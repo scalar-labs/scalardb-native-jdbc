@@ -16,7 +16,7 @@ mssql = "13.6.0.jre11"
 oracle = "23.26.3.0.0"
 testcontainers = "2.0.5"
 junit-jupiter = "5.14.4"
-mockito = "5.23.0"
+mockito = "5.24.0"
 assertj = "3.27.7"
 # Build tools, at ScalarDB Saga's versions
 spotless = "8.9.0"
