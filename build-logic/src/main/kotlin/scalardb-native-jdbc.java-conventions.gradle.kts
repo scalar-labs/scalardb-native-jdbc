@@ -157,10 +157,12 @@ dependencies {
     compileOnly(libs.jcip.annotations)
     compileOnly(libs.spotbugs.annotations)
 
+    testCompileOnly(libs.jspecify)
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.junit.jupiter)
     testImplementation(libs.assertj.core)
 
+    "integrationTestCompileOnly"(libs.jspecify)
     "integrationTestImplementation"(libs.assertj.core)
 }
 

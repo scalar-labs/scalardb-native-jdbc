@@ -208,9 +208,10 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
      each data column: a classic-layout table (`ConsensusCommitUtils.isTransactionTableMetadata`).
   4. Otherwise a plain table: pass through.
 
-  The same `metadata` entry, present for the source tables of a decoupled table as well, gives the
-  primary key, the clustering order and the `before_*` set, so nothing is inferred from naming
-  conventions: a plain table called `foo_data`, or one with a column named `tx_id` but no `metadata`
+  The `metadata` table has entries for physical tables only; a virtual table has none, and ScalarDB's
+  own `getTableMetadata` merges the two source entries at read time. So for a decoupled table the
+  primary key, the clustering order and the user's columns come from the **data table's** entry, and
+  the `before_*` set follows from the non-key columns; nothing is inferred from naming conventions: a plain table called `foo_data`, or one with a column named `tx_id` but no `metadata`
   entry, is not misclassified. Refreshed as in 4.4.
 - **No ScalarDB API.** The driver never calls ScalarDB and knows nothing of Cluster. ScalarDB
   transactions run through ScalarDB's own JDBC storage adapter on their own connections. The two are
@@ -381,8 +382,12 @@ minor or major gets its own certification run, and the README carries the table 
 lines and engines. The facts of section 1 were read on the 4.0 line and confirmed at the contract level
 on the 3.19 line (decoupled layout, virtual tables, the split put and its "not exists" conversion, the
 `tx_id`-only prepare condition, before-image nulling, `hasBeforeImage`, the 15 s lifetime, the
-batching in `mutate`, `recoverRecord`); the line-level claims are to be re-read once on the 3.19 branch
-before the first preview, after which the contract tests carry them.
+batching in `mutate`, `recoverRecord`), and on 2026-10-09 every line-level claim was re-read on the
+`v3.19.1` tag: the recovery types per isolation level, the background roll and the expiry guard with its
+re-read, the ignored record-commit failure, the one-phase-commit guard, the split put and its "not
+exists" conversion, the batching order, the rollback of NULL metadata, validation on `tx_id`, the
+per-engine conflict codes and minimum isolation levels, the catalog and naming. All identical to the
+4.0 line; the files differ elsewhere. From here the contract tests carry the facts forward.
 
 **Stability and migration.** The driver moves into the ScalarDB repository as a subproject once the
 protocol has stopped moving: the interleaving matrix green on the certified engines, and one preview
@@ -1111,7 +1116,7 @@ retries.
     through `rc_T` for serializability between driver transactions; the setup command owns `rc_T`, the
     in-flight index and the backfill; the build section matches the repository's plugin and CI.
 
-## References in ScalarDB (verified on the 4.0 line, `core/src/main/java/com/scalar/db`; the 3.19 line carries the same contract, see Repository and build)
+## References in ScalarDB (`core/src/main/java/com/scalar/db`; verified on `v3.19.1` and on the 4.0 line, identical in every cited behaviour)
 
 - `transaction/consensuscommit/PrepareMutationComposer.java`: prepare condition on `tx_id` only;
   `before_tx_version = 0` for a NULL `tx_id`.
