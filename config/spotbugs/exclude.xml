@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+  <!-- Suppress in test classes, nested test classes included -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="SE_BAD_FIELD"/>
+  </Match>
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+  </Match>
+  <!-- A value-returning call inside an assertThatThrownBy lambda intentionally ignores its result
+       (the call is expected to throw). -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="RV_RETURN_VALUE_IGNORED_INFERRED"/>
+  </Match>
+  <!-- Constructors called inside assertThatThrownBy lambdas are not meant to be thrown -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="RV_EXCEPTION_NOT_THROWN"/>
+  </Match>
+  <!-- Test fixtures hold injected objects in fields by design -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="EI_EXPOSE_REP2"/>
+  </Match>
+</FindBugsFilter>

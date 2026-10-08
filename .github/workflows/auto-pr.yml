@@ -1,0 +1,21 @@
+name: Auto-PR
+
+# When a PR merges into main or a version branch, open cherry-pick backport PRs on every release line
+# named by a "ScalarDB <version>" GitHub project attached to the merged PR. The projects are shared
+# across the ScalarDB family. Requires the org's GH_PR_PAT secret, same as the other Scalar
+# repositories using this workflow.
+on:
+  pull_request:
+    branches:
+      - main
+      - "[0-9]+"
+      - "[0-9]+.[0-9]+"
+    types:
+      - closed
+
+jobs:
+  if_merged:
+    uses: scalar-labs/actions/.github/workflows/auto-pr-reusable.yaml@main
+    secrets: inherit
+    with:
+      project_base_name: "ScalarDB"

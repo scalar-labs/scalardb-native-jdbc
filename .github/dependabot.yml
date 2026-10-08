@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      build-tooling:
+        patterns:
+          - "com.diffplug.spotless*"
+          - "com.github.spotbugs*"
+          - "com.google.errorprone*"
+          - "com.h3xstream.findsecbugs*"
+          - "com.uber.nullaway*"
+          - "com.vanniktech*"
+          - "net.ltgt.gradle*"
+      testcontainers:
+        patterns:
+          - "org.testcontainers*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
