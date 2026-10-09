@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "027"
 tags: [code-review, documentation]
@@ -127,6 +127,14 @@ To be filled during triage.
 
 **Actions:**
 - Synonyms are refused with 42000 on every engine (040); unquoted non-ASCII names are folded by Oracle itself and by A-Z only on PostgreSQL (043); a double-quoted name is refused where the session reads a string, the setting being part of the session state the proxy captures (049).
+
+### 2026-10-09 - Design doc updated (uncommitted, with the section 4.7 draft)
+
+**By:** Claude Code
+
+**Actions:**
+- docs/design.md now states: the identifier rules per engine as measured ("Identifiers per engine", the heading Engine's javadoc cites), with the stored spellings, ScalarDB's views and the Oracle INT import limit; the catalog as built (per database and credentials, own connection, resolution through the engine first, the five steps with synonym and T_tx_metadata refusals, case-insensitive matching where the database compares that way, error unless allowed); the session state the proxy captures and when it is re-read, with the coarse-path cost; the two new properties catalogTtlMs and allowNoCatalog; what "the parser can interpret" means without a node-type list, with the executable-comment, double-quote and single-table refusals (4.1); the catalog cache and the operator contract for a table registered after the load (4.4); the 4.7 draft corrected where it contradicted the code (the allowlist is gone, NOWAIT/WAIT/SKIP LOCKED refused until carried, synonyms refused); section 7 limits; the release workflows marked as to be added; change item 14.
+- Not done here: the per-engine table's SQL Server and Oracle rows still describe the read and write paths the proxy step will implement; the refusal error contract (016) and the operator tooling contract (026) remain their own todos.
 
 ## Notes
 

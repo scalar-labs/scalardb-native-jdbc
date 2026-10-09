@@ -174,8 +174,9 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   ScalarDB, goes to that database in that database's own dialect. The driver translates no dialect and
   routes nothing per query. A connection pool wraps the driver like any other, and an ORM sees plain
   JDBC. A transaction that must span two databases is a ScalarDB transaction, not this driver.
-- **Per statement**: parse with JSQLParser; resolve every table reference against the cached catalog;
-  classify (plain tables only, a SELECT mixing plain and ScalarDB tables, DML on one ScalarDB table, or
+- **Per statement**: parse with JSQLParser under the engine's identifier rules and the session's
+  double-quote setting; resolve every table reference, first through the engine's own catalog and then
+  against ScalarDB's (see "The catalog"); classify (plain tables only, a SELECT mixing plain and ScalarDB tables, DML on one ScalarDB table, or
   refused); rewrite as in section 4; forward on the wrapped connection; post-process the result (strip
   metadata, remember anchors). A statement with no ScalarDB table is forwarded verbatim. Placeholders
   duplicated by a rewrite, `P` into `P_before` or into a second UNION ALL arm, are re-bound with the same
@@ -190,11 +191,21 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   is forwarded, optionally filtered to hide `_data`, `_tx_metadata` and `virtual_tables`. A passthrough
   flag via `setClientInfo` sends statements verbatim for DDL and maintenance, only in
   autocommit.
-- **The catalog** is read once per driver instance and cached, from two ordinary tables in ScalarDB's
-  system schema, `scalardb` by default (`scalar.db.system_namespace_name`, the `scalardbnative.metadataSchema`
-  property): `virtual_tables` and `metadata`. They sit in the same database as the user's tables, carry
-  no transaction metadata and are written only by ScalarDB's admin API; the driver reads them with plain
-  SELECTs and never writes them. The lookup for a user table name mirrors ScalarDB's own tests:
+- **The catalog** is one per database and credentials (engine, vendor URL, user, metadata schema;
+  never keyed by password, and per user because what `all_objects` and `sys.objects` show depends on the
+  user). It reads two ordinary tables in ScalarDB's system schema, `scalardb` by default
+  (`scalar.db.system_namespace_name`, the `scalardbnative.metadataSchema` property): `virtual_tables`
+  and `metadata`. They sit in the same database as the user's tables, carry no transaction metadata and
+  are written only by ScalarDB's admin API; the driver reads them whole, with plain SELECTs on a
+  connection of its own in autocommit, never on the user's connection, and never writes them. A query on
+  the user's connection would fix the snapshot of the user's transaction before the statement 4.2
+  requires to come first, and a failure would abort that transaction.
+
+  A name as written is first resolved by **the engine's own catalog** ("Identifiers per engine"): which
+  stored table or view it denotes, given the session's schemas, in the stored spelling. Only that answer
+  is looked up in ScalarDB's catalog, in this order:
+  0. A synonym is **refused** with SQLSTATE `42000`, "name the table it stands for", whatever it stands
+     for: which table a synonym denotes, chains included, is the engine's to say.
   1. A `virtual_tables` row whose **virtual table name** is the user's name: a created decoupled table.
      Its left source is `T_data`, its right source `T_tx_metadata`, join type INNER. This is also ScalarDB's
      own test for "decoupling applied" (`ConsensusCommitAdmin.throwIfTransactionMetadataDecouplingApplied`).
@@ -206,13 +217,39 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   3. Otherwise a `metadata` entry for the user's name that carries the transaction metadata columns,
      `tx_id`, `tx_state`, `tx_version`, the timestamps, the `before_tx_*` columns and a `before_` twin of
      each data column: a classic-layout table (`ConsensusCommitUtils.isTransactionTableMetadata`).
-  4. Otherwise a plain table: pass through.
+  4. A name that is the **right source** of a `virtual_tables` row, `T_tx_metadata`, is refused like
+     `T_data` and the virtual table of an imported table; the three refusals use SQLSTATE `42000` and
+     name the table to use instead.
+  5. Otherwise a plain table: pass through.
+
+  ScalarDB records a name in the spelling the operator gave `createTable` or `importTable`. Where the
+  database compares table names without regard to case (MySQL and MariaDB with
+  `lower_case_table_names` not 0, SQL Server with a case-insensitive collation; read once per load),
+  that spelling may differ from the stored one, and the catalog matches the two without regard to case
+  as well. A database without ScalarDB's catalog is an **error unless allowed**: the schema existing
+  but its tables not visible is SQLSTATE `42501` naming the SELECT grants (Oracle reports a table it
+  does not grant as absent), the schema not existing is `08004` naming the property, unless
+  `scalardbnative.allowNoCatalog` says the database has no ScalarDB. A database whose `virtual_tables`
+  is missing but `metadata` is present (a ScalarDB older than virtual tables) is logged and has classic
+  layouts only.
 
   The `metadata` table has entries for physical tables only; a virtual table has none, and ScalarDB's
   own `getTableMetadata` merges the two source entries at read time. So for a decoupled table the
   primary key, the clustering order and the user's columns come from the **data table's** entry, and
   the `before_*` set follows from the non-key columns; nothing is inferred from naming conventions: a plain table called `foo_data`, or one with a column named `tx_id` but no `metadata`
   entry, is not misclassified. Refreshed as in 4.4.
+- **Session state** the connection proxy captures on the user's connection, outside a transaction, and
+  passes to every lookup: the schemas an unqualified name resolves through, and whether `"x"` quotes an
+  identifier. Captured at connect and re-read lazily before the next lookup after anything that may
+  change it: `setSchema`, `setCatalog`, any statement the driver did not classify as a SELECT or DML on
+  known tables (`SET search_path`, `SET ROLE`, `USE`, `ALTER SESSION`, `EXECUTE AS` and passthrough
+  statements included, since JSQLParser does not parse several of them), and `commit` or `rollback`
+  after a `SET` inside the transaction (`SET LOCAL` reverts). DDL invalidates the catalog's resolutions.
+  A re-read is a SELECT; inside a transaction it takes the first-statement slot the coarse SERIALIZABLE
+  path of 4.2 needs, so a session-changing statement inside a SERIALIZABLE transaction forces the
+  statement-level path. Not supported: temporary tables named like a ScalarDB table (PostgreSQL
+  `pg_temp` is searched first and is not in `current_schemas(false)`; MySQL temporary tables are not in
+  `information_schema`), and SQL Server `USE` of another database than the catalog's.
 - **No ScalarDB API.** The driver never calls ScalarDB and knows nothing of Cluster. ScalarDB
   transactions run through ScalarDB's own JDBC storage adapter on their own connections. The two are
   independent clients of one database, coordinated only through the row metadata (section 2) and row
@@ -232,8 +269,30 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   | Coarse SERIALIZABLE path (4.2) | `LOCK TABLE T_data IN SHARE MODE` as the first statement, then the coarse check, then the statement | as the first statement, the coarse check as a locking read of the in-flight index, `LOCK IN SHARE MODE`, whose gap lock blocks every prepare on the table until commit; the user's statement then runs as a locking read through `rc_T` | the same `WITH (HOLDLOCK)` | `LOCK TABLE T_data IN SHARE MODE` as the first statement, as PostgreSQL |
   | Identifier quoting | `"name"` | `` `name` `` | `[name]` | `"NAME"`; unquoted names fold to upper case |
   | Row limit, boolean test | `LIMIT n`; `NOT COALESCE(P, false)` | `LIMIT n`; `NOT COALESCE(P, false)` | `TOP n`; `CASE WHEN P THEN 1 ELSE 0 END = 0` | `FETCH FIRST n ROWS ONLY`; `CASE WHEN P THEN 1 ELSE 0 END = 0` |
+  | Vendor hints the parser keeps (4.7) | pg_hint_plan `/*+ ... */` after SELECT, as the Oracle-style hint node | optimizer `/*+ ... */`, `USE`/`FORCE`/`IGNORE INDEX`, `STRAIGHT_JOIN` | `WITH (NOLOCK)`, `WITH (INDEX(...))`, `OPTION (...)`; not `WITH (UPDLOCK, ROWLOCK)` or `UPDATE T WITH (ROWLOCK)`, which fail to parse and are stripped before parsing | `/*+ ... */` and `--+` after SELECT, UPDATE, DELETE, INSERT and MERGE; `FOR UPDATE OF col`, `NOWAIT`, `SKIP LOCKED`; not `RETURNING ... INTO`, `AS OF`, `MODEL` |
   | Known quirk | none | none | `XACT_ABORT` must be off; the filtered index needs `QUOTED_IDENTIFIER ON` in every session that writes `T_meta`, including maintenance scripts and the backfill; `sqlcmd` defaults it off, so pass `-I` | empty string is NULL, so `before_x = ''` never matches; use `IS NULL` |
 
+- **Identifiers per engine.** Measured on PostgreSQL 16, MySQL 8.4, MariaDB 11.4, SQL Server 2022 and
+  Oracle Free 23 with tables created unquoted and imported by ScalarDB 3.19.1, and with a table created
+  by ScalarDB from mixed-case names. The driver applies each rule exactly (`Engine`), and asks the engine
+  where a rule depends on a setting or on the data.
+
+  | | PostgreSQL | MySQL, MariaDB | SQL Server | Oracle |
+  |---|---|---|---|---|
+  | Unquoted name folds to | lower case, A to Z only | as written | as written | upper case; beyond ASCII, as Oracle folds (the driver asks it) |
+  | Table names compare | exactly | exactly; without regard to case when `lower_case_table_names` is not 0, names then stored in lower case | without regard to case (collation `CI`) | exactly |
+  | Column names compare | exactly | without regard to case | without regard to case | exactly |
+  | `"x"` | an identifier | a string, unless `sql_mode` has `ANSI_QUOTES` | an identifier while `QUOTED_IDENTIFIER` is on | an identifier |
+  | Unqualified name resolves through | `search_path` in order; a plain table earlier shadows a ScalarDB table later | the current database | the user's default schema, then `dbo` | the current schema, then a private synonym, then a public one |
+  | How the driver asks | `pg_class` ordered by `array_position` over `current_schemas(false)` | `information_schema.tables`; `database()`, since Connector/J's `getCatalog()` does not follow `USE` | `sys.objects` over the default schema and `dbo`, one query | `all_objects` and `all_synonyms`, one query |
+  | Synonyms | none | none | refused | refused |
+
+  ScalarDB keeps names exactly as given on every engine and quotes the names it creates, so its own
+  catalog columns are lower case on Oracle, where the driver quotes them; its catalog compares
+  `full_table_name` exactly on PostgreSQL and Oracle and without regard to case on MySQL, MariaDB and SQL
+  Server, by collation. ScalarDB creates a real view for every decoupled table's virtual name, `T` for a
+  created table and `T_scalardb` for an imported one, on every engine. It cannot import an Oracle `INT`
+  column, which Oracle stores as `NUMBER(38,0)`; use `NUMBER(10)` or `NUMBER(19)`.
 - **Where engine variance lives.** The conversion is mechanical and engine-neutral apart from spelling;
   what differs is how each engine implements its isolation levels. Two rules were chosen to keep that
   variance out of the protocol: the CAS is always conditioned on the anchor and never relies on the
@@ -279,7 +338,11 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
 - Vendor properties pass through untouched. Driver properties are namespaced and few:
   `scalardbnative.inflightWaitMs`, the bounded wait of section 6 under READ COMMITTED, 0 to abort at
   once; `scalardbnative.passthrough`, settable through `setClientInfo`; `scalardbnative.metadataSchema`,
-  where ScalarDB keeps `virtual_tables` and its table metadata, `scalardb` by default. The isolation level is not a URL
+  where ScalarDB keeps `virtual_tables` and its table metadata, `scalardb` by default;
+  `scalardbnative.catalogTtlMs`, how long a loaded catalog and a resolved name are trusted, 60000 by
+  default (4.4); `scalardbnative.allowNoCatalog`, `false` by default, to accept a database without
+  ScalarDB's catalog, every table then plain. The driver strips its own properties before handing the
+  rest to the vendor driver. The isolation level is not a URL
   property; it is `Connection.setTransactionIsolation`, so `@Transactional(isolation = ...)` works as is.
 
 ### Repository and build
@@ -338,8 +401,8 @@ the `scalardb-native-jdbc-<module>` pattern.
   next version, a version branch per line, `3.19`, releases cut from the branch, never from `main`.
 - Workflows, from Saga: `ci.yml` runs `check` on JDK 25 (Temurin) for `main`, version branches and pull
   requests, then a compiler-warnings pass without the build cache, and uploads test reports on failure;
-  `release-snapshot.yml` publishes a snapshot on every push to `main` and version branches;
-  `release.yml` publishes from a tag; `auto-pr.yml`. Two additions: an engine matrix job that runs the
+  `auto-pr.yml`. To be added with the first release: `release-snapshot.yml`, a snapshot on every push to
+  `main` and version branches, and `release.yml`, from a tag. Two additions: an engine matrix job that runs the
   interleaving matrix on the hosted runner's Docker, and a nightly that runs it against the newest 3.19
   patch and against the 4.0 line, which is not published, so the nightly clones ScalarDB `master` and
   runs `./gradlew :core:publishToMavenLocal` first, as the frontend's build does.
@@ -485,8 +548,26 @@ runs a second lookup on the before image index; for other columns it uses the OR
 | Touches plain tables only | pass through unchanged |
 | SELECT over plain and/or ScalarDB tables | each ScalarDB table name replaced by the level's read surface (4.2); one native statement, except the coarse-check path of 4.2, which sends the check, and on PostgreSQL and Oracle the table lock, first, and the SERIALIZABLE locking re-read of 4.2 on MySQL, MariaDB, SQL Server and Oracle |
 | INSERT / UPDATE / DELETE on exactly one ScalarDB table | 4.3 |
-| DML on several tables, INSERT ... SELECT, MERGE, DML mixing plain and ScalarDB tables, UPDATE of a key column, anything the parser cannot interpret | **refuse** with a clear error; never guess |
+| DML on several tables, INSERT ... SELECT, MERGE, DML mixing plain and ScalarDB tables, UPDATE of a key column, anything the parser cannot interpret | **refuse** with a clear error; never guess. 4.7 lists the vendor syntax the parser does not interpret and the hints refused on a ScalarDB table |
+| A name through a synonym, `T_data`, `T_tx_metadata` or `T_scalardb` | **refuse** (`42000`), naming the table to use (section 1, "The catalog") |
 | DDL, bulk maintenance | passthrough mode only, in autocommit, with the table quiesced; ScalarDB refuses schema changes on decoupled tables, such as adding a column (`throwIfTransactionMetadataDecouplingApplied`), so DDL there goes through ScalarDB's admin or not at all |
+
+**What "the parser can interpret" means.** The text is exactly one statement; JSQLParser parses it;
+every table node of the parser's public syntax tree is a reference the walk visited, a column qualifier
+or a `FOR UPDATE OF` target (the driver reads the public tree only, never private fields, so it gives the
+same answers with JSQLParser as a named module); no comment is of a form an engine may execute (MySQL
+`/*! ... */` and `/*M! ... */`, a `--` not followed by whitespace, a block comment nested in another,
+all refused on every engine); and no name is double-quoted where the session reads `"x"` as a string.
+There is no list of known node types: an expression the shape does not inspect cannot hide a table or a
+column, since both are taken from the tree. A single-table shape further refuses the modifiers and
+clauses that read or write something else than the table's rows: `INSERT`, `UPDATE` and `DELETE IGNORE`,
+`ON DUPLICATE KEY UPDATE`, `ON CONFLICT`, `OUTPUT`, `SKIP LOCKED`, `NOWAIT`, `WAIT`, optimizer and table
+hints, `TABLESAMPLE`, `PIVOT`, a database link, `DELETE ... USING`, `FOR PORTION OF`, `CONNECT BY`,
+`QUALIFY`, `LATERAL VIEW`, `FOR XML`, `INTO OUTFILE`, a temporary target table and `PREWHERE`; and a key
+equality is a key column compared with a placeholder or a literal, possibly signed or cast. A statement
+other than a single-table shape that locks rows or writes its result anywhere (`FOR UPDATE`, `FOR SHARE`,
+`SKIP LOCKED`, `INTO`) is refused on the `rc_T` route, and so is a rewrite that would rename a table a
+`FOR UPDATE OF` names by its name.
 
 ### 4.2 Reads
 
@@ -762,11 +843,18 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   ck)` with the **virtual table name** (`T` or `T_scalardb`), not `_data`. It runs inside a ScalarDB
   process, because it needs the coordinator, and returns false for a writer not yet expired, so the row
   is revisited on the next pass.
-- **Catalog cache.** Refresh on a miss and on a "table, column or index not found" error, plus a TTL.
-  ScalarDB refuses schema changes on decoupled tables, but index creation and drop are not guarded, so
-  changes come from registering, importing or dropping a table and from index DDL. `virtual_tables` and
-  ScalarDB's table metadata live in ScalarDB's metadata schema, `scalardb` by default, given by the
-  `scalardbnative.metadataSchema` property.
+- **Catalog cache.** ScalarDB's catalog is loaded whole and trusted for `scalardbnative.catalogTtlMs`;
+  each resolved name is trusted for the same time and cached with its classification, in a bounded LRU.
+  No lock is held across a round trip: while one thread reloads, the others are served the previous
+  catalog, and a stale resolution is served while the catalog connection is busy. The catalog
+  connection is retried once after a connection failure. **The operator contract:** a table imported or
+  created after the load is plain until the TTL expires or the catalog is refreshed; a miss cannot
+  trigger a refresh, since every plain table misses. So import first, then refresh through the JDBC
+  surface or wait for the TTL, before native writers touch the table. ScalarDB refuses schema changes on
+  decoupled tables, but index creation and drop are not guarded, so changes come from registering,
+  importing or dropping a table and from index DDL. `virtual_tables` and ScalarDB's table metadata live
+  in ScalarDB's metadata schema, `scalardb` by default, given by the `scalardbnative.metadataSchema`
+  property.
 
 ### 4.5 Tombstones: why a DELETE of a metadata-less row keeps a metadata row
 
@@ -850,7 +938,7 @@ like any other, with `isValid` forwarded.
 | `deleteById` | DELETE by key | 4.3 |
 | `deleteAll` | DELETE with no WHERE | predicate DML with no predicate: one write per key, correct but slow on a large table; use passthrough or a truncate for that |
 | aggregate roots with child collections | separate per-table SELECTs by default; one joined SELECT with single-query loading enabled | per-table: two-arm form; joined: `rc_T` with no anchor under READ COMMITTED, the coarse check under the other levels (4.2) |
-| `@Lock(PESSIMISTIC_WRITE)` | `FOR UPDATE` appended; on SQL Server a table hint, `WITH (UPDLOCK, ROWLOCK)` | the locking-clause rule (4.2), which must parse table hints on SQL Server; refused on the join shapes |
+| `@Lock(PESSIMISTIC_WRITE)` | `FOR UPDATE` appended; on SQL Server a table hint, `WITH (UPDLOCK, ROWLOCK)` | the locking-clause rule (4.2); on SQL Server the table hint is stripped before parsing and re-applied as the separate locking re-read, because JSQLParser 5.4 does not parse `WITH (UPDLOCK, ROWLOCK)` (4.7); refused on the join shapes |
 | `insertAll`, batches | batched INSERT with generated keys | individual statements (4.4, Batches) |
 
 **Spring Boot 3 and 4.** Spring Boot 3 requires Java 17 and Spring Boot 4, on Spring Framework 7,
@@ -877,6 +965,73 @@ rule. MyBatis emits whatever the mapper says, so each mapped statement is classi
 mapper that mixes plain and ScalarDB tables in one DML is refused like any other such statement. The
 repository's `samples/crud-jpa` and `samples/crud-mybatis` applications sit beside the Spring Data JDBC
 one, and with `samples/crud-jdbc` the four are the acceptance suite.
+
+### 4.7 Vendor hints and unparsed vendor syntax
+
+Measured on JSQLParser 5.4, the parser the driver uses, on 2026-10-09; the refusals below are covered by
+`StatementShapeTest` and `SqlAstTest`.
+
+**What the parser keeps.** A `/*+ ... */` or `--+` hint that immediately follows `SELECT`, `UPDATE`,
+`DELETE`, `INSERT` or `MERGE` becomes an `OracleHint` node on the statement and on each `PlainSelect`,
+subqueries included; the same node holds MySQL optimizer hints and pg_hint_plan hints, which use the same
+syntax. MySQL `USE`, `FORCE` and `IGNORE INDEX` become a `MySQLIndexHint` on the table reference, and
+`STRAIGHT_JOIN` a flag. SQL Server `WITH (NOLOCK)` and `WITH (INDEX(...))` become `SQLServerHints` on the
+table reference, and `OPTION (...)` parses; `WITH (UPDLOCK, ROWLOCK)`, in any position, and
+`UPDATE T WITH (ROWLOCK)` do **not** parse. Oracle `FOR UPDATE OF col`, `NOWAIT`, `WAIT n` and
+`SKIP LOCKED` parse. A hint anywhere else, after the select list or inside `WHERE`, is a plain comment to
+the parser, and the engines ignore it there as well. **Today the `--+` form is refused**, on every
+engine and for plain tables too, by the executable-comment rule of 4.1, which refuses any `--` not
+followed by whitespace; that rule is to become per engine, since only MySQL and MariaDB read `--x` as
+code (todo 053). Because the rewrite re-joins the original tokens
+(`SqlAst.joinTokens`), every hint survives in the emitted text wherever it stood; only its meaning after
+the rewrite is in question. The parser's own regeneration of a hinted `DELETE` drops the space before
+the hint, `DELETE/*+ ... */`, which Oracle accepts; the token join does not have this problem.
+
+**Plain tables.** Forwarded verbatim, hints and all. Nothing below applies.
+
+**ScalarDB tables.** A hint never changes a statement's shape: a hinted statement takes the route its
+unhinted form takes (4.1). Today the shape reader refuses an optimizer hint on SELECT, INSERT, UPDATE and
+DELETE and a table hint on the table (`StatementShape`), explicitly, so a hinted read falls to the
+`rc_T` route without an anchor and a hinted write is refused. That is safe, and is to be lifted by
+dropping those refusals, with the rules below in place.
+
+- **Statement hints that name no table** (`FIRST_ROWS(n)`, `ALL_ROWS`, `PARALLEL`,
+  `MAX_EXECUTION_TIME`, `OPTION (MAXDOP n)`, `RECOMPILE`) stay at the outermost `SELECT` of the rewritten
+  statement. For a predicate DML they move to the key-selection read; by-key statements drop them, since a
+  primary-key lookup has nothing to steer.
+- **Hints that name the table** (`INDEX(t idx)`, `FULL(t)`, `NO_INDEX(t ...)`, `LEADING(t ...)`,
+  `USE_NL(t)`, `IndexScan(t idx)`, `USE INDEX`, `WITH (INDEX(...))`): after the rewrite the alias names a
+  view or a derived table, which Oracle and PostgreSQL ignore and MySQL rejects, since the view has no
+  such key. So the driver writes the **first arm over the base tables**, `T t LEFT JOIN T_meta m`, the
+  same inlining the locking-clause rule uses, keeps the user's alias on `T`, and attaches the hint to
+  that query block at its own `SELECT`, so no global `@qb` syntax is needed. The second arm never
+  carries a user hint; it has its own index (section 3). In the `rc_T` shapes the ScalarDB table stays a
+  view: a comment hint on it is left in place and ignored by the engine, a MySQL index hint on it is
+  removed.
+- **Locking hints.** Oracle `FOR UPDATE OF col`, `NOWAIT`, `WAIT n` and `SKIP LOCKED` are carried onto
+  the separate base-table `FOR UPDATE` statement of 4.2, the column requalified to `T`. Until then
+  `NOWAIT`, `WAIT` and `SKIP LOCKED` are refused on a ScalarDB table, and `FOR UPDATE OF` is accepted
+  only when it names the table by its alias or name, PostgreSQL's form; Oracle's `OF col`, which names a
+  column, is refused. SQL Server
+  `WITH (UPDLOCK ...)` does not parse, so the driver strips SQL Server table hints from the statement
+  text before parsing, in a token pass, and re-applies an `UPDLOCK` or `HOLDLOCK` intent as the separate
+  locking re-read of 4.2; this is what `@Lock(PESSIMISTIC_WRITE)` needs on SQL Server (4.6).
+- **Refused on a ScalarDB table**, because they change what the rules depend on: Oracle `APPEND` and
+  `APPEND_VALUES`, a direct-path insert that takes a table lock blocking every ScalarDB prepare until
+  commit and then raises ORA-12838 on any later read or write of `T` in the same transaction, the
+  driver's own steps included; Oracle `IGNORE_ROW_ON_DUPKEY_INDEX` and `CHANGE_DUPKEY_ERROR_INDEX`, MySQL
+  `INSERT IGNORE` and `REPLACE`, which alter the duplicate-key outcome 4.3 classifies on; SQL Server
+  `NOLOCK` and `READUNCOMMITTED`, which read the after image of a prepare in progress. Every other hint
+  is at worst a slower plan: Oracle, PostgreSQL and MySQL never raise an error for an unusable comment
+  hint.
+
+**Unparsed vendor syntax.** JSQLParser 5.4 does not parse Oracle `RETURNING ... INTO`, flashback
+`AS OF TIMESTAMP` and the `MODEL` clause, nor the SQL Server lock hints above. Under 4.1 such a statement
+is refused even when it touches plain tables only, since the driver cannot tell. The relaxation of
+passing through a statement whose token stream contains none of the catalog's names is **deferred**: a
+user-defined view over a ScalarDB table would slip through it (section 7), and a synonym would too,
+since a parsed name is refused as a synonym only after the engine has resolved it. The parser's
+coverage of each engine's syntax is therefore part of the certification of that engine.
 
 ---
 
@@ -1024,6 +1179,18 @@ between `T` and plain tables are the database's own.
   make the other side stronger than it is.
 - **Anything bypassing both** (a native writer on `T` without the metadata upkeep, a trigger) is invisible
   to both sides.
+- **User-defined views over a ScalarDB table** are invisible to the catalog, which knows the names
+  ScalarDB registered: a statement through a user view of `T` passes through as a plain-table statement
+  and bypasses both sides like a native writer. This is also why the pass-through relaxation for
+  unparsed statements is deferred (4.7). Synonyms are not this gap: the engine reports them and the
+  driver refuses them, whatever they stand for, so an application that reaches any table through a
+  synonym must name the table.
+- **A table registered after the catalog was loaded is plain** until the TTL expires or the catalog is
+  refreshed (4.4).
+- **Non-ASCII column names on Oracle** are folded by the driver, code point by code point, not by
+  Oracle; table and schema names beyond ASCII are folded by Oracle itself.
+- **Unparsed vendor syntax is refused even on plain tables** (4.7); the parser's coverage of an engine's
+  syntax is part of that engine's certification.
 
 ---
 
@@ -1115,6 +1282,20 @@ retries.
     on every engine, and on MySQL, MariaDB and SQL Server the user's statement runs as a locking read
     through `rc_T` for serializability between driver transactions; the setup command owns `rc_T`, the
     in-flight index and the backfill; the build section matches the repository's plugin and CI.
+13. Vendor hints and unparsed vendor syntax (4.7), measured on JSQLParser 5.4: a hint never changes a
+    statement's shape; a hint that names the table makes the first arm inline the base tables; Oracle
+    `APPEND`, the duplicate-key hints and SQL Server `NOLOCK` are refused on a ScalarDB table; SQL Server
+    `WITH (UPDLOCK, ROWLOCK)` does not parse and is stripped before parsing and re-applied as the locking
+    re-read, which corrects the 4.6 assumption; Oracle `RETURNING ... INTO`, `AS OF` and `MODEL` are
+    refused under the never-guess rule; user views over `T` are a recorded gap.
+14. From the two code reviews of the implementation (2026-10-09): names resolve through the engine's own
+    catalog under per-engine identifier rules measured on all five engines ("Identifiers per engine");
+    synonyms are refused; the catalog is one per database and credentials, loaded whole on its own
+    connection, trusted for a TTL, matched without regard to case where the database compares table
+    names that way, and an error unless allowed when absent or unreadable; `T_tx_metadata` is refused
+    like `T_data`; the session state the proxy captures is the schemas and the double-quote setting;
+    "the parser can interpret" is defined without a node-type list, and executable comment forms are
+    refused (4.1).
 
 ## References in ScalarDB (`core/src/main/java/com/scalar/db`; verified on `v3.19.1` and on the 4.0 line, identical in every cited behaviour)
 
