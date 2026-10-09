@@ -139,6 +139,14 @@ To be filled during triage.
 **Actions:**
 - Listed in todo 050: the second unquoting rule in SqlAst (038), resolvedName x2 now callerless, treeValues, Engine.of unused while NativeJdbcUrl rebuilds the set, Engine.sameColumn, Catalog.engine(), QualifiedName.toString, Query/withConnection, Engines.url()/useSchema(), an inline new java.util.HashSet<>() in NativeJdbcUrl.
 
+### 2026-10-09 - Status
+
+**By:** Claude Code
+
+**Actions:**
+- Removed since the todo was written: hasSecondStatement (001), the reflective scan and the allowlist (003, 011), TableRef.foldedName/resolvedName/quoted/resolvedSchema, ColumnRef.resolvedName and SqlAst.unquote/fold/isQuoted/resolve (038).
+- Still present: SqlAst.source(), cteNames(), TableRef.isColumnQualifier() and fullyQualifiedName(), SqlAst.Kind, StatementShape's mirrored Builder and the flags selectColumns/ordered/limited/insertRowCount/returning. The plan's milestone 3 (rewrite fragments) is where these are settled.
+
 ## Notes
 
 - Pair with 012 so the fragment emitter and the deletions land as one change to the `sql` surface.

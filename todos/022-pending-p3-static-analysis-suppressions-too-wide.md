@@ -116,6 +116,14 @@ To be filled during triage.
 
 ---
 
+### 2026-10-09 - Status
+
+**By:** Claude Code
+
+**Actions:**
+- Done with the catalog rework: the class-wide SQL_INJECTION_JDBC suppression on Catalog is gone; the suppressions are method-scoped (Catalog.load, Engine.resolvePostgresql/resolveOracle/one) with accurate justifications.
+- Still open: SqlAst's EI_EXPOSE_REP justification ("every collection handed out is an immutable copy") is still inaccurate, since statement() hands out the mutable AST.
+
 ## Notes
 
 - If todo 024 removes JSQLParser types from the public API, the `EI_EXPOSE_REP` suppression may become unnecessary.

@@ -119,6 +119,22 @@ class CatalogIntegrationTest {
               .addClusteringKey("K")
               .build(),
           DECOUPLED);
+      // a composite key declared in an order that differs from the column order
+      admin.createTable(
+          "ns",
+          "composite",
+          TableMetadata.newBuilder()
+              .addColumn("a", DataType.INT)
+              .addColumn("b", DataType.INT)
+              .addColumn("c", DataType.INT)
+              .addColumn("d", DataType.INT)
+              .addColumn("x", DataType.TEXT)
+              .addPartitionKey("b")
+              .addPartitionKey("a")
+              .addClusteringKey("d")
+              .addClusteringKey("c")
+              .build(),
+          DECOUPLED);
       admin.createTable(
           "ns",
           "classic",
@@ -225,6 +241,18 @@ class CatalogIntegrationTest {
         assertThat(unquoted).isEqualTo(Layout.DECOUPLED_CREATED);
       }
     }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
+  void compositeKeys_keepTheOrderScalarDbWasGiven(Engines e) throws Exception {
+    Catalog catalog = catalog(e);
+    TableInfo t = catalog.lookup(NO_SESSION, e.engine().quote("ns"), e.engine().quote("composite"));
+    assertThat(t.layout()).isEqualTo(Layout.DECOUPLED_CREATED);
+    assertThat(t.partitionKey()).containsExactly("b", "a");
+    assertThat(t.clusteringKey()).containsExactly("d", "c");
+    assertThat(t.keyColumns()).containsExactly("b", "a", "d", "c");
+    assertThat(t.nonKeyColumns()).containsExactly("x");
   }
 
   @ParameterizedTest

@@ -154,6 +154,35 @@ class CatalogTest {
   }
 
   @Test
+  void aNullJoinType_isReadAsTheOuterJoinOfAnImportedTable() throws SQLException {
+    Map<String, List<MetadataColumn>> metadata = new HashMap<>();
+    metadata.put("app.t", columns("id:PARTITION", "x"));
+    Snapshot s =
+        new Snapshot(
+            true,
+            false,
+            List.of(new VirtualTable("app.t_scalardb", "app.t", "app.t_tx_metadata", null)),
+            metadata,
+            Instant.EPOCH);
+    assertThat(s.classify(new QualifiedName("app", "t")).layout())
+        .isEqualTo(Layout.DECOUPLED_IMPORTED);
+  }
+
+  @Test
+  void aScalarDbTableWithoutAKey_isAnError_notAKeylessTable() {
+    Snapshot s =
+        new Snapshot(
+            true,
+            false,
+            List.of(new VirtualTable("ns.T", "ns.T_data", "ns.T_tx_metadata", "INNER")),
+            new HashMap<>(), // the data table's metadata entry is missing
+            Instant.EPOCH);
+    assertThatThrownBy(() -> s.classify(new QualifiedName("ns", "T")))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("no key for ns.T_data");
+  }
+
+  @Test
   void aSynonym_isRefused_whateverItStandsFor() {
     assertThatThrownBy(() -> snapshot().classify(new QualifiedName("app", "orders_syn", true)))
         .isInstanceOf(SQLException.class)

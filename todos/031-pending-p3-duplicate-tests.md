@@ -107,6 +107,14 @@ To be filled during triage.
 **Actions:**
 - Listed in todo 050: the 100-term predicate built in four test files, ModulePathCheck re-asserting five StatementShapeTest facts, columnNames_followTheEngineRule's six blocks, CatalogIntegrationTest re-asserting CatalogTest's classify fields on every engine, SqlAstTest.identifiers_foldAndResolveLikePostgresAndMySql duplicating EngineTest.
 
+### 2026-10-09 - Status
+
+**By:** Claude Code
+
+**Actions:**
+- Removed: SqlAstTest.identifiers_foldAndResolveLikePostgresAndMySql (duplicate of EngineTest, with 038).
+- Still open: the other duplicates listed here and in 050.
+
 ## Notes
 
 - Do not remove the regression cases that other todos add (001, 002, 006, 007, 013, 014); this item is about

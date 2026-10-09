@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "018"
 tags: [code-review, correctness, sql]
@@ -119,6 +119,15 @@ To be filled during triage.
 - JSQLParser 5.4 already exposes unquoting helpers that may make the driver's own redundant
 
 ---
+
+### 2026-10-09 - Fix applied (remaining cases)
+
+**By:** Claude Code
+
+**Actions:**
+- Doubled delimiters and mismatched pairs were already handled by Engine.resolveIdentifier (038, 049).
+- SqlAst.parse now refuses a table or column name whose tokens include a quoted identifier containing a dot (`"a.b"`, which the parser splits into schema a and table b while the engine sees one name), and any database-qualified table name (three parts, including SQL Server's `db..t`, which resolved in the wrong database and was renamed to `V..t`). MySQL `` `a.b` `` and SQL Server `[a.b]` already failed to parse. A quoted alias with a dot is unaffected.
+- Test: SqlAstTest.namesTheEngineReadsDifferently_areRefused.
 
 ## Notes
 

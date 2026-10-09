@@ -108,6 +108,14 @@ To be filled during triage.
 **Actions:**
 - The vendor drivers and Testcontainers modules for MySQL, MariaDB, SQL Server and Oracle are now used by the integration tests (preview scope is all five engines), so they stay. picocli, mockito and jcip remain unused.
 
+### 2026-10-09 - Status
+
+**By:** Claude Code
+
+**Actions:**
+- The MySQL, MariaDB, SQL Server and Oracle drivers and Testcontainers modules are now used by the integration tests (six configurations) and stay.
+- Still unused: picocli (planned for the tools module, plan milestone 9), mockito and jcip.
+
 ## Notes
 
 - Dependabot grouping in `.github/dependabot.yml` partly hides the churn but does not remove the lock updates.

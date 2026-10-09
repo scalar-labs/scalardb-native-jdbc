@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "023"
 tags: [code-review, security, build]
@@ -113,6 +113,14 @@ To be filled during triage.
 - `ci.yml` already follows the SHA-pinning pattern; only the auto-PR workflow, copied from the sibling repository, does not
 
 ---
+
+### 2026-10-09 - Fix applied
+
+**By:** Claude Code
+
+**Actions:**
+- auto-pr.yml calls the shared workflow at a commit (0594c557, main of 2026-10-05) instead of @main, with a `permissions: contents: read` block; the shared workflow only reads the repository with the job token and opens PRs with GH_PR_PAT, which it does not declare, so `secrets: inherit` stays. Dependabot's github-actions ecosystem updates the pin.
+- logback-classic 1.5.32 -> 1.5.38 (test runtime only), past the advisory's fixed version 1.5.34.
 
 ## Notes
 

@@ -272,6 +272,14 @@ public final class SqlAst {
       lockingOrInto |= isLockingOrInto(s);
     }
     accounted.addAll(forUpdateTables);
+    for (Table t : accounted) {
+      List<String> parts = t.getNameParts();
+      if ((parts != null && parts.size() > 2) || hasDottedQuotedToken(t.getASTNode())) {
+        // a database-qualified name resolves outside the catalog's database; a quoted name holding
+        // a dot is one identifier to the engine and two to the parser
+        return Optional.empty();
+      }
+    }
     if (!doubleQuotesQuoteIdentifiers) {
       for (Table t : accounted) {
         if (isDoubleQuoted(t.getName()) || isDoubleQuoted(t.getSchemaName())) {
@@ -296,6 +304,11 @@ public final class SqlAst {
         columns.add(new ColumnRef((Column) v, null)); // a column the walk skipped
       }
     }
+    for (Column c : walked) {
+      if (hasDottedQuotedToken(c.getASTNode())) {
+        return Optional.empty();
+      }
+    }
     if (!doubleQuotesQuoteIdentifiers) {
       for (Column c : walked) {
         if (isDoubleQuoted(c.getColumnName())) {
@@ -316,6 +329,28 @@ public final class SqlAst {
             parameters.size(),
             lockingOrInto,
             List.copyOf(forUpdateTables)));
+  }
+
+  /**
+   * Whether a name's tokens include a quoted identifier with a dot inside, such as {@code "a.b"}.
+   */
+  private static boolean hasDottedQuotedToken(@Nullable Node n) {
+    if (n == null || n.jjtGetFirstToken() == null) {
+      return false;
+    }
+    Token last = n.jjtGetLastToken();
+    for (Token t = n.jjtGetFirstToken(); t != null; t = t.next) {
+      String image = t.image;
+      if (image.length() > 2
+          && (image.charAt(0) == '"' || image.charAt(0) == '`' || image.charAt(0) == '[')
+          && image.indexOf('.') >= 0) {
+        return true;
+      }
+      if (t == last) {
+        break;
+      }
+    }
+    return false;
   }
 
   private static boolean isDoubleQuoted(@Nullable String name) {

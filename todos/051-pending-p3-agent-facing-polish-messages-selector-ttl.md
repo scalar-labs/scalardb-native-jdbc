@@ -93,6 +93,14 @@ To be filled during triage.
 **Learnings:**
 - A refusal that knows the right answer should say it.
 
+### 2026-10-09 - Status
+
+**By:** Claude Code
+
+**Actions:**
+- Done: refusal messages name the table to use (033 fix); the catalog TTL is named in the design as scalardbnative.catalogTtlMs (027).
+- Still open: Engines.selected() fails on a typo with "No enum constant"; the refusal reasons are todo 016 (plan milestone 0).
+
 ## Notes
 
 - The selector fix is test-only and can go in with any commit.

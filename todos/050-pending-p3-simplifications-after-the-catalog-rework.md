@@ -103,6 +103,14 @@ To be filled during triage.
 **Learnings:**
 - Each fix added one helper for one caller; the sum is the weight.
 
+### 2026-10-09 - Status
+
+**By:** Claude Code
+
+**Actions:**
+- Removed since the todo was written: Engine.sameColumn, the retained treeValues, the stale "node-type scan" comment, the default arms in Engine's switches (045), the Catalog double lock (035 reshaped it).
+- Still open: Engine.of unused while NativeJdbcUrl rebuilds the sub-protocol set; SqlAst.rootOf's fallback parse for COMMIT-like text; QualifiedName.toString; the Catalog convenience constructor; the test duplicates (100-term predicate in four files, ModulePathCheck, columnNames_followTheEngineRule).
+
 ## Notes
 
 - The token-join machinery, `ConnectionSupplier`, the `Clock` parameter, `QualifiedName`, `isMissingTable`'s per-engine codes and the oracle test are genuinely needed and stay (simplicity report, "should stay").

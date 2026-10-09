@@ -13,9 +13,15 @@ on:
     types:
       - closed
 
+# The workflow token only needs to read the repository: the shared workflow opens the backport PRs with
+# GH_PR_PAT, which it does not declare, so the secrets are inherited. Pinned to a commit, not a branch,
+# because inherited secrets reach whatever that ref runs; Dependabot updates the pin.
+permissions:
+  contents: read
+
 jobs:
   if_merged:
-    uses: scalar-labs/actions/.github/workflows/auto-pr-reusable.yaml@main
+    uses: scalar-labs/actions/.github/workflows/auto-pr-reusable.yaml@0594c557e540aa2253f7909debe2d1b0524aa9dc # main, 2026-10-05
     secrets: inherit
     with:
       project_base_name: "ScalarDB"

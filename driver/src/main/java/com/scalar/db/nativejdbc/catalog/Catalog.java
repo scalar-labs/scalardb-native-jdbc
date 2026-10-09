@@ -553,11 +553,13 @@ public final class Catalog implements AutoCloseable {
     final String right;
     final boolean inner;
 
-    VirtualTable(String name, String left, String right, String joinType) {
+    VirtualTable(String name, String left, String right, @Nullable String joinType) {
       this.name = name;
       this.left = left;
       this.right = right;
-      this.inner = joinType.toUpperCase(Locale.ROOT).equals("INNER");
+      // ScalarDB writes INNER or LEFT_OUTER; anything else, NULL included, is treated as the outer
+      // join of an imported table, whose data table is then what a statement names
+      this.inner = joinType != null && joinType.strip().toUpperCase(Locale.ROOT).equals("INNER");
     }
   }
 
@@ -627,7 +629,7 @@ public final class Catalog implements AutoCloseable {
         }
         // ScalarDB registers metadata for the source tables, not for the virtual table: the keys
         // and the user's columns are the data table's entry
-        Columns columns = columns(v.left);
+        Columns columns = keyed(v.left, full);
         return new TableInfo(
             q.schema(),
             q.table(),
@@ -648,7 +650,7 @@ public final class Catalog implements AutoCloseable {
                   + v.name,
               "42000");
         }
-        Columns columns = columns(full); // the user's name is the data table
+        Columns columns = keyed(full, full); // the user's name is the data table
         return new TableInfo(
             q.schema(),
             q.table(),
@@ -670,6 +672,9 @@ public final class Catalog implements AutoCloseable {
             "42000");
       }
       Columns columns = columns(full);
+      if (columns.transactional && columns.partitionKey.isEmpty()) {
+        keyed(full, full); // throws: a ScalarDB table without a key
+      }
       if (columns.transactional) {
         return new TableInfo(
             q.schema(),
@@ -692,6 +697,24 @@ public final class Catalog implements AutoCloseable {
           List.of(),
           List.of(),
           List.of());
+    }
+
+    /**
+     * The columns of a ScalarDB table, which must have a key: an entry without one would make every
+     * predicate look like no key equality at best, and the write path's per-key steps impossible.
+     */
+    private Columns keyed(String dataTable, String full) throws SQLException {
+      Columns c = columns(dataTable);
+      if (c.partitionKey.isEmpty()) {
+        throw new SQLException(
+            "ScalarDB's catalog has no key for "
+                + dataTable
+                + ", the data table of "
+                + full
+                + "; its metadata entry is missing or incomplete",
+            "XX000");
+      }
+      return c;
     }
 
     private Columns columns(String fullTableName) {

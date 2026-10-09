@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "025"
 tags: [code-review, catalog, quality, testing]
@@ -120,6 +120,16 @@ To be filled during triage.
 
 **Actions:**
 - The Oracle quoting bug found by the probe (unquoted column names in the catalog queries fold to upper case and fail with ORA-00904) is fixed: every column name is quoted with the engine's quote. The integration test now covers all five engines, a custom metadata schema that does not exist, case-sensitive names and the refusal SQLSTATE. Still open: a NULL join_type would still throw, composite partition key order is still untested.
+
+### 2026-10-09 - Fix applied
+
+**By:** Claude Code
+
+**Actions:**
+- A NULL or unknown join_type no longer throws: it is read as the LEFT_OUTER join of an imported table, so the table stays protected either way.
+- A ScalarDB table whose catalog entry has no partition key (a virtual table whose data table has no metadata entry, or a classic table without keys) is an error, SQLSTATE XX000 naming the data table, instead of a TableInfo with empty keys.
+- Composite keys: the integration fixture creates ns.composite with partition key (b, a) and clustering key (d, c), declared in a different order from the columns; compositeKeys_keepTheOrderScalarDbWasGiven passes on all six configurations.
+- Tests: CatalogTest.aNullJoinType_isReadAsTheOuterJoinOfAnImportedTable, aScalarDbTableWithoutAKey_isAnError_notAKeylessTable.
 
 ## Notes
 

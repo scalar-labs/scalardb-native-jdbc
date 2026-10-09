@@ -163,6 +163,14 @@ To be filled during triage.
 **Actions:**
 - The catalog's classification is now a pure function of loaded rows (Catalog.Snapshot.classify) and is unit-tested without a database (CatalogTest); Engine.QualifiedName is public. The engine package exists as the leaf the design wanted. Still open: TableInfo's public factory, committedView/metadataColumns accessors, and the JSQLParser types in the sql API.
 
+### 2026-10-09 - Status
+
+**By:** Claude Code
+
+**Actions:**
+- Done: the catalog's classification is unit-tested without Docker (CatalogTest on Catalog.Snapshot); Engine.QualifiedName is public; the engine package exists as the leaf the design wanted.
+- Still open: JSQLParser types in the sql package's public API (statement(), where(), lockMode()), TableInfo's public factory and the committedView/metadataColumns accessors.
+
 ## Notes
 
 - Decide this together with 012 (fragment emitter) since both fix what `sql` hands to the rewrite.

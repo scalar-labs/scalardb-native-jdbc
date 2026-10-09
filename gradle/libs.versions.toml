@@ -6,7 +6,7 @@ scalardb = "3.19.1"
 jsqlparser = "5.4"
 # Kept at ScalarDB's version, since the driver is loaded next to ScalarDB in the tests
 slf4j = "1.7.36"
-logback = "1.5.32"
+logback = "1.5.38"
 picocli = "4.7.7"
 # Vendor JDBC drivers: the application supplies its own; these are the versions the tests run
 postgresql = "42.7.14"

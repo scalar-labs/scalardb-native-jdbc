@@ -314,6 +314,21 @@ class SqlAstTest {
   }
 
   @Test
+  void namesTheEngineReadsDifferently_areRefused() {
+    // one identifier to the engine, schema and table to the parser
+    assertThat(SqlAst.parse("select * from \"a.b\" where id = ?", Engine.POSTGRESQL)).isEmpty();
+    assertThat(SqlAst.parse("select * from s.\"a.b\" where id = ?", Engine.POSTGRESQL)).isEmpty();
+    assertThat(SqlAst.parse("select \"x.y\" from t", Engine.POSTGRESQL)).isEmpty();
+    // a database-qualified name resolves outside the catalog's database
+    assertThat(SqlAst.parse("select * from db..t where id = ?", Engine.SQLSERVER)).isEmpty();
+    assertThat(SqlAst.parse("select * from db.s.t where id = ?", Engine.SQLSERVER)).isEmpty();
+    // ordinary qualified and quoted names still parse, and so does a quoted alias with a dot
+    assertThat(SqlAst.parse("select * from s.\"Orders\" where id = ?", Engine.POSTGRESQL))
+        .isPresent();
+    assertThat(SqlAst.parse("select id as \"a.b\" from t", Engine.POSTGRESQL)).isPresent();
+  }
+
+  @Test
   void topPlaceholder_isCounted() {
     assertThat(parse("select top ? * from t where id = ?").parameterCount()).isEqualTo(2);
     assertThat(
