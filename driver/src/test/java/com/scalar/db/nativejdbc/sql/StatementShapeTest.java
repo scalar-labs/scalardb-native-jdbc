@@ -68,7 +68,7 @@ class StatementShapeTest {
         shape(
             "SELECT \"t\".\"id\" AS \"id\", \"t\".\"x\" AS \"x\" FROM \"t\" WHERE \"t\".\"id\" = ?");
     assertThat(s.kind()).isEqualTo(StatementShape.Kind.SELECT);
-    assertThat(s.table().resolvedName()).isEqualTo("t");
+    assertThat(s.table().name()).isEqualTo("\"t\"");
     assertThat(s.selectColumns()).isEmpty(); // aliased items are not a plain projection
     assertThat(s.whereColumns()).containsExactly("id");
     assertThat(s.isKeyEquality(List.of("id"))).isTrue();
@@ -81,7 +81,7 @@ class StatementShapeTest {
         shape(
             "select * from s.orders o where o.x = ? and y in (?, ?) order by o.id limit 10 offset 2");
     assertThat(s.selectAll()).isTrue();
-    assertThat(s.table().resolvedSchema()).isEqualTo("s");
+    assertThat(s.table().schema()).isEqualTo("s");
     assertThat(s.whereColumns()).containsExactly("x", "y");
     assertThat(s.isKeyEquality(List.of("id"))).isFalse();
     assertThat(s.ordered()).isTrue();
@@ -214,6 +214,18 @@ class StatementShapeTest {
         "select * from t with (nolock) where id = ?",
         "select * from t use index (i) where id = ?",
         "select * from t tablesample system (10)",
+        "delete from t using (select 1 where false) v where id < 5", // reads other rows
+        "delete from t using u where t.id = u.id",
+        "select * from t@remote where id = ?", // a database link names a table elsewhere
+        "select * from t start with id = 1 connect by prior id = parent_id",
+        "select * from t where id = ? for xml auto",
+        "select * into #tmp from t where id = ?",
+        "select * from t where id = ? into outfile '/tmp/x'",
+        "select * from t where id = ? qualify row_number() over (order by id) = 1",
+        "select * from t lateral view explode(x) e as y where id = ?",
+        "select * from t prewhere id = ? where x = 1",
+        "update t for portion of valid_time from ? to ? set x = ? where id = ?",
+        "delete from t for portion of valid_time from ? to ? where id = ?",
         "merge into t using s on t.id = s.id when matched then update set x = s.x",
         "update t set (x, y) = (?, ?) where id = ?",
         "update t set x = 1 where id = ? limit 1",

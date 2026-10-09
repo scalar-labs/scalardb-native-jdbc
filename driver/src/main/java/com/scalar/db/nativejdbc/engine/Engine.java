@@ -167,9 +167,10 @@ public enum Engine {
         return s.toLowerCase(Locale.ROOT);
       case UPPER:
         return s.toUpperCase(Locale.ROOT);
-      default:
+      case NONE:
         return s;
     }
+    throw new AssertionError(fold);
   }
 
   /**
@@ -184,14 +185,15 @@ public enum Engine {
   }
 
   /**
-   * Returns whether the engine treats two resolved column names as the same column.
+   * Returns the key under which this engine compares a resolved name that is local to a statement:
+   * a CTE name, a table alias, a column qualifier. SQL Server compares every identifier without
+   * regard to case; the other engines compare these names as resolved.
    *
-   * @param a a resolved column name
-   * @param b a resolved column name
-   * @return whether they name the same column
+   * @param resolvedName a name from {@link #resolveIdentifier}
+   * @return the comparison key
    */
-  public boolean sameColumn(String a, String b) {
-    return columnKey(a).equals(columnKey(b));
+  public String nameKey(String resolvedName) {
+    return this == SQLSERVER ? resolvedName.toLowerCase(Locale.ROOT) : resolvedName;
   }
 
   /**
@@ -209,22 +211,7 @@ public enum Engine {
    * @throws SQLException if the engine cannot be asked
    */
   public List<String> sessionSchemas(Connection connection) throws SQLException {
-    String sql;
-    switch (this) {
-      case POSTGRESQL:
-        sql = "SELECT current_schemas(false)";
-        break;
-      case MYSQL:
-      case MARIADB:
-        sql = "SELECT database()";
-        break;
-      case SQLSERVER:
-        sql = "SELECT schema_name()";
-        break;
-      default:
-        sql = "SELECT sys_context('USERENV', 'CURRENT_SCHEMA') FROM dual";
-        break;
-    }
+    String sql = sessionSchemasQuery();
     try (PreparedStatement ps = connection.prepareStatement(sql);
         ResultSet rs = ps.executeQuery()) {
       List<String> out = new ArrayList<>();
@@ -282,26 +269,29 @@ public enum Engine {
         }
       case SQLSERVER:
         {
-          String sql =
-              "SELECT s.name, o.name FROM sys.objects o JOIN sys.schemas s"
-                  + " ON s.schema_id = o.schema_id"
-                  + " WHERE s.name = ? AND o.name = ? AND o.type IN ('U', 'V')";
-          if (schema != null) {
-            return one(connection, sql, schema, table);
-          }
-          List<String> candidates = new ArrayList<>(sessionSchemas);
-          candidates.add("dbo");
-          for (String s : candidates) {
-            QualifiedName found = one(connection, sql, s, table);
-            if (found != null) {
-              return found;
+          // the default schema first, then dbo, in one round trip
+          String first =
+              schema != null ? schema : sessionSchemas.isEmpty() ? "dbo" : sessionSchemas.get(0);
+          String second = schema != null ? schema : "dbo";
+          try (PreparedStatement ps =
+              connection.prepareStatement(
+                  "SELECT TOP 1 s.name, o.name FROM sys.objects o JOIN sys.schemas s"
+                      + " ON s.schema_id = o.schema_id"
+                      + " WHERE o.name = ? AND o.type IN ('U', 'V') AND s.name IN (?, ?)"
+                      + " ORDER BY CASE WHEN s.name = ? THEN 0 ELSE 1 END")) {
+            ps.setString(1, table);
+            ps.setString(2, first);
+            ps.setString(3, second);
+            ps.setString(4, first);
+            try (ResultSet rs = ps.executeQuery()) {
+              return rs.next() ? new QualifiedName(rs.getString(1), rs.getString(2)) : null;
             }
           }
-          return null;
         }
-      default:
+      case ORACLE:
         return resolveOracle(connection, sessionSchemas, schema, table);
     }
+    throw new AssertionError(this);
   }
 
   @SuppressFBWarnings(
@@ -345,21 +335,30 @@ public enum Engine {
     if (sessionSchemas.isEmpty()) {
       return null;
     }
+    // the current schema's own table or view, then a private synonym of it, then a public one
+    // (one level, to a table or view), in one round trip
     String current = sessionSchemas.get(0);
-    QualifiedName own = one(c, objects, current, table);
-    if (own != null) {
-      return own;
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT owner, object_name FROM ("
+                + "SELECT owner, object_name, 0 pri FROM all_objects"
+                + " WHERE owner = ? AND object_name = ? AND object_type IN ('TABLE', 'VIEW')"
+                + " UNION ALL"
+                + " SELECT o.owner, o.object_name,"
+                + " CASE s.owner WHEN 'PUBLIC' THEN 2 ELSE 1 END pri"
+                + " FROM all_synonyms s JOIN all_objects o"
+                + " ON o.owner = s.table_owner AND o.object_name = s.table_name"
+                + " WHERE s.synonym_name = ? AND s.owner IN (?, 'PUBLIC')"
+                + " AND o.object_type IN ('TABLE', 'VIEW'))"
+                + " ORDER BY pri FETCH FIRST 1 ROW ONLY")) {
+      ps.setString(1, current);
+      ps.setString(2, table);
+      ps.setString(3, table);
+      ps.setString(4, current);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? new QualifiedName(rs.getString(1), rs.getString(2)) : null;
+      }
     }
-    // then a private synonym of the current schema, then a public one; one level, as a table
-    QualifiedName target =
-        one(
-            c,
-            "SELECT table_owner, table_name FROM all_synonyms WHERE synonym_name = ?"
-                + " AND owner IN (?, 'PUBLIC')"
-                + " ORDER BY CASE owner WHEN 'PUBLIC' THEN 1 ELSE 0 END",
-            table,
-            current);
-    return target == null ? null : one(c, objects, target.schema, target.table);
   }
 
   @SuppressFBWarnings(
@@ -377,8 +376,61 @@ public enum Engine {
   }
 
   /**
+   * Returns whether this database compares table names without regard to case, which is a
+   * per-database setting rather than a property of the engine: MySQL and MariaDB when {@code
+   * lower_case_table_names} is not 0 (the Windows default, common on managed services), SQL Server
+   * when the database collation is case-insensitive; never on PostgreSQL and Oracle. Where it is
+   * true, the name ScalarDB recorded at import time may differ in case from the one the engine
+   * stores, and the two must be compared without regard to case.
+   *
+   * @param connection a connection to the database
+   * @return whether table names compare without regard to case
+   * @throws SQLException if the setting cannot be read
+   */
+  public boolean tableNamesCaseInsensitive(Connection connection) throws SQLException {
+    String sql = tableNameSettingQuery();
+    if (sql == null) {
+      return false;
+    }
+    try (PreparedStatement ps = connection.prepareStatement(sql);
+        ResultSet rs = ps.executeQuery()) {
+      if (!rs.next()) {
+        return false;
+      }
+      String value = rs.getString(1);
+      if (value == null) {
+        return false;
+      }
+      return this == SQLSERVER
+          ? value.toUpperCase(Locale.ROOT).contains("_CI")
+          : !value.equals("0");
+    }
+  }
+
+  /**
+   * Returns whether a schema exists, as far as this connection can see. Used to tell a catalog
+   * schema that is absent from one whose tables this user is not allowed to see: Oracle answers
+   * "does not exist" for both, and {@code all_users} is visible to every user.
+   *
+   * @param connection a connection to the database
+   * @param schema the schema name in its stored spelling
+   * @return whether the schema exists
+   * @throws SQLException if the engine cannot be asked
+   */
+  public boolean schemaExists(Connection connection, String schema) throws SQLException {
+    String sql = schemaExistsQuery();
+    try (PreparedStatement ps = connection.prepareStatement(sql)) {
+      ps.setString(1, schema);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    }
+  }
+
+  /**
    * Returns whether the exception says that a table the query named does not exist, which is how a
-   * database without ScalarDB's catalog answers.
+   * database without ScalarDB's catalog answers. On Oracle the same error also means that the table
+   * exists but this user may not see it; {@link #schemaExists} tells the two apart.
    *
    * @param e the exception
    * @return whether it is the engine's "no such table"
@@ -394,8 +446,54 @@ public enum Engine {
         return "42S02".equals(state) || e.getErrorCode() == 1146 || e.getErrorCode() == 1049;
       case SQLSERVER:
         return "S0002".equals(state) || e.getErrorCode() == 208;
-      default:
+      case ORACLE:
         return e.getErrorCode() == 942;
     }
+    throw new AssertionError(this);
+  }
+
+  private String sessionSchemasQuery() {
+    switch (this) {
+      case POSTGRESQL:
+        return "SELECT current_schemas(false)";
+      case MYSQL:
+      case MARIADB:
+        return "SELECT database()";
+      case SQLSERVER:
+        return "SELECT schema_name()";
+      case ORACLE:
+        return "SELECT sys_context('USERENV', 'CURRENT_SCHEMA') FROM dual";
+    }
+    throw new AssertionError(this);
+  }
+
+  /** The query reading the setting, or {@code null} where table names always compare exactly. */
+  private @Nullable String tableNameSettingQuery() {
+    switch (this) {
+      case MYSQL:
+      case MARIADB:
+        return "SELECT @@lower_case_table_names";
+      case SQLSERVER:
+        return "SELECT CONVERT(varchar(128), DATABASEPROPERTYEX(DB_NAME(), 'Collation'))";
+      case POSTGRESQL:
+      case ORACLE:
+        return null;
+    }
+    throw new AssertionError(this);
+  }
+
+  private String schemaExistsQuery() {
+    switch (this) {
+      case POSTGRESQL:
+        return "SELECT 1 FROM pg_namespace WHERE nspname = ?";
+      case MYSQL:
+      case MARIADB:
+        return "SELECT 1 FROM information_schema.schemata WHERE schema_name = ?";
+      case SQLSERVER:
+        return "SELECT 1 FROM sys.schemas WHERE name = ?";
+      case ORACLE:
+        return "SELECT 1 FROM all_users WHERE username = ?";
+    }
+    throw new AssertionError(this);
   }
 }

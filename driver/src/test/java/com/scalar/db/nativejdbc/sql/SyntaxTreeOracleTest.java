@@ -15,7 +15,6 @@ import net.sf.jsqlparser.statement.delete.Delete;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.update.Update;
 import org.jspecify.annotations.Nullable;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -62,6 +61,8 @@ class SyntaxTreeOracleTest {
             "select * from t where x = ? order by y limit ? offset ?",
             "select * from t where x = ? offset ? rows fetch first ? rows only",
             "select * from t where x = ? and y = any (?)",
+            "select top ? * from t where id = ?",
+            "select * from t o where o.id = ? for update of o",
             wide.toString()));
   }
 
@@ -69,7 +70,7 @@ class SyntaxTreeOracleTest {
   @MethodSource("statements")
   void theTreeHoldsEveryTableAndPlaceholder_andEveryColumnOfTheWhereClause(String sql) {
     SqlAst ast = SqlAst.parse(sql).orElseThrow();
-    Set<Object> tree = ast.treeValues();
+    Set<Object> tree = SqlAst.valuesUnder(ast.root());
     Set<Table> qualifiers = Collections.newSetFromMap(new IdentityHashMap<>());
     for (SqlAst.ColumnRef c : ast.columnRefs()) {
       SqlAst.TableRef q = c.qualifier();
@@ -85,6 +86,8 @@ class SyntaxTreeOracleTest {
             .isTrue();
       } else if (o instanceof JdbcParameter || o instanceof JdbcNamedParameter) {
         placeholders++;
+      } else if (o instanceof Column column) {
+        assertThat(isColumnRef(ast, column)).as("column %s is a column reference", o).isTrue();
       }
     }
     assertThat(ast.parameterCount()).as("every placeholder is counted").isEqualTo(placeholders);
@@ -101,13 +104,6 @@ class SyntaxTreeOracleTest {
     }
   }
 
-  @Test
-  void parse_refusesAStatementWithATableNodeTheWalkDoesNotVisit() {
-    // the parser builds a table node for the OF target; the reference walk never visits it
-    assertThat(SqlAst.parse("select * from s.\"Order\" o where o.id = ? for update of o"))
-        .isEmpty();
-  }
-
   private static @Nullable Expression whereOf(SqlAst ast) {
     Object s = ast.statement();
     if (s instanceof PlainSelect select) {
@@ -120,5 +116,14 @@ class SyntaxTreeOracleTest {
       return delete.getWhere();
     }
     return null;
+  }
+
+  private static boolean isColumnRef(SqlAst ast, Column c) {
+    for (SqlAst.ColumnRef r : ast.columnRefs()) {
+      if (r.isAmong(Set.of(c))) {
+        return true;
+      }
+    }
+    return false;
   }
 }

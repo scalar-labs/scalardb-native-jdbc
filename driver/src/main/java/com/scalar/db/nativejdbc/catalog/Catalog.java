@@ -7,6 +7,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLNonTransientConnectionException;
+import java.sql.SQLNonTransientException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -17,10 +19,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tells, for a table name as a statement writes it, what the driver knows about the table: a {@link
@@ -35,8 +41,7 @@ import org.jspecify.annotations.Nullable;
  *       the engines differ: Oracle folds unquoted names to upper case and PostgreSQL to lower case,
  *       SQL Server compares without regard to case, a plain table earlier in a PostgreSQL {@code
  *       search_path} shadows a ScalarDB table later in it, and an Oracle synonym may stand for a
- *       table in another schema. The answer is the stored spelling, which is also the spelling
- *       ScalarDB keeps for the tables it created or imported.
+ *       table in another schema. The answer is the stored spelling.
  *   <li><b>ScalarDB's catalog</b>, loaded whole on a connection of this class's own and refreshed
  *       after {@code ttl} or on {@link #invalidate}, then classifies the stored name: a {@code
  *       virtual_tables} row named by it is a created decoupled table (INNER join) or the virtual
@@ -44,21 +49,32 @@ import org.jspecify.annotations.Nullable;
  *       marks an imported decoupled table (LEFT_OUTER) or the data table of a created one, which a
  *       statement must not name either; a row whose right source it is marks a transaction metadata
  *       table, refused as well; a {@code metadata} entry carrying the transaction columns is a
- *       classic-layout table; anything else is plain.
+ *       classic-layout table; anything else is plain. ScalarDB records the spelling the operator
+ *       typed, which on an engine that compares table names without regard to case may differ from
+ *       the stored one, so where the database compares that way ({@link
+ *       Engine#tableNamesCaseInsensitive}) so does this classification.
  * </ol>
+ *
+ * <p>A database without ScalarDB's catalog is an error unless the catalog was told to allow it: a
+ * silent "every table is plain" is also what a mistyped schema name, or a user without rights on
+ * the catalog tables, would produce, and on Oracle "does not exist" is the answer to both.
  *
  * <p>Nothing runs on the user's connection: the catalog's queries would otherwise fix the snapshot
  * of the user's transaction before the statement the design requires to come first, and a failure
  * would abort that transaction. The session schemas are read from the user's connection by the
- * caller, outside a transaction ({@link Engine#sessionSchemas}), and passed in.
+ * caller, outside a transaction ({@link Engine#sessionSchemas}), and passed in. No lock is held
+ * across a round trip: a stale catalog is served while one thread reloads it, and a name is
+ * resolved on the catalog connection outside the cache's lock.
  */
-public final class Catalog {
+public final class Catalog implements AutoCloseable {
 
   /** ScalarDB's default system namespace, where its catalog tables live. */
   public static final String DEFAULT_METADATA_SCHEMA = "scalardb";
 
   /** How long a loaded catalog and the names resolved against it are trusted. */
   public static final Duration DEFAULT_TTL = Duration.ofSeconds(60);
+
+  private static final Logger LOG = LoggerFactory.getLogger(Catalog.class);
 
   private static final int RESOLUTION_CACHE_SIZE = 4096;
 
@@ -82,9 +98,9 @@ public final class Catalog {
   @FunctionalInterface
   public interface ConnectionSupplier {
     /**
-     * Opens a connection.
+     * Opens a connection. The catalog puts it in autocommit mode itself.
      *
-     * @return the connection, in autocommit mode
+     * @return the connection
      * @throws SQLException if the database cannot be reached
      */
     Connection open() throws SQLException;
@@ -95,22 +111,63 @@ public final class Catalog {
   private final ConnectionSupplier connections;
   private final Duration ttl;
   private final Clock clock;
+  private final boolean allowAbsent;
 
-  private final Object lock = new Object();
-  private @Nullable Snapshot snapshot; // guarded by lock
-  private @Nullable Connection connection; // guarded by lock; reused across loads and resolutions
+  private volatile @Nullable Snapshot snapshot;
+  private final ReentrantLock loadLock = new ReentrantLock();
 
-  /** Resolved names, keyed by session schemas and the name as resolved; guarded by lock. */
-  private final Map<String, Optional<QualifiedName>> resolutions =
-      new LinkedHashMap<String, Optional<QualifiedName>>(64, 0.75f, true) {
+  private final ReentrantLock connectionLock = new ReentrantLock();
+  private @Nullable Connection connection; // guarded by connectionLock
+  private volatile boolean closed;
+
+  /**
+   * A resolved name with the instant it was resolved at, and the classification of that name
+   * against one snapshot, kept so that a hit costs a map lookup rather than a rebuilt {@link
+   * TableInfo}.
+   */
+  private static final class Resolution {
+    final @Nullable QualifiedName name;
+    final Instant resolvedAt;
+    volatile @Nullable Classified classified;
+
+    Resolution(@Nullable QualifiedName name, Instant resolvedAt) {
+      this.name = name;
+      this.resolvedAt = resolvedAt;
+    }
+  }
+
+  /** What a snapshot said about a name: a table, or a refusal to rethrow. */
+  private static final class Classified {
+    final Snapshot snapshot;
+    final @Nullable TableInfo info;
+    final @Nullable SQLException refusal;
+
+    Classified(Snapshot snapshot, @Nullable TableInfo info, @Nullable SQLException refusal) {
+      this.snapshot = snapshot;
+      this.info = info;
+      this.refusal = refusal;
+    }
+
+    TableInfo get() throws SQLException {
+      if (info != null) {
+        return info;
+      }
+      SQLException r = Objects.requireNonNull(refusal);
+      throw new SQLException(r.getMessage(), r.getSQLState(), r.getErrorCode());
+    }
+  }
+
+  private final Map<String, Resolution> resolutions =
+      new LinkedHashMap<String, Resolution>(64, 0.75f, true) {
         @Override
-        protected boolean removeEldestEntry(Map.Entry<String, Optional<QualifiedName>> eldest) {
+        protected boolean removeEldestEntry(Map.Entry<String, Resolution> eldest) {
           return size() > RESOLUTION_CACHE_SIZE;
         }
       };
 
   /**
-   * Creates a catalog for one database, trusting what it loads for {@link #DEFAULT_TTL}.
+   * Creates a catalog for one database that requires ScalarDB's catalog to exist and trusts what it
+   * loads for {@link #DEFAULT_TTL}.
    *
    * @param engine the database engine
    * @param metadataSchema the schema that holds {@code virtual_tables} and {@code metadata},
@@ -118,7 +175,7 @@ public final class Catalog {
    * @param connections how to open a connection of the catalog's own
    */
   public Catalog(Engine engine, String metadataSchema, ConnectionSupplier connections) {
-    this(engine, metadataSchema, connections, DEFAULT_TTL, Clock.systemUTC());
+    this(engine, metadataSchema, connections, DEFAULT_TTL, Clock.systemUTC(), false);
   }
 
   /**
@@ -129,13 +186,16 @@ public final class Catalog {
    * @param connections how to open a connection of the catalog's own
    * @param ttl how long a loaded catalog is trusted before it is read again
    * @param clock the clock that measures {@code ttl}
+   * @param allowAbsent whether a database whose {@code metadataSchema} does not exist is accepted,
+   *     with every table plain, rather than refused
    */
   public Catalog(
       Engine engine,
       String metadataSchema,
       ConnectionSupplier connections,
       Duration ttl,
-      Clock clock) {
+      Clock clock,
+      boolean allowAbsent) {
     if (!IDENTIFIER.matcher(metadataSchema).matches()) {
       throw new IllegalArgumentException("Not a plain identifier: " + metadataSchema);
     }
@@ -144,6 +204,7 @@ public final class Catalog {
     this.connections = connections;
     this.ttl = ttl;
     this.clock = clock;
+    this.allowAbsent = allowAbsent;
   }
 
   /**
@@ -163,9 +224,10 @@ public final class Catalog {
    * @param rawTable the table as written, quotes included
    * @return what the driver knows about the table the engine resolves the name to; a name the
    *     engine knows no table or view for is plain
-   * @throws SQLException if a catalog cannot be read, or if the name denotes a table a user
-   *     statement must not use: the data table, the transaction metadata table or the virtual table
-   *     of a decoupled layout (SQLSTATE 42000)
+   * @throws SQLException if a catalog cannot be read (SQLSTATE 08004 when ScalarDB's catalog is
+   *     absent and not allowed to be, 42501 when its tables exist but cannot be seen), or if the
+   *     name denotes a table a user statement must not use: the data table, the transaction
+   *     metadata table or the virtual table of a decoupled layout (SQLSTATE 42000)
    */
   public TableInfo lookup(List<String> sessionSchemas, @Nullable String rawSchema, String rawTable)
       throws SQLException {
@@ -173,20 +235,42 @@ public final class Catalog {
     String table = engine.resolveIdentifier(rawTable);
     Snapshot current = snapshot();
     if (!current.present) {
-      return plain(schema, sessionSchemas, table); // no ScalarDB catalog: every table is plain
+      return plain(schema, sessionSchemas, table); // no ScalarDB catalog, by permission
     }
-    QualifiedName name = resolve(sessionSchemas, schema, table);
+    Resolution resolution = resolve(sessionSchemas, schema, table);
+    QualifiedName name = resolution.name;
     if (name == null) {
       return plain(schema, sessionSchemas, table); // the engine knows no such table
     }
-    return current.classify(name);
+    Classified c = resolution.classified;
+    if (c == null || c.snapshot != current) {
+      try {
+        c = new Classified(current, current.classify(name), null);
+      } catch (SQLException refusal) {
+        c = new Classified(current, null, refusal);
+      }
+      resolution.classified = c;
+    }
+    return c.get();
   }
 
   /** Forgets everything loaded and resolved, so the next lookup reads both catalogs again. */
   public void invalidate() {
-    synchronized (lock) {
-      snapshot = null;
+    snapshot = null;
+    synchronized (resolutions) {
       resolutions.clear();
+    }
+  }
+
+  /** Closes the catalog's own connection; a later lookup opens a new one. */
+  @Override
+  public void close() {
+    closed = true;
+    connectionLock.lock();
+    try {
+      dropConnection();
+    } finally {
+      connectionLock.unlock();
     }
   }
 
@@ -197,33 +281,72 @@ public final class Catalog {
         ns, table, Layout.PLAIN, table, null, null, List.of(), List.of(), List.of());
   }
 
+  /**
+   * The current snapshot: the loaded one while it is fresh; a stale one while another thread
+   * reloads; a fresh load when there is none or this thread is the one to reload.
+   */
   private Snapshot snapshot() throws SQLException {
-    synchronized (lock) {
-      Snapshot s = snapshot;
-      Instant now = clock.instant();
-      if (s != null && s.loadedAt.plus(ttl).isAfter(now)) {
-        return s;
+    Snapshot s = snapshot;
+    Instant now = clock.instant();
+    if (s != null && s.expiresAt.isAfter(now)) {
+      return s;
+    }
+    if (s != null) {
+      if (!loadLock.tryLock()) {
+        return s; // stale, and someone else is reloading: serve the stale one
+      }
+    } else {
+      loadLock.lock(); // nothing to serve yet: wait for the first load
+    }
+    try {
+      Snapshot again = snapshot;
+      if (again != null && again.expiresAt.isAfter(now)) {
+        return again;
       }
       Snapshot loaded = withConnection(c -> load(c, now));
       snapshot = loaded;
-      resolutions.clear();
       return loaded;
+    } finally {
+      loadLock.unlock();
     }
   }
 
-  private @Nullable QualifiedName resolve(
-      List<String> sessionSchemas, @Nullable String schema, String table) throws SQLException {
-    String key = String.join("\u0000", sessionSchemas) + "\u0001" + schema + "\u0001" + table;
-    synchronized (lock) {
-      Optional<QualifiedName> cached = resolutions.get(key);
-      if (cached != null) {
-        return cached.orElse(null);
+  private Resolution resolve(List<String> sessionSchemas, @Nullable String schema, String table)
+      throws SQLException {
+    String key =
+        String.join("\u0000", sessionSchemas)
+            + "\u0001"
+            + (schema == null ? "" : "\u0002" + schema)
+            + "\u0001"
+            + table;
+    Instant now = clock.instant();
+    Resolution cached;
+    synchronized (resolutions) {
+      cached = resolutions.get(key);
+    }
+    if (cached != null && cached.resolvedAt.plus(ttl).isAfter(now)) {
+      return cached;
+    }
+    // Stale or missing. A stale answer is served while the catalog connection is busy (a reload or
+    // another resolution), so a hit never waits on a round trip; only a missing one does.
+    if (cached != null) {
+      if (!connectionLock.tryLock()) {
+        return cached;
       }
+    } else {
+      connectionLock.lock();
+    }
+    try {
       Optional<QualifiedName> resolved =
           withConnection(
               c -> Optional.ofNullable(engine.resolve(c, sessionSchemas, schema, table)));
-      resolutions.put(key, resolved);
-      return resolved.orElse(null);
+      Resolution fresh = new Resolution(resolved.orElse(null), now);
+      synchronized (resolutions) {
+        resolutions.put(key, fresh);
+      }
+      return fresh;
+    } finally {
+      connectionLock.unlock();
     }
   }
 
@@ -231,24 +354,62 @@ public final class Catalog {
     T run(Connection c) throws SQLException;
   }
 
-  /** Runs on the catalog's own connection, opened on demand and dropped on any failure. */
+  /**
+   * Runs on the catalog's own connection, opened on demand, serialised with the other users of it
+   * (the lock is reentrant, so a caller that already holds it may call this) and never with the
+   * caches. A connection that fails is dropped; if it had been used before, one fresh connection is
+   * tried once, so a server-side idle reap costs no statement.
+   */
   private <T> T withConnection(Query<T> query) throws SQLException {
+    if (closed) {
+      throw new SQLNonTransientConnectionException("The catalog is closed", "08003");
+    }
+    connectionLock.lock();
+    try {
+      boolean reused = connection != null;
+      Connection c = connection();
+      try {
+        return query.run(c);
+      } catch (SQLException e) {
+        dropConnection();
+        if (!reused || !isConnectionFailure(e)) {
+          throw e;
+        }
+      }
+      return query.run(connection());
+    } catch (SQLException e) {
+      dropConnection();
+      throw e;
+    } finally {
+      connectionLock.unlock();
+    }
+  }
+
+  private Connection connection() throws SQLException {
     Connection c = connection;
     if (c == null) {
       c = connections.open();
+      c.setAutoCommit(true);
       connection = c;
     }
-    try {
-      return query.run(c);
-    } catch (SQLException e) {
-      connection = null;
+    return c;
+  }
+
+  private void dropConnection() {
+    Connection c = connection;
+    connection = null;
+    if (c != null) {
       try {
         c.close();
       } catch (SQLException ignored) {
-        // the first exception is the one to report
+        // the connection is being discarded
       }
-      throw e;
     }
+  }
+
+  private static boolean isConnectionFailure(SQLException e) {
+    String state = e.getSQLState();
+    return state != null && state.startsWith("08");
   }
 
   private String quoted(String table) {
@@ -286,7 +447,11 @@ public final class Catalog {
       if (!engine.isMissingTable(e)) {
         throw e;
       }
-      // a ScalarDB too old for virtual tables: only classic layouts can exist
+      LOG.warn(
+          "{}.virtual_tables is not visible: only classic-layout ScalarDB tables can be"
+              + " recognised ({})",
+          metadataSchema,
+          e.getMessage());
     }
     try (PreparedStatement ps =
             c.prepareStatement(
@@ -312,9 +477,44 @@ public final class Catalog {
       if (!engine.isMissingTable(e)) {
         throw e;
       }
-      present = false; // no ScalarDB catalog in this database
+      present = false;
+      absent(c, e);
     }
-    return new Snapshot(present, virtualTables, metadata, now);
+    boolean caseInsensitive = present && engine.tableNamesCaseInsensitive(c);
+    return new Snapshot(present, caseInsensitive, virtualTables, metadata, now.plus(ttl));
+  }
+
+  /** The metadata table is not visible: tell "no ScalarDB here" from "not allowed to look". */
+  private void absent(Connection c, SQLException cause) throws SQLException {
+    if (engine.schemaExists(c, metadataSchema)) {
+      throw new SQLNonTransientException(
+          "ScalarDB's catalog table "
+              + metadataSchema
+              + ".metadata cannot be seen although the schema exists: either ScalarDB has not"
+              + " created it yet, or this user lacks SELECT on "
+              + metadataSchema
+              + ".metadata and "
+              + metadataSchema
+              + ".virtual_tables ("
+              + cause.getMessage()
+              + ")",
+          "42501",
+          cause);
+    }
+    if (!allowAbsent) {
+      throw new SQLNonTransientConnectionException(
+          "No ScalarDB catalog: schema "
+              + metadataSchema
+              + " does not exist in this database. Set the metadata schema property if ScalarDB"
+              + " uses another one, or allow a database without ScalarDB explicitly ("
+              + cause.getMessage()
+              + ")",
+          "08004",
+          cause);
+    }
+    LOG.warn(
+        "No ScalarDB catalog in schema {}: every table is treated as plain, as allowed",
+        metadataSchema);
   }
 
   /** One row of {@code virtual_tables}. */
@@ -346,34 +546,50 @@ public final class Catalog {
   /** ScalarDB's catalog as loaded at one instant. */
   static final class Snapshot {
     final boolean present;
-    final Instant loadedAt;
+    final boolean caseInsensitive;
+    final Instant expiresAt;
     private final Map<String, VirtualTable> byName = new HashMap<>();
     private final Map<String, VirtualTable> byLeft = new HashMap<>();
     private final Map<String, VirtualTable> byRight = new HashMap<>();
-    private final Map<String, List<MetadataColumn>> metadata;
+    private final Map<String, List<MetadataColumn>> metadata = new HashMap<>();
 
+    /**
+     * @param caseInsensitive whether the database compares table names without regard to case, in
+     *     which case the names ScalarDB recorded are matched that way too
+     */
     Snapshot(
         boolean present,
+        boolean caseInsensitive,
         List<VirtualTable> virtualTables,
         Map<String, List<MetadataColumn>> metadata,
-        Instant loadedAt) {
+        Instant expiresAt) {
       this.present = present;
-      this.loadedAt = loadedAt;
-      this.metadata = metadata;
+      this.caseInsensitive = caseInsensitive;
+      this.expiresAt = expiresAt;
       for (VirtualTable v : virtualTables) {
-        byName.put(v.name, v);
-        byLeft.put(v.left, v);
-        byRight.put(v.right, v);
+        byName.put(key(v.name), v);
+        byLeft.put(key(v.left), v);
+        byRight.put(key(v.right), v);
       }
+      for (Map.Entry<String, List<MetadataColumn>> e : metadata.entrySet()) {
+        this.metadata.put(key(e.getKey()), e.getValue());
+      }
+    }
+
+    private String key(String fullTableName) {
+      return caseInsensitive ? fullTableName.toLowerCase(Locale.ROOT) : fullTableName;
     }
 
     TableInfo classify(QualifiedName q) throws SQLException {
       String full = q.schema() + "." + q.table();
-      VirtualTable v = byName.get(full);
+      String k = key(full);
+      VirtualTable v = byName.get(k);
       if (v != null) {
         if (!v.inner) {
           throw new SQLException(
-              full + " is ScalarDB's virtual table of an imported table; name the table itself",
+              full
+                  + " is ScalarDB's virtual table of an imported table; name the table itself, "
+                  + v.left,
               "42000");
         }
         // ScalarDB registers metadata for the source tables, not for the virtual table: the keys
@@ -390,11 +606,13 @@ public final class Catalog {
             columns.clusteringKey,
             columns.dataColumns);
       }
-      v = byLeft.get(full);
+      v = byLeft.get(k);
       if (v != null) {
         if (v.inner) {
           throw new SQLException(
-              full + " is the data table of a ScalarDB table; name the ScalarDB table instead",
+              full
+                  + " is the data table of a ScalarDB table; name the ScalarDB table instead, "
+                  + v.name,
               "42000");
         }
         Columns columns = columns(full); // the user's name is the data table
@@ -409,11 +627,13 @@ public final class Catalog {
             columns.clusteringKey,
             columns.dataColumns);
       }
-      if (byRight.containsKey(full)) {
+      v = byRight.get(k);
+      if (v != null) {
         throw new SQLException(
             full
                 + " is the transaction metadata table of a ScalarDB table; name the ScalarDB table"
-                + " instead",
+                + " instead, "
+                + (v.inner ? v.name : v.left),
             "42000");
       }
       Columns columns = columns(full);
@@ -444,13 +664,13 @@ public final class Catalog {
     private Columns columns(String fullTableName) {
       Columns out = new Columns();
       Set<String> names = new LinkedHashSet<>();
-      for (MetadataColumn col : metadata.getOrDefault(fullTableName, List.of())) {
+      for (MetadataColumn col : metadata.getOrDefault(key(fullTableName), List.of())) {
         names.add(col.name);
         if (col.keyType != null) {
-          String k = col.keyType.toUpperCase(Locale.ROOT);
-          if (k.equals("PARTITION")) {
+          String kt = col.keyType.toUpperCase(Locale.ROOT);
+          if (kt.equals("PARTITION")) {
             out.partitionKey.add(col.name);
-          } else if (k.equals("CLUSTERING")) {
+          } else if (kt.equals("CLUSTERING")) {
             out.clusteringKey.add(col.name);
           }
         }

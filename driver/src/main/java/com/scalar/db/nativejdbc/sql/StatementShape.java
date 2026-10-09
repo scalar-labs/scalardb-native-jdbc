@@ -23,6 +23,7 @@ import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
+import net.sf.jsqlparser.parser.Node;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
@@ -49,8 +50,11 @@ import org.jspecify.annotations.Nullable;
  * {@code ;}, the modifiers that change what a statement does ({@code INSERT IGNORE} and {@code
  * UPDATE IGNORE}, {@code ON DUPLICATE KEY UPDATE}, {@code ON CONFLICT}, an {@code OUTPUT} clause,
  * {@code SKIP LOCKED}, {@code NOWAIT} and {@code WAIT}), an optimizer hint, a table hint and {@code
- * TABLESAMPLE}, and a clause without a syntax tree. The caller decides what empty means: a read
- * goes to the committed-image view, a write is refused.
+ * TABLESAMPLE}, a database link, a clause that reads or writes something other than the table's
+ * rows ({@code USING}, {@code FOR PORTION OF}, {@code CONNECT BY}, {@code QUALIFY}, {@code LATERAL
+ * VIEW}, {@code FOR XML}, {@code INTO OUTFILE}, a temporary target table, {@code PREWHERE}), and a
+ * clause without a syntax tree. The caller decides what empty means: a read goes to the
+ * committed-image view, a write is refused.
  *
  * <p>Values are never interpreted here. The native database evaluates every literal and expression;
  * the driver only needs the structure: which table, which columns, where the predicate is, and
@@ -114,20 +118,20 @@ public final class StatementShape {
    * @return the shape, or empty when the statement is not one of the single-table shapes
    */
   public static Optional<StatementShape> of(String sql, Engine engine) {
-    return SqlAst.parse(sql).flatMap(ast -> of(ast, engine));
+    return SqlAst.parse(sql, engine).flatMap(StatementShape::of);
   }
 
   /**
-   * Classifies a parsed statement. Column names are resolved the way {@code engine} resolves them
-   * ({@link Engine#resolveIdentifier}) and compared the way it compares them ({@link
+   * Classifies a parsed statement. Column names are resolved the way the statement's engine
+   * resolves them ({@link Engine#resolveIdentifier}) and compared the way it compares them ({@link
    * Engine#columnKey}), so that {@code Amount} and {@code amount} are one column on MySQL and two
    * on PostgreSQL.
    *
    * @param ast the statement
-   * @param engine the engine whose identifier rules resolve the column names
    * @return the shape, or empty when the statement is not one of the single-table shapes
    */
-  public static Optional<StatementShape> of(SqlAst ast, Engine engine) {
+  public static Optional<StatementShape> of(SqlAst ast) {
+    Engine engine = ast.engine();
     if (ast.tableRefs().size() != 1 || !ast.cteRefs().isEmpty()) {
       return Optional.empty();
     }
@@ -359,14 +363,32 @@ public final class StatementShape {
         || e instanceof HexValue;
   }
 
-  /** A hint or a sample clause on the table itself, which a renamed table may not carry. */
+  /**
+   * A hint, a sample clause or a database link on the table itself, which a renamed table may not
+   * carry: {@code t@remote} names a table elsewhere, not this one.
+   */
   private static boolean hasTableHint(SqlAst.TableRef ref) {
     Table t = ref.node();
     return t.getIndexHint() != null
         || t.getSqlServerHints() != null
         || t.getSampleClause() != null
         || t.getPivot() != null
-        || t.getUnPivot() != null;
+        || t.getUnPivot() != null
+        || hasDatabaseLink(t);
+  }
+
+  /**
+   * {@code t@remote}: the lexer keeps the link inside the name token (and {@code getDBLinkName()}
+   * answers the table's own name for a plain table), and a quoted name holding an {@code @} is
+   * mangled by the parser; both are refused by looking at the token.
+   */
+  private static boolean hasDatabaseLink(Table t) {
+    Node n = t.getASTNode();
+    return n != null && n.jjtGetLastToken() != null && n.jjtGetLastToken().image.indexOf('@') >= 0;
+  }
+
+  private static boolean nonEmpty(@Nullable List<?> list) {
+    return list != null && !list.isEmpty();
   }
 
   private static void flattenAnd(Expression e, List<Expression> out) {
@@ -441,9 +463,18 @@ public final class StatementShape {
           || (s.getWithItemsList() != null && !s.getWithItemsList().isEmpty())
           || s.getTop() != null
           || s.getOracleHint() != null
-          || s.isSkipLocked() // the flags below are primitives, invisible to the node-type scan
+          || s.isSkipLocked()
           || s.isNoWait()
-          || s.getWait() != null) {
+          || s.getWait() != null
+          // clauses that read or write something other than the table's rows
+          || s.getOracleHierarchical() != null
+          || s.getQualify() != null
+          || nonEmpty(s.getLateralViews())
+          || s.getForXmlPath() != null
+          || s.getForClause() != null
+          || s.getMySqlSelectIntoClause() != null
+          || s.getIntoTempTable() != null
+          || s.getPreWhere() != null) {
         return false;
       }
       List<SelectItem<?>> items = s.getSelectItems();
@@ -476,6 +507,17 @@ public final class StatementShape {
       ordered = s.getOrderByElements() != null && !s.getOrderByElements().isEmpty();
       limited = s.getLimit() != null || s.getOffset() != null || s.getFetch() != null;
       lockMode = s.getForMode();
+      if (s.getForUpdateTables() != null) {
+        for (Table target : s.getForUpdateTables()) {
+          // FOR UPDATE OF names this table, by its alias or its name, or nothing this shape knows
+          String alias = table.alias();
+          boolean byAlias = alias != null && sameIdentifier(target.getName(), alias);
+          boolean byName = alias == null && sameIdentifier(target.getName(), table.name());
+          if (target.getSchemaName() != null || !(byAlias || byName)) {
+            return false;
+          }
+        }
+      }
       return predicate(s.getWhere());
     }
 
@@ -529,7 +571,8 @@ public final class StatementShape {
           || (u.getOrderByElements() != null && !u.getOrderByElements().isEmpty())
           || u.isModifierIgnore()
           || u.getOutputClause() != null
-          || u.getOracleHint() != null) {
+          || u.getOracleHint() != null
+          || u.getForPortionClause() != null) {
         return false;
       }
       List<UpdateSet> sets = u.getUpdateSets();
@@ -550,14 +593,17 @@ public final class StatementShape {
 
     boolean delete(Delete d) {
       kind = Kind.DELETE;
-      // a USING list or a join adds table references, which the single-table check already refused
-      if ((d.getTables() != null && !d.getTables().isEmpty())
-          || (d.getJoins() != null && !d.getJoins().isEmpty())
+      // a USING item or a join reads other rows: a table is caught by the single-table check, a
+      // subquery or a VALUES list is not, so the list itself is refused
+      if (nonEmpty(d.getTables())
+          || nonEmpty(d.getJoins())
+          || nonEmpty(d.getUsingFromItemList())
           || d.getLimit() != null
-          || (d.getOrderByElements() != null && !d.getOrderByElements().isEmpty())
+          || nonEmpty(d.getOrderByElements())
           || d.isModifierIgnore()
           || d.getOutputClause() != null
-          || d.getOracleHint() != null) {
+          || d.getOracleHint() != null
+          || d.getForPortionClause() != null) {
         return false;
       }
       returning = d.getReturningClause() != null;
@@ -597,7 +643,9 @@ public final class StatementShape {
     }
 
     private boolean sameIdentifier(String a, String b) {
-      return engine.resolveIdentifier(a).equals(engine.resolveIdentifier(b));
+      return engine
+          .nameKey(engine.resolveIdentifier(a))
+          .equals(engine.nameKey(engine.resolveIdentifier(b)));
     }
   }
 }

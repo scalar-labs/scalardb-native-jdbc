@@ -18,9 +18,10 @@ public final class ModulePathCheck {
     check(parser.isNamed(), "JSQLParser must be loaded as a named module here, got " + parser);
 
     SqlAst ast =
-        SqlAst.parse("select * from t where id = ? and (k = :k or n = abs(?))").orElseThrow();
+        SqlAst.parse("select * from t where id = ? and (k = :k or n = abs(?))", Engine.POSTGRESQL)
+            .orElseThrow();
     check(ast.parameterCount() == 3, "parameterCount: " + ast.parameterCount());
-    StatementShape shape = StatementShape.of(ast, Engine.POSTGRESQL).orElseThrow();
+    StatementShape shape = StatementShape.of(ast).orElseThrow();
     check(
         shape.whereColumns().equals(List.of("id", "k", "n")),
         "whereColumns: " + shape.whereColumns());
@@ -46,10 +47,10 @@ public final class ModulePathCheck {
     for (int i = 1; i < 100; i++) {
       wide.append(" or c").append(i).append(" = ?");
     }
-    SqlAst deep = SqlAst.parse(wide.toString()).orElseThrow();
+    SqlAst deep = SqlAst.parse(wide.toString(), Engine.POSTGRESQL).orElseThrow();
     check(deep.parameterCount() == 100, "a 100-term predicate is walked in full");
     check(
-        StatementShape.of(deep, Engine.POSTGRESQL).orElseThrow().whereColumns().size() == 100,
+        StatementShape.of(deep).orElseThrow().whereColumns().size() == 100,
         "every column of a 100-term predicate is seen");
     System.out.println("module-path check passed with " + parser.getName());
   }

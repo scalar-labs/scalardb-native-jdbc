@@ -40,6 +40,25 @@ public enum Engines {
       return new MySQLContainer("mysql:8.4").withUsername("root").withPassword("test");
     }
   },
+  /**
+   * MySQL with {@code lower_case_table_names=1}, the Windows default and common on managed
+   * services: table names are stored in lower case and compared without regard to case, so the
+   * spelling ScalarDB records differs from the one the engine stores.
+   */
+  MYSQL_LOWER_CASE(Engine.MYSQL) {
+    @Override
+    JdbcDatabaseContainer<?> create() {
+      return new MySQLContainer("mysql:8.4")
+          .withUsername("root")
+          .withPassword("test")
+          .withCommand("--lower-case-table-names=1");
+    }
+
+    @Override
+    public String storedTable(String unquoted) {
+      return unquoted.toLowerCase(java.util.Locale.ROOT);
+    }
+  },
   MARIADB(Engine.MARIADB) {
     @Override
     JdbcDatabaseContainer<?> create() {
@@ -167,9 +186,19 @@ public enum Engines {
     return TransactionFactory.create(p).getTransactionAdmin();
   }
 
-  /** The stored spelling of a name written unquoted in DDL on this engine. */
-  public String stored(String unquoted) {
+  /** The stored spelling of a table name written unquoted in DDL on this engine. */
+  public String storedTable(String unquoted) {
     return engine.resolveIdentifier(unquoted);
+  }
+
+  /** The stored spelling of a column name written unquoted in DDL on this engine. */
+  public String storedColumn(String unquoted) {
+    return engine.resolveIdentifier(unquoted);
+  }
+
+  /** The stored spelling of a schema name written unquoted in DDL on this engine. */
+  public String storedSchema(String unquoted) {
+    return storedTable(unquoted);
   }
 
   /** An integer column type ScalarDB can import on this engine. */

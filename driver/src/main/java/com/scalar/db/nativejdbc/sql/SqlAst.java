@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc.sql;
 
+import com.scalar.db.nativejdbc.engine.Engine;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -9,7 +10,6 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -30,7 +30,10 @@ import net.sf.jsqlparser.statement.delete.Delete;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.merge.Merge;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
+import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
+import net.sf.jsqlparser.statement.select.SetOperationList;
+import net.sf.jsqlparser.statement.select.Top;
 import net.sf.jsqlparser.statement.select.WithItem;
 import net.sf.jsqlparser.statement.truncate.Truncate;
 import net.sf.jsqlparser.statement.update.Update;
@@ -137,9 +140,11 @@ public final class SqlAst {
   private final List<TableRef> cteRefs;
   private final List<ColumnRef> columnRefs;
   private final Set<String> cteNames;
+  private final Engine engine;
   private final Node root;
-  private final Set<Object> treeValues;
   private final int parameterCount;
+  private final boolean lockingOrInto;
+  private final List<Table> forUpdateTables;
 
   private SqlAst(
       String source,
@@ -148,28 +153,39 @@ public final class SqlAst {
       List<TableRef> cteRefs,
       List<ColumnRef> columnRefs,
       Set<String> cteNames,
+      Engine engine,
       Node root,
-      Set<Object> treeValues,
-      int parameterCount) {
+      int parameterCount,
+      boolean lockingOrInto,
+      List<Table> forUpdateTables) {
     this.source = source;
     this.statement = statement;
     this.tableRefs = tableRefs;
     this.cteRefs = cteRefs;
     this.columnRefs = columnRefs;
     this.cteNames = cteNames;
+    this.engine = engine;
     this.root = root;
-    this.treeValues = treeValues;
     this.parameterCount = parameterCount;
+    this.lockingOrInto = lockingOrInto;
+    this.forUpdateTables = forUpdateTables;
+  }
+
+  /** Parses with PostgreSQL's identifier rules; a convenience for the tests of this package. */
+  static Optional<SqlAst> parse(String sql) {
+    return parse(sql, Engine.POSTGRESQL);
   }
 
   /**
-   * Parses one statement.
+   * Parses one statement. Names local to the statement, CTE names and the table names column
+   * qualifiers refer to, are matched the way {@code engine} matches them.
    *
    * @param sql the statement
+   * @param engine the engine whose identifier rules apply
    * @return the AST, or empty when the text is not exactly one statement, when the parser or the
    *     reference walk cannot handle it, or when the syntax tree holds a table the walk missed
    */
-  public static Optional<SqlAst> parse(String sql) {
+  public static Optional<SqlAst> parse(String sql, Engine engine) {
     Statement stmt;
     try {
       // parseStatements, not parse: the latter silently keeps only the first of "a; b"
@@ -187,6 +203,10 @@ public final class SqlAst {
     } catch (RuntimeException e) {
       return Optional.empty();
     }
+    Set<String> cteKeys = new LinkedHashSet<>();
+    for (String raw : walker.cteNames) {
+      cteKeys.add(key(engine, raw));
+    }
     List<TableRef> tables = new ArrayList<>();
     List<TableRef> ctes = new ArrayList<>();
     Set<Table> seen = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -195,7 +215,7 @@ public final class SqlAst {
         continue; // the walk returns the body of a CTE twice
       }
       TableRef ref = new TableRef(t, false);
-      if (t.getSchemaName() == null && walker.cteNames.contains(fold(t.getName()))) {
+      if (t.getSchemaName() == null && cteKeys.contains(key(engine, t.getName()))) {
         ctes.add(ref);
       } else {
         tables.add(ref);
@@ -209,12 +229,25 @@ public final class SqlAst {
       columns.add(new ColumnRef(null, a));
     }
     Node root = rootOf(stmt, walker.tables, walker.columns, sql);
-    if (root == null) {
+    if (root == null || hasCommentAnEngineMayExecute(root)) {
       return Optional.empty();
     }
     Set<Object> values = valuesUnder(root);
-    // Every table node of the parser's own tree must be one the walk found, as a reference or as a
-    // column qualifier; otherwise a rewrite would leave it as written.
+    // Every SELECT of the statement, wherever it is nested: the walk visits them, and the tree
+    // holds the rest.
+    Set<Select> selects = Collections.newSetFromMap(new IdentityHashMap<>());
+    selects.addAll(walker.selects);
+    if (stmt instanceof Select) {
+      selects.add((Select) stmt);
+    }
+    for (Object v : values) {
+      if (v instanceof Select) {
+        selects.add((Select) v);
+      }
+    }
+    // Every table node of the parser's own tree must be one the walk found, as a reference, as a
+    // column qualifier or as the target of FOR UPDATE OF; otherwise a rewrite would leave it as
+    // written.
     Set<Table> accounted = Collections.newSetFromMap(new IdentityHashMap<>());
     accounted.addAll(walker.tables);
     for (ColumnRef c : columns) {
@@ -223,16 +256,30 @@ public final class SqlAst {
         accounted.add(q);
       }
     }
+    List<Table> forUpdateTables = new ArrayList<>();
+    boolean lockingOrInto = false;
+    for (Select s : selects) {
+      if (s.getForUpdateTables() != null) {
+        forUpdateTables.addAll(s.getForUpdateTables());
+      }
+      lockingOrInto |= isLockingOrInto(s);
+    }
+    accounted.addAll(forUpdateTables);
     // A placeholder that is the operand of a cast or a sign has no tree node of its own, so the
     // placeholders are the union of what the tree and the walk found.
     Set<Object> parameters = Collections.newSetFromMap(new IdentityHashMap<>());
     parameters.addAll(walker.parameters);
+    Set<Column> walked = Collections.newSetFromMap(new IdentityHashMap<>());
+    walked.addAll(walker.columns);
     for (Object v : values) {
       if (v instanceof Table && !accounted.contains(v)) {
         return Optional.empty();
       }
       if (v instanceof JdbcParameter || v instanceof JdbcNamedParameter) {
         parameters.add(v);
+      }
+      if (v instanceof Column && walked.add((Column) v)) {
+        columns.add(new ColumnRef((Column) v, null)); // a column the walk skipped
       }
     }
     return Optional.of(
@@ -242,10 +289,59 @@ public final class SqlAst {
             List.copyOf(tables),
             List.copyOf(ctes),
             List.copyOf(columns),
-            Set.copyOf(walker.cteNames),
+            Set.copyOf(cteKeys),
+            engine,
             root,
-            Collections.unmodifiableSet(values),
-            parameters.size()));
+            parameters.size(),
+            lockingOrInto,
+            List.copyOf(forUpdateTables)));
+  }
+
+  /** The key under which a name local to the statement is compared on {@code engine}. */
+  private static String key(Engine engine, String raw) {
+    return engine.nameKey(engine.resolveIdentifier(raw));
+  }
+
+  private static boolean isLockingOrInto(Select s) {
+    if (s.getForMode() != null || s.isSkipLocked() || s.isNoWait() || s.getWait() != null) {
+      return true;
+    }
+    if (s instanceof PlainSelect) {
+      PlainSelect p = (PlainSelect) s;
+      return (p.getIntoTables() != null && !p.getIntoTables().isEmpty())
+          || p.getMySqlSelectIntoClause() != null
+          || p.getIntoTempTable() != null;
+    }
+    return false;
+  }
+
+  /**
+   * Comment forms the parser reads as comments but an engine may execute, so that the statement the
+   * engine would run is not the one that was classified: MySQL's executable comments {@code /*!
+   * ...} and {@code /*M! ...}; a {@code --} not followed by whitespace, which is not a comment on
+   * MySQL and MariaDB ({@code id = 1 --1} is {@code id = 1 - -1}); and a block comment holding
+   * another opener, which the parser and PostgreSQL nest but MySQL, MariaDB and Oracle end at the
+   * first closer. Refused on every engine rather than per engine: nothing is guessed.
+   */
+  private static boolean hasCommentAnEngineMayExecute(Node root) {
+    for (Token t = root.jjtGetFirstToken(); t != null; t = t.next) {
+      for (Token s = t.specialToken; s != null; s = s.specialToken) {
+        String image = s.image;
+        if (s.kind == CCJSqlParserConstants.MULTI_LINE_COMMENT) {
+          if (image.startsWith("/*!") || image.startsWith("/*M!") || image.indexOf("/*", 2) >= 0) {
+            return true;
+          }
+        } else if (isLineComment(s)
+            && image.length() > 2
+            && !Character.isWhitespace(image.charAt(2))) {
+          return true;
+        }
+      }
+      if (t.kind == 0) {
+        break; // EOF, whose special tokens are the trailing comments
+      }
+    }
+    return false;
   }
 
   /**
@@ -358,7 +454,7 @@ public final class SqlAst {
   }
 
   /**
-   * Returns the names defined by a {@code WITH} clause, folded.
+   * Returns the names defined by a {@code WITH} clause, as the engine compares them.
    *
    * @return the CTE names
    */
@@ -375,9 +471,30 @@ public final class SqlAst {
     return parameterCount;
   }
 
-  /** The value of every node of the syntax tree, each once, by identity. For the test oracle. */
-  Set<Object> treeValues() {
-    return treeValues;
+  /**
+   * Returns the engine whose identifier rules the statement was parsed with.
+   *
+   * @return the engine
+   */
+  public Engine engine() {
+    return engine;
+  }
+
+  /**
+   * Returns whether any SELECT of the statement, nested ones included, locks rows ({@code FOR
+   * UPDATE}, {@code FOR SHARE}, {@code SKIP LOCKED}, {@code NOWAIT}, {@code WAIT}) or writes its
+   * result ({@code INTO}). Renaming a table under such a clause changes what is locked or written,
+   * so a rewrite of a statement other than a single-table shape must refuse it.
+   *
+   * @return whether a locking or INTO clause appears anywhere
+   */
+  public boolean hasLockingOrIntoClause() {
+    return lockingOrInto;
+  }
+
+  /** The root of the parser's syntax tree. */
+  Node root() {
+    return root;
   }
 
   /**
@@ -406,8 +523,11 @@ public final class SqlAst {
     }
     Map<Token, String> from = new IdentityHashMap<>();
     Map<Token, Token> to = new IdentityHashMap<>();
-    if (naming != null && !collectReplacements(planRewrite(naming), from, to)) {
-      return null;
+    if (naming != null) {
+      Rewrite plan = planRewrite(naming);
+      if (lockTargetIsRenamed(plan) || !collectReplacements(plan, from, to)) {
+        return null;
+      }
     }
     StringBuilder out = new StringBuilder();
     Token skipEnd = null;
@@ -474,19 +594,19 @@ public final class SqlAst {
       if (r.hasAlias()) {
         continue;
       }
-      noAlias.add(r.foldedName());
+      noAlias.add(key(engine, r.name()));
       if (usedAsColumnQualifier(r)) {
         String alias = naming.aliasFor(r);
         if (alias != null) {
           plan.aliases.put(r, alias);
-          aliasByName.put(r.foldedName(), alias);
+          aliasByName.put(key(engine, r.name()), alias);
         }
       }
     }
     for (ColumnRef c : columnRefs) {
       Table q = c.qualifierNode();
       if (q != null) {
-        String last = fold(q.getName());
+        String last = key(engine, q.getName());
         if (noAlias.contains(last)) {
           String alias = aliasByName.get(last);
           String to = alias != null ? alias : q.getName();
@@ -506,10 +626,27 @@ public final class SqlAst {
   }
 
   private boolean usedAsColumnQualifier(TableRef r) {
+    String name = key(engine, r.name());
     for (ColumnRef c : columnRefs) {
       Table q = c.qualifierNode();
-      if (q != null && r.foldedName().equals(fold(q.getName()))) {
+      if (q != null && name.equals(key(engine, q.getName()))) {
         return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Whether {@code FOR UPDATE OF} names a table the plan renames by its name rather than by an
+   * alias: the target would then name a table no longer in the statement.
+   */
+  private boolean lockTargetIsRenamed(Rewrite plan) {
+    for (Table target : forUpdateTables) {
+      String name = key(engine, target.getName());
+      for (TableRef r : plan.tables.keySet()) {
+        if (!r.hasAlias() && name.equals(key(engine, r.name()))) {
+          return true;
+        }
       }
     }
     return false;
@@ -618,61 +755,6 @@ public final class SqlAst {
     return end;
   }
 
-  /**
-   * Removes identifier quoting: {@code "x"}, {@code `x`} and {@code [x]} become {@code x}.
-   *
-   * @param s an identifier as written
-   * @return the identifier without its quotes
-   */
-  public static String unquote(String s) {
-    if (s.length() < 2) {
-      return s;
-    }
-    char c = s.charAt(0);
-    if ((c == '"' || c == '`' || c == '[')
-        && (s.endsWith("\"") || s.endsWith("`") || s.endsWith("]"))) {
-      return s.substring(1, s.length() - 1);
-    }
-    return s;
-  }
-
-  /**
-   * Folds an identifier for matching: unquoted and lower-cased.
-   *
-   * @param s an identifier as written
-   * @return the folded identifier
-   */
-  public static String fold(String s) {
-    return unquote(s).toLowerCase(Locale.ROOT);
-  }
-
-  /**
-   * Returns whether an identifier is quoted.
-   *
-   * @param s an identifier as written
-   * @return whether it carries quotes
-   */
-  public static boolean isQuoted(String s) {
-    if (s.length() < 2) {
-      return false;
-    }
-    char c = s.charAt(0);
-    return (c == '"' && s.endsWith("\""))
-        || (c == '`' && s.endsWith("`"))
-        || (c == '[' && s.endsWith("]"));
-  }
-
-  /**
-   * Returns the name an identifier resolves to: as written without quotes when it was quoted,
-   * folded when it was not, which is the rule of PostgreSQL and MySQL alike.
-   *
-   * @param s an identifier as written
-   * @return the resolved name
-   */
-  public static String resolve(String s) {
-    return isQuoted(s) ? unquote(s) : fold(s);
-  }
-
   /** One table reference, a handle onto a node of the AST. */
   public static final class TableRef {
     private final Table node;
@@ -698,33 +780,6 @@ public final class SqlAst {
     }
 
     /**
-     * Returns the folded table name.
-     *
-     * @return the name, unquoted and lower-cased
-     */
-    public String foldedName() {
-      return fold(node.getName());
-    }
-
-    /**
-     * Returns the name the reference resolves to: as written when quoted, folded otherwise.
-     *
-     * @return the resolved name
-     */
-    public String resolvedName() {
-      return resolve(node.getName());
-    }
-
-    /**
-     * Returns whether the table name is quoted.
-     *
-     * @return whether it carries quotes
-     */
-    public boolean quoted() {
-      return isQuoted(node.getName());
-    }
-
-    /**
      * Returns how many parts the name has: 1 for {@code t}, 2 for {@code s.t}, 3 for {@code d.s.t}.
      *
      * @return the part count
@@ -742,16 +797,6 @@ public final class SqlAst {
      */
     public @Nullable String schema() {
       return node.getSchemaName();
-    }
-
-    /**
-     * Returns the resolved schema qualifier, or {@code null} for an unqualified name.
-     *
-     * @return the resolved schema, or {@code null}
-     */
-    public @Nullable String resolvedSchema() {
-      String s = node.getSchemaName();
-      return s == null ? null : resolve(s);
     }
 
     /**
@@ -818,15 +863,6 @@ public final class SqlAst {
     }
 
     /**
-     * Returns the resolved column name: as written when quoted, folded otherwise.
-     *
-     * @return the resolved name
-     */
-    public String resolvedName() {
-      return resolve(name());
-    }
-
-    /**
      * Returns whether the reference is a {@code t.*}.
      *
      * @return whether it names all columns of a table
@@ -889,7 +925,27 @@ public final class SqlAst {
     final List<Column> columns = new ArrayList<>();
     final List<AllTableColumns> allTableColumns = new ArrayList<>();
     final List<Object> parameters = new ArrayList<>();
-    final Set<String> cteNames = new LinkedHashSet<>();
+    final List<Select> selects = new ArrayList<>();
+    final Set<String> cteNames = new LinkedHashSet<>(); // as written
+
+    @Override
+    public <S> Void visit(PlainSelect plainSelect, S context) {
+      selects.add(plainSelect);
+      Top top = plainSelect.getTop();
+      if (top != null) {
+        Expression e = top.getExpression();
+        if (e instanceof JdbcParameter || e instanceof JdbcNamedParameter) {
+          parameters.add(e); // TOP ? is neither a tree node nor visited
+        }
+      }
+      return super.visit(plainSelect, context);
+    }
+
+    @Override
+    public <S> Void visit(SetOperationList setOperationList, S context) {
+      selects.add(setOperationList);
+      return super.visit(setOperationList, context);
+    }
 
     @Override
     public <S> Void visit(JdbcParameter parameter, S context) {
@@ -906,7 +962,7 @@ public final class SqlAst {
     @Override
     public <S> Void visit(WithItem<?> withItem, S context) {
       if (withItem.getAlias() != null) {
-        cteNames.add(fold(withItem.getAlias().getName()));
+        cteNames.add(withItem.getAlias().getName());
       }
       return super.visit(withItem, context);
     }
@@ -960,7 +1016,7 @@ public final class SqlAst {
   }
 
   /** Iterative, with no depth limit: a predicate of any length is walked in full. */
-  private static Set<Object> valuesUnder(Node root) {
+  static Set<Object> valuesUnder(Node root) {
     Set<Object> out = Collections.newSetFromMap(new IdentityHashMap<>());
     Deque<Node> stack = new ArrayDeque<>();
     stack.push(root);

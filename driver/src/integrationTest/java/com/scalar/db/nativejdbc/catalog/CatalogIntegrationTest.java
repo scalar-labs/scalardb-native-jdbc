@@ -8,16 +8,27 @@ import com.scalar.db.api.TableMetadata;
 import com.scalar.db.io.DataType;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.testing.Engines;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -60,7 +71,8 @@ class CatalogIntegrationTest {
           "CREATE TABLE app.Orders (Id " + intType + " PRIMARY KEY, Amount " + intType + ")",
           "CREATE TABLE app.imported_classic (id " + intType + " PRIMARY KEY, x VARCHAR(10))",
           "CREATE TABLE app.late1 (id " + intType + " PRIMARY KEY)",
-          "CREATE TABLE app.late2 (id " + intType + " PRIMARY KEY)");
+          "CREATE TABLE app.late2 (id " + intType + " PRIMARY KEY)",
+          "CREATE TABLE app.Mixed_Case (Id " + intType + " PRIMARY KEY)");
       switch (e) {
         case POSTGRESQL -> {
           e.execute(c, "CREATE TABLE public.orders (id INT PRIMARY KEY)");
@@ -75,9 +87,17 @@ class CatalogIntegrationTest {
       }
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
-      String app = e.stored("app");
-      admin.importTable(app, e.stored("Orders"), DECOUPLED, Map.of());
-      admin.importTable(app, e.stored("imported_classic"), Map.of(), Map.of());
+      String app = e.storedSchema("app");
+      admin.importTable(app, e.storedTable("Orders"), DECOUPLED, Map.of());
+      admin.importTable(app, e.storedTable("imported_classic"), Map.of(), Map.of());
+      // where the engine ignores case, ScalarDB accepts a spelling that differs from the stored
+      // one and records it as given
+      boolean ignoresCase;
+      try (Connection c = e.open()) {
+        ignoresCase = e.engine().tableNamesCaseInsensitive(c);
+      }
+      admin.importTable(
+          app, ignoresCase ? "MIXED_case" : e.storedTable("Mixed_Case"), DECOUPLED, Map.of());
       admin.createNamespace("ns", true);
       admin.createTable(
           "ns",
@@ -111,16 +131,17 @@ class CatalogIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void importedDecoupledTable_inItsStoredSpelling(Engines e) throws Exception {
-    TableInfo t = catalog(e).lookup(NO_SESSION, "app", e.stored("Orders"));
-    String orders = e.stored("Orders");
+    TableInfo t = catalog(e).lookup(NO_SESSION, "app", e.storedTable("Orders"));
+    String orders = e.storedTable("Orders");
     assertThat(t.layout()).isEqualTo(Layout.DECOUPLED_IMPORTED);
-    assertThat(t.namespace()).isEqualTo(e.stored("app"));
+    assertThat(t.namespace()).isEqualTo(e.storedSchema("app"));
     assertThat(t.table()).isEqualTo(orders);
     assertThat(t.dataTable()).isEqualTo(orders);
     assertThat(t.metadataTable()).isEqualTo(orders + "_tx_metadata");
     assertThat(t.virtualTable()).isEqualTo(orders + "_scalardb");
-    assertThat(t.keyColumns()).containsExactly(e.stored("Id"));
-    assertThat(t.dataColumns()).containsExactlyInAnyOrder(e.stored("Id"), e.stored("Amount"));
+    assertThat(t.keyColumns()).containsExactly(e.storedColumn("Id"));
+    assertThat(t.dataColumns())
+        .containsExactlyInAnyOrder(e.storedColumn("Id"), e.storedColumn("Amount"));
   }
 
   @ParameterizedTest
@@ -143,6 +164,12 @@ class CatalogIntegrationTest {
         assertThat(layout(catalog, "app", "`Orders`")).isEqualTo(imported);
         assertThat(layout(catalog, "app", "orders")).isEqualTo(Layout.PLAIN);
         assertThat(layout(catalog, "APP", "Orders")).isEqualTo(Layout.PLAIN);
+      }
+      case MYSQL_LOWER_CASE -> {
+        // stored in lower case, compared without regard to case, ScalarDB recorded app.Orders
+        assertThat(layout(catalog, "app", "Orders")).isEqualTo(imported);
+        assertThat(layout(catalog, "app", "orders")).isEqualTo(imported);
+        assertThat(layout(catalog, "APP", "ORDERS")).isEqualTo(imported);
       }
       case SQLSERVER -> {
         // the engine keeps case and compares without regard to it
@@ -170,10 +197,10 @@ class CatalogIntegrationTest {
     TableInfo t = catalog.lookup(NO_SESSION, engine.quote("ns"), engine.quote("Orders"));
     assertThat(t.layout()).isEqualTo(Layout.DECOUPLED_CREATED);
     assertThat(t.namespace()).isEqualTo("ns");
-    assertThat(t.table()).isEqualTo("Orders");
+    assertThat(t.table()).isEqualTo(e == Engines.MYSQL_LOWER_CASE ? "orders" : "Orders");
     assertThat(t.dataTable()).isEqualTo("Orders_data");
     assertThat(t.metadataTable()).isEqualTo("Orders_tx_metadata");
-    assertThat(t.virtualTable()).isEqualTo("Orders");
+    assertThat(t.virtualTable()).isEqualTo(t.table()); // the virtual name is the user's name
     assertThat(t.partitionKey()).containsExactly("Id");
     assertThat(t.clusteringKey()).containsExactly("K");
     assertThat(t.dataColumns()).containsExactly("Id", "K", "Amount");
@@ -205,7 +232,7 @@ class CatalogIntegrationTest {
     TableInfo imported = catalog.lookup(NO_SESSION, "app", "imported_classic");
     assertThat(imported.layout()).isEqualTo(Layout.CLASSIC);
     assertThat(imported.metadataTable()).isNull();
-    assertThat(imported.keyColumns()).containsExactly(e.stored("id"));
+    assertThat(imported.keyColumns()).containsExactly(e.storedColumn("id"));
   }
 
   @ParameterizedTest
@@ -248,6 +275,13 @@ class CatalogIntegrationTest {
           assertThat(catalog.lookup(session, null, "orders").layout()).isEqualTo(Layout.PLAIN);
         }
       }
+      case MYSQL_LOWER_CASE -> {
+        try (Connection c = e.open()) {
+          e.execute(c, "USE app");
+          assertThat(catalog.lookup(engine.sessionSchemas(c), null, "orders").layout())
+              .isEqualTo(Layout.DECOUPLED_IMPORTED);
+        }
+      }
       case SQLSERVER -> {
         try (Connection c = e.open()) {
           List<String> session = engine.sessionSchemas(c);
@@ -286,7 +320,7 @@ class CatalogIntegrationTest {
   void namesAUserStatementMustNotUseAreRefused(Engines e) throws Exception {
     Catalog catalog = catalog(e);
     Engine engine = e.engine();
-    String orders = e.stored("Orders");
+    String orders = e.storedTable("Orders");
     assertRefused(catalog, "app", engine.quote(orders + "_scalardb"), "virtual table");
     assertRefused(catalog, "app", engine.quote(orders + "_tx_metadata"), "transaction metadata");
     assertRefused(catalog, engine.quote("ns"), engine.quote("Orders_data"), "data table");
@@ -296,10 +330,124 @@ class CatalogIntegrationTest {
 
   @ParameterizedTest
   @MethodSource("engines")
-  void aDatabaseWithoutScalarDb_hasOnlyPlainTables(Engines e) throws Exception {
+  void aHit_returnsTheClassificationAlreadyMade(Engines e) throws Exception {
     prepare(e);
-    Catalog none = new Catalog(e.engine(), "nosuch", e::open);
-    assertThat(none.lookup(NO_SESSION, "app", e.stored("Orders")).layout()).isEqualTo(Layout.PLAIN);
+    try (Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open)) {
+      TableInfo first = catalog.lookup(NO_SESSION, "app", e.storedTable("Orders"));
+      assertThat(catalog.lookup(NO_SESSION, "app", e.storedTable("Orders"))).isSameAs(first);
+      String virtual = e.engine().quote(e.storedTable("Orders") + "_scalardb");
+      for (int i = 0; i < 2; i++) {
+        assertThatThrownBy(() -> catalog.lookup(NO_SESSION, "app", virtual))
+            .isInstanceOf(SQLException.class)
+            .extracting("SQLState")
+            .isEqualTo("42000");
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
+  void aDatabaseWithoutScalarDb_isAnErrorUnlessAllowed(Engines e) throws Exception {
+    prepare(e);
+    try (Catalog none = new Catalog(e.engine(), "nosuch", e::open)) {
+      assertThatThrownBy(() -> none.lookup(NO_SESSION, "app", e.storedTable("Orders")))
+          .isInstanceOf(SQLException.class)
+          .hasMessageContaining("nosuch")
+          .extracting("SQLState")
+          .isEqualTo("08004");
+    }
+    try (Catalog allowed =
+        new Catalog(e.engine(), "nosuch", e::open, Catalog.DEFAULT_TTL, Clock.systemUTC(), true)) {
+      assertThat(allowed.lookup(NO_SESSION, "app", e.storedTable("Orders")).layout())
+          .isEqualTo(Layout.PLAIN);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
+  void aNameRecordedInAnotherCaseThanStored_isStillTheScalarDbTable(Engines e) throws Exception {
+    Catalog catalog = catalog(e);
+    boolean ignoresCase;
+    try (Connection c = e.open()) {
+      ignoresCase = e.engine().tableNamesCaseInsensitive(c);
+    }
+    assertThat(ignoresCase).isEqualTo(e == Engines.SQLSERVER || e == Engines.MYSQL_LOWER_CASE);
+    // the import recorded app.MIXED_case where the engine ignores case, app.Mixed_Case elsewhere
+    assertThat(catalog.lookup(NO_SESSION, "app", e.storedTable("Mixed_Case")).layout())
+        .isEqualTo(Layout.DECOUPLED_IMPORTED);
+    if (ignoresCase) {
+      assertThat(catalog.lookup(NO_SESSION, "app", "mixed_CASE").layout())
+          .isEqualTo(Layout.DECOUPLED_IMPORTED);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
+  void aUserWhoCannotSeeTheCatalog_getsAnError_notPlainTables(Engines e) throws Exception {
+    Assumptions.assumeTrue(
+        e == Engines.ORACLE, "Oracle reports a table it does not grant as absent");
+    prepare(e);
+    String url = e.url();
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          "CREATE USER limited IDENTIFIED BY limited",
+          "GRANT CREATE SESSION TO limited",
+          "GRANT SELECT, INSERT, UPDATE, DELETE ON app.orders TO limited");
+    }
+    try (Catalog asLimited =
+        new Catalog(
+            Engine.ORACLE,
+            Catalog.DEFAULT_METADATA_SCHEMA,
+            () -> DriverManager.getConnection(url, "limited", "limited"))) {
+      assertThatThrownBy(() -> asLimited.lookup(List.of("LIMITED"), "app", "orders"))
+          .isInstanceOf(SQLException.class)
+          .hasMessageContaining("lacks SELECT")
+          .extracting("SQLState")
+          .isEqualTo("42501");
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
+  void aReloadNeverBlocksCacheHits(Engines e) throws Exception {
+    Assumptions.assumeTrue(e == Engines.POSTGRESQL, "one engine is enough");
+    prepare(e);
+    // a catalog connection whose queries take 200 ms stands in for a large catalog or a slow miss
+    Catalog.ConnectionSupplier slow = () -> slowConnection(e.open(), 200);
+    Instant[] now = {Instant.parse("2026-10-09T00:00:00Z")};
+    try (Catalog catalog =
+        new Catalog(
+            e.engine(),
+            Catalog.DEFAULT_METADATA_SCHEMA,
+            slow,
+            Duration.ofSeconds(60),
+            fixedClock(now),
+            false)) {
+      catalog.lookup(NO_SESSION, "app", "plain"); // the first load and resolution
+      ExecutorService pool = Executors.newFixedThreadPool(9);
+      try {
+        now[0] = now[0].plusSeconds(61); // the next lookup reloads
+        Future<?> reload = pool.submit(() -> catalog.lookup(NO_SESSION, "app", "plain"));
+        Thread.sleep(50); // let the reload start
+        List<Future<Long>> hits = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+          hits.add(
+              pool.submit(
+                  () -> {
+                    long t0 = System.nanoTime();
+                    catalog.lookup(NO_SESSION, "app", "plain");
+                    return (System.nanoTime() - t0) / 1_000_000;
+                  }));
+        }
+        for (Future<Long> h : hits) {
+          assertThat(h.get()).as("a hit during a reload, in ms").isLessThan(100);
+        }
+        reload.get();
+      } finally {
+        pool.shutdownNow();
+      }
+    }
   }
 
   @ParameterizedTest
@@ -307,33 +455,21 @@ class CatalogIntegrationTest {
   void theLoadedCatalogIsTrustedUntilTheTtl_orInvalidate(Engines e) throws Exception {
     prepare(e);
     Instant[] now = {Instant.parse("2026-10-09T00:00:00Z")};
-    Clock clock =
-        new Clock() {
-          @Override
-          public Instant instant() {
-            return now[0];
-          }
-
-          @Override
-          public java.time.ZoneId getZone() {
-            return ZoneOffset.UTC;
-          }
-
-          @Override
-          public Clock withZone(java.time.ZoneId zone) {
-            return this;
-          }
-        };
     Catalog byTtl =
         new Catalog(
-            e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open, Duration.ofSeconds(60), clock);
+            e.engine(),
+            Catalog.DEFAULT_METADATA_SCHEMA,
+            e::open,
+            Duration.ofSeconds(60),
+            fixedClock(now),
+            false);
     Catalog byInvalidate = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     assertThat(layout(byTtl, "app", "late1")).isEqualTo(Layout.PLAIN);
     assertThat(layout(byInvalidate, "app", "late2")).isEqualTo(Layout.PLAIN);
 
     try (DistributedTransactionAdmin admin = e.admin()) {
-      admin.importTable(e.stored("app"), e.stored("late1"), DECOUPLED, Map.of());
-      admin.importTable(e.stored("app"), e.stored("late2"), DECOUPLED, Map.of());
+      admin.importTable(e.storedSchema("app"), e.storedTable("late1"), DECOUPLED, Map.of());
+      admin.importTable(e.storedSchema("app"), e.storedTable("late2"), DECOUPLED, Map.of());
     }
     assertThat(layout(byTtl, "app", "late1")).isEqualTo(Layout.PLAIN); // still the old load
     now[0] = now[0].plusSeconds(61);
@@ -356,5 +492,57 @@ class CatalogIntegrationTest {
         .hasMessageContaining(message)
         .extracting("SQLState")
         .isEqualTo("42000");
+  }
+
+  private static Clock fixedClock(Instant[] now) {
+    return new Clock() {
+      @Override
+      public Instant instant() {
+        return now[0];
+      }
+
+      @Override
+      public ZoneId getZone() {
+        return ZoneOffset.UTC;
+      }
+
+      @Override
+      public Clock withZone(ZoneId zone) {
+        return this;
+      }
+    };
+  }
+
+  /** The connection, with every query delayed by {@code millis}. */
+  private static Connection slowConnection(Connection real, long millis) {
+    InvocationHandler onConnection =
+        (proxy, method, args) -> {
+          Object r;
+          try {
+            r = method.invoke(real, args);
+          } catch (InvocationTargetException ex) {
+            throw ex.getCause();
+          }
+          if (!method.getName().equals("prepareStatement")) {
+            return r;
+          }
+          PreparedStatement ps = (PreparedStatement) r;
+          return Proxy.newProxyInstance(
+              Connection.class.getClassLoader(),
+              new Class<?>[] {PreparedStatement.class},
+              (p2, m2, a2) -> {
+                if (m2.getName().equals("executeQuery")) {
+                  Thread.sleep(millis);
+                }
+                try {
+                  return m2.invoke(ps, a2);
+                } catch (InvocationTargetException ex) {
+                  throw ex.getCause();
+                }
+              });
+        };
+    return (Connection)
+        Proxy.newProxyInstance(
+            Connection.class.getClassLoader(), new Class<?>[] {Connection.class}, onConnection);
   }
 }

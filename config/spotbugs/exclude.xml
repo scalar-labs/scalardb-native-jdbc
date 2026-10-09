@@ -25,4 +25,13 @@
     <Class name="~.*Test(\$.*)?"/>
     <Bug pattern="EI_EXPOSE_REP2"/>
   </Match>
+  <!-- Test fixtures create throw-away users in disposable containers; their passwords are not secrets -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="DMI_CONSTANT_DB_PASSWORD"/>
+  </Match>
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Bug pattern="HARD_CODE_PASSWORD"/>
+  </Match>
 </FindBugsFilter>

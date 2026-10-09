@@ -2,12 +2,14 @@ package com.scalar.db.nativejdbc.sql;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.scalar.db.nativejdbc.engine.Engine;
 import java.util.stream.Stream;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class SqlAstTest {
 
@@ -28,6 +30,34 @@ class SqlAstTest {
   void parse_returnsEmptyForWhatTheParserCannotRead() {
     assertThat(SqlAst.parse("select from where")).isEmpty();
     assertThat(SqlAst.parse("")).isEmpty();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "update plain /*! , scalar_t */ set y = 1 where id = 1", // MySQL executes the comment
+        "select 1 /*!50000 + 1 */ from t",
+        "select 1 /*M! + 1 */ from t",
+        "delete from scalar_t where id = 1 --1", // "- -1" on MySQL and MariaDB
+        "select * from t where x = 1 --(select max(id) from u)",
+        "select * from plain /* /* */ where x in (select id from scalar_t) -- */", // not nested on
+        // MySQL
+      })
+  void parse_refusesCommentFormsAnEngineMayExecute(String sql) {
+    assertThat(SqlAst.parse(sql)).isEmpty();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "select /*+ full(t) */ * from t",
+        "select /*k='v'*/ * from t",
+        "select * from t -- a plain comment",
+        "select * from t --",
+        "select * from t /* a */ /* b */",
+      })
+  void parse_keepsOrdinaryCommentsAndHints(String sql) {
+    assertThat(SqlAst.parse(sql)).isPresent();
   }
 
   @Test
@@ -59,14 +89,11 @@ class SqlAstTest {
     SqlAst.TableRef t = parse("select x.id from s.\"Order\" x").tableRefs().get(0);
     assertThat(t.schema()).isEqualTo("s");
     assertThat(t.name()).isEqualTo("\"Order\"");
-    assertThat(t.resolvedName()).isEqualTo("Order");
-    assertThat(t.foldedName()).isEqualTo("order");
-    assertThat(t.quoted()).isTrue();
     assertThat(t.partCount()).isEqualTo(2);
     assertThat(t.alias()).isEqualTo("x");
 
     SqlAst.TableRef u = parse("select * from Orders").tableRefs().get(0);
-    assertThat(u.resolvedName()).isEqualTo("orders");
+    assertThat(u.name()).isEqualTo("Orders");
     assertThat(u.schema()).isNull();
     assertThat(u.hasAlias()).isFalse();
   }
@@ -175,7 +202,8 @@ class SqlAstTest {
 
               @Override
               public @Nullable String columnReplacementFor(SqlAst.ColumnRef ref) {
-                return ref.resolvedName().equals("id") ? null : "before_" + ref.resolvedName();
+                String name = Engine.POSTGRESQL.resolveIdentifier(ref.name());
+                return name.equals("id") ? null : "before_" + name;
               }
             });
     assertThat(out).isEqualTo("select * from t where before_x = ? and t.before_y > 1 and id = 3");
@@ -212,12 +240,51 @@ class SqlAstTest {
   }
 
   @Test
-  void identifiers_foldAndResolveLikePostgresAndMySql() {
-    assertThat(SqlAst.resolve("Orders")).isEqualTo("orders");
-    assertThat(SqlAst.resolve("\"Orders\"")).isEqualTo("Orders");
-    assertThat(SqlAst.resolve("`Orders`")).isEqualTo("Orders");
-    assertThat(SqlAst.resolve("[Orders]")).isEqualTo("Orders");
-    assertThat(SqlAst.isQuoted("\"x\"")).isTrue();
-    assertThat(SqlAst.isQuoted("x")).isFalse();
+  void cteNames_matchTheWayTheEngineMatchesNames() {
+    // PostgreSQL: the quoted CTE "Orders" and the unquoted table orders are different objects
+    String pg = "with \"Orders\" as (select 1 as id) select * from orders";
+    assertThat(SqlAst.parse(pg, Engine.POSTGRESQL).orElseThrow().tableRefs()).hasSize(1);
+    assertThat(SqlAst.parse(pg, Engine.POSTGRESQL).orElseThrow().cteRefs()).isEmpty();
+    // Oracle: the quoted CTE "orders" and the unquoted orders (folded to ORDERS) differ too
+    String ora = "with \"orders\" as (select 1 as id from dual) select * from orders";
+    assertThat(SqlAst.parse(ora, Engine.ORACLE).orElseThrow().cteRefs()).isEmpty();
+    // the same name, unquoted on both sides, is the CTE on every engine
+    String same = "with c as (select 1 as id) select * from C";
+    assertThat(SqlAst.parse(same, Engine.POSTGRESQL).orElseThrow().cteRefs()).hasSize(1);
+    assertThat(SqlAst.parse(same, Engine.ORACLE).orElseThrow().cteRefs()).hasSize(1);
+    assertThat(SqlAst.parse(same, Engine.SQLSERVER).orElseThrow().cteRefs()).hasSize(1);
+    // MySQL keeps case and compares exactly; SQL Server ignores case
+    assertThat(SqlAst.parse(same, Engine.MYSQL).orElseThrow().tableRefs()).hasSize(1);
+  }
+
+  @Test
+  void forUpdateOf_parses_andARewriteRenamingItsTargetByNameIsRefused() {
+    SqlAst byAlias = parse("select * from t o where o.id = ? for update of o");
+    assertThat(byAlias.hasLockingOrIntoClause()).isTrue();
+    assertThat(byAlias.joinTokens(ref -> "v_t"))
+        .isEqualTo("select * from v_t o where o.id = ? for update of o");
+    SqlAst byName = parse("select * from t where id = ? for update of t");
+    assertThat(byName.joinTokens(ref -> "v_t")).isNull();
+  }
+
+  @Test
+  void lockingOrIntoClauses_areSeenWhereverTheyAreNested() {
+    assertThat(parse("select * from t where id = ?").hasLockingOrIntoClause()).isFalse();
+    assertThat(parse("select * from a join b on a.id = b.id for update").hasLockingOrIntoClause())
+        .isTrue();
+    assertThat(
+            parse("select * from a where id in (select id from b for update skip locked)")
+                .hasLockingOrIntoClause())
+        .isTrue();
+    assertThat(parse("select * into t2 from a join b on a.id = b.id").hasLockingOrIntoClause())
+        .isTrue();
+  }
+
+  @Test
+  void topPlaceholder_isCounted() {
+    assertThat(parse("select top ? * from t where id = ?").parameterCount()).isEqualTo(2);
+    assertThat(
+            parse("select top (?) * from t join u on t.id = u.id where t.id = ?").parameterCount())
+        .isEqualTo(2);
   }
 }

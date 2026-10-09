@@ -43,6 +43,10 @@ class CatalogTest {
   }
 
   private static Snapshot snapshot() {
+    return snapshot(false);
+  }
+
+  private static Snapshot snapshot(boolean caseInsensitive) {
     Map<String, List<MetadataColumn>> metadata = new HashMap<>();
     metadata.put("ns.Orders_data", columns("Id:PARTITION", "K:CLUSTERING", "Amount"));
     List<MetadataColumn> ordersMeta = columns("Id:PARTITION", "K:CLUSTERING", "before_Amount");
@@ -59,6 +63,7 @@ class CatalogTest {
     metadata.put("app.storage_only", columns("id:PARTITION", "x"));
     return new Snapshot(
         true,
+        caseInsensitive,
         List.of(
             new VirtualTable("ns.Orders", "ns.Orders_data", "ns.Orders_tx_metadata", "INNER"),
             new VirtualTable(
@@ -132,5 +137,29 @@ class CatalogTest {
         .isEqualTo(Layout.PLAIN);
     assertThat(snapshot().classify(new QualifiedName("APP", "orders")).layout())
         .isEqualTo(Layout.PLAIN);
+  }
+
+  @Test
+  void whereTheDatabaseIgnoresCase_theRecordedSpellingIsMatchedThatWay() throws SQLException {
+    // SQL Server, or MySQL with lower_case_table_names=1: ScalarDB recorded app.orders and
+    // ns.Orders; the engine stores and resolves Orders and ns.orders
+    Snapshot ci = snapshot(true);
+    TableInfo imported = ci.classify(new QualifiedName("APP", "Orders"));
+    assertThat(imported.layout()).isEqualTo(Layout.DECOUPLED_IMPORTED);
+    assertThat(imported.table()).isEqualTo("Orders"); // the engine's spelling for the user's table
+    assertThat(imported.metadataTable()).isEqualTo("orders_tx_metadata"); // ScalarDB's for its own
+    assertThat(ci.classify(new QualifiedName("ns", "orders")).layout())
+        .isEqualTo(Layout.DECOUPLED_CREATED);
+    assertThat(ci.classify(new QualifiedName("NS", "CLASSIC")).layout()).isEqualTo(Layout.CLASSIC);
+  }
+
+  @Test
+  void refusals_nameTheTableToUseInstead() {
+    assertThatThrownBy(() -> snapshot().classify(new QualifiedName("ns", "Orders_data")))
+        .hasMessageContaining("ns.Orders");
+    assertThatThrownBy(() -> snapshot().classify(new QualifiedName("app", "orders_tx_metadata")))
+        .hasMessageContaining("app.orders");
+    assertThatThrownBy(() -> snapshot().classify(new QualifiedName("app", "orders_scalardb")))
+        .hasMessageContaining("app.orders");
   }
 }

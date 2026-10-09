@@ -46,11 +46,21 @@ class EngineTest {
 
   @Test
   void columnsCompare_exactlyOnPostgresqlAndOracle_withoutCaseElsewhere() {
-    assertThat(Engine.POSTGRESQL.sameColumn("Amount", "amount")).isFalse();
-    assertThat(Engine.ORACLE.sameColumn("AMOUNT", "amount")).isFalse();
-    assertThat(Engine.MYSQL.sameColumn("Amount", "amount")).isTrue();
-    assertThat(Engine.MARIADB.sameColumn("Amount", "AMOUNT")).isTrue();
-    assertThat(Engine.SQLSERVER.sameColumn("Amount", "amount")).isTrue();
+    assertThat(Engine.POSTGRESQL.columnKey("Amount"))
+        .isNotEqualTo(Engine.POSTGRESQL.columnKey("amount"));
+    assertThat(Engine.ORACLE.columnKey("AMOUNT")).isNotEqualTo(Engine.ORACLE.columnKey("amount"));
+    assertThat(Engine.MYSQL.columnKey("Amount")).isEqualTo(Engine.MYSQL.columnKey("amount"));
+    assertThat(Engine.MARIADB.columnKey("Amount")).isEqualTo(Engine.MARIADB.columnKey("AMOUNT"));
+    assertThat(Engine.SQLSERVER.columnKey("Amount"))
+        .isEqualTo(Engine.SQLSERVER.columnKey("amount"));
+  }
+
+  @Test
+  void namesLocalToAStatement_compareWithoutCaseOnSqlServerOnly() {
+    assertThat(Engine.SQLSERVER.nameKey("Orders")).isEqualTo(Engine.SQLSERVER.nameKey("orders"));
+    for (Engine e : new Engine[] {Engine.POSTGRESQL, Engine.MYSQL, Engine.MARIADB, Engine.ORACLE}) {
+      assertThat(e.nameKey("Orders")).isNotEqualTo(e.nameKey("orders"));
+    }
   }
 
   @Test
