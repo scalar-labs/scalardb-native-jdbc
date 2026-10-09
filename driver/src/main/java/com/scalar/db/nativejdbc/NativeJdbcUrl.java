@@ -2,8 +2,8 @@ package com.scalar.db.nativejdbc;
 
 import com.scalar.db.nativejdbc.engine.Engine;
 import java.util.Locale;
-import java.util.Objects;
 import java.util.Set;
+import org.jspecify.annotations.Nullable;
 
 /**
  * A ScalarDB Native JDBC URL: the prefix {@value #PREFIX} followed by the vendor's own URL without
@@ -45,9 +45,8 @@ public final class NativeJdbcUrl {
    * @param url a JDBC URL
    * @return whether this driver should handle the URL
    */
-  public static boolean accepts(String url) {
-    Objects.requireNonNull(url, "url");
-    return url.regionMatches(true, 0, PREFIX, 0, PREFIX.length());
+  public static boolean accepts(@Nullable String url) {
+    return url != null && url.regionMatches(true, 0, PREFIX, 0, PREFIX.length());
   }
 
   /**
@@ -56,29 +55,31 @@ public final class NativeJdbcUrl {
    * @param url a URL that {@link #accepts} returns {@code true} for
    * @return the parsed URL
    * @throws IllegalArgumentException if the URL does not carry the prefix, has no sub-protocol, or
-   *     names a sub-protocol the driver does not support
+   *     names a sub-protocol the driver does not support. The message never contains the URL, which
+   *     may carry credentials, only the prefix and the sub-protocol.
    */
   public static NativeJdbcUrl parse(String url) {
     if (!accepts(url)) {
       throw new IllegalArgumentException(
-          "Not a ScalarDB Native JDBC URL (expected the prefix '" + PREFIX + "'): " + url);
+          "Not a ScalarDB Native JDBC URL: expected the prefix '" + PREFIX + "'");
     }
     String remainder = url.substring(PREFIX.length());
     int colon = remainder.indexOf(':');
     if (colon <= 0) {
-      throw new IllegalArgumentException("No sub-protocol after '" + PREFIX + "': " + url);
+      throw new IllegalArgumentException(
+          "No sub-protocol after '" + PREFIX + "': expected one of " + sorted());
     }
     String subProtocol = remainder.substring(0, colon).toLowerCase(Locale.ROOT);
     if (!SUB_PROTOCOLS.contains(subProtocol)) {
       throw new IllegalArgumentException(
-          "Unsupported sub-protocol '"
-              + subProtocol
-              + "' (supported: "
-              + SUB_PROTOCOLS
-              + "): "
-              + url);
+          "Unsupported database '" + subProtocol + "': expected one of " + sorted());
     }
-    return new NativeJdbcUrl(subProtocol, "jdbc:" + remainder);
+    // the vendor drivers match their prefix case-sensitively, so the token is passed lower-cased
+    return new NativeJdbcUrl(subProtocol, "jdbc:" + subProtocol + remainder.substring(colon));
+  }
+
+  private static String sorted() {
+    return String.join(", ", new java.util.TreeSet<>(SUB_PROTOCOLS));
   }
 
   /**
@@ -98,10 +99,5 @@ public final class NativeJdbcUrl {
    */
   public String vendorUrl() {
     return vendorUrl;
-  }
-
-  @Override
-  public String toString() {
-    return PREFIX + vendorUrl.substring("jdbc:".length());
   }
 }

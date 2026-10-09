@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "015"
 tags: [code-review, security, driver]
@@ -100,6 +100,15 @@ To be filled during triage.
 - The sub-protocol token is the only part of a URL that is safe to echo on every vendor
 
 ---
+
+### 2026-10-09 - Fix applied
+
+**By:** Claude Code
+
+**Actions:**
+- No message of NativeJdbcUrl or NativeJdbcDriver contains the URL any more, only the prefix and the sub-protocol; a missing vendor driver is reported as "No <db> JDBC driver is registered: add the vendor's driver to the class path" (08001) without DriverManager's cause; getPropertyInfo wraps a parse error as SQLException (08001) and passes empty Properties for null; NativeJdbcUrl.toString, which printed the URL, is removed.
+- Also from 017: accepts(null) is false instead of a NullPointerException, and the vendor URL carries the lower-cased sub-protocol (jdbc:scalardb-native:MariaDB:... now reaches the MariaDB driver).
+- Tests: NativeJdbcUrlTest.parseErrors_neverRepeatTheUrl over six URLs carrying a password in the common forms; NativeJdbcDriverTest for getPropertyInfo and a missing vendor driver.
 
 ## Notes
 

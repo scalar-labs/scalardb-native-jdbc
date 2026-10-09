@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "013"
 tags: [code-review, correctness, sql]
@@ -97,6 +97,14 @@ To be filled during triage.
 - `TablesNamesFinder` collects CTE names statement-wide; positional scoping has to be layered on top
 
 ---
+
+### 2026-10-09 - Fix applied
+
+**By:** Claude Code
+
+**Actions:**
+- The walker records, for each table node, the non-recursive CTEs whose bodies contain it (the traversal visits a body inside its WITH item, duplicate visits included); a reference inside the body of a CTE of the same name denotes the table, not the CTE. WITH RECURSIVE keeps the self-reference as a CTE reference. Names compare with the engine's rules (038).
+- Test: SqlAstTest.cteBody_seesTheTableOfTheSameName_unlessRecursive (the shadowing statement gives one table and one CTE reference; a chain a, b gives t as the only table; the recursive CTE gives no table).
 
 ## Notes
 

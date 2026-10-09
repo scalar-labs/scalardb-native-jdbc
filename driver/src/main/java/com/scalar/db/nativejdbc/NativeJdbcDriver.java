@@ -49,24 +49,40 @@ public final class NativeJdbcDriver implements Driver {
       // DriverManager can try the next registered driver.
       return null;
     }
-    NativeJdbcUrl parsed;
-    try {
-      parsed = NativeJdbcUrl.parse(url);
-    } catch (IllegalArgumentException e) {
-      throw new SQLException(e.getMessage(), SQLSTATE_UNABLE_TO_CONNECT, e);
-    }
-    Driver vendor = DriverManager.getDriver(parsed.vendorUrl());
+    NativeJdbcUrl parsed = parse(url);
     Connection connection =
-        vendor.connect(parsed.vendorUrl(), info == null ? new Properties() : info);
+        vendorDriver(parsed).connect(parsed.vendorUrl(), info == null ? new Properties() : info);
     if (connection == null) {
       throw new SQLException(
-          "The " + parsed.subProtocol() + " driver did not accept " + parsed.vendorUrl(),
+          "The " + parsed.subProtocol() + " driver did not accept the URL",
           SQLSTATE_UNABLE_TO_CONNECT);
     }
     // The connection proxy of docs/design.md ("Architecture") wraps this connection next; until
-    // then
-    // the vendor connection is returned as is.
+    // then the vendor connection is returned as is.
     return connection;
+  }
+
+  /** Parses the URL; the error never repeats the URL, which may carry credentials. */
+  private static NativeJdbcUrl parse(String url) throws SQLException {
+    try {
+      return NativeJdbcUrl.parse(url);
+    } catch (IllegalArgumentException e) {
+      throw new SQLException(e.getMessage(), SQLSTATE_UNABLE_TO_CONNECT, e);
+    }
+  }
+
+  /** The vendor's registered driver; the error names what is missing, never the URL. */
+  private static Driver vendorDriver(NativeJdbcUrl parsed) throws SQLException {
+    try {
+      return DriverManager.getDriver(parsed.vendorUrl());
+    } catch (SQLException e) {
+      // DriverManager's message is "No suitable driver"; its cause may hold the URL, so drop it
+      throw new SQLException(
+          "No "
+              + parsed.subProtocol()
+              + " JDBC driver is registered: add the vendor's driver to the class path",
+          SQLSTATE_UNABLE_TO_CONNECT);
+    }
   }
 
   @Override
@@ -80,8 +96,9 @@ public final class NativeJdbcDriver implements Driver {
     if (!acceptsURL(url)) {
       return new DriverPropertyInfo[0];
     }
-    NativeJdbcUrl parsed = NativeJdbcUrl.parse(url);
-    return DriverManager.getDriver(parsed.vendorUrl()).getPropertyInfo(parsed.vendorUrl(), info);
+    NativeJdbcUrl parsed = parse(url);
+    return vendorDriver(parsed)
+        .getPropertyInfo(parsed.vendorUrl(), info == null ? new Properties() : info);
   }
 
   @Override

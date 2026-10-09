@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "014"
 tags: [code-review, correctness, sql]
@@ -103,6 +103,14 @@ To be filled during triage.
 - A test that asserts the current output verbatim can lock in a bug; assert properties (re-parse succeeds, qualifiers resolve) as well as text
 
 ---
+
+### 2026-10-09 - Fix applied
+
+**By:** Claude Code
+
+**Actions:**
+- Naming.aliasFor is removed: a renamed table without an alias that a column qualifier names gets its own name as the alias, the only one that keeps the qualifier meaning the same table; a schema in such a qualifier is dropped (s.t.x becomes t.x). The alias is emitted with a space and no AS, valid on all five engines, Oracle included. Qualifiers match a table on schema and name, so with s1.t and s2.t only s1.t's columns are re-qualified; two renamed tables of one name both named by qualifiers would share the alias, so the rewrite is refused (null).
+- Tests: joinTokens_aliasesARenamedTableWithItsOwnName_whenColumnsNameIt and joinTokens_matchesQualifiersOnSchemaAndName replace the test that asserted the dangling output.
 
 ## Notes
 

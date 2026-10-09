@@ -104,19 +104,6 @@ public final class SqlAst {
     @Nullable String replacementFor(TableRef ref);
 
     /**
-     * Returns the alias to attach to a replaced table reference that has none while a column is
-     * qualified by its name, already quoted for the engine, or {@code null} to attach none. It is
-     * asked about the reference before the replacement. Without an alias the qualified columns
-     * would refer to a name the replacement removed.
-     *
-     * @param ref a table reference of the statement that is being replaced
-     * @return the alias, or {@code null}
-     */
-    default @Nullable String aliasFor(TableRef ref) {
-      return null;
-    }
-
-    /**
      * Returns the name that replaces this column reference's name, already quoted for the engine,
      * or {@code null} to leave it alone. The qualifier is kept.
      *
@@ -232,7 +219,10 @@ public final class SqlAst {
         continue; // the walk returns the body of a CTE twice
       }
       TableRef ref = new TableRef(t, false);
-      if (t.getSchemaName() == null && cteKeys.contains(key(engine, t.getName()))) {
+      String name = key(engine, t.getName());
+      if (t.getSchemaName() == null
+          && cteKeys.contains(name)
+          && !isInOwnBody(walker.enclosingCtes.get(t), name, engine)) {
         ctes.add(ref);
       } else {
         tables.add(ref);
@@ -330,6 +320,23 @@ public final class SqlAst {
 
   private static boolean isDoubleQuoted(@Nullable String name) {
     return name != null && name.length() >= 2 && name.startsWith("\"") && name.endsWith("\"");
+  }
+
+  /**
+   * Whether a reference named {@code name} sits in the body of a non-recursive CTE of that name,
+   * where the name still denotes the table: a CTE body does not see its own name unless it is
+   * recursive.
+   */
+  private static boolean isInOwnBody(@Nullable List<String> enclosing, String name, Engine engine) {
+    if (enclosing == null) {
+      return false;
+    }
+    for (String raw : enclosing) {
+      if (key(engine, raw).equals(name)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** The key under which a name local to the statement is compared on {@code engine}. */
@@ -544,13 +551,14 @@ public final class SqlAst {
 
   /**
    * Returns the statement with the original tokens joined and the references {@code naming} names
-   * replaced. A replaced table reference without an alias whose name qualifies a column gets the
-   * alias {@link Naming#aliasFor} supplies, and the column qualifiers follow it. The result is
-   * parsed again before it is returned.
+   * replaced. A replaced table reference without an alias whose name qualifies a column is given
+   * its own name as the alias, so the qualifiers keep naming it; a schema in such a qualifier is
+   * dropped. The result is parsed again before it is returned.
    *
    * @param naming what to replace, or {@code null} to replace nothing
-   * @return the rewritten statement, or {@code null} when a token range cannot be located or the
-   *     result does not parse, in which case nothing has been rewritten
+   * @return the rewritten statement, or {@code null} when a token range cannot be located, when two
+   *     renamed tables of one name would need the same alias, when a {@code FOR UPDATE OF} names a
+   *     renamed table, or when the result does not parse; in each case nothing has been rewritten
    */
   public @Nullable String joinTokens(@Nullable Naming naming) {
     if (root.jjtGetFirstToken() == null) {
@@ -560,7 +568,9 @@ public final class SqlAst {
     Map<Token, Token> to = new IdentityHashMap<>();
     if (naming != null) {
       Rewrite plan = planRewrite(naming);
-      if (lockTargetIsRenamed(plan) || !collectReplacements(plan, from, to)) {
+      if (plan.unrepresentable
+          || lockTargetIsRenamed(plan)
+          || !collectReplacements(plan, from, to)) {
         return null;
       }
     }
@@ -612,6 +622,7 @@ public final class SqlAst {
     final Map<TableRef, String> aliases = new IdentityHashMap<>();
     final Map<ColumnRef, String> qualifiers = new IdentityHashMap<>();
     final Map<ColumnRef, String> columnNames = new IdentityHashMap<>();
+    boolean unrepresentable;
   }
 
   private Rewrite planRewrite(Naming naming) {
@@ -622,32 +633,28 @@ public final class SqlAst {
         plan.tables.put(r, to);
       }
     }
-    // A replaced reference without an alias may be named by a column qualifier; give it one.
-    Set<String> noAlias = new LinkedHashSet<>();
-    Map<String, String> aliasByName = new LinkedHashMap<>();
+    // A replaced reference without an alias may be named by a column qualifier. The only alias that
+    // keeps such a qualifier meaning the same table is the table's own name, so it gets that one.
+    List<TableRef> renamedWithoutAlias = new ArrayList<>();
+    Set<String> aliasesGiven = new LinkedHashSet<>();
     for (TableRef r : plan.tables.keySet()) {
       if (r.hasAlias()) {
         continue;
       }
-      noAlias.add(key(engine, r.name()));
+      renamedWithoutAlias.add(r);
       if (usedAsColumnQualifier(r)) {
-        String alias = naming.aliasFor(r);
-        if (alias != null) {
-          plan.aliases.put(r, alias);
-          aliasByName.put(key(engine, r.name()), alias);
+        if (!aliasesGiven.add(key(engine, r.name()))) {
+          plan.unrepresentable = true; // two tables of one name would share the alias
         }
+        plan.aliases.put(r, r.name());
       }
     }
     for (ColumnRef c : columnRefs) {
       Table q = c.qualifierNode();
       if (q != null) {
-        String last = key(engine, q.getName());
-        if (noAlias.contains(last)) {
-          String alias = aliasByName.get(last);
-          String to = alias != null ? alias : q.getName();
-          if (q.getSchemaName() != null || !to.equals(q.getName())) {
-            plan.qualifiers.put(c, to);
-          }
+        TableRef target = qualifiedTable(q, renamedWithoutAlias);
+        if (target != null && q.getSchemaName() != null) {
+          plan.qualifiers.put(c, target.name()); // s.t.x becomes t.x, t being the alias now
         }
       }
       if (!c.isAllColumnsOfTable()) {
@@ -661,14 +668,35 @@ public final class SqlAst {
   }
 
   private boolean usedAsColumnQualifier(TableRef r) {
-    String name = key(engine, r.name());
     for (ColumnRef c : columnRefs) {
       Table q = c.qualifierNode();
-      if (q != null && name.equals(key(engine, q.getName()))) {
+      if (q != null && qualifies(q, r)) {
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * Whether column qualifier {@code q} names table reference {@code r}: the same name, and the same
+   * schema when the qualifier carries one and the reference does too.
+   */
+  private boolean qualifies(Table q, TableRef r) {
+    if (!key(engine, q.getName()).equals(key(engine, r.name()))) {
+      return false;
+    }
+    String qs = q.getSchemaName();
+    String rs = r.schema();
+    return qs == null || rs == null || key(engine, qs).equals(key(engine, rs));
+  }
+
+  private @Nullable TableRef qualifiedTable(Table q, List<TableRef> candidates) {
+    for (TableRef r : candidates) {
+      if (qualifies(q, r)) {
+        return r;
+      }
+    }
+    return null;
   }
 
   /**
@@ -697,7 +725,8 @@ public final class SqlAst {
       }
       Token first = n.jjtGetFirstToken();
       String alias = plan.aliases.get(r);
-      from.put(first, alias == null ? e.getValue() : e.getValue() + " AS " + alias);
+      // no AS: Oracle rejects it before a table alias, and the bare form is valid on every engine
+      from.put(first, alias == null ? e.getValue() : e.getValue() + " " + alias);
       to.put(first, nameEndOf(first));
     }
     Set<ColumnRef> touched = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -963,6 +992,11 @@ public final class SqlAst {
     final List<Select> selects = new ArrayList<>();
     final Set<String> cteNames = new LinkedHashSet<>(); // as written
 
+    /** For each table node, the non-recursive CTEs whose bodies contain it, names as written. */
+    final Map<Table, List<String>> enclosingCtes = new IdentityHashMap<>();
+
+    private final Deque<String> withBodies = new ArrayDeque<>();
+
     @Override
     public <S> Void visit(PlainSelect plainSelect, S context) {
       selects.add(plainSelect);
@@ -999,12 +1033,25 @@ public final class SqlAst {
       if (withItem.getAlias() != null) {
         cteNames.add(withItem.getAlias().getName());
       }
-      return super.visit(withItem, context);
+      boolean scoped = withItem.getAlias() != null && !withItem.isRecursive();
+      if (scoped) {
+        withBodies.push(withItem.getAlias().getName());
+      }
+      try {
+        return super.visit(withItem, context);
+      } finally {
+        if (scoped) {
+          withBodies.pop();
+        }
+      }
     }
 
     @Override
     public <S> Void visit(Table table, S context) {
       tables.add(table);
+      if (!withBodies.isEmpty()) {
+        enclosingCtes.computeIfAbsent(table, k -> new ArrayList<>()).addAll(withBodies);
+      }
       return super.visit(table, context);
     }
 

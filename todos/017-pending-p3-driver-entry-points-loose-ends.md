@@ -132,6 +132,13 @@ To be filled during triage.
 
 ---
 
+### 2026-10-09 - Partly resolved with 015
+
+**By:** Claude Code
+
+**Actions:**
+- Done: getPropertyInfo's unchecked exception and null info, acceptsURL(null), the sub-protocol's case in the vendor URL, and the missing-driver message. Still open: listing and stripping the driver's own properties, deregister(), the version constants, and the connect-path tests with a real vendor driver.
+
 ## Notes
 
 - Keep the message fix coordinated with todo 015 so the URL is never echoed.

@@ -160,26 +160,43 @@ class SqlAstTest {
   }
 
   @Test
-  void joinTokens_replacesATable_andAddsAnAliasWhenColumnsNameIt() {
+  void joinTokens_aliasesARenamedTableWithItsOwnName_whenColumnsNameIt() {
     SqlAst ast = parse("select \"order\".id, qty from s.\"order\" where \"order\".id = ?");
-    String out = ast.joinTokens(ref -> ref.schema() != null ? "rc_order" : null);
-    assertThat(out).isEqualTo("select \"order\".id, qty from rc_order where \"order\".id = ?");
+    assertThat(ast.joinTokens(ref -> "rc_order"))
+        .isEqualTo("select \"order\".id, qty from rc_order \"order\" where \"order\".id = ?");
+    // a schema-qualified qualifier is reduced to the alias
+    assertThat(parse("select s.t.id from s.t where s.t.x = ?").joinTokens(ref -> "rc_t"))
+        .isEqualTo("select t.id from rc_t t where t.x = ?");
+    // no qualifier names the table: no alias is added
+    assertThat(parse("select id from s.t where x = ?").joinTokens(ref -> "rc_t"))
+        .isEqualTo("select id from rc_t where x = ?");
+  }
 
-    String aliased =
-        ast.joinTokens(
-            new SqlAst.Naming() {
-              @Override
-              public String replacementFor(SqlAst.TableRef ref) {
-                return "rc_order";
-              }
+  @Test
+  void joinTokens_matchesQualifiersOnSchemaAndName() {
+    // only s1.t is renamed; the column of s2.t keeps its qualifier
+    SqlAst ast = parse("select s1.t.a, s2.t.b from s1.t, s2.t");
+    assertThat(ast.joinTokens(ref -> "s1".equals(ref.schema()) ? "rc_t" : null))
+        .isEqualTo("select t.a, s2.t.b from rc_t t, s2.t");
+    // both renamed and both named by qualifiers: one alias cannot stand for two tables
+    assertThat(ast.joinTokens(ref -> "rc_t")).isNull();
+  }
 
-              @Override
-              public String aliasFor(SqlAst.TableRef ref) {
-                return "\"order\"";
-              }
-            });
-    assertThat(aliased)
-        .isEqualTo("select \"order\".id, qty from rc_order AS \"order\" where \"order\".id = ?");
+  @Test
+  void cteBody_seesTheTableOfTheSameName_unlessRecursive() {
+    SqlAst shadow =
+        parse("with orders as (select * from orders where id = 1) select * from orders");
+    assertThat(shadow.tableRefs()).hasSize(1); // the real table, read inside the CTE body
+    assertThat(shadow.cteRefs()).hasSize(1); // the outer reference to the CTE
+    SqlAst chain = parse("with a as (select * from t), b as (select * from a) select * from b");
+    assertThat(chain.tableRefs().stream().map(SqlAst.TableRef::name)).containsExactly("t");
+    assertThat(chain.cteRefs()).hasSize(2);
+    SqlAst recursive =
+        parse(
+            "with recursive r as (select 1 as n union all select n + 1 from r where n < 3)"
+                + " select * from r");
+    assertThat(recursive.tableRefs()).isEmpty();
+    assertThat(recursive.cteRefs()).hasSize(2);
   }
 
   @Test

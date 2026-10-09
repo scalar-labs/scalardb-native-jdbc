@@ -7,6 +7,7 @@ import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Properties;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 class NativeJdbcDriverTest {
@@ -22,6 +23,45 @@ class NativeJdbcDriverTest {
   void connect_returnsNullForAForeignUrl() throws SQLException {
     assertThat(new NativeJdbcDriver().connect("jdbc:postgresql://localhost/db", new Properties()))
         .isNull();
+  }
+
+  @Test
+  void getPropertyInfo_reportsAnUnsupportedSubProtocolAsAnSqlException() {
+    assertThatThrownBy(
+            () ->
+                new NativeJdbcDriver()
+                    .getPropertyInfo("jdbc:scalardb-native:sqlite://u:s3cret@host/db", null))
+        .isInstanceOf(SQLException.class)
+        .hasMessageNotContaining("s3cret")
+        .extracting("SQLState")
+        .isEqualTo("08001");
+  }
+
+  @Test
+  void aMissingVendorDriver_isNamed_withoutTheUrl() {
+    // the unit-test class path has no driver for jdbc:mysql:
+    Assumptions.assumeTrue(
+        DriverManager.drivers().noneMatch(d -> acceptsQuietly(d, "jdbc:mysql://h/db")),
+        "a MySQL driver is on the class path");
+    assertThatThrownBy(
+            () ->
+                new NativeJdbcDriver()
+                    .connect(
+                        "jdbc:scalardb-native:mysql://u:s3cret@host/db?password=s3cret",
+                        new Properties()))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("No mysql JDBC driver")
+        .hasMessageNotContaining("s3cret")
+        .extracting("SQLState")
+        .isEqualTo("08001");
+  }
+
+  private static boolean acceptsQuietly(Driver d, String url) {
+    try {
+      return d.acceptsURL(url);
+    } catch (SQLException e) {
+      return false;
+    }
   }
 
   @Test
