@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "037"
 tags: [code-review, reliability, catalog]
@@ -128,6 +128,14 @@ To be filled during triage.
 
 **Actions:**
 - Done in the 035 fix: retry once on a fresh connection after a class-08 failure of a reused one; setAutoCommit(true) after open; Catalog implements AutoCloseable and the integration tests close their catalogs. Still open: query and network timeouts on the catalog connection, eager load at connect with an 08004 there, attributed rethrow of catalog failures, and the driver's per-(engine, URL, user, schema) catalog map with eviction on deregister.
+
+### 2026-10-09 - Fix applied (plan milestone 0)
+
+**By:** Claude Code
+
+**Actions:**
+- The driver keeps one Catalog per (vendor URL, user, metadata schema, TTL, allowNoCatalog), never keyed by password, whose supplier opens connections with the vendor driver and the stripped properties. `connect` verifies the catalog first (`Catalog.verify()`), so a database without it fails with 08004 and an unreadable one with 42501 before any statement. The catalog connection gets a 30 s network timeout (daemon executor); retry once, autocommit and close() came with 035.
+- Tests: DriverIntegrationTest (connect checks the catalog; nosuch is 08004 unless allowNoCatalog, also via the URL; connections to one database as one user share one catalog).
 
 ## Notes
 

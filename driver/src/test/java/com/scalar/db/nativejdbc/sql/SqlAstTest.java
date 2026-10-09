@@ -37,14 +37,49 @@ class SqlAstTest {
       strings = {
         "update plain /*! , scalar_t */ set y = 1 where id = 1", // MySQL executes the comment
         "select 1 /*!50000 + 1 */ from t",
-        "select 1 /*M! + 1 */ from t",
         "delete from scalar_t where id = 1 --1", // "- -1" on MySQL and MariaDB
         "select * from t where x = 1 --(select max(id) from u)",
-        "select * from plain /* /* */ where x in (select id from scalar_t) -- */", // not nested on
-        // MySQL
+        "select * from plain /* /* */ where x in (select id from scalar_t) -- */", // not nested
       })
-  void parse_refusesCommentFormsAnEngineMayExecute(String sql) {
-    assertThat(SqlAst.parse(sql)).isEmpty();
+  void commentFormsMySqlExecutes_areRefusedThere_andAreCommentsOnPostgresqlAndSqlServer(
+      String sql) {
+    assertThat(SqlAst.analyze(sql, Engine.MYSQL, false).isPresent()).isFalse();
+    assertThat(SqlAst.analyze(sql, Engine.MARIADB, false).isPresent()).isFalse();
+    assertThat(SqlAst.parse(sql, Engine.POSTGRESQL)).isPresent();
+    assertThat(SqlAst.parse(sql, Engine.SQLSERVER)).isPresent();
+  }
+
+  @Test
+  void mariaDbAlone_executesItsOwnMComment() {
+    String sql = "select 1 /*M! + 1 */ from t";
+    assertThat(SqlAst.analyze(sql, Engine.MARIADB, false).isPresent()).isFalse();
+    assertThat(SqlAst.analyze(sql, Engine.MYSQL, false).isPresent()).isTrue();
+  }
+
+  @Test
+  void oracle_endsANestedCommentEarly_butReadsItsOwnHintsAndDashComments() {
+    assertThat(
+            SqlAst.parse(
+                "select * from plain /* /* */ where x in (select id from u) -- */", Engine.ORACLE))
+        .isEmpty();
+    assertThat(SqlAst.parse("select --+ index(t i)\n * from t where id = ?", Engine.ORACLE))
+        .isPresent();
+    assertThat(SqlAst.parse("select * from t where id = 1 --1", Engine.ORACLE)).isPresent();
+    assertThat(SqlAst.parse("select 1 /*! + 1 */ from t", Engine.ORACLE)).isPresent();
+  }
+
+  @Test
+  void refusals_sayWhy() {
+    assertThat(SqlAst.analyze("select 1; select 2", Engine.POSTGRESQL, true).reason())
+        .contains("2 statements");
+    assertThat(SqlAst.analyze("select from where", Engine.POSTGRESQL, true).reason())
+        .startsWith("the statement cannot be parsed");
+    assertThat(SqlAst.analyze("delete from t where id = 1 --1", Engine.MYSQL, false).reason())
+        .contains("not a comment on mysql");
+    assertThat(SqlAst.analyze("select * from db.s.t", Engine.SQLSERVER, true).reason())
+        .contains("names a database");
+    assertThat(SqlAst.analyze("select * from \"t\"", Engine.MYSQL, false).reason())
+        .contains("ANSI_QUOTES");
   }
 
   @ParameterizedTest

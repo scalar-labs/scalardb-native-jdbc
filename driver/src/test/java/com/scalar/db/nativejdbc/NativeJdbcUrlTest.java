@@ -48,6 +48,34 @@ class NativeJdbcUrlTest {
   }
 
   @Test
+  void driverParameters_areTakenOutOfTheVendorUrl() {
+    NativeJdbcUrl pg =
+        NativeJdbcUrl.parse(
+            "jdbc:scalardb-native:postgresql://h/db?ssl=true&scalardbnative.metadataSchema=meta"
+                + "&scalardbnative.catalogTtlMs=1000");
+    assertThat(pg.vendorUrl()).isEqualTo("jdbc:postgresql://h/db?ssl=true");
+    assertThat(pg.driverParameters())
+        .containsEntry("scalardbnative.metadataSchema", "meta")
+        .containsEntry("scalardbnative.catalogTtlMs", "1000");
+
+    NativeJdbcUrl only =
+        NativeJdbcUrl.parse("jdbc:scalardb-native:mysql://h/db?scalardbnative.allowNoCatalog=true");
+    assertThat(only.vendorUrl()).isEqualTo("jdbc:mysql://h/db");
+
+    NativeJdbcUrl mssql =
+        NativeJdbcUrl.parse(
+            "jdbc:scalardb-native:sqlserver://h:1433;databaseName=db;"
+                + "scalardbnative.metadataSchema=meta;encrypt=false");
+    assertThat(mssql.vendorUrl())
+        .isEqualTo("jdbc:sqlserver://h:1433;databaseName=db;encrypt=false");
+    assertThat(mssql.driverParameters()).containsEntry("scalardbnative.metadataSchema", "meta");
+
+    NativeJdbcUrl none = NativeJdbcUrl.parse("jdbc:scalardb-native:postgresql://h/db?ssl=true");
+    assertThat(none.vendorUrl()).isEqualTo("jdbc:postgresql://h/db?ssl=true");
+    assertThat(none.driverParameters()).isEmpty();
+  }
+
+  @Test
   void accepts_isFalseForNull() {
     assertThat(NativeJdbcUrl.accepts(null)).isFalse();
   }

@@ -7,8 +7,10 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.SQLNonTransientException;
+import java.sql.SQLSyntaxErrorException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -22,6 +24,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
@@ -77,6 +81,18 @@ public final class Catalog implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(Catalog.class);
 
   private static final int RESOLUTION_CACHE_SIZE = 4096;
+
+  /** How long one round trip on the catalog's own connection may take. */
+  private static final Duration NETWORK_TIMEOUT = Duration.ofSeconds(30);
+
+  /** Runs the vendor drivers' network-timeout aborts; daemon threads, so a JVM can exit. */
+  private static final Executor TIMEOUTS =
+      Executors.newCachedThreadPool(
+          r -> {
+            Thread t = new Thread(r, "scalardb-native-jdbc-catalog-timeout");
+            t.setDaemon(true);
+            return t;
+          });
 
   private static final Set<String> TRANSACTION_COLUMNS =
       Set.of(
@@ -152,8 +168,12 @@ public final class Catalog implements AutoCloseable {
       if (info != null) {
         return info;
       }
+      // a fresh exception each time, of the same kind, so the stack trace is the caller's
       SQLException r = Objects.requireNonNull(refusal);
-      throw new SQLException(r.getMessage(), r.getSQLState(), r.getErrorCode());
+      if (r instanceof SQLSyntaxErrorException) {
+        throw new SQLSyntaxErrorException(r.getMessage(), r.getSQLState(), r.getErrorCode());
+      }
+      throw new SQLNonTransientException(r.getMessage(), r.getSQLState(), r.getErrorCode());
     }
   }
 
@@ -281,6 +301,17 @@ public final class Catalog implements AutoCloseable {
       folds.put(raw, folded);
     }
     return folded;
+  }
+
+  /**
+   * Loads ScalarDB's catalog now unless a fresh one is loaded, so that a database without it, or a
+   * user who cannot read it, is refused when the connection opens rather than at its first
+   * statement.
+   *
+   * @throws SQLException as {@link #lookup} would for the catalog itself (08004, 42501)
+   */
+  public void verify() throws SQLException {
+    snapshot();
   }
 
   /** Forgets everything loaded and resolved, so the next lookup reads both catalogs again. */
@@ -419,6 +450,12 @@ public final class Catalog implements AutoCloseable {
     if (c == null) {
       c = connections.open();
       c.setAutoCommit(true);
+      try {
+        // a catalog query that hangs would otherwise hold every reload and miss of this catalog
+        c.setNetworkTimeout(TIMEOUTS, (int) NETWORK_TIMEOUT.toMillis());
+      } catch (SQLFeatureNotSupportedException | AbstractMethodError e) {
+        // the vendor driver has no network timeout; its own socket settings apply
+      }
       connection = c;
     }
     return c;
@@ -516,7 +553,7 @@ public final class Catalog implements AutoCloseable {
   /** The metadata table is not visible: tell "no ScalarDB here" from "not allowed to look". */
   private void absent(Connection c, SQLException cause) throws SQLException {
     if (engine.schemaExists(c, metadataSchema)) {
-      throw new SQLNonTransientException(
+      throw new SQLSyntaxErrorException(
           "ScalarDB's catalog table "
               + metadataSchema
               + ".metadata cannot be seen although the schema exists: either ScalarDB has not"
@@ -614,14 +651,14 @@ public final class Catalog implements AutoCloseable {
     TableInfo classify(QualifiedName q) throws SQLException {
       String full = q.schema() + "." + q.table();
       if (q.isSynonym()) {
-        throw new SQLException(
+        throw new SQLSyntaxErrorException(
             full + " is a synonym; name the table it stands for instead", "42000");
       }
       String k = key(full);
       VirtualTable v = byName.get(k);
       if (v != null) {
         if (!v.inner) {
-          throw new SQLException(
+          throw new SQLSyntaxErrorException(
               full
                   + " is ScalarDB's virtual table of an imported table; name the table itself, "
                   + v.left,
@@ -644,7 +681,7 @@ public final class Catalog implements AutoCloseable {
       v = byLeft.get(k);
       if (v != null) {
         if (v.inner) {
-          throw new SQLException(
+          throw new SQLSyntaxErrorException(
               full
                   + " is the data table of a ScalarDB table; name the ScalarDB table instead, "
                   + v.name,
@@ -664,7 +701,7 @@ public final class Catalog implements AutoCloseable {
       }
       v = byRight.get(k);
       if (v != null) {
-        throw new SQLException(
+        throw new SQLSyntaxErrorException(
             full
                 + " is the transaction metadata table of a ScalarDB table; name the ScalarDB table"
                 + " instead, "
@@ -706,7 +743,7 @@ public final class Catalog implements AutoCloseable {
     private Columns keyed(String dataTable, String full) throws SQLException {
       Columns c = columns(dataTable);
       if (c.partitionKey.isEmpty()) {
-        throw new SQLException(
+        throw new SQLNonTransientException(
             "ScalarDB's catalog has no key for "
                 + dataTable
                 + ", the data table of "

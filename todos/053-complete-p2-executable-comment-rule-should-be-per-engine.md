@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "053"
 tags: [code-review, sql, usability, engine]
@@ -68,6 +68,14 @@ The fix for 034 refuses, at parse time and on every engine, any statement contai
 
 **Actions:**
 - Compared section 4.7 (Oracle `--+` hints kept) with the 034 rule (any `--` without whitespace refused on every engine); recorded the conflict in 4.7 and here.
+
+### 2026-10-09 - Fix applied (plan milestone 0)
+
+**By:** Claude Code
+
+**Actions:**
+- The rule is per engine: `/*!` refused on MySQL and MariaDB, `/*M!` on MariaDB only (the engine test showed MySQL treats `/*M!` as an ordinary comment, which the first version had wrong); a nested block comment refused on MySQL, MariaDB and Oracle; `--` not followed by whitespace refused on MySQL and MariaDB. Oracle's `--+` hints and PostgreSQL's `--TODO` parse again.
+- Tests: unit tests per engine; CommentFormsIntegrationTest runs each of four forms on every engine configuration and asserts the parser refuses it exactly when the engine returns 2 instead of 1 (the engine executed part of the comment).
 
 ## Notes
 

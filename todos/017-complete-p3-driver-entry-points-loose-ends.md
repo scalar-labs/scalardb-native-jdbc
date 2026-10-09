@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "017"
 tags: [code-review, driver, quality]
@@ -138,6 +138,16 @@ To be filled during triage.
 
 **Actions:**
 - Done: getPropertyInfo's unchecked exception and null info, acceptsURL(null), the sub-protocol's case in the vendor URL, and the missing-driver message. Still open: listing and stripping the driver's own properties, deregister(), the version constants, and the connect-path tests with a real vendor driver.
+
+### 2026-10-09 - Fix applied (plan milestone 0)
+
+**By:** Claude Code
+
+**Actions:**
+- `DriverProperties` reads metadataSchema, catalogTtlMs, allowNoCatalog, inflightWaitMs and passthrough from the connect Properties and from the URL (`?k=v&...`, or `;k=v` on SQL Server; the URL wins); an unknown or malformed `scalardbnative.*` key fails connect with 08001. The driver's keys are stripped from the vendor URL and the vendor properties; `getPropertyInfo` lists the driver's properties, with descriptions and choices, ahead of the vendor's.
+- `NativeJdbcDriver.deregister()` deregisters the driver and closes its catalogs. `NativeJdbcUrl.engine()` uses `Engine.of`.
+- Not done: the version constants still mirror gradle.properties by hand (cosmetic).
+- Tests: DriverPropertiesTest, NativeJdbcUrlTest.driverParameters_areTakenOutOfTheVendorUrl, DriverIntegrationTest.getPropertyInfo_listsTheDriversPropertiesFirst.
 
 ## Notes
 

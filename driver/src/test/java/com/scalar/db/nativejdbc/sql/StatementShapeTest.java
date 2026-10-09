@@ -7,6 +7,7 @@ import java.util.List;
 import net.sf.jsqlparser.statement.select.ForMode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class StatementShapeTest {
@@ -256,6 +257,28 @@ class StatementShapeTest {
       })
   void of_acceptsOrdinaryExpressions_whateverTheirNodeTypes(String sql) {
     assertThat(StatementShape.of(sql, Engine.POSTGRESQL)).isPresent();
+  }
+
+  @ParameterizedTest
+  @CsvSource(
+      delimiter = '|',
+      value = {
+        "select * from a join b on a.id = b.id | 2 tables",
+        "select * from t where id = ? for update skip locked | SKIP LOCKED",
+        "insert ignore into t (id) values (?) | INSERT IGNORE",
+        "insert into t select * from u | 2 tables",
+        "update t set (x, y) = (?, ?) where id = ? | set one column at a time",
+        "delete from t using (select 1) v where id < 5 | DELETE ... USING",
+        "select o.id from t | not this table's",
+        "with c as (select 1) select * from c | names no table",
+        "select * from t start with id = 1 connect by prior id = parent_id | CONNECT BY",
+        "truncate table t | Truncate statement",
+      })
+  void refusals_sayWhy(String sql, String reason) {
+    Outcome<StatementShape> outcome =
+        StatementShape.classify(SqlAst.parse(sql, Engine.POSTGRESQL).orElseThrow());
+    assertThat(outcome.isPresent()).isFalse();
+    assertThat(outcome.reason()).contains(reason.strip());
   }
 
   @Test

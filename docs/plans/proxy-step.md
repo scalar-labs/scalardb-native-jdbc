@@ -33,6 +33,9 @@ deliverable; 7 onwards widen it.
 
 ### Milestone 0: contracts the proxy depends on
 
+**Done 2026-10-09** (todos 016, 017, 037, 053). The shared `DriverErrors` class is left to
+milestone 1, its first user; the contract is design section 1, "Errors".
+
 Small, independent of each other, no proxy code yet.
 
 - **Error contract (todo 016).** `StatementShape` and `SqlAst` return the reason with an empty result (a

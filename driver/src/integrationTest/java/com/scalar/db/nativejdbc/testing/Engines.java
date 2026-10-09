@@ -167,6 +167,10 @@ public enum Engines {
     return started().url;
   }
 
+  public String password() throws SQLException {
+    return started().password;
+  }
+
   /** Opens an administrative connection, in autocommit mode. */
   public Connection open() throws SQLException {
     Started s = started();

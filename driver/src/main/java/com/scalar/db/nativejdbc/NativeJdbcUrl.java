@@ -1,7 +1,14 @@
 package com.scalar.db.nativejdbc;
 
 import com.scalar.db.nativejdbc.engine.Engine;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
 
@@ -32,10 +39,13 @@ public final class NativeJdbcUrl {
 
   private final String subProtocol;
   private final String vendorUrl;
+  private final Map<String, String> driverParameters;
 
-  private NativeJdbcUrl(String subProtocol, String vendorUrl) {
+  private NativeJdbcUrl(
+      String subProtocol, String vendorUrl, Map<String, String> driverParameters) {
     this.subProtocol = subProtocol;
     this.vendorUrl = vendorUrl;
+    this.driverParameters = driverParameters;
   }
 
   /**
@@ -75,7 +85,50 @@ public final class NativeJdbcUrl {
           "Unsupported database '" + subProtocol + "': expected one of " + sorted());
     }
     // the vendor drivers match their prefix case-sensitively, so the token is passed lower-cased
-    return new NativeJdbcUrl(subProtocol, "jdbc:" + subProtocol + remainder.substring(colon));
+    String vendor = "jdbc:" + subProtocol + remainder.substring(colon);
+    Map<String, String> driverParameters = new LinkedHashMap<>();
+    vendor =
+        subProtocol.equals("sqlserver")
+            ? extractSemicolonParameters(vendor, driverParameters)
+            : extractQueryParameters(vendor, driverParameters);
+    return new NativeJdbcUrl(subProtocol, vendor, Map.copyOf(driverParameters));
+  }
+
+  /** {@code ?a=b&scalardbnative.x=y}: removes the driver's keys, keeps the vendor's as written. */
+  private static String extractQueryParameters(String url, Map<String, String> into) {
+    int q = url.indexOf('?');
+    if (q < 0) {
+      return url;
+    }
+    List<String> kept = new ArrayList<>();
+    for (String pair : url.substring(q + 1).split("&", -1)) {
+      int eq = pair.indexOf('=');
+      String key = URLDecoder.decode(eq < 0 ? pair : pair.substring(0, eq), StandardCharsets.UTF_8);
+      if (key.startsWith(DriverProperties.PREFIX)) {
+        into.put(
+            key, eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8));
+      } else {
+        kept.add(pair);
+      }
+    }
+    return kept.isEmpty() ? url.substring(0, q) : url.substring(0, q + 1) + String.join("&", kept);
+  }
+
+  /** SQL Server's {@code ;a=b;scalardbnative.x=y}: removes the driver's keys. */
+  private static String extractSemicolonParameters(String url, Map<String, String> into) {
+    String[] segments = url.split(";", -1);
+    StringBuilder out = new StringBuilder(segments[0]);
+    for (int i = 1; i < segments.length; i++) {
+      String segment = segments[i];
+      int eq = segment.indexOf('=');
+      String key = (eq < 0 ? segment : segment.substring(0, eq)).strip();
+      if (key.startsWith(DriverProperties.PREFIX)) {
+        into.put(key, eq < 0 ? "" : segment.substring(eq + 1).strip());
+      } else {
+        out.append(';').append(segment);
+      }
+    }
+    return out.toString();
   }
 
   private static String sorted() {
@@ -92,12 +145,32 @@ public final class NativeJdbcUrl {
   }
 
   /**
-   * Returns the vendor driver's URL, the given URL with this driver's prefix replaced by {@code
-   * jdbc:}.
+   * Returns the engine the sub-protocol selects.
+   *
+   * @return the engine
+   */
+  public Engine engine() {
+    return Engine.of(subProtocol);
+  }
+
+  /**
+   * Returns the vendor driver's URL: the given URL with this driver's prefix replaced by {@code
+   * jdbc:} and this driver's own {@code scalardbnative.*} parameters removed.
    *
    * @return the vendor URL
    */
   public String vendorUrl() {
     return vendorUrl;
+  }
+
+  /**
+   * Returns this driver's own parameters found in the URL, {@code scalardbnative.*} keys in the
+   * vendor's parameter syntax ({@code ?a=b&c=d}, or {@code ;a=b} for SQL Server).
+   *
+   * @return the parameters, keys with their prefix
+   */
+  @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "an immutable Map.copyOf")
+  public Map<String, String> driverParameters() {
+    return driverParameters;
   }
 }

@@ -190,22 +190,39 @@ public final class SqlAst {
    */
   public static Optional<SqlAst> parse(
       String sql, Engine engine, boolean doubleQuotesQuoteIdentifiers) {
+    return analyze(sql, engine, doubleQuotesQuoteIdentifiers).toOptional();
+  }
+
+  /**
+   * Parses one statement as {@link #parse(String, Engine, boolean)} does, and says why when it
+   * refuses it.
+   *
+   * @param sql the statement
+   * @param engine the engine whose identifier rules apply
+   * @param doubleQuotesQuoteIdentifiers whether {@code "x"} quotes an identifier in the session
+   * @return the AST, or the reason it was refused
+   */
+  public static Outcome<SqlAst> analyze(
+      String sql, Engine engine, boolean doubleQuotesQuoteIdentifiers) {
     Statement stmt;
     try {
       // parseStatements, not parse: the latter silently keeps only the first of "a; b"
       Statements statements = CCJSqlParserUtil.parseStatements(sql);
       if (statements.size() != 1) {
-        return Optional.empty();
+        return Outcome.refused(
+            statements.isEmpty()
+                ? "the text holds no statement"
+                : "the text holds " + statements.size() + " statements; send one at a time");
       }
       stmt = statements.get(0);
     } catch (Exception e) {
-      return Optional.empty();
+      return Outcome.refused("the statement cannot be parsed: " + firstLine(e));
     }
     Walker walker = new Walker();
     try {
       walker.getTables(stmt);
     } catch (RuntimeException e) {
-      return Optional.empty();
+      return Outcome.refused("the statement's table references cannot be enumerated");
     }
     Set<String> cteKeys = new LinkedHashSet<>();
     for (String raw : walker.cteNames) {
@@ -236,8 +253,12 @@ public final class SqlAst {
       columns.add(new ColumnRef(null, a));
     }
     Node root = rootOf(stmt, walker.tables, walker.columns, sql);
-    if (root == null || hasCommentAnEngineMayExecute(root)) {
-      return Optional.empty();
+    if (root == null) {
+      return Outcome.refused("the statement's tokens cannot be located");
+    }
+    String comment = commentAnEngineMayExecute(root, engine);
+    if (comment != null) {
+      return Outcome.refused(comment);
     }
     Set<Object> values = valuesUnder(root);
     // Every SELECT of the statement, wherever it is nested: the walk visits them, and the tree
@@ -274,16 +295,24 @@ public final class SqlAst {
     accounted.addAll(forUpdateTables);
     for (Table t : accounted) {
       List<String> parts = t.getNameParts();
-      if ((parts != null && parts.size() > 2) || hasDottedQuotedToken(t.getASTNode())) {
-        // a database-qualified name resolves outside the catalog's database; a quoted name holding
-        // a dot is one identifier to the engine and two to the parser
-        return Optional.empty();
+      // a database-qualified name resolves outside the catalog's database; a quoted name holding
+      // a dot is one identifier to the engine and two to the parser
+      if (parts != null && parts.size() > 2) {
+        return Outcome.refused(
+            "the table name "
+                + t.getFullyQualifiedName()
+                + " names a database; name the schema"
+                + " and table only, on a connection to that database");
+      }
+      if (hasDottedQuotedToken(t.getASTNode())) {
+        return Outcome.refused(
+            "the quoted table name in " + t.getFullyQualifiedName() + " contains a dot");
       }
     }
     if (!doubleQuotesQuoteIdentifiers) {
       for (Table t : accounted) {
         if (isDoubleQuoted(t.getName()) || isDoubleQuoted(t.getSchemaName())) {
-          return Optional.empty();
+          return Outcome.refused(doubleQuoteReason(engine, t.getFullyQualifiedName()));
         }
       }
     }
@@ -295,7 +324,11 @@ public final class SqlAst {
     walked.addAll(walker.columns);
     for (Object v : values) {
       if (v instanceof Table && !accounted.contains(v)) {
-        return Optional.empty();
+        return Outcome.refused(
+            "the table "
+                + ((Table) v).getFullyQualifiedName()
+                + " appears in a clause the driver"
+                + " does not interpret");
       }
       if (v instanceof JdbcParameter || v instanceof JdbcNamedParameter) {
         parameters.add(v);
@@ -306,17 +339,19 @@ public final class SqlAst {
     }
     for (Column c : walked) {
       if (hasDottedQuotedToken(c.getASTNode())) {
-        return Optional.empty();
+        return Outcome.refused(
+            "the quoted column name in " + c.getFullyQualifiedName() + " contains a dot");
       }
     }
     if (!doubleQuotesQuoteIdentifiers) {
       for (Column c : walked) {
         if (isDoubleQuoted(c.getColumnName())) {
-          return Optional.empty(); // a string to the engine, a column to the parser
+          // a string to the engine, a column to the parser
+          return Outcome.refused(doubleQuoteReason(engine, c.getColumnName()));
         }
       }
     }
-    return Optional.of(
+    return Outcome.of(
         new SqlAst(
             sql,
             stmt,
@@ -393,32 +428,73 @@ public final class SqlAst {
   }
 
   /**
-   * Comment forms the parser reads as comments but an engine may execute, so that the statement the
-   * engine would run is not the one that was classified: MySQL's executable comments {@code /*!
-   * ...} and {@code /*M! ...}; a {@code --} not followed by whitespace, which is not a comment on
-   * MySQL and MariaDB ({@code id = 1 --1} is {@code id = 1 - -1}); and a block comment holding
-   * another opener, which the parser and PostgreSQL nest but MySQL, MariaDB and Oracle end at the
-   * first closer. Refused on every engine rather than per engine: nothing is guessed.
+   * A comment form the parser reads as a comment but this engine executes, so that the statement
+   * the engine would run is not the one that was classified, or {@code null}. Each rule is the
+   * engine's own, measured on its container: MySQL and MariaDB execute {@code /*! ...}, MariaDB
+   * also {@code /*M! ...}, and both read a {@code --} not followed by whitespace as two minus signs
+   * ({@code id = 1 --1} is {@code id = 1 - -1}); MySQL, MariaDB and Oracle end a block comment at
+   * its first closer, where the parser, PostgreSQL and SQL Server nest. On the other engines the
+   * same text is a comment, as Oracle's {@code --+} hints are.
    */
-  private static boolean hasCommentAnEngineMayExecute(Node root) {
+  private static @Nullable String commentAnEngineMayExecute(Node root, Engine engine) {
+    boolean mysqlLike = engine == Engine.MYSQL || engine == Engine.MARIADB;
+    boolean flatBlockComments = mysqlLike || engine == Engine.ORACLE;
     for (Token t = root.jjtGetFirstToken(); t != null; t = t.next) {
       for (Token s = t.specialToken; s != null; s = s.specialToken) {
         String image = s.image;
         if (s.kind == CCJSqlParserConstants.MULTI_LINE_COMMENT) {
-          if (image.startsWith("/*!") || image.startsWith("/*M!") || image.indexOf("/*", 2) >= 0) {
-            return true;
+          if ((mysqlLike && image.startsWith("/*!"))
+              || (engine == Engine.MARIADB && image.startsWith("/*M!"))) {
+            return "the comment " + abbreviate(image) + " is executed by " + engine.subProtocol();
           }
-        } else if (isLineComment(s)
+          if (flatBlockComments && image.indexOf("/*", 2) >= 0) {
+            return "the nested comment "
+                + abbreviate(image)
+                + " ends at its first */ on "
+                + engine.subProtocol();
+          }
+        } else if (mysqlLike
+            && isLineComment(s)
             && image.length() > 2
             && !Character.isWhitespace(image.charAt(2))) {
-          return true;
+          return "\"--\" not followed by a space is not a comment on "
+              + engine.subProtocol()
+              + ": "
+              + abbreviate(image);
         }
       }
       if (t.kind == 0) {
         break; // EOF, whose special tokens are the trailing comments
       }
     }
-    return false;
+    return null;
+  }
+
+  private static String abbreviate(String s) {
+    String line = s.strip().replace('\n', ' ');
+    return line.length() <= 40 ? line : line.substring(0, 37) + "...";
+  }
+
+  private static String firstLine(Exception e) {
+    String m =
+        e.getCause() != null && e.getCause().getMessage() != null
+            ? e.getCause().getMessage()
+            : e.getMessage();
+    if (m == null) {
+      return e.getClass().getSimpleName();
+    }
+    int nl = m.indexOf('\n');
+    String line = nl < 0 ? m : m.substring(0, nl);
+    return line.length() <= 200 ? line : line.substring(0, 197) + "...";
+  }
+
+  private static String doubleQuoteReason(Engine engine, String name) {
+    return "the double-quoted name "
+        + name
+        + " is a string, not a name, in this "
+        + engine.subProtocol()
+        + " session; use the engine's own quoting"
+        + (engine == Engine.SQLSERVER ? " or SET QUOTED_IDENTIFIER ON" : " or ANSI_QUOTES");
   }
 
   /**

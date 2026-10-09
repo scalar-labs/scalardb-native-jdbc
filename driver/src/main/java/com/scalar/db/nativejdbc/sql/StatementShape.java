@@ -122,26 +122,34 @@ public final class StatementShape {
   }
 
   /**
-   * Classifies a parsed statement. Column names are resolved the way the statement's engine
-   * resolves them ({@link Engine#resolveIdentifier}) and compared the way it compares them ({@link
-   * Engine#columnKey}), so that {@code Amount} and {@code amount} are one column on MySQL and two
-   * on PostgreSQL.
+   * Classifies a parsed statement as {@link #of(SqlAst)} does, and says why when it is not one of
+   * the single-table shapes.
    *
    * @param ast the statement
-   * @return the shape, or empty when the statement is not one of the single-table shapes
+   * @return the shape, or the reason the statement is not one
    */
-  public static Optional<StatementShape> of(SqlAst ast) {
+  public static Outcome<StatementShape> classify(SqlAst ast) {
     Engine engine = ast.engine();
-    if (ast.tableRefs().size() != 1 || !ast.cteRefs().isEmpty()) {
-      return Optional.empty();
+    if (ast.tableRefs().size() != 1) {
+      return Outcome.refused(
+          ast.tableRefs().isEmpty()
+              ? "the statement names no table"
+              : "the statement reads " + ast.tableRefs().size() + " tables");
+    }
+    if (!ast.cteRefs().isEmpty()) {
+      return Outcome.refused("the statement has a WITH clause");
     }
     SqlAst.TableRef table = ast.tableRefs().get(0);
-    if (table.partCount() > 2 || hasTableHint(table)) {
-      return Optional.empty();
+    if (table.partCount() > 2) {
+      return Outcome.refused("the table name has more than a schema and a table");
+    }
+    if (hasTableHint(table)) {
+      return Outcome.refused(
+          "the table carries a hint, a sample clause, a PIVOT or a database link");
     }
     Builder b = new Builder(ast, table, engine);
     if (!b.resolveColumnQualifiers()) {
-      return Optional.empty();
+      return Outcome.refused(b.refusal);
     }
     Statement stmt = ast.statement();
     boolean ok;
@@ -154,9 +162,24 @@ public final class StatementShape {
     } else if (stmt instanceof Delete) {
       ok = b.delete((Delete) stmt);
     } else {
-      ok = false;
+      ok =
+          b.refuse(
+              "a " + stmt.getClass().getSimpleName() + " statement is not a single-table shape");
     }
-    return ok ? Optional.of(new StatementShape(b)) : Optional.empty();
+    return ok ? Outcome.of(new StatementShape(b)) : Outcome.refused(b.refusal);
+  }
+
+  /**
+   * Classifies a parsed statement. Column names are resolved the way the statement's engine
+   * resolves them ({@link Engine#resolveIdentifier}) and compared the way it compares them ({@link
+   * Engine#columnKey}), so that {@code Amount} and {@code amount} are one column on MySQL and two
+   * on PostgreSQL.
+   *
+   * @param ast the statement
+   * @return the shape, or empty when the statement is not one of the single-table shapes
+   */
+  public static Optional<StatementShape> of(SqlAst ast) {
+    return classify(ast).toOptional();
   }
 
   /**
@@ -420,6 +443,23 @@ public final class StatementShape {
     List<String> setColumns = List.of();
     boolean returning;
 
+    String refusal = "not a single-table shape";
+
+    boolean refuse(String why) {
+      refusal = why;
+      return false;
+    }
+
+    /** The reason of the first condition that holds, from (condition, reason) pairs, or null. */
+    static @Nullable String first(Object... conditionThenReason) {
+      for (int i = 0; i < conditionThenReason.length; i += 2) {
+        if ((Boolean) conditionThenReason[i]) {
+          return (String) conditionThenReason[i + 1];
+        }
+      }
+      return null;
+    }
+
     Builder(SqlAst ast, SqlAst.TableRef table, Engine engine) {
       this.ast = ast;
       this.table = table;
@@ -437,7 +477,7 @@ public final class StatementShape {
           continue;
         }
         if (q.partCount() > 2) {
-          return false;
+          return refuse("the column " + c + " is qualified by more than a schema and a table");
         }
         String qualifierSchema = q.schema();
         String tableSchema = table.schema();
@@ -448,7 +488,7 @@ public final class StatementShape {
                 && (qualifierSchema == null
                     || (tableSchema != null && sameIdentifier(qualifierSchema, tableSchema)));
         if (!byAlias && !byName) {
-          return false;
+          return refuse("the column " + c + " is qualified by a name that is not this table's");
         }
       }
       return true;
@@ -457,29 +497,47 @@ public final class StatementShape {
     boolean select(PlainSelect s) {
       kind = Kind.SELECT;
       FromItem from = s.getFromItem();
-      if (!(from instanceof Table)
-          || (s.getJoins() != null && !s.getJoins().isEmpty())
-          || (s.getIntoTables() != null && !s.getIntoTables().isEmpty())
-          || (s.getWithItemsList() != null && !s.getWithItemsList().isEmpty())
-          || s.getTop() != null
-          || s.getOracleHint() != null
-          || s.isSkipLocked()
-          || s.isNoWait()
-          || s.getWait() != null
-          // clauses that read or write something other than the table's rows
-          || s.getOracleHierarchical() != null
-          || s.getQualify() != null
-          || nonEmpty(s.getLateralViews())
-          || s.getForXmlPath() != null
-          || s.getForClause() != null
-          || s.getMySqlSelectIntoClause() != null
-          || s.getIntoTempTable() != null
-          || s.getPreWhere() != null) {
-        return false;
+      String why =
+          first(
+              !(from instanceof Table),
+              "the FROM item is not a table",
+              nonEmpty(s.getJoins()),
+              "the statement has a join",
+              nonEmpty(s.getIntoTables()),
+              "SELECT ... INTO",
+              nonEmpty(s.getWithItemsList()),
+              "the statement has a WITH clause",
+              s.getTop() != null,
+              "TOP",
+              s.getOracleHint() != null,
+              "an optimizer hint",
+              s.isSkipLocked(),
+              "SKIP LOCKED",
+              s.isNoWait(),
+              "NOWAIT",
+              s.getWait() != null,
+              "WAIT",
+              // clauses that read or write something other than the table's rows
+              s.getOracleHierarchical() != null,
+              "CONNECT BY",
+              s.getQualify() != null,
+              "QUALIFY",
+              nonEmpty(s.getLateralViews()),
+              "LATERAL VIEW",
+              s.getForXmlPath() != null || s.getForClause() != null,
+              "FOR XML or FOR JSON",
+              s.getMySqlSelectIntoClause() != null,
+              "INTO OUTFILE or INTO DUMPFILE",
+              s.getIntoTempTable() != null,
+              "a temporary target table",
+              s.getPreWhere() != null,
+              "PREWHERE");
+      if (why != null) {
+        return refuse(why + " is not supported on a ScalarDB table");
       }
       List<SelectItem<?>> items = s.getSelectItems();
       if (items == null || items.isEmpty()) {
-        return false;
+        return refuse("the select list is empty");
       }
       boolean functions = false;
       List<String> columns = new ArrayList<>();
@@ -488,7 +546,7 @@ public final class StatementShape {
         Expression e = item.getExpression();
         if (e instanceof AllColumns || e instanceof AllTableColumns) {
           if (items.size() != 1 || item.getAlias() != null) {
-            return false;
+            return refuse("* is combined with other select items or an alias");
           }
           selectAll = true;
           plain = false;
@@ -514,7 +572,7 @@ public final class StatementShape {
           boolean byAlias = alias != null && sameIdentifier(target.getName(), alias);
           boolean byName = alias == null && sameIdentifier(target.getName(), table.name());
           if (target.getSchemaName() != null || !(byAlias || byName)) {
-            return false;
+            return refuse("FOR UPDATE OF " + target + " does not name this table");
           }
         }
       }
@@ -523,23 +581,34 @@ public final class StatementShape {
 
     boolean insert(Insert i) {
       kind = Kind.INSERT;
-      if (table.hasAlias()
-          || !(i.getSelect() instanceof Values)
-          || (i.getSetUpdateSets() != null && !i.getSetUpdateSets().isEmpty())
-          || i.isModifierIgnore() // an upsert in disguise: a collision looks like success
-          || (i.getDuplicateUpdateSets() != null && !i.getDuplicateUpdateSets().isEmpty())
-          || i.getConflictTarget() != null
-          || i.getConflictAction() != null
-          || i.getOutputClause() != null
-          || i.getOracleHint() != null) {
-        return false; // INSERT ... SELECT, INSERT ... SET and every upsert form are out of scope
+      String why =
+          first(
+              table.hasAlias(),
+              "an aliased INSERT target",
+              !(i.getSelect() instanceof Values),
+              "INSERT ... SELECT",
+              nonEmpty(i.getSetUpdateSets()),
+              "INSERT ... SET",
+              // an upsert in disguise: a collision looks like success
+              i.isModifierIgnore(),
+              "INSERT IGNORE",
+              nonEmpty(i.getDuplicateUpdateSets()),
+              "ON DUPLICATE KEY UPDATE",
+              i.getConflictTarget() != null || i.getConflictAction() != null,
+              "ON CONFLICT",
+              i.getOutputClause() != null,
+              "OUTPUT",
+              i.getOracleHint() != null,
+              "an optimizer hint");
+      if (why != null) {
+        return refuse(why + " is not supported on a ScalarDB table");
       }
       ExpressionList<Column> cols = i.getColumns();
       if (cols != null) {
         List<String> names = new ArrayList<>();
         for (Column c : cols) {
           if (c.getTable() != null) {
-            return false;
+            return refuse("the INSERT column " + c + " is qualified");
           }
           names.add(engine.resolveIdentifier(c.getColumnName()));
         }
@@ -552,37 +621,45 @@ public final class StatementShape {
       } else {
         for (Object row : top) {
           if (!(row instanceof ParenthesedExpressionList<?>)) {
-            return false;
+            return refuse("a VALUES row is not a parenthesised list");
           }
           rows++;
         }
       }
       insertRowCount = rows;
       returning = i.getReturningClause() != null;
-      return rows > 0;
+      return rows > 0 || refuse("the INSERT has no VALUES rows");
     }
 
     boolean update(Update u) {
       kind = Kind.UPDATE;
-      if (u.getFromItem() != null
-          || (u.getJoins() != null && !u.getJoins().isEmpty())
-          || (u.getStartJoins() != null && !u.getStartJoins().isEmpty())
-          || u.getLimit() != null
-          || (u.getOrderByElements() != null && !u.getOrderByElements().isEmpty())
-          || u.isModifierIgnore()
-          || u.getOutputClause() != null
-          || u.getOracleHint() != null
-          || u.getForPortionClause() != null) {
-        return false;
+      String why =
+          first(
+              u.getFromItem() != null || nonEmpty(u.getJoins()) || nonEmpty(u.getStartJoins()),
+              "UPDATE with FROM or a join",
+              u.getLimit() != null,
+              "UPDATE ... LIMIT",
+              nonEmpty(u.getOrderByElements()),
+              "UPDATE ... ORDER BY",
+              u.isModifierIgnore(),
+              "UPDATE IGNORE",
+              u.getOutputClause() != null,
+              "OUTPUT",
+              u.getOracleHint() != null,
+              "an optimizer hint",
+              u.getForPortionClause() != null,
+              "FOR PORTION OF");
+      if (why != null) {
+        return refuse(why + " is not supported on a ScalarDB table");
       }
       List<UpdateSet> sets = u.getUpdateSets();
       if (sets == null || sets.isEmpty()) {
-        return false;
+        return refuse("the UPDATE sets no column");
       }
       List<String> names = new ArrayList<>();
       for (UpdateSet set : sets) {
         if (set.getColumns().size() != 1 || set.getValues().size() != 1) {
-          return false; // SET (a, b) = (?, ?)
+          return refuse("SET (a, b) = (...) is not supported; set one column at a time");
         }
         names.add(engine.resolveIdentifier(set.getColumn(0).getColumnName()));
       }
@@ -595,16 +672,26 @@ public final class StatementShape {
       kind = Kind.DELETE;
       // a USING item or a join reads other rows: a table is caught by the single-table check, a
       // subquery or a VALUES list is not, so the list itself is refused
-      if (nonEmpty(d.getTables())
-          || nonEmpty(d.getJoins())
-          || nonEmpty(d.getUsingFromItemList())
-          || d.getLimit() != null
-          || nonEmpty(d.getOrderByElements())
-          || d.isModifierIgnore()
-          || d.getOutputClause() != null
-          || d.getOracleHint() != null
-          || d.getForPortionClause() != null) {
-        return false;
+      String why =
+          first(
+              nonEmpty(d.getTables()) || nonEmpty(d.getJoins()),
+              "DELETE with a join",
+              nonEmpty(d.getUsingFromItemList()),
+              "DELETE ... USING",
+              d.getLimit() != null,
+              "DELETE ... LIMIT",
+              nonEmpty(d.getOrderByElements()),
+              "DELETE ... ORDER BY",
+              d.isModifierIgnore(),
+              "DELETE IGNORE",
+              d.getOutputClause() != null,
+              "OUTPUT",
+              d.getOracleHint() != null,
+              "an optimizer hint",
+              d.getForPortionClause() != null,
+              "FOR PORTION OF");
+      if (why != null) {
+        return refuse(why + " is not supported on a ScalarDB table");
       }
       returning = d.getReturningClause() != null;
       return predicate(d.getWhere());
@@ -617,7 +704,7 @@ public final class StatementShape {
       }
       Set<Object> nodes = SqlAst.valuesUnder(w);
       if (nodes == null) {
-        return false; // a predicate that cannot be inspected is not understood
+        return refuse("the WHERE clause cannot be inspected");
       }
       Set<String> names = new LinkedHashSet<>();
       for (SqlAst.ColumnRef c : ast.columnRefs()) {

@@ -1,12 +1,17 @@
 package com.scalar.db.nativejdbc;
 
+import com.scalar.db.nativejdbc.catalog.Catalog;
 import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.DriverPropertyInfo;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.time.Clock;
+import java.util.Arrays;
+import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import org.jspecify.annotations.Nullable;
 
@@ -29,12 +34,35 @@ public final class NativeJdbcDriver implements Driver {
 
   private static final String SQLSTATE_UNABLE_TO_CONNECT = "08001";
 
+  private static final NativeJdbcDriver INSTANCE = new NativeJdbcDriver();
+
+  /**
+   * One catalog per database and credentials: engine, vendor URL, user and the catalog settings,
+   * never the password. Per user because which tables a name resolves to is per user on Oracle and
+   * SQL Server.
+   */
+  private static final Map<String, Catalog> CATALOGS = new ConcurrentHashMap<>();
+
   static {
     try {
-      DriverManager.registerDriver(new NativeJdbcDriver());
+      DriverManager.registerDriver(INSTANCE);
     } catch (SQLException e) {
       throw new ExceptionInInitializerError(e);
     }
+  }
+
+  /**
+   * Deregisters the driver and closes the connections its catalogs hold, for an application server
+   * that unloads the application; connections already open keep working.
+   *
+   * @throws SQLException if {@link DriverManager} refuses
+   */
+  public static void deregister() throws SQLException {
+    DriverManager.deregisterDriver(INSTANCE);
+    for (Catalog c : CATALOGS.values()) {
+      c.close();
+    }
+    CATALOGS.clear();
   }
 
   /**
@@ -50,8 +78,13 @@ public final class NativeJdbcDriver implements Driver {
       return null;
     }
     NativeJdbcUrl parsed = parse(url);
-    Connection connection =
-        vendorDriver(parsed).connect(parsed.vendorUrl(), info == null ? new Properties() : info);
+    DriverProperties settings = DriverProperties.read(parsed.driverParameters(), info);
+    Properties vendorProperties = DriverProperties.vendorProperties(info);
+    Driver vendor = vendorDriver(parsed);
+    // the catalog first: a database without ScalarDB's catalog, or a user who cannot read it, is
+    // refused here rather than at the first statement
+    catalog(parsed, settings, vendor, vendorProperties).verify();
+    Connection connection = vendor.connect(parsed.vendorUrl(), vendorProperties);
     if (connection == null) {
       throw new SQLException(
           "The " + parsed.subProtocol() + " driver did not accept the URL",
@@ -60,6 +93,41 @@ public final class NativeJdbcDriver implements Driver {
     // The connection proxy of docs/design.md ("Architecture") wraps this connection next; until
     // then the vendor connection is returned as is.
     return connection;
+  }
+
+  private static Catalog catalog(
+      NativeJdbcUrl parsed, DriverProperties settings, Driver vendor, Properties vendorProperties) {
+    String key =
+        String.join(
+            "\u0000",
+            parsed.vendorUrl(),
+            vendorProperties.getProperty("user", ""),
+            settings.metadataSchema,
+            Long.toString(settings.catalogTtl.toMillis()),
+            Boolean.toString(settings.allowNoCatalog));
+    return CATALOGS.computeIfAbsent(
+        key,
+        k ->
+            new Catalog(
+                parsed.engine(),
+                settings.metadataSchema,
+                () -> {
+                  Connection c = vendor.connect(parsed.vendorUrl(), vendorProperties);
+                  if (c == null) {
+                    throw new SQLException(
+                        "The " + parsed.subProtocol() + " driver did not accept the URL",
+                        SQLSTATE_UNABLE_TO_CONNECT);
+                  }
+                  return c;
+                },
+                settings.catalogTtl,
+                Clock.systemUTC(),
+                settings.allowNoCatalog));
+  }
+
+  /** How many catalogs the driver holds; for tests. */
+  static int catalogCount() {
+    return CATALOGS.size();
   }
 
   /** Parses the URL; the error never repeats the URL, which may carry credentials. */
@@ -97,8 +165,14 @@ public final class NativeJdbcDriver implements Driver {
       return new DriverPropertyInfo[0];
     }
     NativeJdbcUrl parsed = parse(url);
-    return vendorDriver(parsed)
-        .getPropertyInfo(parsed.vendorUrl(), info == null ? new Properties() : info);
+    DriverPropertyInfo[] own =
+        DriverProperties.describe(DriverProperties.read(parsed.driverParameters(), info));
+    DriverPropertyInfo[] vendors =
+        vendorDriver(parsed)
+            .getPropertyInfo(parsed.vendorUrl(), DriverProperties.vendorProperties(info));
+    DriverPropertyInfo[] out = Arrays.copyOf(own, own.length + vendors.length);
+    System.arraycopy(vendors, 0, out, own.length, vendors.length);
+    return out;
   }
 
   @Override

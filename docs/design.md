@@ -341,8 +341,24 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   where ScalarDB keeps `virtual_tables` and its table metadata, `scalardb` by default;
   `scalardbnative.catalogTtlMs`, how long a loaded catalog and a resolved name are trusted, 60000 by
   default (4.4); `scalardbnative.allowNoCatalog`, `false` by default, to accept a database without
-  ScalarDB's catalog, every table then plain. The driver strips its own properties before handing the
-  rest to the vendor driver. The isolation level is not a URL
+  ScalarDB's catalog, every table then plain. They are read from the connect `Properties` and from the
+  URL in the vendor's parameter syntax (`?scalardbnative.x=y&...`, or `;scalardbnative.x=y` for SQL
+  Server), the URL winning; an unknown or malformed `scalardbnative.*` key fails `connect` with `08001`.
+  The driver strips its own keys from both before handing the rest to the vendor driver, and
+  `getPropertyInfo` lists them ahead of the vendor's.
+- **Errors.** Every error the driver raises itself is a standard JDBC subclass with a fixed SQLSTATE,
+  so a caller can tell what to do without parsing messages; a message never contains the URL.
+
+  | SQLSTATE | Exception | Meaning | What the caller does |
+  |---|---|---|---|
+  | `40001` | `SQLTransactionRollbackException` | a driver-decided abort: a conflict with a ScalarDB or driver transaction (4.4, section 6) | roll back and retry the transaction |
+  | `0A000` | `SQLFeatureNotSupportedException` | a statement the driver does not handle on a ScalarDB table, with the reason (4.1); `READ_UNCOMMITTED` | rewrite the statement; never retry |
+  | `42000` | `SQLSyntaxErrorException` | a name a statement must not use: `T_data`, `T_tx_metadata`, `T_scalardb`, a synonym; the message names the table to use | rewrite the statement |
+  | `42501` | `SQLSyntaxErrorException` | ScalarDB's catalog exists but this user cannot read it | grant SELECT on the catalog tables |
+  | `08004` | `SQLNonTransientConnectionException` | refused at connect: no ScalarDB catalog (unless allowed), a table without the setup of section 3, SQL Server without `READ_COMMITTED_SNAPSHOT` | fix the configuration or run the setup |
+  | `08001` | `SQLException` | a malformed URL or driver property, a missing vendor driver | fix the URL or the class path |
+
+  Errors the database raises pass through unchanged. The isolation level is not a URL
   property; it is `Connection.setTransactionIsolation`, so `@Transactional(isolation = ...)` works as is.
 
 ### Repository and build
@@ -555,9 +571,11 @@ runs a second lookup on the before image index; for other columns it uses the OR
 **What "the parser can interpret" means.** The text is exactly one statement; JSQLParser parses it;
 every table node of the parser's public syntax tree is a reference the walk visited, a column qualifier
 or a `FOR UPDATE OF` target (the driver reads the public tree only, never private fields, so it gives the
-same answers with JSQLParser as a named module); no comment is of a form an engine may execute (MySQL
-`/*! ... */` and `/*M! ... */`, a `--` not followed by whitespace, a block comment nested in another,
-all refused on every engine); and no name is double-quoted where the session reads `"x"` as a string.
+same answers with JSQLParser as a named module); no comment is of a form this engine executes, each rule
+the engine's own and checked on its container: MySQL and MariaDB run `/*! ... */`, MariaDB also
+`/*M! ... */`, and both read a `--` not followed by whitespace as two minus signs, MySQL, MariaDB and Oracle end a block
+comment at its first `*/` where PostgreSQL and SQL Server nest; no name is a database-qualified one or a
+quoted name holding a dot; and no name is double-quoted where the session reads `"x"` as a string.
 There is no list of known node types: an expression the shape does not inspect cannot hide a table or a
 column, since both are taken from the tree. A single-table shape further refuses the modifiers and
 clauses that read or write something else than the table's rows: `INSERT`, `UPDATE` and `DELETE IGNORE`,
@@ -979,10 +997,8 @@ syntax. MySQL `USE`, `FORCE` and `IGNORE INDEX` become a `MySQLIndexHint` on the
 table reference, and `OPTION (...)` parses; `WITH (UPDLOCK, ROWLOCK)`, in any position, and
 `UPDATE T WITH (ROWLOCK)` do **not** parse. Oracle `FOR UPDATE OF col`, `NOWAIT`, `WAIT n` and
 `SKIP LOCKED` parse. A hint anywhere else, after the select list or inside `WHERE`, is a plain comment to
-the parser, and the engines ignore it there as well. **Today the `--+` form is refused**, on every
-engine and for plain tables too, by the executable-comment rule of 4.1, which refuses any `--` not
-followed by whitespace; that rule is to become per engine, since only MySQL and MariaDB read `--x` as
-code (todo 053). Because the rewrite re-joins the original tokens
+the parser, and the engines ignore it there as well. Oracle's `--+` form is accepted: the
+executable-comment rule of 4.1 is per engine, and only MySQL and MariaDB read `--x` as code. Because the rewrite re-joins the original tokens
 (`SqlAst.joinTokens`), every hint survives in the emitted text wherever it stood; only its meaning after
 the rewrite is in question. The parser's own regeneration of a hinted `DELETE` drops the space before
 the hint, `DELETE/*+ ... */`, which Oracle accepts; the token join does not have this problem.

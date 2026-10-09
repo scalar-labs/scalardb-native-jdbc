@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "016"
 tags: [code-review, usability, design, sql, driver]
@@ -118,6 +118,15 @@ To be filled during triage.
 
 **Actions:**
 - The commit added about fifteen new silent refusal causes to StatementShape (table hints, TABLESAMPLE, PIVOT, SKIP LOCKED, NOWAIT, WAIT, INSERT IGNORE, ON DUPLICATE KEY, ON CONFLICT, OUTPUT, hints, "predicate not inspectable") and removed SqlAst.unknownNodes(), which this todo's Option 1 relied on; hasSecondStatement moved into SqlAst.parse, which still swallows the parser message. New direction: a Builder.refuse(String why) that records the clause and returns false, and of() returning the reason with the empty result; ModulePathCheck and StatementShapeTest should assert the reason.
+
+### 2026-10-09 - Fix applied (plan milestone 0)
+
+**By:** Claude Code
+
+**Actions:**
+- `sql.Outcome<T>` carries a value or the reason a statement was refused. `SqlAst.analyze(sql, engine, doubleQuotes)` and `StatementShape.classify(ast)` return it, and `parse`/`of` are wrappers over them; every refusal point of the parser and the shape builder states the clause that caused it (multi-statement text, a parse error with the parser's first line, an executable comment form, a database-qualified or dotted quoted name, a double-quoted name where the session reads a string, a table in an uninterpreted clause, a join, WITH, each modifier and clause of 036, SET (a, b), a foreign qualifier, FOR UPDATE OF another table).
+- The error contract is design section 1, "Errors": 40001 SQLTransactionRollbackException, 0A000 SQLFeatureNotSupportedException, 42000 and 42501 SQLSyntaxErrorException, 08004 SQLNonTransientConnectionException, 08001; the catalog now raises the subclasses. The router raises 0A000 with the Outcome's reason from milestone 1.
+- Tests: SqlAstTest.refusals_sayWhy, StatementShapeTest.refusals_sayWhy (ten shapes).
 
 ## Notes
 
