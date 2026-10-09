@@ -1,6 +1,7 @@
 # Plan: the connection proxy and the first protected path
 
-Status: draft for review, 2026-10-09. Nothing here is implemented yet.
+Status: accepted 2026-10-09, with the three proposals under "Decisions". Nothing here is implemented
+yet.
 
 ## Goal
 
@@ -55,8 +56,13 @@ Small, independent of each other, no proxy code yet.
   the first statement; catalogs are closed on `DriverManager.deregisterDriver` (and `deregister()` is
   added, from 017).
 
-Tests: unit tests for the refusal reasons and the property parsing; integration tests on PostgreSQL for
-the eager load and the error codes.
+- **Per-engine comment rule (todo 053).** The executable-comment refusal of 4.1 becomes per engine, so
+  ordinary comments and Oracle's `--+` hints parse where the engine reads them as comments; the router
+  needs the parser to accept them, since a parse refusal applies to plain tables too.
+
+Tests: unit tests for the refusal reasons, the property parsing and the comment rule per engine;
+integration tests on PostgreSQL for the eager load and the error codes, and on each engine for the
+comment forms.
 
 ### Milestone 1: wrapped connection, pass-through, refusals
 
@@ -186,8 +192,9 @@ CAS unchanged. The interleaving tests gain the write-skew and phantom rows of se
 In the design's certification order: MySQL and MariaDB together, SQL Server, Oracle. Each adds its row of
 the per-engine table to `Engine` (insert collision, locking spellings, row limit and boolean test,
 retryable codes, the in-flight index form) and runs the full interleaving suite on its container. SQL
-Server adds the `READ_COMMITTED_SNAPSHOT` check at connect; Oracle maps SNAPSHOT and SERIALIZABLE as
-section 5 says.
+Server adds the `READ_COMMITTED_SNAPSHOT` check at connect, and the token pass of 4.7 that strips its
+table hints before parsing; that pass must still refuse `NOLOCK` and `READUNCOMMITTED` on a ScalarDB
+table, so it detects them before stripping. Oracle maps SNAPSHOT and SERIALIZABLE as section 5 says.
 
 ### Milestone 9: tools and acceptance
 
@@ -214,6 +221,7 @@ New packages under `com.scalar.db.nativejdbc`, each depending only on what is li
 | Todo | Where |
 |---|---|
 | 016 error contract | milestone 0 |
+| 053 per-engine comment rule | milestone 0 |
 | 017 driver entry points, remaining parts | milestone 0 |
 | 037 catalog connection, remaining parts | milestone 0 |
 | 039 session state | milestone 1 |
@@ -225,7 +233,7 @@ New packages under `com.scalar.db.nativejdbc`, each depending only on what is li
 The cleanup todos (019, 020, 022 to 025, 028 to 031, 050, 051) are taken when a milestone touches the
 code they name, not separately.
 
-## Decisions to confirm
+## Decisions (accepted 2026-10-09)
 
 1. **Classic-layout tables in the first deliverable.** The design covers them, but the user's main case
    is the imported decoupled layout. Proposal: milestones 3 and 4 handle the two decoupled layouts and
