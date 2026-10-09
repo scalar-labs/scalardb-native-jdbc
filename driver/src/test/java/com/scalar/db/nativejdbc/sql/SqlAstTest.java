@@ -2,7 +2,6 @@ package com.scalar.db.nativejdbc.sql;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.util.List;
 import java.util.stream.Stream;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import org.jspecify.annotations.Nullable;
@@ -29,6 +28,18 @@ class SqlAstTest {
   void parse_returnsEmptyForWhatTheParserCannotRead() {
     assertThat(SqlAst.parse("select from where")).isEmpty();
     assertThat(SqlAst.parse("")).isEmpty();
+  }
+
+  @Test
+  void parse_returnsEmptyUnlessTheTextIsExactlyOneStatement() {
+    // the parser's single-statement entry point keeps only the first of these
+    assertThat(SqlAst.parse("select 1 from plain_t; delete from scalar_t")).isEmpty();
+    assertThat(SqlAst.parse("insert into t (id) values (1); delete from t")).isEmpty();
+    assertThat(SqlAst.parse("select 1 from t;;")).isEmpty();
+    // a trailing terminator, a comment after it, and a ';' inside a literal are still one statement
+    assertThat(parse("select 1 from t;").tableRefs()).hasSize(1);
+    assertThat(parse("select 1 from t; -- tail").tableRefs()).hasSize(1);
+    assertThat(parse("select * from t where x = 'a; b'").tableRefs()).hasSize(1);
   }
 
   @Test
@@ -75,6 +86,8 @@ class SqlAstTest {
         "/* load Order */ select * from orders o\n  where o.id = ?  -- trailing comment",
         "select /* middle */ * from orders where id = ?",
         "select * from orders -- line comment\nwhere id = ?",
+        "delete from orders -- cleanup */\nwhere id = ?",
+        "select * from orders -- a\n-- b\nwhere id = ? -- c */",
         "select * from orders where note = 'orders' and memo = 'a -- b' and m2 = 'c /* d */ e'",
         "select * from orders where note = 'it''s a test' and qty = -1.5",
         "select * from orders where d = {d '2020-01-01'} and memo like '%a_b%'",
@@ -107,6 +120,16 @@ class SqlAstTest {
     SqlAst ast = parse("/* a */ SELECT   \"Order\".id\nFROM s.\"Order\" -- tail\n WHERE id = ?");
     assertThat(ast.joinTokens())
         .isEqualTo("/* a */ SELECT \"Order\".id FROM s.\"Order\" -- tail\nWHERE id = ?");
+  }
+
+  @Test
+  void joinTokens_closesALineCommentByItsKind_whateverItContains() {
+    // "*/" inside a -- comment must not be mistaken for the end of a comment: the WHERE would
+    // vanish
+    assertThat(parse("delete from t -- cleanup */\nwhere id = 1").joinTokens(ref -> "v_t"))
+        .isEqualTo("delete from v_t -- cleanup */\nwhere id = 1");
+    assertThat(parse("select * from t -- x\n/* y */ where id = ?").joinTokens())
+        .isEqualTo("select * from t -- x\n/* y */ where id = ?");
   }
 
   @Test
@@ -174,13 +197,18 @@ class SqlAstTest {
   }
 
   @Test
-  void unknownNodes_reportATableNodeTheWalkMissed_orAnUntaughtType() {
-    assertThat(parse("select * from t where id = ?").unknownNodes()).isEmpty();
-    assertThat(parse("select * from t").unknownNodes()).isEmpty();
-    List<String> merge =
-        parse("merge into t using s on t.id = s.id when matched then update set x = s.x")
-            .unknownNodes();
-    assertThat(merge).anyMatch(u -> u.startsWith("type:"));
+  void parameterCount_isCountedOverTheWholeTree_atAnyDepth() {
+    // an OR chain nests one level per term; the walk has no depth limit
+    StringBuilder b = new StringBuilder("select * from t where c0 = ?");
+    for (int i = 1; i < 100; i++) {
+      b.append(" or c").append(i).append(" = :p").append(i);
+    }
+    assertThat(parse(b.toString()).parameterCount()).isEqualTo(100);
+    assertThat(
+            parse("select (select ? from u where u.k = ?) from t where id in (?, ?) and x = ?")
+                .parameterCount())
+        .isEqualTo(5);
+    assertThat(parse("insert into t (id, x) values (?, ?), (?, ?)").parameterCount()).isEqualTo(4);
   }
 
   @Test

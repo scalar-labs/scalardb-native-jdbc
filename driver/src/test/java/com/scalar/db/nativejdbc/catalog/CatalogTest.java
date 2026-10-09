@@ -1,0 +1,136 @@
+package com.scalar.db.nativejdbc.catalog;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import com.scalar.db.nativejdbc.catalog.Catalog.MetadataColumn;
+import com.scalar.db.nativejdbc.catalog.Catalog.Snapshot;
+import com.scalar.db.nativejdbc.catalog.Catalog.VirtualTable;
+import com.scalar.db.nativejdbc.engine.Engine.QualifiedName;
+import java.sql.SQLException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Test;
+
+/** The classification of a stored name from ScalarDB's catalog rows, with no database. */
+class CatalogTest {
+
+  private static final List<String> TX =
+      List.of(
+          "tx_id",
+          "tx_state",
+          "tx_version",
+          "tx_prepared_at",
+          "tx_committed_at",
+          "before_tx_id",
+          "before_tx_state",
+          "before_tx_version",
+          "before_tx_prepared_at",
+          "before_tx_committed_at");
+
+  private static List<MetadataColumn> columns(String... namesWithKeys) {
+    List<MetadataColumn> out = new ArrayList<>();
+    for (String n : namesWithKeys) {
+      int colon = n.indexOf(':');
+      @Nullable String key = colon < 0 ? null : n.substring(colon + 1);
+      out.add(new MetadataColumn(colon < 0 ? n : n.substring(0, colon), key));
+    }
+    return out;
+  }
+
+  private static Snapshot snapshot() {
+    Map<String, List<MetadataColumn>> metadata = new HashMap<>();
+    metadata.put("ns.Orders_data", columns("Id:PARTITION", "K:CLUSTERING", "Amount"));
+    List<MetadataColumn> ordersMeta = columns("Id:PARTITION", "K:CLUSTERING", "before_Amount");
+    for (String t : TX) {
+      ordersMeta.add(new MetadataColumn(t, null));
+    }
+    metadata.put("ns.Orders_tx_metadata", ordersMeta);
+    metadata.put("app.orders", columns("id:PARTITION", "x", "y"));
+    List<MetadataColumn> classic = columns("id:PARTITION", "x", "before_x");
+    for (String t : TX) {
+      classic.add(new MetadataColumn(t, null));
+    }
+    metadata.put("ns.classic", classic);
+    metadata.put("app.storage_only", columns("id:PARTITION", "x"));
+    return new Snapshot(
+        true,
+        List.of(
+            new VirtualTable("ns.Orders", "ns.Orders_data", "ns.Orders_tx_metadata", "INNER"),
+            new VirtualTable(
+                "app.orders_scalardb", "app.orders", "app.orders_tx_metadata", "LEFT_OUTER")),
+        metadata,
+        Instant.EPOCH);
+  }
+
+  @Test
+  void createdDecoupledTable_isTheVirtualName_withTheDataTablesColumns() throws SQLException {
+    TableInfo t = snapshot().classify(new QualifiedName("ns", "Orders"));
+    assertThat(t.layout()).isEqualTo(Layout.DECOUPLED_CREATED);
+    assertThat(t.namespace()).isEqualTo("ns");
+    assertThat(t.table()).isEqualTo("Orders");
+    assertThat(t.dataTable()).isEqualTo("Orders_data");
+    assertThat(t.metadataTable()).isEqualTo("Orders_tx_metadata");
+    assertThat(t.virtualTable()).isEqualTo("Orders");
+    assertThat(t.keyColumns()).containsExactly("Id", "K");
+    assertThat(t.dataColumns()).containsExactly("Id", "K", "Amount");
+    assertThat(t.nonKeyColumns()).containsExactly("Amount");
+  }
+
+  @Test
+  void importedDecoupledTable_isTheLeftSource() throws SQLException {
+    TableInfo t = snapshot().classify(new QualifiedName("app", "orders"));
+    assertThat(t.layout()).isEqualTo(Layout.DECOUPLED_IMPORTED);
+    assertThat(t.dataTable()).isEqualTo("orders");
+    assertThat(t.metadataTable()).isEqualTo("orders_tx_metadata");
+    assertThat(t.virtualTable()).isEqualTo("orders_scalardb");
+    assertThat(t.keyColumns()).containsExactly("id");
+    assertThat(t.dataColumns()).containsExactly("id", "x", "y");
+  }
+
+  @Test
+  void classicTable_carriesTheTransactionColumns_whichAreNotDataColumns() throws SQLException {
+    TableInfo t = snapshot().classify(new QualifiedName("ns", "classic"));
+    assertThat(t.layout()).isEqualTo(Layout.CLASSIC);
+    assertThat(t.metadataTable()).isNull();
+    assertThat(t.dataColumns()).containsExactly("id", "x");
+  }
+
+  @Test
+  void plainTables_includeAScalarDbStorageOnlyTable_andAnythingUnknown() throws SQLException {
+    assertThat(snapshot().classify(new QualifiedName("app", "storage_only")).layout())
+        .isEqualTo(Layout.PLAIN);
+    assertThat(snapshot().classify(new QualifiedName("app", "nope")).layout())
+        .isEqualTo(Layout.PLAIN);
+  }
+
+  @Test
+  void theThreeNamesAStatementMustNotUse_areRefused() {
+    assertThatThrownBy(() -> snapshot().classify(new QualifiedName("ns", "Orders_data")))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("data table")
+        .extracting("SQLState")
+        .isEqualTo("42000");
+    assertThatThrownBy(() -> snapshot().classify(new QualifiedName("ns", "Orders_tx_metadata")))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("transaction metadata table");
+    assertThatThrownBy(() -> snapshot().classify(new QualifiedName("app", "orders_tx_metadata")))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("transaction metadata table");
+    assertThatThrownBy(() -> snapshot().classify(new QualifiedName("app", "orders_scalardb")))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("virtual table");
+  }
+
+  @Test
+  void storedSpellingIsExact_theEngineHasAlreadyResolvedIt() throws SQLException {
+    assertThat(snapshot().classify(new QualifiedName("ns", "orders")).layout())
+        .isEqualTo(Layout.PLAIN);
+    assertThat(snapshot().classify(new QualifiedName("APP", "orders")).layout())
+        .isEqualTo(Layout.PLAIN);
+  }
+}

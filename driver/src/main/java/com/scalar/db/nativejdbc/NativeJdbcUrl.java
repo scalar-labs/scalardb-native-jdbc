@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc;
 
+import com.scalar.db.nativejdbc.engine.Engine;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
@@ -19,8 +20,15 @@ public final class NativeJdbcUrl {
   /** The prefix every URL of this driver starts with. */
   public static final String PREFIX = "jdbc:scalardb-native:";
 
-  private static final Set<String> SUB_PROTOCOLS =
-      Set.of("postgresql", "mysql", "mariadb", "sqlserver", "oracle");
+  private static final Set<String> SUB_PROTOCOLS = subProtocols();
+
+  private static Set<String> subProtocols() {
+    Set<String> out = new java.util.HashSet<>();
+    for (Engine e : Engine.values()) {
+      out.add(e.subProtocol());
+    }
+    return Set.copyOf(out);
+  }
 
   private final String subProtocol;
   private final String vendorUrl;

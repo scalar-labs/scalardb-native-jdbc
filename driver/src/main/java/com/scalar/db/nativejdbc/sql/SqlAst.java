@@ -1,12 +1,10 @@
 package com.scalar.db.nativejdbc.sql;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import java.lang.reflect.Array;
-import java.lang.reflect.Field;
-import java.lang.reflect.Modifier;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -15,16 +13,19 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.TreeSet;
 import net.sf.jsqlparser.expression.Alias;
+import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
+import net.sf.jsqlparser.parser.ASTNodeAccess;
+import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.parser.Node;
 import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
+import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.delete.Delete;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.merge.Merge;
@@ -45,11 +46,12 @@ import org.jspecify.annotations.Nullable;
  *
  * <ul>
  *   <li><b>Touch nothing unless everything is understood.</b> A statement that cannot be parsed
- *       yields {@link Optional#empty()}; a rewrite that cannot locate the tokens of every reference
- *       it must change yields {@code null} rather than a partial result; and {@link
- *       #unknownNodes()} reports a table node the enumeration missed or a node type this class has
- *       not been taught, so that a parser update that grows the grammar fails closed instead of
- *       silently passing.
+ *       yields {@link Optional#empty()}; so does one whose syntax tree holds a table node the
+ *       reference walk did not visit, so that a parser update that grows the grammar fails closed
+ *       instead of silently passing; and a rewrite that cannot locate the tokens of every reference
+ *       it must change yields {@code null} rather than a partial result. Every check reads the
+ *       parser's public syntax tree, never its private fields, so nothing here goes blind when the
+ *       parser is loaded as a named module.
  *   <li><b>Decide by the tree, not the text.</b> The kind of statement comes from the AST type, so
  *       a leading comment does not change it; every table reference is found by walking the tree,
  *       so a second table in a join or a subquery is not missed; and literals are single tokens, so
@@ -123,81 +125,6 @@ public final class SqlAst {
     }
   }
 
-  /**
-   * The node types the rewrite has been taught. Measured from the statements of the tests, never
-   * guessed: a type that appears in a statement but not here is reported by {@link
-   * #unknownNodes()}.
-   */
-  private static final Set<String> KNOWN_NODE_TYPES =
-      Set.of(
-          "net.sf.jsqlparser.expression.Alias",
-          "net.sf.jsqlparser.expression.BooleanValue",
-          "net.sf.jsqlparser.expression.CaseExpression",
-          "net.sf.jsqlparser.expression.CastExpression",
-          "net.sf.jsqlparser.expression.DateValue",
-          "net.sf.jsqlparser.expression.DoubleValue",
-          "net.sf.jsqlparser.expression.Function",
-          "net.sf.jsqlparser.expression.JdbcNamedParameter",
-          "net.sf.jsqlparser.expression.JdbcParameter",
-          "net.sf.jsqlparser.expression.LongValue",
-          "net.sf.jsqlparser.expression.NotExpression",
-          "net.sf.jsqlparser.expression.NullValue",
-          "net.sf.jsqlparser.expression.SignedExpression",
-          "net.sf.jsqlparser.expression.StringValue",
-          "net.sf.jsqlparser.expression.TimeValue",
-          "net.sf.jsqlparser.expression.TimestampValue",
-          "net.sf.jsqlparser.expression.WhenClause",
-          "net.sf.jsqlparser.expression.operators.arithmetic.Addition",
-          "net.sf.jsqlparser.expression.operators.arithmetic.Concat",
-          "net.sf.jsqlparser.expression.operators.arithmetic.Division",
-          "net.sf.jsqlparser.expression.operators.arithmetic.Multiplication",
-          "net.sf.jsqlparser.expression.operators.arithmetic.Subtraction",
-          "net.sf.jsqlparser.expression.operators.conditional.AndExpression",
-          "net.sf.jsqlparser.expression.operators.conditional.OrExpression",
-          "net.sf.jsqlparser.expression.operators.relational.Between",
-          "net.sf.jsqlparser.expression.operators.relational.EqualsTo",
-          "net.sf.jsqlparser.expression.operators.relational.ExpressionList",
-          "net.sf.jsqlparser.expression.operators.relational.GreaterThan",
-          "net.sf.jsqlparser.expression.operators.relational.GreaterThanEquals",
-          "net.sf.jsqlparser.expression.operators.relational.InExpression",
-          "net.sf.jsqlparser.expression.operators.relational.IsNullExpression",
-          "net.sf.jsqlparser.expression.operators.relational.LikeExpression",
-          "net.sf.jsqlparser.expression.operators.relational.LikeExpression$KeyWord",
-          "net.sf.jsqlparser.expression.operators.relational.MinorThan",
-          "net.sf.jsqlparser.expression.operators.relational.MinorThanEquals",
-          "net.sf.jsqlparser.expression.operators.relational.NotEqualsTo",
-          "net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList",
-          "net.sf.jsqlparser.schema.Column",
-          "net.sf.jsqlparser.schema.Table",
-          "net.sf.jsqlparser.statement.ReturningClause",
-          "net.sf.jsqlparser.statement.ReturningClause$Keyword",
-          "net.sf.jsqlparser.statement.delete.Delete",
-          "net.sf.jsqlparser.statement.insert.Insert",
-          "net.sf.jsqlparser.statement.insert.Insert$OverridingMode",
-          "net.sf.jsqlparser.statement.select.AllColumns",
-          "net.sf.jsqlparser.statement.select.AllTableColumns",
-          "net.sf.jsqlparser.statement.select.Distinct",
-          "net.sf.jsqlparser.statement.select.Fetch",
-          "net.sf.jsqlparser.statement.select.ForMode",
-          "net.sf.jsqlparser.statement.select.GroupByElement",
-          "net.sf.jsqlparser.statement.select.Join",
-          "net.sf.jsqlparser.statement.select.LateralSubSelect",
-          "net.sf.jsqlparser.statement.select.Limit",
-          "net.sf.jsqlparser.statement.select.Offset",
-          "net.sf.jsqlparser.statement.select.OrderByElement",
-          "net.sf.jsqlparser.statement.select.ParenthesedSelect",
-          "net.sf.jsqlparser.statement.select.PlainSelect",
-          "net.sf.jsqlparser.statement.select.PlainSelect$EmitMode",
-          "net.sf.jsqlparser.statement.select.SelectItem",
-          "net.sf.jsqlparser.statement.select.SetOperationList",
-          "net.sf.jsqlparser.statement.select.SetOperationList$SetOperationType",
-          "net.sf.jsqlparser.statement.select.TableFunction",
-          "net.sf.jsqlparser.statement.select.UnionOp",
-          "net.sf.jsqlparser.statement.select.Values",
-          "net.sf.jsqlparser.statement.select.WithItem",
-          "net.sf.jsqlparser.statement.update.Update",
-          "net.sf.jsqlparser.statement.update.UpdateSet");
-
   /** Symbols that take no space before them. */
   private static final Set<String> NO_SPACE_BEFORE = Set.of(".", "..", ",", "(", ")", ";", "}");
 
@@ -210,7 +137,9 @@ public final class SqlAst {
   private final List<TableRef> cteRefs;
   private final List<ColumnRef> columnRefs;
   private final Set<String> cteNames;
-  private @Nullable List<String> unknownNodes;
+  private final Node root;
+  private final Set<Object> treeValues;
+  private final int parameterCount;
 
   private SqlAst(
       String source,
@@ -218,25 +147,37 @@ public final class SqlAst {
       List<TableRef> tableRefs,
       List<TableRef> cteRefs,
       List<ColumnRef> columnRefs,
-      Set<String> cteNames) {
+      Set<String> cteNames,
+      Node root,
+      Set<Object> treeValues,
+      int parameterCount) {
     this.source = source;
     this.statement = statement;
     this.tableRefs = tableRefs;
     this.cteRefs = cteRefs;
     this.columnRefs = columnRefs;
     this.cteNames = cteNames;
+    this.root = root;
+    this.treeValues = treeValues;
+    this.parameterCount = parameterCount;
   }
 
   /**
    * Parses one statement.
    *
    * @param sql the statement
-   * @return the AST, or empty when the parser or the reference walk cannot handle the statement
+   * @return the AST, or empty when the text is not exactly one statement, when the parser or the
+   *     reference walk cannot handle it, or when the syntax tree holds a table the walk missed
    */
   public static Optional<SqlAst> parse(String sql) {
     Statement stmt;
     try {
-      stmt = CCJSqlParserUtil.parse(sql);
+      // parseStatements, not parse: the latter silently keeps only the first of "a; b"
+      Statements statements = CCJSqlParserUtil.parseStatements(sql);
+      if (statements.size() != 1) {
+        return Optional.empty();
+      }
+      stmt = statements.get(0);
     } catch (Exception e) {
       return Optional.empty();
     }
@@ -267,6 +208,33 @@ public final class SqlAst {
     for (AllTableColumns a : walker.allTableColumns) {
       columns.add(new ColumnRef(null, a));
     }
+    Node root = rootOf(stmt, walker.tables, walker.columns, sql);
+    if (root == null) {
+      return Optional.empty();
+    }
+    Set<Object> values = valuesUnder(root);
+    // Every table node of the parser's own tree must be one the walk found, as a reference or as a
+    // column qualifier; otherwise a rewrite would leave it as written.
+    Set<Table> accounted = Collections.newSetFromMap(new IdentityHashMap<>());
+    accounted.addAll(walker.tables);
+    for (ColumnRef c : columns) {
+      Table q = c.qualifierNode();
+      if (q != null) {
+        accounted.add(q);
+      }
+    }
+    // A placeholder that is the operand of a cast or a sign has no tree node of its own, so the
+    // placeholders are the union of what the tree and the walk found.
+    Set<Object> parameters = Collections.newSetFromMap(new IdentityHashMap<>());
+    parameters.addAll(walker.parameters);
+    for (Object v : values) {
+      if (v instanceof Table && !accounted.contains(v)) {
+        return Optional.empty();
+      }
+      if (v instanceof JdbcParameter || v instanceof JdbcNamedParameter) {
+        parameters.add(v);
+      }
+    }
     return Optional.of(
         new SqlAst(
             sql,
@@ -274,7 +242,43 @@ public final class SqlAst {
             List.copyOf(tables),
             List.copyOf(ctes),
             List.copyOf(columns),
-            Set.copyOf(walker.cteNames)));
+            Set.copyOf(walker.cteNames),
+            root,
+            Collections.unmodifiableSet(values),
+            parameters.size()));
+  }
+
+  /**
+   * The root of the parser's syntax tree, reached from any node of the statement; for a statement
+   * without a single node, which can hold neither a table nor a placeholder, a fresh parse of the
+   * text supplies the token chain.
+   */
+  private static @Nullable Node rootOf(
+      Statement stmt, List<Table> tables, List<Column> columns, String sql) {
+    Node n = null;
+    for (Table t : tables) {
+      n = t.getASTNode();
+      if (n != null) {
+        break;
+      }
+    }
+    if (n == null && stmt instanceof ASTNodeAccess) {
+      n = ((ASTNodeAccess) stmt).getASTNode();
+    }
+    for (int i = 0; n == null && i < columns.size(); i++) {
+      n = columns.get(i).getASTNode();
+    }
+    if (n != null) {
+      while (n.jjtGetParent() != null) {
+        n = n.jjtGetParent();
+      }
+      return n;
+    }
+    try {
+      return CCJSqlParserUtil.parseAST(sql);
+    } catch (Exception e) {
+      return null;
+    }
   }
 
   /**
@@ -368,80 +372,12 @@ public final class SqlAst {
    * @return the placeholder count
    */
   public int parameterCount() {
-    int n = 0;
-    for (Object o : scanNodes().keySet()) {
-      if (o instanceof JdbcParameter || o instanceof JdbcNamedParameter) {
-        n++;
-      }
-    }
-    return n;
+    return parameterCount;
   }
 
-  /**
-   * Returns what the walk did not understand: {@code table:<name>} for a table node that is neither
-   * a table reference, a CTE reference nor a column qualifier, which a rewrite would miss; and
-   * {@code type:<class>} for a node type this class has not been taught. A caller that rewrites
-   * must refuse a statement with a {@code table:} entry; a {@code type:} entry means the statement
-   * is not one of the shapes the driver handles.
-   *
-   * @return the findings, empty when everything was understood
-   */
-  public List<String> unknownNodes() {
-    List<String> cached = unknownNodes;
-    if (cached != null) {
-      return cached;
-    }
-    List<String> out = new ArrayList<>();
-    Set<Table> accounted = Collections.newSetFromMap(new IdentityHashMap<>());
-    for (TableRef r : tableRefs) {
-      accounted.add(r.node);
-    }
-    for (TableRef r : cteRefs) {
-      accounted.add(r.node);
-    }
-    for (ColumnRef c : columnRefs) {
-      Table q = c.qualifierNode();
-      if (q != null) {
-        accounted.add(q);
-      }
-    }
-    Set<String> types = new TreeSet<>();
-    for (Object node : scanNodes().keySet()) {
-      types.add(node.getClass().getName());
-      if (node instanceof Table && !accounted.contains(node)) {
-        out.add("table:" + ((Table) node).getFullyQualifiedName());
-      }
-    }
-    for (String t : types) {
-      if (!KNOWN_NODE_TYPES.contains(t)) {
-        out.add("type:" + t);
-      }
-    }
-    cached = List.copyOf(out);
-    unknownNodes = cached;
-    return cached;
-  }
-
-  /**
-   * Returns whether {@link #unknownNodes()} is not empty.
-   *
-   * @return whether something was not understood
-   */
-  public boolean hasUnknownNodes() {
-    return !unknownNodes().isEmpty();
-  }
-
-  /**
-   * Returns the node types that appear in the statement.
-   *
-   * @return the class names, sorted
-   */
-  public Set<String> nodeTypes() {
-    Set<String> types = new TreeSet<>();
-    for (Object node : scanNodes().keySet()) {
-      types.add(node.getClass().getName());
-    }
-    return types;
+  /** The value of every node of the syntax tree, each once, by identity. For the test oracle. */
+  Set<Object> treeValues() {
+    return treeValues;
   }
 
   /**
@@ -465,8 +401,7 @@ public final class SqlAst {
    *     result does not parse, in which case nothing has been rewritten
    */
   public @Nullable String joinTokens(@Nullable Naming naming) {
-    Node root = astRoot();
-    if (root == null || root.jjtGetFirstToken() == null) {
+    if (root.jjtGetFirstToken() == null) {
       return null;
     }
     Map<Token, String> from = new IdentityHashMap<>();
@@ -477,9 +412,12 @@ public final class SqlAst {
     StringBuilder out = new StringBuilder();
     Token skipEnd = null;
     String prev = null;
+    // whether the last appended token is a line comment, which only a newline closes
+    boolean openLineComment = false;
     for (Token t = root.jjtGetFirstToken(); t != null; t = t.next) {
       for (Token sp : specialTokensOf(t)) {
-        appendToken(out, prev, sp.image);
+        appendToken(out, prev, sp.image, openLineComment);
+        openLineComment = isLineComment(sp);
         prev = null; // nothing is tightened right after a comment
       }
       if (t.kind == 0 || t.image.isEmpty()) {
@@ -493,13 +431,15 @@ public final class SqlAst {
       }
       String put = from.get(t);
       if (put != null) {
-        appendToken(out, prev, put);
+        appendToken(out, prev, put, openLineComment);
+        openLineComment = false;
         prev = put;
         Token end = to.get(t);
         skipEnd = end == t ? null : end;
         continue;
       }
-      appendToken(out, prev, t.image);
+      appendToken(out, prev, t.image, openLineComment);
+      openLineComment = false;
       prev = t.image;
     }
     String joined = out.toString().strip();
@@ -575,23 +515,6 @@ public final class SqlAst {
     return false;
   }
 
-  private @Nullable Node astRoot() {
-    for (TableRef r : tableRefs) {
-      Node n = r.node.getASTNode();
-      if (n != null) {
-        while (n.jjtGetParent() != null) {
-          n = n.jjtGetParent();
-        }
-        return n;
-      }
-    }
-    try {
-      return CCJSqlParserUtil.parseAST(source); // nothing to replace in a statement without tables
-    } catch (Exception e) {
-      return null;
-    }
-  }
-
   /** Turns the plan into token instructions: first token to text, and first token to last token. */
   private boolean collectReplacements(Rewrite plan, Map<Token, String> from, Map<Token, Token> to) {
     for (Map.Entry<TableRef, String> e : plan.tables.entrySet()) {
@@ -631,15 +554,26 @@ public final class SqlAst {
     return true;
   }
 
-  private static void appendToken(StringBuilder out, @Nullable String prev, String image) {
+  /**
+   * Appends {@code image}, after a newline when a line comment is open and else after a space where
+   * two tokens would otherwise fuse. The decision is by token kind, never by the text: a line
+   * comment may contain anything, the end of a block comment included.
+   */
+  private static void appendToken(
+      StringBuilder out, @Nullable String prev, String image, boolean afterLineComment) {
     if (out.length() > 0) {
-      if (endsWithOpenLineComment(out)) {
+      if (afterLineComment) {
         out.append('\n');
       } else if (needsSeparator(prev, image)) {
         out.append(' ');
       }
     }
     out.append(image);
+  }
+
+  private static boolean isLineComment(Token t) {
+    return t.kind == CCJSqlParserConstants.LINE_COMMENT
+        || t.kind == CCJSqlParserConstants.HASH_LINE_COMMENT;
   }
 
   /**
@@ -653,13 +587,6 @@ public final class SqlAst {
     return !NO_SPACE_AFTER.contains(prev) && !NO_SPACE_BEFORE.contains(image);
   }
 
-  private static boolean endsWithOpenLineComment(StringBuilder out) {
-    int nl = out.lastIndexOf("\n");
-    String lastLine = out.substring(nl + 1);
-    int lc = lastLine.lastIndexOf("--");
-    return lc >= 0 && !lastLine.substring(lc).contains("*/");
-  }
-
   /** The special tokens, comments, are chained in reverse; returned in text order. */
   private static List<Token> specialTokensOf(Token t) {
     if (t.specialToken == null) {
@@ -667,8 +594,9 @@ public final class SqlAst {
     }
     List<Token> out = new ArrayList<>();
     for (Token s = t.specialToken; s != null; s = s.specialToken) {
-      out.add(0, s);
+      out.add(s);
     }
+    Collections.reverse(out);
     return out;
   }
 
@@ -749,6 +677,11 @@ public final class SqlAst {
   public static final class TableRef {
     private final Table node;
     private final boolean qualifier;
+
+    /** The parser's node. */
+    Table node() {
+      return node;
+    }
 
     private TableRef(Table node, boolean qualifier) {
       this.node = node;
@@ -904,7 +837,7 @@ public final class SqlAst {
 
     /**
      * Whether this reference's node is one of {@code nodes}, an identity set from {@code
-     * nodesUnder}.
+     * valuesUnder}.
      */
     boolean isAmong(Set<Object> nodes) {
       return column != null && nodes.contains(column);
@@ -947,12 +880,28 @@ public final class SqlAst {
     }
   }
 
-  /** Collects the tables, columns and CTE names while riding on the parser's own traversal. */
+  /**
+   * Collects the tables, columns, placeholders and CTE names while riding on the parser's own
+   * traversal.
+   */
   private static final class Walker extends TablesNamesFinder<Void> {
     final List<Table> tables = new ArrayList<>();
     final List<Column> columns = new ArrayList<>();
     final List<AllTableColumns> allTableColumns = new ArrayList<>();
+    final List<Object> parameters = new ArrayList<>();
     final Set<String> cteNames = new LinkedHashSet<>();
+
+    @Override
+    public <S> Void visit(JdbcParameter parameter, S context) {
+      parameters.add(parameter);
+      return super.visit(parameter, context);
+    }
+
+    @Override
+    public <S> Void visit(JdbcNamedParameter parameter, S context) {
+      parameters.add(parameter);
+      return super.visit(parameter, context);
+    }
 
     @Override
     public <S> Void visit(WithItem<?> withItem, S context) {
@@ -998,77 +947,33 @@ public final class SqlAst {
     }
   }
 
-  /** Every {@code net.sf.jsqlparser} object reachable from the statement, found by reflection. */
-  private Map<Object, Boolean> scanNodes() {
-    Map<Object, Boolean> seen = new IdentityHashMap<>();
-    scan(statement, seen, 0);
-    return seen;
-  }
-
   /**
-   * Returns every {@code net.sf.jsqlparser} node reachable from {@code root}, by identity, so a
-   * caller can tell which references lie inside one clause.
+   * Returns the values of every syntax-tree node under {@code expression}, itself included, by
+   * identity, so a caller can tell which references lie inside one clause.
    *
-   * @param root a node of the statement, such as a {@code WHERE} expression
-   * @return the nodes under it, including itself
+   * @param expression an expression of the statement, such as a {@code WHERE} clause
+   * @return the values under it, or {@code null} when the expression carries no syntax tree
    */
-  static Set<Object> nodesUnder(Object root) {
-    Map<Object, Boolean> seen = new IdentityHashMap<>();
-    scan(root, seen, 0);
-    return seen.keySet();
+  static @Nullable Set<Object> valuesUnder(Expression expression) {
+    Node n = expression.getASTNode();
+    return n == null ? null : valuesUnder(n);
   }
 
-  private static void scan(@Nullable Object o, Map<Object, Boolean> seen, int depth) {
-    if (o == null || depth > 64) {
-      return;
-    }
-    Class<?> k = o.getClass();
-    String name = k.getName();
-    boolean node =
-        name.startsWith("net.sf.jsqlparser.") && !name.startsWith("net.sf.jsqlparser.parser.");
-    if (node) {
-      if (seen.put(o, Boolean.TRUE) != null) {
-        return;
+  /** Iterative, with no depth limit: a predicate of any length is walked in full. */
+  private static Set<Object> valuesUnder(Node root) {
+    Set<Object> out = Collections.newSetFromMap(new IdentityHashMap<>());
+    Deque<Node> stack = new ArrayDeque<>();
+    stack.push(root);
+    while (!stack.isEmpty()) {
+      Node n = stack.pop();
+      Object v = n.jjtGetValue();
+      if (v != null) {
+        out.add(v);
       }
-      if (o instanceof Enum<?>) {
-        return;
-      }
-    }
-    if (o instanceof Collection<?>) {
-      for (Object e : (Collection<?>) o) {
-        scan(e, seen, depth + 1);
-      }
-    } else if (o instanceof Map<?, ?>) {
-      for (Map.Entry<?, ?> e : ((Map<?, ?>) o).entrySet()) {
-        scan(e.getKey(), seen, depth + 1);
-        scan(e.getValue(), seen, depth + 1);
-      }
-    } else if (k.isArray() && !k.getComponentType().isPrimitive()) {
-      int n = Array.getLength(o);
-      for (int i = 0; i < n; i++) {
-        scan(Array.get(o, i), seen, depth + 1);
+      for (int i = n.jjtGetNumChildren() - 1; i >= 0; i--) {
+        stack.push(n.jjtGetChild(i));
       }
     }
-    if (!node) {
-      return;
-    }
-    for (Class<?> c = k; c != null && c != Object.class; c = c.getSuperclass()) {
-      if (!c.getName().startsWith("net.sf.jsqlparser.")) {
-        continue;
-      }
-      for (Field f : c.getDeclaredFields()) {
-        if (Modifier.isStatic(f.getModifiers()) || f.getType().isPrimitive()) {
-          continue;
-        }
-        Object v;
-        try {
-          f.setAccessible(true);
-          v = f.get(o);
-        } catch (RuntimeException | ReflectiveOperationException e) {
-          continue;
-        }
-        scan(v, seen, depth + 1);
-      }
-    }
+    return out;
   }
 }

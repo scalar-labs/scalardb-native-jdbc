@@ -1,17 +1,28 @@
 package com.scalar.db.nativejdbc.sql;
 
+import com.scalar.db.nativejdbc.engine.Engine;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import net.sf.jsqlparser.expression.CastExpression;
+import net.sf.jsqlparser.expression.DateValue;
+import net.sf.jsqlparser.expression.DoubleValue;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.Function;
+import net.sf.jsqlparser.expression.HexValue;
+import net.sf.jsqlparser.expression.JdbcNamedParameter;
+import net.sf.jsqlparser.expression.JdbcParameter;
+import net.sf.jsqlparser.expression.LongValue;
+import net.sf.jsqlparser.expression.SignedExpression;
+import net.sf.jsqlparser.expression.StringValue;
+import net.sf.jsqlparser.expression.TimeValue;
+import net.sf.jsqlparser.expression.TimestampValue;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
-import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
@@ -35,8 +46,11 @@ import org.jspecify.annotations.Nullable;
  * <p>{@link #of} returns empty for every other shape: several tables, a join, a subquery over a
  * table, a set operation, a CTE, {@code INSERT ... SELECT}, {@code MERGE}, a multi-column {@code
  * SET}, a column qualified by anything but this table's name or alias, a second statement after a
- * {@code ;}, and any node type the AST wrapper has not been taught. The caller decides what empty
- * means: a read goes to the committed-image view, a write is refused.
+ * {@code ;}, the modifiers that change what a statement does ({@code INSERT IGNORE} and {@code
+ * UPDATE IGNORE}, {@code ON DUPLICATE KEY UPDATE}, {@code ON CONFLICT}, an {@code OUTPUT} clause,
+ * {@code SKIP LOCKED}, {@code NOWAIT} and {@code WAIT}), an optimizer hint, a table hint and {@code
+ * TABLESAMPLE}, and a clause without a syntax tree. The caller decides what empty means: a read
+ * goes to the committed-image view, a write is refused.
  *
  * <p>Values are never interpreted here. The native database evaluates every literal and expression;
  * the driver only needs the structure: which table, which columns, where the predicate is, and
@@ -57,6 +71,7 @@ public final class StatementShape {
   }
 
   private final SqlAst ast;
+  private final Engine engine;
   private final Kind kind;
   private final SqlAst.TableRef table;
   private final boolean selectAll;
@@ -74,6 +89,7 @@ public final class StatementShape {
 
   private StatementShape(Builder b) {
     this.ast = b.ast;
+    this.engine = b.engine;
     this.kind = b.kind;
     this.table = b.table;
     this.selectAll = b.selectAll;
@@ -94,30 +110,32 @@ public final class StatementShape {
    * Classifies a statement.
    *
    * @param sql one statement
+   * @param engine the engine whose identifier rules resolve the column names
    * @return the shape, or empty when the statement is not one of the single-table shapes
    */
-  public static Optional<StatementShape> of(String sql) {
-    if (hasSecondStatement(sql)) {
-      return Optional.empty();
-    }
-    return SqlAst.parse(sql).flatMap(StatementShape::of);
+  public static Optional<StatementShape> of(String sql, Engine engine) {
+    return SqlAst.parse(sql).flatMap(ast -> of(ast, engine));
   }
 
   /**
-   * Classifies a parsed statement.
+   * Classifies a parsed statement. Column names are resolved the way {@code engine} resolves them
+   * ({@link Engine#resolveIdentifier}) and compared the way it compares them ({@link
+   * Engine#columnKey}), so that {@code Amount} and {@code amount} are one column on MySQL and two
+   * on PostgreSQL.
    *
    * @param ast the statement
+   * @param engine the engine whose identifier rules resolve the column names
    * @return the shape, or empty when the statement is not one of the single-table shapes
    */
-  public static Optional<StatementShape> of(SqlAst ast) {
-    if (ast.hasUnknownNodes() || ast.tableRefs().size() != 1 || !ast.cteRefs().isEmpty()) {
+  public static Optional<StatementShape> of(SqlAst ast, Engine engine) {
+    if (ast.tableRefs().size() != 1 || !ast.cteRefs().isEmpty()) {
       return Optional.empty();
     }
     SqlAst.TableRef table = ast.tableRefs().get(0);
-    if (table.partCount() > 2) {
+    if (table.partCount() > 2 || hasTableHint(table)) {
       return Optional.empty();
     }
-    Builder b = new Builder(ast, table);
+    Builder b = new Builder(ast, table, engine);
     if (!b.resolveColumnQualifiers()) {
       return Optional.empty();
     }
@@ -135,24 +153,6 @@ public final class StatementShape {
       ok = false;
     }
     return ok ? Optional.of(new StatementShape(b)) : Optional.empty();
-  }
-
-  /**
-   * The parser keeps only the first statement of a {@code a; b}, so a second one is refused here.
-   */
-  private static boolean hasSecondStatement(String sql) {
-    String s = sql.strip();
-    while (s.endsWith(";")) {
-      s = s.substring(0, s.length() - 1).strip();
-    }
-    if (s.indexOf(';') < 0) {
-      return false;
-    }
-    try {
-      return CCJSqlParserUtil.parseStatements(sql).size() > 1;
-    } catch (Exception e) {
-      return true;
-    }
   }
 
   /**
@@ -297,10 +297,12 @@ public final class StatementShape {
 
   /**
    * Returns whether the {@code WHERE} clause addresses exactly the given key: a conjunction of
-   * {@code column = value} terms, one per key column and nothing else. Such a statement is a key
-   * read or a key write.
+   * {@code column = value} terms, one per key column and nothing else, where each value is a
+   * placeholder or a literal, possibly signed or cast. Such a statement is a key read or a key
+   * write; {@code id = id + 0}, {@code id = (select ...)}, {@code id = f(...)} and {@code id =
+   * null} are not.
    *
-   * @param keyColumns the resolved names of the table's key columns
+   * @param keyColumns the table's key columns as the catalog spells them
    * @return whether the predicate is a key equality
    */
   public boolean isKeyEquality(List<String> keyColumns) {
@@ -310,6 +312,10 @@ public final class StatementShape {
     List<Expression> terms = new ArrayList<>();
     flattenAnd(where, terms);
     Set<String> seen = new LinkedHashSet<>();
+    Set<String> keys = new LinkedHashSet<>();
+    for (String k : keyColumns) {
+      keys.add(engine.columnKey(k));
+    }
     for (Expression term : terms) {
       if (!(term instanceof EqualsTo)) {
         return false;
@@ -326,11 +332,41 @@ public final class StatementShape {
       } else {
         return false;
       }
-      if (other instanceof Column || !seen.add(SqlAst.resolve(c.getColumnName()))) {
-        return false; // a column-to-column term, or the same key column twice
+      if (!isConstant(other)
+          || !seen.add(engine.columnKey(engine.resolveIdentifier(c.getColumnName())))) {
+        return false; // not a value the engine can bind as a key, or the same key column twice
       }
     }
-    return seen.size() == keyColumns.size() && seen.containsAll(keyColumns);
+    return seen.equals(keys);
+  }
+
+  /** A placeholder or a literal, possibly signed or cast; everything else fails closed. */
+  private static boolean isConstant(Expression e) {
+    if (e instanceof SignedExpression) {
+      return isConstant(((SignedExpression) e).getExpression());
+    }
+    if (e instanceof CastExpression) {
+      return isConstant(((CastExpression) e).getLeftExpression());
+    }
+    return e instanceof JdbcParameter
+        || e instanceof JdbcNamedParameter
+        || e instanceof LongValue
+        || e instanceof DoubleValue
+        || e instanceof StringValue
+        || e instanceof DateValue
+        || e instanceof TimeValue
+        || e instanceof TimestampValue
+        || e instanceof HexValue;
+  }
+
+  /** A hint or a sample clause on the table itself, which a renamed table may not carry. */
+  private static boolean hasTableHint(SqlAst.TableRef ref) {
+    Table t = ref.node();
+    return t.getIndexHint() != null
+        || t.getSqlServerHints() != null
+        || t.getSampleClause() != null
+        || t.getPivot() != null
+        || t.getUnPivot() != null;
   }
 
   private static void flattenAnd(Expression e, List<Expression> out) {
@@ -347,6 +383,7 @@ public final class StatementShape {
   private static final class Builder {
     final SqlAst ast;
     final SqlAst.TableRef table;
+    final Engine engine;
     Kind kind = Kind.SELECT;
     boolean selectAll;
     List<String> selectColumns = List.of();
@@ -361,9 +398,10 @@ public final class StatementShape {
     List<String> setColumns = List.of();
     boolean returning;
 
-    Builder(SqlAst ast, SqlAst.TableRef table) {
+    Builder(SqlAst ast, SqlAst.TableRef table, Engine engine) {
       this.ast = ast;
       this.table = table;
+      this.engine = engine;
     }
 
     /**
@@ -402,7 +440,10 @@ public final class StatementShape {
           || (s.getIntoTables() != null && !s.getIntoTables().isEmpty())
           || (s.getWithItemsList() != null && !s.getWithItemsList().isEmpty())
           || s.getTop() != null
-          || s.getOracleHint() != null) {
+          || s.getOracleHint() != null
+          || s.isSkipLocked() // the flags below are primitives, invisible to the node-type scan
+          || s.isNoWait()
+          || s.getWait() != null) {
         return false;
       }
       List<SelectItem<?>> items = s.getSelectItems();
@@ -421,7 +462,7 @@ public final class StatementShape {
           selectAll = true;
           plain = false;
         } else if (e instanceof Column && item.getAlias() == null) {
-          columns.add(SqlAst.resolve(((Column) e).getColumnName()));
+          columns.add(engine.resolveIdentifier(((Column) e).getColumnName()));
         } else {
           plain = false;
           if (containsFunction(e)) {
@@ -442,8 +483,14 @@ public final class StatementShape {
       kind = Kind.INSERT;
       if (table.hasAlias()
           || !(i.getSelect() instanceof Values)
-          || (i.getSetUpdateSets() != null && !i.getSetUpdateSets().isEmpty())) {
-        return false; // INSERT ... SELECT, and INSERT ... SET, are out of scope
+          || (i.getSetUpdateSets() != null && !i.getSetUpdateSets().isEmpty())
+          || i.isModifierIgnore() // an upsert in disguise: a collision looks like success
+          || (i.getDuplicateUpdateSets() != null && !i.getDuplicateUpdateSets().isEmpty())
+          || i.getConflictTarget() != null
+          || i.getConflictAction() != null
+          || i.getOutputClause() != null
+          || i.getOracleHint() != null) {
+        return false; // INSERT ... SELECT, INSERT ... SET and every upsert form are out of scope
       }
       ExpressionList<Column> cols = i.getColumns();
       if (cols != null) {
@@ -452,7 +499,7 @@ public final class StatementShape {
           if (c.getTable() != null) {
             return false;
           }
-          names.add(SqlAst.resolve(c.getColumnName()));
+          names.add(engine.resolveIdentifier(c.getColumnName()));
         }
         insertColumns = names;
       }
@@ -479,7 +526,10 @@ public final class StatementShape {
           || (u.getJoins() != null && !u.getJoins().isEmpty())
           || (u.getStartJoins() != null && !u.getStartJoins().isEmpty())
           || u.getLimit() != null
-          || (u.getOrderByElements() != null && !u.getOrderByElements().isEmpty())) {
+          || (u.getOrderByElements() != null && !u.getOrderByElements().isEmpty())
+          || u.isModifierIgnore()
+          || u.getOutputClause() != null
+          || u.getOracleHint() != null) {
         return false;
       }
       List<UpdateSet> sets = u.getUpdateSets();
@@ -491,7 +541,7 @@ public final class StatementShape {
         if (set.getColumns().size() != 1 || set.getValues().size() != 1) {
           return false; // SET (a, b) = (?, ?)
         }
-        names.add(SqlAst.resolve(set.getColumn(0).getColumnName()));
+        names.add(engine.resolveIdentifier(set.getColumn(0).getColumnName()));
       }
       setColumns = names;
       returning = u.getReturningClause() != null;
@@ -504,7 +554,10 @@ public final class StatementShape {
       if ((d.getTables() != null && !d.getTables().isEmpty())
           || (d.getJoins() != null && !d.getJoins().isEmpty())
           || d.getLimit() != null
-          || (d.getOrderByElements() != null && !d.getOrderByElements().isEmpty())) {
+          || (d.getOrderByElements() != null && !d.getOrderByElements().isEmpty())
+          || d.isModifierIgnore()
+          || d.getOutputClause() != null
+          || d.getOracleHint() != null) {
         return false;
       }
       returning = d.getReturningClause() != null;
@@ -516,11 +569,14 @@ public final class StatementShape {
       if (w == null) {
         return true;
       }
-      Set<Object> nodes = SqlAst.nodesUnder(w);
+      Set<Object> nodes = SqlAst.valuesUnder(w);
+      if (nodes == null) {
+        return false; // a predicate that cannot be inspected is not understood
+      }
       Set<String> names = new LinkedHashSet<>();
       for (SqlAst.ColumnRef c : ast.columnRefs()) {
         if (c.isAmong(nodes)) {
-          names.add(c.resolvedName());
+          names.add(engine.resolveIdentifier(c.name()));
         }
       }
       whereColumns = new ArrayList<>(names);
@@ -528,7 +584,11 @@ public final class StatementShape {
     }
 
     private static boolean containsFunction(Expression e) {
-      for (Object node : SqlAst.nodesUnder(e)) {
+      Set<Object> nodes = SqlAst.valuesUnder(e);
+      if (nodes == null) {
+        return true; // not inspectable: assume the worst, which only costs the anchor
+      }
+      for (Object node : nodes) {
         if (node instanceof Function) {
           return true;
         }
@@ -536,8 +596,8 @@ public final class StatementShape {
       return false;
     }
 
-    private static boolean sameIdentifier(String a, String b) {
-      return SqlAst.resolve(a).equals(SqlAst.resolve(b));
+    private boolean sameIdentifier(String a, String b) {
+      return engine.resolveIdentifier(a).equals(engine.resolveIdentifier(b));
     }
   }
 }

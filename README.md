@@ -53,7 +53,10 @@ Requires JDK 25 to build; the driver artifact is compiled for Java 11 with `--re
 ./gradlew spotlessApply  # format to the Google Java Style Guide
 ```
 
-The integration tests run database containers through Testcontainers and need Docker.
+The integration tests run database containers through Testcontainers and need Docker. They run
+against all five engines by default; `-Dnativejdbc.engines=postgresql,mysql` selects a subset
+(`postgresql`, `mysql`, `mariadb`, `sqlserver`, `oracle`). Oracle and SQL Server take a minute or
+more to start, and SQL Server runs under emulation on Apple Silicon.
 
 | Path | What |
 | --- | --- |

@@ -2,6 +2,7 @@ package com.scalar.db.nativejdbc.sql;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.scalar.db.nativejdbc.engine.Engine;
 import java.util.List;
 import net.sf.jsqlparser.statement.select.ForMode;
 import org.junit.jupiter.api.Test;
@@ -11,7 +12,54 @@ import org.junit.jupiter.params.provider.ValueSource;
 class StatementShapeTest {
 
   private static StatementShape shape(String sql) {
-    return StatementShape.of(sql).orElseThrow();
+    return StatementShape.of(sql, Engine.POSTGRESQL).orElseThrow();
+  }
+
+  @Test
+  void columnNames_followTheEngineRule() {
+    String unquoted = "update t set x = ? where amount = ?";
+    String quoted = "update t set x = ? where \"Amount\" = ?";
+    assertThat(shape(unquoted).whereColumns()).containsExactly("amount");
+    assertThat(StatementShape.of(unquoted, Engine.ORACLE).orElseThrow().whereColumns())
+        .containsExactly("AMOUNT");
+    assertThat(StatementShape.of(unquoted, Engine.MYSQL).orElseThrow().whereColumns())
+        .containsExactly("amount");
+    for (Engine e : Engine.values()) {
+      assertThat(StatementShape.of(quoted, e).orElseThrow().whereColumns())
+          .as("%s keeps a quoted name", e)
+          .containsExactly("Amount");
+      assertThat(StatementShape.of(quoted, e).orElseThrow().isKeyEquality(List.of("Amount")))
+          .as("%s matches the catalog spelling when quoted", e)
+          .isTrue();
+    }
+    // the catalog spells the key column "Amount": only engines that ignore case match the unquoted
+    // spelling, and Oracle matches its own upper-case fold
+    assertThat(shape(unquoted).isKeyEquality(List.of("Amount"))).isFalse();
+    assertThat(
+            StatementShape.of(unquoted, Engine.MYSQL)
+                .orElseThrow()
+                .isKeyEquality(List.of("Amount")))
+        .isTrue();
+    assertThat(
+            StatementShape.of(unquoted, Engine.MARIADB)
+                .orElseThrow()
+                .isKeyEquality(List.of("Amount")))
+        .isTrue();
+    assertThat(
+            StatementShape.of(unquoted, Engine.SQLSERVER)
+                .orElseThrow()
+                .isKeyEquality(List.of("Amount")))
+        .isTrue();
+    assertThat(
+            StatementShape.of(unquoted, Engine.ORACLE)
+                .orElseThrow()
+                .isKeyEquality(List.of("Amount")))
+        .isFalse();
+    assertThat(
+            StatementShape.of(unquoted, Engine.ORACLE)
+                .orElseThrow()
+                .isKeyEquality(List.of("AMOUNT")))
+        .isTrue();
   }
 
   @Test
@@ -72,6 +120,40 @@ class StatementShapeTest {
     assertThat(shape("select * from t").isKeyEquality(List.of("id"))).isFalse();
   }
 
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "id = ?",
+        "id = :id",
+        "? = id",
+        "id = 1",
+        "id = -1",
+        "id = 'a'",
+        "id = {d '2020-01-01'}",
+        "id = cast(? as int)",
+        "id = ?::bigint",
+        "id = -cast(? as int)"
+      })
+  void keyEquality_acceptsPlaceholdersAndLiterals_signedOrCast(String term) {
+    assertThat(shape("update t set x = ? where " + term).isKeyEquality(List.of("id"))).isTrue();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "id = id + 0", // every row, not one
+        "id = id",
+        "id = (select 5)",
+        "id = null", // no row
+        "id = abs(1)",
+        "id = coalesce(?, 0)",
+        "id = cast(k as int)",
+        "id = x + ?"
+      })
+  void keyEquality_refusesAnythingButAValue(String term) {
+    assertThat(shape("update t set x = ? where " + term).isKeyEquality(List.of("id"))).isFalse();
+  }
+
   @Test
   void insert_withAndWithoutColumnList_andRows() {
     StatementShape one = shape("insert into t (id, x) values (?, ?)");
@@ -117,6 +199,21 @@ class StatementShapeTest {
         "select s.t.id from u.t", // qualified by the wrong schema
         "insert into t select * from u",
         "insert into t (id) values (?); delete from t",
+        "insert ignore into t (id) values (?)",
+        "update ignore t set x = ? where id = ?",
+        "insert into t (id) values (?) on duplicate key update x = 1",
+        "insert into t (id) values (?) on conflict (id) do nothing",
+        "insert into t (id) output inserted.id values (?)",
+        "select * from t where id = ? for update skip locked",
+        "select * from t where id = ? for update nowait",
+        "select * from t where id = ? for update wait 5",
+        "select /*+ full(t) */ * from t where id = ?",
+        "update /*+ index(t i) */ t set x = ? where id = ?",
+        "delete /*+ parallel */ from t where id = ?",
+        "insert /*+ append */ into t (id) values (?)",
+        "select * from t with (nolock) where id = ?",
+        "select * from t use index (i) where id = ?",
+        "select * from t tablesample system (10)",
         "merge into t using s on t.id = s.id when matched then update set x = s.x",
         "update t set (x, y) = (?, ?) where id = ?",
         "update t set x = 1 where id = ? limit 1",
@@ -128,7 +225,32 @@ class StatementShapeTest {
         "select from where"
       })
   void of_isEmptyForShapesTheDriverDoesNotHandle(String sql) {
-    assertThat(StatementShape.of(sql)).isEmpty();
+    assertThat(StatementShape.of(sql, Engine.POSTGRESQL)).isEmpty();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "update t set x = ?, updated_at = current_timestamp where id = ?",
+        "select * from t where id = ? and n % 2 = 0",
+        "select * from t where x is distinct from ?",
+        "select * from t order by x nulls last",
+        "select * from t where d > current_date - interval '1 day'",
+        "select * from t where x is true",
+        "select * from t where x ~ 'a.*'",
+        "select x, row_number() over (order by y) from t where id = ?"
+      })
+  void of_acceptsOrdinaryExpressions_whateverTheirNodeTypes(String sql) {
+    assertThat(StatementShape.of(sql, Engine.POSTGRESQL)).isPresent();
+  }
+
+  @Test
+  void whereColumns_areWalkedInFull_howeverLongThePredicate() {
+    StringBuilder b = new StringBuilder("select * from t where c0 = ?");
+    for (int i = 1; i < 100; i++) {
+      b.append(" and c").append(i).append(" = ?");
+    }
+    assertThat(shape(b.toString()).whereColumns()).hasSize(100);
   }
 
   @Test

@@ -163,6 +163,7 @@ dependencies {
     testImplementation(libs.assertj.core)
 
     "integrationTestCompileOnly"(libs.jspecify)
+    "integrationTestCompileOnly"(libs.spotbugs.annotations)
     "integrationTestImplementation"(libs.assertj.core)
 }
 

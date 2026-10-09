@@ -1,0 +1,212 @@
+package com.scalar.db.nativejdbc.testing;
+
+import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.nativejdbc.engine.Engine;
+import com.scalar.db.service.TransactionFactory;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
+import org.testcontainers.containers.JdbcDatabaseContainer;
+import org.testcontainers.mariadb.MariaDBContainer;
+import org.testcontainers.mssqlserver.MSSQLServerContainer;
+import org.testcontainers.mysql.MySQLContainer;
+import org.testcontainers.oracle.OracleContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+
+/**
+ * One database container per engine per JVM, started on first use and reaped by Testcontainers when
+ * the JVM ends. Select engines with {@code -Dnativejdbc.engines=postgresql,oracle}; the default,
+ * {@code all}, runs the five. The connection is always the administrative one, which the fixtures
+ * and ScalarDB's admin both need.
+ */
+public enum Engines {
+  POSTGRESQL(Engine.POSTGRESQL) {
+    @Override
+    JdbcDatabaseContainer<?> create() {
+      return new PostgreSQLContainer("postgres:16");
+    }
+  },
+  MYSQL(Engine.MYSQL) {
+    @Override
+    JdbcDatabaseContainer<?> create() {
+      return new MySQLContainer("mysql:8.4").withUsername("root").withPassword("test");
+    }
+  },
+  MARIADB(Engine.MARIADB) {
+    @Override
+    JdbcDatabaseContainer<?> create() {
+      return new MariaDBContainer("mariadb:11.4").withUsername("root").withPassword("test");
+    }
+  },
+  SQLSERVER(Engine.SQLSERVER) {
+    @Override
+    JdbcDatabaseContainer<?> create() {
+      return new MSSQLServerContainer("mcr.microsoft.com/mssql/server:2022-latest").acceptLicense();
+    }
+
+    @Override
+    String url(JdbcDatabaseContainer<?> c) throws SQLException {
+      // ScalarDB works inside one database; master is not the place for application schemas
+      try (Connection conn =
+              DriverManager.getConnection(c.getJdbcUrl(), c.getUsername(), c.getPassword());
+          Statement st = conn.createStatement()) {
+        st.execute("CREATE DATABASE appdb");
+      }
+      return c.getJdbcUrl() + ";databaseName=appdb";
+    }
+  },
+  ORACLE(Engine.ORACLE) {
+    @Override
+    JdbcDatabaseContainer<?> create() {
+      return new OracleContainer("gvenzl/oracle-free:23-slim-faststart");
+    }
+
+    @Override
+    String username(JdbcDatabaseContainer<?> c) {
+      return "system"; // ScalarDB creates a user per namespace, which needs DBA rights
+    }
+
+    @Override
+    String isolation() {
+      return "SERIALIZABLE"; // Oracle has no REPEATABLE READ
+    }
+  };
+
+  private static final Map<Engines, Started> STARTED = new EnumMap<>(Engines.class);
+
+  private static final class Started {
+    final String url;
+    final String username;
+    final String password;
+
+    Started(String url, String username, String password) {
+      this.url = url;
+      this.username = username;
+      this.password = password;
+    }
+  }
+
+  private final Engine engine;
+
+  Engines(Engine engine) {
+    this.engine = engine;
+  }
+
+  abstract JdbcDatabaseContainer<?> create();
+
+  String url(JdbcDatabaseContainer<?> c) throws SQLException {
+    return c.getJdbcUrl();
+  }
+
+  String username(JdbcDatabaseContainer<?> c) {
+    return c.getUsername();
+  }
+
+  String isolation() {
+    return "REPEATABLE_READ";
+  }
+
+  /** The engines selected for this run. */
+  public static List<Engines> selected() {
+    String property = System.getProperty("nativejdbc.engines", "all").trim();
+    if (property.isEmpty() || property.equalsIgnoreCase("all")) {
+      return List.of(values());
+    }
+    List<Engines> out = new ArrayList<>();
+    for (String name : property.split(",", -1)) {
+      out.add(valueOf(name.trim().toUpperCase(Locale.ROOT)));
+    }
+    return out;
+  }
+
+  public Engine engine() {
+    return engine;
+  }
+
+  private Started started() throws SQLException {
+    synchronized (STARTED) {
+      Started s = STARTED.get(this);
+      if (s == null) {
+        JdbcDatabaseContainer<?> c = create();
+        c.start();
+        s = new Started(url(c), username(c), c.getPassword());
+        STARTED.put(this, s);
+      }
+      return s;
+    }
+  }
+
+  public String url() throws SQLException {
+    return started().url;
+  }
+
+  /** Opens an administrative connection, in autocommit mode. */
+  public Connection open() throws SQLException {
+    Started s = started();
+    return DriverManager.getConnection(s.url, s.username, s.password);
+  }
+
+  /** ScalarDB's admin on this database. */
+  public DistributedTransactionAdmin admin() throws Exception {
+    Started s = started();
+    Properties p = new Properties();
+    p.setProperty("scalar.db.storage", "jdbc");
+    p.setProperty("scalar.db.contact_points", s.url);
+    p.setProperty("scalar.db.username", s.username);
+    p.setProperty("scalar.db.password", s.password);
+    p.setProperty("scalar.db.transaction_manager", "consensus-commit");
+    p.setProperty("scalar.db.jdbc.isolation_level", isolation());
+    return TransactionFactory.create(p).getTransactionAdmin();
+  }
+
+  /** The stored spelling of a name written unquoted in DDL on this engine. */
+  public String stored(String unquoted) {
+    return engine.resolveIdentifier(unquoted);
+  }
+
+  /** An integer column type ScalarDB can import on this engine. */
+  public String intType() {
+    return this == ORACLE ? "NUMBER(10)" : "INT";
+  }
+
+  /** The DDL that creates a schema for application tables; on Oracle a schema is a user. */
+  public String createSchema(String name) {
+    return switch (this) {
+      case MYSQL, MARIADB -> "CREATE DATABASE " + name;
+      case ORACLE -> "CREATE USER " + name + " IDENTIFIED BY " + name + " QUOTA UNLIMITED ON USERS";
+      default -> "CREATE SCHEMA " + name;
+    };
+  }
+
+  /** The statement that makes {@code schema} the session's first schema for unqualified names. */
+  public String useSchema(String schema) {
+    return switch (this) {
+      case POSTGRESQL -> "SET search_path TO " + schema + ", public";
+      case MYSQL, MARIADB -> "USE " + schema;
+      case ORACLE -> "ALTER SESSION SET CURRENT_SCHEMA = " + schema;
+      default ->
+          throw new UnsupportedOperationException(
+              "SQL Server resolves through the user's default schema");
+    };
+  }
+
+  /** Runs fixture DDL as given. */
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "test fixture DDL written in the test sources, never data")
+  public void execute(Connection c, String... sql) throws SQLException {
+    try (Statement st = c.createStatement()) {
+      for (String s : sql) {
+        st.execute(s);
+      }
+    }
+  }
+}
