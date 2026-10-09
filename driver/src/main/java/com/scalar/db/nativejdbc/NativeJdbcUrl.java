@@ -114,12 +114,30 @@ public final class NativeJdbcUrl {
     return kept.isEmpty() ? url.substring(0, q) : url.substring(0, q + 1) + String.join("&", kept);
   }
 
-  /** SQL Server's {@code ;a=b;scalardbnative.x=y}: removes the driver's keys. */
+  /**
+   * SQL Server's {@code ;a=b;scalardbnative.x=y}: removes the driver's keys. A value in braces,
+   * {@code password={a;b}}, may hold semicolons and is one value, as mssql-jdbc reads it; text
+   * inside braces is never taken for a key.
+   */
   private static String extractSemicolonParameters(String url, Map<String, String> into) {
-    String[] segments = url.split(";", -1);
-    StringBuilder out = new StringBuilder(segments[0]);
-    for (int i = 1; i < segments.length; i++) {
-      String segment = segments[i];
+    List<String> segments = new ArrayList<>();
+    int depth = 0;
+    int start = 0;
+    for (int i = 0; i < url.length(); i++) {
+      char c = url.charAt(i);
+      if (c == '{') {
+        depth++;
+      } else if (c == '}' && depth > 0) {
+        depth--;
+      } else if (c == ';' && depth == 0) {
+        segments.add(url.substring(start, i));
+        start = i + 1;
+      }
+    }
+    segments.add(url.substring(start));
+    StringBuilder out = new StringBuilder(segments.get(0));
+    for (int i = 1; i < segments.size(); i++) {
+      String segment = segments.get(i);
       int eq = segment.indexOf('=');
       String key = (eq < 0 ? segment : segment.substring(0, eq)).strip();
       if (key.startsWith(DriverProperties.PREFIX)) {

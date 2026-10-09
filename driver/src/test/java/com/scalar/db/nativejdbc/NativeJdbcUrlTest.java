@@ -70,6 +70,17 @@ class NativeJdbcUrlTest {
         .isEqualTo("jdbc:sqlserver://h:1433;databaseName=db;encrypt=false");
     assertThat(mssql.driverParameters()).containsEntry("scalardbnative.metadataSchema", "meta");
 
+    // a braced SQL Server value is one value: nothing inside it is taken for a driver key
+    NativeJdbcUrl braced =
+        NativeJdbcUrl.parse(
+            "jdbc:scalardb-native:sqlserver://h;databaseName=db;"
+                + "password={a;scalardbnative.allowNoCatalog=true;b};encrypt=false");
+    assertThat(braced.vendorUrl())
+        .isEqualTo(
+            "jdbc:sqlserver://h;databaseName=db;"
+                + "password={a;scalardbnative.allowNoCatalog=true;b};encrypt=false");
+    assertThat(braced.driverParameters()).isEmpty();
+
     NativeJdbcUrl none = NativeJdbcUrl.parse("jdbc:scalardb-native:postgresql://h/db?ssl=true");
     assertThat(none.vendorUrl()).isEqualTo("jdbc:postgresql://h/db?ssl=true");
     assertThat(none.driverParameters()).isEmpty();

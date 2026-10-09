@@ -191,9 +191,9 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   is forwarded, optionally filtered to hide `_data`, `_tx_metadata` and `virtual_tables`. A passthrough
   flag via `setClientInfo` sends statements verbatim for DDL and maintenance, only in
   autocommit.
-- **The catalog** is one per database and credentials (engine, vendor URL, user, metadata schema;
-  never keyed by password, and per user because what `all_objects` and `sys.objects` show depends on the
-  user). It reads two ordinary tables in ScalarDB's system schema, `scalardb` by default
+- **The catalog** is one per database and identity: the vendor URL, every vendor property except the
+  password, and the catalog settings, since what `all_objects`, `sys.objects` and `pg_class` show
+  depends on who asks (the user, an Oracle proxy user, a role set through the properties). It reads two ordinary tables in ScalarDB's system schema, `scalardb` by default
   (`scalar.db.system_namespace_name`, the `scalardbnative.metadataSchema` property): `virtual_tables`
   and `metadata`. They sit in the same database as the user's tables, carry no transaction metadata and
   are written only by ScalarDB's admin API; the driver reads them whole, with plain SELECTs on a
@@ -337,13 +337,14 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   `snapshot_isolation_state`, refusing the connection without the first and SNAPSHOT without the second.
 - Vendor properties pass through untouched. Driver properties are namespaced and few:
   `scalardbnative.inflightWaitMs`, the bounded wait of section 6 under READ COMMITTED, 0 to abort at
-  once; `scalardbnative.passthrough`, settable through `setClientInfo`; `scalardbnative.metadataSchema`,
+  once; `scalardbnative.passthrough`, settable **only** through `setClientInfo`, never from the URL or
+  the connect properties, since it turns the protection off; `scalardbnative.metadataSchema`,
   where ScalarDB keeps `virtual_tables` and its table metadata, `scalardb` by default;
   `scalardbnative.catalogTtlMs`, how long a loaded catalog and a resolved name are trusted, 60000 by
   default (4.4); `scalardbnative.allowNoCatalog`, `false` by default, to accept a database without
   ScalarDB's catalog, every table then plain. They are read from the connect `Properties` and from the
   URL in the vendor's parameter syntax (`?scalardbnative.x=y&...`, or `;scalardbnative.x=y` for SQL
-  Server), the URL winning; an unknown or malformed `scalardbnative.*` key fails `connect` with `08001`.
+  Server, where a braced value such as `password={a;b}` is one value), the URL winning; an unknown or malformed `scalardbnative.*` key fails `connect` with `08001`.
   The driver strips its own keys from both before handing the rest to the vendor driver, and
   `getPropertyInfo` lists them ahead of the vendor's.
 - **Errors.** Every error the driver raises itself is a standard JDBC subclass with a fixed SQLSTATE,

@@ -11,6 +11,7 @@ import java.time.Clock;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Properties;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import org.jspecify.annotations.Nullable;
@@ -37,9 +38,10 @@ public final class NativeJdbcDriver implements Driver {
   private static final NativeJdbcDriver INSTANCE = new NativeJdbcDriver();
 
   /**
-   * One catalog per database and credentials: engine, vendor URL, user and the catalog settings,
-   * never the password. Per user because which tables a name resolves to is per user on Oracle and
-   * SQL Server.
+   * One catalog per database and identity: the vendor URL, every vendor property except the
+   * password, and the catalog settings. Which tables a name resolves to depends on who asks (the
+   * user, an Oracle proxy user, a PostgreSQL role set through the properties), so callers that
+   * differ in any of these never share a catalog.
    */
   private static final Map<String, Catalog> CATALOGS = new ConcurrentHashMap<>();
 
@@ -97,11 +99,21 @@ public final class NativeJdbcDriver implements Driver {
 
   private static Catalog catalog(
       NativeJdbcUrl parsed, DriverProperties settings, Driver vendor, Properties vendorProperties) {
+    StringBuilder identity = new StringBuilder();
+    for (String name : new TreeSet<>(vendorProperties.stringPropertyNames())) {
+      if (!name.equalsIgnoreCase("password")) {
+        identity
+            .append(name)
+            .append('=')
+            .append(vendorProperties.getProperty(name))
+            .append('\u0001');
+      }
+    }
     String key =
         String.join(
             "\u0000",
             parsed.vendorUrl(),
-            vendorProperties.getProperty("user", ""),
+            identity,
             settings.metadataSchema,
             Long.toString(settings.catalogTtl.toMillis()),
             Boolean.toString(settings.allowNoCatalog));

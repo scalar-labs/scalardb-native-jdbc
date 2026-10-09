@@ -19,7 +19,6 @@ class DriverPropertiesTest {
     assertThat(p.catalogTtl).isEqualTo(Duration.ofSeconds(60));
     assertThat(p.allowNoCatalog).isFalse();
     assertThat(p.inflightWait).isEqualTo(Duration.ZERO);
-    assertThat(p.passthrough).isFalse();
   }
 
   @Test
@@ -47,8 +46,12 @@ class DriverPropertiesTest {
     assertThatThrownBy(() -> DriverProperties.read(Map.of("scalardbnative.typo", "x"), null))
         .hasMessageContaining("Unknown driver property scalardbnative.typo");
     assertThatThrownBy(
-            () -> DriverProperties.read(Map.of("scalardbnative.passthrough", "yes"), null))
+            () -> DriverProperties.read(Map.of("scalardbnative.allowNoCatalog", "yes"), null))
         .hasMessageContaining("true or false");
+    // passthrough turns the protection off, so it is not accepted from a URL or the properties
+    assertThatThrownBy(
+            () -> DriverProperties.read(Map.of("scalardbnative.passthrough", "true"), null))
+        .hasMessageContaining("Unknown driver property scalardbnative.passthrough");
   }
 
   @Test
@@ -72,8 +75,7 @@ class DriverPropertiesTest {
             "scalardbnative.metadataSchema",
             "scalardbnative.catalogTtlMs",
             "scalardbnative.allowNoCatalog",
-            "scalardbnative.inflightWaitMs",
-            "scalardbnative.passthrough");
+            "scalardbnative.inflightWaitMs");
     assertThat(infos[1].value).isEqualTo("1000");
     assertThat(infos[2].choices).containsExactly("true", "false");
   }

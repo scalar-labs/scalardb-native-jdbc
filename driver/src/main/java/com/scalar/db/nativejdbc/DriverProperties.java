@@ -22,7 +22,6 @@ final class DriverProperties {
   static final String CATALOG_TTL_MS = PREFIX + "catalogTtlMs";
   static final String ALLOW_NO_CATALOG = PREFIX + "allowNoCatalog";
   static final String INFLIGHT_WAIT_MS = PREFIX + "inflightWaitMs";
-  static final String PASSTHROUGH = PREFIX + "passthrough";
 
   private static final String SQLSTATE_UNABLE_TO_CONNECT = "08001";
 
@@ -30,19 +29,13 @@ final class DriverProperties {
   final Duration catalogTtl;
   final boolean allowNoCatalog;
   final Duration inflightWait;
-  final boolean passthrough;
 
   private DriverProperties(
-      String metadataSchema,
-      Duration catalogTtl,
-      boolean allowNoCatalog,
-      Duration inflightWait,
-      boolean passthrough) {
+      String metadataSchema, Duration catalogTtl, boolean allowNoCatalog, Duration inflightWait) {
     this.metadataSchema = metadataSchema;
     this.catalogTtl = catalogTtl;
     this.allowNoCatalog = allowNoCatalog;
     this.inflightWait = inflightWait;
-    this.passthrough = passthrough;
   }
 
   /**
@@ -68,8 +61,9 @@ final class DriverProperties {
       if (!key.equals(METADATA_SCHEMA)
           && !key.equals(CATALOG_TTL_MS)
           && !key.equals(ALLOW_NO_CATALOG)
-          && !key.equals(INFLIGHT_WAIT_MS)
-          && !key.equals(PASSTHROUGH)) {
+          && !key.equals(INFLIGHT_WAIT_MS)) {
+        // passthrough is deliberately not a connect property: it turns the protection off, so it
+        // is set on a connection through setClientInfo, never from a URL
         throw new SQLException("Unknown driver property " + key, SQLSTATE_UNABLE_TO_CONNECT);
       }
     }
@@ -77,8 +71,7 @@ final class DriverProperties {
         all.getProperty(METADATA_SCHEMA, "scalardb"),
         Duration.ofMillis(nonNegative(all, CATALOG_TTL_MS, 60_000)),
         bool(all, ALLOW_NO_CATALOG),
-        Duration.ofMillis(nonNegative(all, INFLIGHT_WAIT_MS, 0)),
-        bool(all, PASSTHROUGH));
+        Duration.ofMillis(nonNegative(all, INFLIGHT_WAIT_MS, 0)));
   }
 
   /** The connect properties without this driver's keys, for the vendor driver. */
@@ -116,10 +109,6 @@ final class DriverProperties {
           Long.toString(current.inflightWait.toMillis()),
           "Under READ COMMITTED, how long a write waits for a row a ScalarDB transaction holds;"
               + " 0 aborts at once"),
-      choice(
-          PASSTHROUGH,
-          current.passthrough,
-          "Send statements verbatim, for DDL and maintenance; only in autocommit"),
     };
   }
 
