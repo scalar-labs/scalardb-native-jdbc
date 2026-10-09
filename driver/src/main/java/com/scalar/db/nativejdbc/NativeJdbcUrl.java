@@ -100,6 +100,15 @@ public final class NativeJdbcUrl {
     if (q < 0) {
       return url;
     }
+    int authority = url.indexOf("//");
+    if (authority >= 0
+        && authority < q
+        && url.substring(authority + 2, q).indexOf('/') < 0
+        && url.indexOf('@', q) >= 0) {
+      // "//user:pa?ss@host": the vendor drivers disagree on where such a query starts
+      throw new IllegalArgumentException(
+          "A '?' inside the host part of the URL is ambiguous; percent-encode it");
+    }
     List<String> kept = new ArrayList<>();
     for (String pair : url.substring(q + 1).split("&", -1)) {
       int eq = pair.indexOf('=');
@@ -115,29 +124,64 @@ public final class NativeJdbcUrl {
   }
 
   /**
-   * SQL Server's {@code ;a=b;scalardbnative.x=y}: removes the driver's keys. A value in braces,
-   * {@code password={a;b}}, may hold semicolons and is one value, as mssql-jdbc reads it; text
-   * inside braces is never taken for a key.
+   * SQL Server's {@code ;a=b;scalardbnative.x=y}: removes the driver's keys, reading the URL the
+   * way mssql-jdbc does: a value is braced only when its first non-blank character is {@code {};
+   * inside braces {@code }}} is a literal {@code }} and a single {@code }} closes; after the
+   * closing brace only blanks may come before the next {@code ;}. A URL that breaks these rules is
+   * refused rather than split in a place the vendor driver would not split it.
    */
   private static String extractSemicolonParameters(String url, Map<String, String> into) {
-    List<String> segments = new ArrayList<>();
-    int depth = 0;
+    List<int[]> segments = new ArrayList<>(); // [start, end) of each ;-separated segment
     int start = 0;
-    for (int i = 0; i < url.length(); i++) {
+    int i = 0;
+    int n = url.length();
+    boolean inValue = false;
+    while (i < n) {
       char c = url.charAt(i);
-      if (c == '{') {
-        depth++;
-      } else if (c == '}' && depth > 0) {
-        depth--;
-      } else if (c == ';' && depth == 0) {
-        segments.add(url.substring(start, i));
+      if (c == ';') {
+        segments.add(new int[] {start, i});
         start = i + 1;
+        inValue = false;
+        i++;
+      } else if (c == '=' && !inValue) {
+        inValue = true;
+        i++;
+        while (i < n && url.charAt(i) == ' ') {
+          i++;
+        }
+        if (i < n && url.charAt(i) == '{') {
+          i++;
+          boolean closed = false;
+          while (i < n) {
+            if (url.charAt(i) == '}') {
+              if (i + 1 < n && url.charAt(i + 1) == '}') {
+                i += 2; // an escaped brace inside the value
+                continue;
+              }
+              closed = true;
+              i++;
+              break;
+            }
+            i++;
+          }
+          if (!closed) {
+            throw new IllegalArgumentException("A braced value in the URL is not closed");
+          }
+          while (i < n && url.charAt(i) == ' ') {
+            i++;
+          }
+          if (i < n && url.charAt(i) != ';') {
+            throw new IllegalArgumentException("Text follows a braced value in the URL");
+          }
+        }
+      } else {
+        i++;
       }
     }
-    segments.add(url.substring(start));
-    StringBuilder out = new StringBuilder(segments.get(0));
-    for (int i = 1; i < segments.size(); i++) {
-      String segment = segments.get(i);
+    segments.add(new int[] {start, n});
+    StringBuilder out = new StringBuilder(url.substring(segments.get(0)[0], segments.get(0)[1]));
+    for (int k = 1; k < segments.size(); k++) {
+      String segment = url.substring(segments.get(k)[0], segments.get(k)[1]);
       int eq = segment.indexOf('=');
       String key = (eq < 0 ? segment : segment.substring(0, eq)).strip();
       if (key.startsWith(DriverProperties.PREFIX)) {

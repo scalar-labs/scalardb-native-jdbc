@@ -50,10 +50,22 @@ class SqlAstTest {
   }
 
   @Test
-  void mariaDbAlone_executesItsOwnMComment() {
-    String sql = "select 1 /*M! + 1 */ from t";
+  void bothMySqlCommentForms_areRefusedOnBothEngines() {
+    // a mysql URL may be served by a MariaDB server, which runs /*M! too
+    String sql = "update plain_t /*M!100000 , ns.scalar_t */ set plain_t.a = 1";
     assertThat(SqlAst.analyze(sql, Engine.MARIADB, false).isPresent()).isFalse();
-    assertThat(SqlAst.analyze(sql, Engine.MYSQL, false).isPresent()).isTrue();
+    assertThat(SqlAst.analyze(sql, Engine.MYSQL, false).isPresent()).isFalse();
+    assertThat(SqlAst.parse(sql, Engine.POSTGRESQL)).isPresent(); // an ordinary comment there
+  }
+
+  @Test
+  void refusalReasons_neverQuoteTheStatementsText() {
+    String reason =
+        SqlAst.analyze("update users set password = 'S3cr3t-pw' 'x'", Engine.POSTGRESQL, true)
+            .reason();
+    assertThat(reason).doesNotContain("S3cr3t").doesNotContain("'x'").contains("line 1");
+    assertThat(SqlAst.analyze("select 1 /*! secret text */ from t", Engine.MYSQL, false).reason())
+        .doesNotContain("secret");
   }
 
   @Test

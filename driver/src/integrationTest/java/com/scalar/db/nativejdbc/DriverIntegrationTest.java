@@ -71,12 +71,60 @@ class DriverIntegrationTest {
         .hasMessageContaining("nosuch")
         .extracting("SQLState")
         .isEqualTo("08004");
-    try (Connection c =
-        DriverManager.getConnection(
-            url + "?scalardbnative.metadataSchema=nosuch&scalardbnative.allowNoCatalog=true",
-            credentials)) {
+    Properties allowed = (Properties) p.clone();
+    allowed.setProperty("scalardbnative.allowNoCatalog", "true");
+    try (Connection c = DriverManager.getConnection(url, allowed)) {
       assertThat(c.isValid(5)).isTrue();
     }
+    // neither setting may come from the URL: either could turn the protection off
+    assertThatThrownBy(
+            () -> {
+              try (Connection c =
+                  DriverManager.getConnection(
+                      url
+                          + "?scalardbnative.metadataSchema=nosuch&scalardbnative.allowNoCatalog=true",
+                      credentials)) {
+                c.isValid(1);
+              }
+            })
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("cannot be set in the URL")
+        .extracting("SQLState")
+        .isEqualTo("08001");
+  }
+
+  @Test
+  void aWrongPassword_leavesNothingBehind_andTheRightOneStillWorks() throws SQLException {
+    Properties wrong = (Properties) credentials.clone();
+    wrong.setProperty("password", "WRONG");
+    wrong.setProperty("ApplicationName", "wrong-password-test");
+    int before = NativeJdbcDriver.catalogCount();
+    assertThatThrownBy(
+            () -> {
+              try (Connection c = DriverManager.getConnection(url, wrong)) {
+                c.isValid(1);
+              }
+            })
+        .isInstanceOf(SQLException.class);
+    assertThat(NativeJdbcDriver.catalogCount()).isEqualTo(before);
+    Properties right = (Properties) credentials.clone();
+    right.setProperty("ApplicationName", "wrong-password-test");
+    try (Connection c = DriverManager.getConnection(url, right)) {
+      assertThat(c.isValid(5)).isTrue();
+    }
+  }
+
+  @Test
+  void theCatalogRegistryIsBounded() throws SQLException {
+    for (int i = 0; i < 80; i++) {
+      Properties p = (Properties) credentials.clone();
+      p.setProperty(
+          "ApplicationName", "bound-" + i); // a property per connection, as a pool may set
+      try (Connection c = DriverManager.getConnection(url, p)) {
+        c.isValid(1);
+      }
+    }
+    assertThat(NativeJdbcDriver.catalogCount()).isLessThanOrEqualTo(64);
   }
 
   @Test

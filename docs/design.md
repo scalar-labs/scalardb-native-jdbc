@@ -191,9 +191,13 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   is forwarded, optionally filtered to hide `_data`, `_tx_metadata` and `virtual_tables`. A passthrough
   flag via `setClientInfo` sends statements verbatim for DDL and maintenance, only in
   autocommit.
-- **The catalog** is one per database and identity: the vendor URL, every vendor property except the
-  password, and the catalog settings, since what `all_objects`, `sys.objects` and `pg_class` show
-  depends on who asks (the user, an Oracle proxy user, a role set through the properties). It reads two ordinary tables in ScalarDB's system schema, `scalardb` by default
+- **The catalog** is one per database and identity, keyed by a SHA-256 digest of the vendor URL,
+  every vendor property, password included, and the catalog settings: what `all_objects`,
+  `sys.objects` and `pg_class` show depends on who asks (the user, an Oracle proxy user, a role set
+  through the properties), a rotated password gets a fresh catalog, and no credential is kept in a
+  key. It is created only after the caller's own connection has logged in, so a failed login leaves
+  nothing behind. The driver keeps at most 64 catalogs, least recently used first; one pushed out
+  releases its database session, and a connection still holding it reopens one when it needs to. It reads two ordinary tables in ScalarDB's system schema, `scalardb` by default
   (`scalar.db.system_namespace_name`, the `scalardbnative.metadataSchema` property): `virtual_tables`
   and `metadata`. They sit in the same database as the user's tables, carry no transaction metadata and
   are written only by ScalarDB's admin API; the driver reads them whole, with plain SELECTs on a
@@ -342,10 +346,15 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   where ScalarDB keeps `virtual_tables` and its table metadata, `scalardb` by default;
   `scalardbnative.catalogTtlMs`, how long a loaded catalog and a resolved name are trusted, 60000 by
   default (4.4); `scalardbnative.allowNoCatalog`, `false` by default, to accept a database without
-  ScalarDB's catalog, every table then plain. They are read from the connect `Properties` and from the
-  URL in the vendor's parameter syntax (`?scalardbnative.x=y&...`, or `;scalardbnative.x=y` for SQL
-  Server, where a braced value such as `password={a;b}` is one value), the URL winning; an unknown or malformed `scalardbnative.*` key fails `connect` with `08001`.
-  The driver strips its own keys from both before handing the rest to the vendor driver, and
+  ScalarDB's catalog, every table then plain. They are read from the connect `Properties`. A URL is often
+  assembled from configuration someone else controls, so only the two settings that cannot weaken the
+  protection, `catalogTtlMs` and `inflightWaitMs`, may also come from the URL, in the vendor's parameter
+  syntax (`?k=v&...`, or `;k=v` for SQL Server), the URL winning; `metadataSchema` and `allowNoCatalog`
+  from the URL fail `connect` with `08001`, as does an unknown or malformed `scalardbnative.*` key. The
+  URL is split exactly as the vendor driver splits it: a SQL Server value is braced only when its first
+  character is `{`, `}}` inside braces is a literal, and an unbalanced brace refuses the URL; a `?`
+  inside the host part, which the vendor drivers read differently, refuses it too. `catalogTtlMs` is at
+  most one hour. The driver strips its own keys before handing the rest to the vendor driver, and
   `getPropertyInfo` lists them ahead of the vendor's.
 - **Errors.** Every error the driver raises itself is a standard JDBC subclass with a fixed SQLSTATE,
   so a caller can tell what to do without parsing messages; a message never contains the URL.
@@ -574,7 +583,8 @@ every table node of the parser's public syntax tree is a reference the walk visi
 or a `FOR UPDATE OF` target (the driver reads the public tree only, never private fields, so it gives the
 same answers with JSQLParser as a named module); no comment is of a form this engine executes, each rule
 the engine's own and checked on its container: MySQL and MariaDB run `/*! ... */`, MariaDB also
-`/*M! ... */`, and both read a `--` not followed by whitespace as two minus signs, MySQL, MariaDB and Oracle end a block
+`/*M! ... */`, which the driver refuses on MySQL as well since a `mysql` URL may be served by a MariaDB
+server, and both read a `--` not followed by whitespace as two minus signs, MySQL, MariaDB and Oracle end a block
 comment at its first `*/` where PostgreSQL and SQL Server nest; no name is a database-qualified one or a
 quoted name holding a dot; and no name is double-quoted where the session reads `"x"` as a string.
 There is no list of known node types: an expression the shape does not inspect cannot hide a table or a

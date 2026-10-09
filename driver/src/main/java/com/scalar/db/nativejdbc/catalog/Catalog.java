@@ -91,6 +91,7 @@ public final class Catalog implements AutoCloseable {
           r -> {
             Thread t = new Thread(r, "scalardb-native-jdbc-catalog-timeout");
             t.setDaemon(true);
+            t.setContextClassLoader(null); // never pin an unloaded application's class loader
             return t;
           });
 
@@ -322,7 +323,20 @@ public final class Catalog implements AutoCloseable {
     }
   }
 
-  /** Closes the catalog's own connection; a later lookup opens a new one. */
+  /**
+   * Closes the catalog's database session without closing the catalog: a later lookup opens a new
+   * one. For a registry that keeps a bounded number of sessions open.
+   */
+  public void releaseConnection() {
+    connectionLock.lock();
+    try {
+      dropConnection();
+    } finally {
+      connectionLock.unlock();
+    }
+  }
+
+  /** Closes the catalog's own connection; the catalog is not used again. */
   @Override
   public void close() {
     closed = true;
@@ -561,9 +575,7 @@ public final class Catalog implements AutoCloseable {
               + metadataSchema
               + ".metadata and "
               + metadataSchema
-              + ".virtual_tables ("
-              + cause.getMessage()
-              + ")",
+              + ".virtual_tables; the database's own error is the cause",
           "42501",
           cause);
     }
@@ -572,9 +584,8 @@ public final class Catalog implements AutoCloseable {
           "No ScalarDB catalog: schema "
               + metadataSchema
               + " does not exist in this database. Set the metadata schema property if ScalarDB"
-              + " uses another one, or allow a database without ScalarDB explicitly ("
-              + cause.getMessage()
-              + ")",
+              + " uses another one, or allow a database without ScalarDB explicitly; the"
+              + " database's own error is the cause",
           "08004",
           cause);
     }

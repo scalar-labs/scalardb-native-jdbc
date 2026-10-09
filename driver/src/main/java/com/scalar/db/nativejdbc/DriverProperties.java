@@ -5,13 +5,16 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
+import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The driver's own properties, {@code scalardbnative.*}, read from the URL's parameters and from
- * the connect {@link Properties}; a URL parameter wins over a property of the same name, as the
- * vendor drivers do. They are removed before the rest is handed to the vendor driver (design
- * section 1, "URL scheme").
+ * The driver's own properties, {@code scalardbnative.*}, read from the connect {@link Properties}
+ * and, for the two that cannot weaken the protection ({@code catalogTtlMs}, {@code
+ * inflightWaitMs}), also from the URL's parameters, a URL parameter winning as the vendor drivers
+ * do. They are removed before the rest is handed to the vendor driver (design section 1, "URL
+ * scheme").
  */
 final class DriverProperties {
 
@@ -22,6 +25,15 @@ final class DriverProperties {
   static final String CATALOG_TTL_MS = PREFIX + "catalogTtlMs";
   static final String ALLOW_NO_CATALOG = PREFIX + "allowNoCatalog";
   static final String INFLIGHT_WAIT_MS = PREFIX + "inflightWaitMs";
+
+  private static final Set<String> KNOWN =
+      Set.of(METADATA_SCHEMA, CATALOG_TTL_MS, ALLOW_NO_CATALOG, INFLIGHT_WAIT_MS);
+
+  /** A table registered with ScalarDB is protected after at most this long, whatever is set. */
+  static final Duration MAX_CATALOG_TTL = Duration.ofHours(1);
+
+  /** What the metadata schema may look like: a plain SQL identifier, as the catalog requires. */
+  private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
   private static final String SQLSTATE_UNABLE_TO_CONNECT = "08001";
 
@@ -48,28 +60,47 @@ final class DriverProperties {
    */
   static DriverProperties read(Map<String, String> urlParameters, @Nullable Properties info)
       throws SQLException {
+    for (String key : urlParameters.keySet()) {
+      if (!key.equals(CATALOG_TTL_MS) && !key.equals(INFLIGHT_WAIT_MS)) {
+        // a URL is often assembled from configuration someone else controls; the settings that
+        // can turn the protection off (which catalog to read, accepting none, passthrough) are
+        // taken from the connect properties only
+        throw new SQLException(
+            key
+                + (KNOWN.contains(key)
+                    ? " cannot be set in the URL; pass it in the connect properties"
+                    : " is not a driver property"),
+            SQLSTATE_UNABLE_TO_CONNECT);
+      }
+    }
     Properties all = new Properties();
     if (info != null) {
       for (String key : info.stringPropertyNames()) {
         if (key.startsWith(PREFIX)) {
+          if (!KNOWN.contains(key)) {
+            // passthrough is deliberately not a connect property: it turns the protection off,
+            // so it is set on a connection through setClientInfo
+            throw new SQLException(key + " is not a driver property", SQLSTATE_UNABLE_TO_CONNECT);
+          }
           all.setProperty(key, info.getProperty(key));
         }
       }
     }
     urlParameters.forEach(all::setProperty);
-    for (String key : all.stringPropertyNames()) {
-      if (!key.equals(METADATA_SCHEMA)
-          && !key.equals(CATALOG_TTL_MS)
-          && !key.equals(ALLOW_NO_CATALOG)
-          && !key.equals(INFLIGHT_WAIT_MS)) {
-        // passthrough is deliberately not a connect property: it turns the protection off, so it
-        // is set on a connection through setClientInfo, never from a URL
-        throw new SQLException("Unknown driver property " + key, SQLSTATE_UNABLE_TO_CONNECT);
-      }
+    String schema = all.getProperty(METADATA_SCHEMA, "scalardb");
+    if (!IDENTIFIER.matcher(schema).matches()) {
+      throw new SQLException(
+          METADATA_SCHEMA + " must be a plain identifier", SQLSTATE_UNABLE_TO_CONNECT);
+    }
+    long ttl = nonNegative(all, CATALOG_TTL_MS, 60_000);
+    if (ttl > MAX_CATALOG_TTL.toMillis()) {
+      throw new SQLException(
+          CATALOG_TTL_MS + " is at most " + MAX_CATALOG_TTL.toMillis() + " (one hour)",
+          SQLSTATE_UNABLE_TO_CONNECT);
     }
     return new DriverProperties(
-        all.getProperty(METADATA_SCHEMA, "scalardb"),
-        Duration.ofMillis(nonNegative(all, CATALOG_TTL_MS, 60_000)),
+        schema,
+        Duration.ofMillis(ttl),
         bool(all, ALLOW_NO_CATALOG),
         Duration.ofMillis(nonNegative(all, INFLIGHT_WAIT_MS, 0)));
   }

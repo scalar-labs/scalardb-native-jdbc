@@ -1,6 +1,9 @@
 package com.scalar.db.nativejdbc;
 
 import com.scalar.db.nativejdbc.catalog.Catalog;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.DriverManager;
@@ -9,10 +12,10 @@ import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.time.Clock;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.TreeSet;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import org.jspecify.annotations.Nullable;
 
@@ -37,13 +40,27 @@ public final class NativeJdbcDriver implements Driver {
 
   private static final NativeJdbcDriver INSTANCE = new NativeJdbcDriver();
 
+  /** How many catalogs, and so how many catalog sessions, the driver keeps at most. */
+  private static final int MAX_CATALOGS = 64;
+
   /**
-   * One catalog per database and identity: the vendor URL, every vendor property except the
-   * password, and the catalog settings. Which tables a name resolves to depends on who asks (the
-   * user, an Oracle proxy user, a PostgreSQL role set through the properties), so callers that
-   * differ in any of these never share a catalog.
+   * One catalog per database and identity, keyed by a digest (see {@link #catalog}), least recently
+   * used first. A catalog pushed out releases its database session; a connection still holding it
+   * keeps working and reopens one when it needs to. Guarded by itself.
    */
-  private static final Map<String, Catalog> CATALOGS = new ConcurrentHashMap<>();
+  private static final Map<String, Catalog> CATALOGS =
+      new LinkedHashMap<String, Catalog>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Catalog> eldest) {
+          if (size() <= MAX_CATALOGS) {
+            return false;
+          }
+          eldest.getValue().releaseConnection();
+          return true;
+        }
+      };
+
+  private static volatile boolean deregistered;
 
   static {
     try {
@@ -60,11 +77,14 @@ public final class NativeJdbcDriver implements Driver {
    * @throws SQLException if {@link DriverManager} refuses
    */
   public static void deregister() throws SQLException {
+    deregistered = true; // a connect racing with this one fails rather than leaves a catalog open
     DriverManager.deregisterDriver(INSTANCE);
-    for (Catalog c : CATALOGS.values()) {
-      c.close();
+    synchronized (CATALOGS) {
+      for (Catalog c : CATALOGS.values()) {
+        c.close();
+      }
+      CATALOGS.clear();
     }
-    CATALOGS.clear();
   }
 
   /**
@@ -79,67 +99,101 @@ public final class NativeJdbcDriver implements Driver {
       // DriverManager can try the next registered driver.
       return null;
     }
+    if (deregistered) {
+      throw new SQLException("The driver has been deregistered", SQLSTATE_UNABLE_TO_CONNECT);
+    }
     NativeJdbcUrl parsed = parse(url);
     DriverProperties settings = DriverProperties.read(parsed.driverParameters(), info);
     Properties vendorProperties = DriverProperties.vendorProperties(info);
     Driver vendor = vendorDriver(parsed);
-    // the catalog first: a database without ScalarDB's catalog, or a user who cannot read it, is
-    // refused here rather than at the first statement
-    catalog(parsed, settings, vendor, vendorProperties).verify();
+    // the user's own connection first: a caller who cannot log in leaves nothing behind
     Connection connection = vendor.connect(parsed.vendorUrl(), vendorProperties);
     if (connection == null) {
       throw new SQLException(
           "The " + parsed.subProtocol() + " driver did not accept the URL",
           SQLSTATE_UNABLE_TO_CONNECT);
     }
+    try {
+      // then the catalog: a database without ScalarDB's catalog, or a user who cannot read it, is
+      // refused here rather than at the first statement
+      catalog(parsed, settings, vendor, vendorProperties).verify();
+    } catch (SQLException | RuntimeException e) {
+      try {
+        connection.close();
+      } catch (SQLException suppressed) {
+        e.addSuppressed(suppressed);
+      }
+      throw e;
+    }
     // The connection proxy of docs/design.md ("Architecture") wraps this connection next; until
     // then the vendor connection is returned as is.
     return connection;
   }
 
+  /**
+   * The catalog for this database and identity. The key is a digest of the vendor URL, every vendor
+   * property, password and other secrets included, and the catalog settings: callers whose identity
+   * differs in any way never share a catalog, a rotated password gets a new one, and no credential
+   * is kept in a key. Only callers that have just logged in with these properties get here.
+   */
   private static Catalog catalog(
       NativeJdbcUrl parsed, DriverProperties settings, Driver vendor, Properties vendorProperties) {
-    StringBuilder identity = new StringBuilder();
+    StringBuilder identity = new StringBuilder(parsed.vendorUrl()).append('\u0000');
     for (String name : new TreeSet<>(vendorProperties.stringPropertyNames())) {
-      if (!name.equalsIgnoreCase("password")) {
-        identity
-            .append(name)
-            .append('=')
-            .append(vendorProperties.getProperty(name))
-            .append('\u0001');
-      }
+      identity.append(name).append('=').append(vendorProperties.getProperty(name)).append('\u0001');
     }
-    String key =
-        String.join(
-            "\u0000",
-            parsed.vendorUrl(),
-            identity,
-            settings.metadataSchema,
-            Long.toString(settings.catalogTtl.toMillis()),
-            Boolean.toString(settings.allowNoCatalog));
-    return CATALOGS.computeIfAbsent(
-        key,
-        k ->
+    identity
+        .append('\u0000')
+        .append(settings.metadataSchema)
+        .append('\u0000')
+        .append(settings.catalogTtl.toMillis())
+        .append('\u0000')
+        .append(settings.allowNoCatalog);
+    String key = sha256(identity.toString());
+    synchronized (CATALOGS) {
+      Catalog c = CATALOGS.get(key);
+      if (c == null) {
+        c =
             new Catalog(
                 parsed.engine(),
                 settings.metadataSchema,
                 () -> {
-                  Connection c = vendor.connect(parsed.vendorUrl(), vendorProperties);
-                  if (c == null) {
+                  Connection conn = vendor.connect(parsed.vendorUrl(), vendorProperties);
+                  if (conn == null) {
                     throw new SQLException(
                         "The " + parsed.subProtocol() + " driver did not accept the URL",
                         SQLSTATE_UNABLE_TO_CONNECT);
                   }
-                  return c;
+                  return conn;
                 },
                 settings.catalogTtl,
                 Clock.systemUTC(),
-                settings.allowNoCatalog));
+                settings.allowNoCatalog);
+        CATALOGS.put(key, c);
+      }
+      return c;
+    }
+  }
+
+  private static String sha256(String s) {
+    try {
+      byte[] digest =
+          MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8));
+      StringBuilder hex = new StringBuilder(digest.length * 2);
+      for (byte b : digest) {
+        hex.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
+      }
+      return hex.toString();
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 is required of every Java platform", e);
+    }
   }
 
   /** How many catalogs the driver holds; for tests. */
   static int catalogCount() {
-    return CATALOGS.size();
+    synchronized (CATALOGS) {
+      return CATALOGS.size();
+    }
   }
 
   /** Parses the URL; the error never repeats the URL, which may carry credentials. */

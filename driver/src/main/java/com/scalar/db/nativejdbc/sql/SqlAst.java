@@ -21,6 +21,7 @@ import net.sf.jsqlparser.parser.ASTNodeAccess;
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.parser.Node;
+import net.sf.jsqlparser.parser.ParseException;
 import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
@@ -443,24 +444,21 @@ public final class SqlAst {
       for (Token s = t.specialToken; s != null; s = s.specialToken) {
         String image = s.image;
         if (s.kind == CCJSqlParserConstants.MULTI_LINE_COMMENT) {
-          if ((mysqlLike && image.startsWith("/*!"))
-              || (engine == Engine.MARIADB && image.startsWith("/*M!"))) {
-            return "the comment " + abbreviate(image) + " is executed by " + engine.subProtocol();
+          // both forms on both engines: a mysql URL may be served by a MariaDB server, which runs
+          // /*M! as well, and the URL is all the driver knows
+          if (mysqlLike && (image.startsWith("/*!") || image.startsWith("/*M!"))) {
+            return "a comment of the form "
+                + (image.startsWith("/*!") ? "/*! ... */" : "/*M! ... */")
+                + " is executed by MySQL and MariaDB";
           }
           if (flatBlockComments && image.indexOf("/*", 2) >= 0) {
-            return "the nested comment "
-                + abbreviate(image)
-                + " ends at its first */ on "
-                + engine.subProtocol();
+            return "a nested block comment ends at its first */ on " + engine.subProtocol();
           }
         } else if (mysqlLike
             && isLineComment(s)
             && image.length() > 2
             && !Character.isWhitespace(image.charAt(2))) {
-          return "\"--\" not followed by a space is not a comment on "
-              + engine.subProtocol()
-              + ": "
-              + abbreviate(image);
+          return "\"--\" not followed by a space is not a comment on " + engine.subProtocol();
         }
       }
       if (t.kind == 0) {
@@ -470,22 +468,25 @@ public final class SqlAst {
     return null;
   }
 
-  private static String abbreviate(String s) {
-    String line = s.strip().replace('\n', ' ');
-    return line.length() <= 40 ? line : line.substring(0, 37) + "...";
-  }
-
+  // Where the parser stopped, by token kind and position only: the token's text may be a literal
+  // holding data, and the reason becomes an exception message that ends up in logs.
   private static String firstLine(Exception e) {
-    String m =
-        e.getCause() != null && e.getCause().getMessage() != null
-            ? e.getCause().getMessage()
-            : e.getMessage();
-    if (m == null) {
-      return e.getClass().getSimpleName();
+    Throwable t = e;
+    while (t != null && !(t instanceof ParseException)) {
+      t = t.getCause();
     }
-    int nl = m.indexOf('\n');
-    String line = nl < 0 ? m : m.substring(0, nl);
-    return line.length() <= 200 ? line : line.substring(0, 197) + "...";
+    if (t != null) {
+      Token current = ((ParseException) t).currentToken;
+      Token next = current == null ? null : current.next;
+      if (next != null) {
+        String kind =
+            next.kind >= 0 && next.kind < CCJSqlParserConstants.tokenImage.length
+                ? CCJSqlParserConstants.tokenImage[next.kind]
+                : "token";
+        return "unexpected " + kind + " at line " + next.beginLine + ", column " + next.beginColumn;
+      }
+    }
+    return "the parser gave no position";
   }
 
   private static String doubleQuoteReason(Engine engine, String name) {

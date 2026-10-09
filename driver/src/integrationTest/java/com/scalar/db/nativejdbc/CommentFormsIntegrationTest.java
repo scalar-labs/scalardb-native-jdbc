@@ -17,7 +17,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * The parser refuses a comment form exactly where the engine executes it: each statement selects 1
- * where the comment is a comment and 2 where the engine runs part of it.
+ * where the comment is a comment and 2 where the engine runs part of it. The one deliberate
+ * exception is MariaDB's {@code /*M!} form, refused on MySQL as well.
  */
 class CommentFormsIntegrationTest {
 
@@ -53,6 +54,11 @@ class CommentFormsIntegrationTest {
       value = rs.getInt(1);
     }
     boolean refused = !SqlAst.analyze(sql, e.engine(), true).isPresent();
-    assertThat(refused).as("%s returned %d", sql.strip(), value).isEqualTo(value != 1);
+    // one deliberate extra refusal: a mysql URL may be served by a MariaDB server, which runs /*M!
+    boolean mariaDbFormOnMySql =
+        form.contains("/*M!") && e.engine() == com.scalar.db.nativejdbc.engine.Engine.MYSQL;
+    assertThat(refused)
+        .as("%s returned %d", sql.strip(), value)
+        .isEqualTo(value != 1 || mariaDbFormOnMySql);
   }
 }

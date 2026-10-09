@@ -22,36 +22,43 @@ class DriverPropertiesTest {
   }
 
   @Test
-  void readsProperties_andTheUrlWins() throws SQLException {
+  void readsProperties_andTheUrlWinsForTheSettingsItMaySet() throws SQLException {
     Properties info = new Properties();
-    info.setProperty("scalardbnative.metadataSchema", "fromProperties");
+    info.setProperty("scalardbnative.metadataSchema", "meta");
     info.setProperty("scalardbnative.catalogTtlMs", "5000");
     info.setProperty("scalardbnative.allowNoCatalog", "TRUE");
-    DriverProperties p =
-        DriverProperties.read(Map.of("scalardbnative.metadataSchema", "fromUrl"), info);
-    assertThat(p.metadataSchema).isEqualTo("fromUrl");
-    assertThat(p.catalogTtl).isEqualTo(Duration.ofSeconds(5));
+    DriverProperties p = DriverProperties.read(Map.of("scalardbnative.catalogTtlMs", "7000"), info);
+    assertThat(p.metadataSchema).isEqualTo("meta");
+    assertThat(p.catalogTtl).isEqualTo(Duration.ofSeconds(7));
     assertThat(p.allowNoCatalog).isTrue();
   }
 
   @Test
-  void malformedOrUnknownProperties_failTheConnect() {
-    Properties bad = new Properties();
-    bad.setProperty("scalardbnative.catalogTtlMs", "-1");
-    assertThatThrownBy(() -> DriverProperties.read(Map.of(), bad))
+  void settingsThatCanTurnTheProtectionOff_areRefusedFromTheUrl() {
+    for (String key :
+        new String[] {
+          "scalardbnative.metadataSchema",
+          "scalardbnative.allowNoCatalog",
+          "scalardbnative.passthrough"
+        }) {
+      assertThatThrownBy(() -> DriverProperties.read(Map.of(key, "x"), null))
+          .isInstanceOf(SQLException.class)
+          .extracting("SQLState")
+          .isEqualTo("08001");
+    }
+  }
+
+  @Test
+  void theTtlIsCapped_andTheSchemaMustBeAnIdentifier() {
+    Properties ttl = new Properties();
+    ttl.setProperty("scalardbnative.catalogTtlMs", "9223372036854775807");
+    assertThatThrownBy(() -> DriverProperties.read(Map.of(), ttl))
+        .hasMessageContaining("at most 3600000");
+    Properties schema = new Properties();
+    schema.setProperty("scalardbnative.metadataSchema", "a; drop");
+    assertThatThrownBy(() -> DriverProperties.read(Map.of(), schema))
         .isInstanceOf(SQLException.class)
-        .hasMessageContaining("catalogTtlMs")
-        .extracting("SQLState")
-        .isEqualTo("08001");
-    assertThatThrownBy(() -> DriverProperties.read(Map.of("scalardbnative.typo", "x"), null))
-        .hasMessageContaining("Unknown driver property scalardbnative.typo");
-    assertThatThrownBy(
-            () -> DriverProperties.read(Map.of("scalardbnative.allowNoCatalog", "yes"), null))
-        .hasMessageContaining("true or false");
-    // passthrough turns the protection off, so it is not accepted from a URL or the properties
-    assertThatThrownBy(
-            () -> DriverProperties.read(Map.of("scalardbnative.passthrough", "true"), null))
-        .hasMessageContaining("Unknown driver property scalardbnative.passthrough");
+        .hasMessageContaining("plain identifier");
   }
 
   @Test
