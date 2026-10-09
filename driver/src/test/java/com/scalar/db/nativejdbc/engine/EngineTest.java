@@ -26,6 +26,28 @@ class EngineTest {
   }
 
   @Test
+  void nonAsciiNames_foldAsTheEnginesDo() {
+    // PostgreSQL folds A-Z only
+    assertThat(Engine.POSTGRESQL.resolveIdentifier("Ärger")).isEqualTo("Ärger");
+    assertThat(Engine.POSTGRESQL.resolveIdentifier("ÄrgerX")).isEqualTo("Ärgerx");
+    // Oracle: a non-ASCII unquoted name is left to the server; Java never expands ß into SS
+    assertThat(Engine.ORACLE.needsServerFold("größe")).isTrue();
+    assertThat(Engine.ORACLE.needsServerFold("\"größe\"")).isFalse();
+    assertThat(Engine.ORACLE.needsServerFold("orders")).isFalse();
+    assertThat(Engine.POSTGRESQL.needsServerFold("größe")).isFalse();
+    assertThat(Engine.ORACLE.resolveIdentifier("straße")).isEqualTo("STRAßE");
+  }
+
+  @Test
+  void doubleQuotes_quoteIdentifiersByDefault_exceptOnMySqlAndMariaDb() {
+    assertThat(Engine.POSTGRESQL.doubleQuotesQuoteIdentifiersByDefault()).isTrue();
+    assertThat(Engine.ORACLE.doubleQuotesQuoteIdentifiersByDefault()).isTrue();
+    assertThat(Engine.SQLSERVER.doubleQuotesQuoteIdentifiersByDefault()).isTrue();
+    assertThat(Engine.MYSQL.doubleQuotesQuoteIdentifiersByDefault()).isFalse();
+    assertThat(Engine.MARIADB.doubleQuotesQuoteIdentifiersByDefault()).isFalse();
+  }
+
+  @Test
   void quotedIdentifiers_areKept_inAnyQuotingStyle() {
     for (Engine e : Engine.values()) {
       assertThat(e.resolveIdentifier("\"Orders\"")).isEqualTo("Orders");

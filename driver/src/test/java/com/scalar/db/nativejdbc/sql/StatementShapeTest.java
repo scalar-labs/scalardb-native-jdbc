@@ -25,10 +25,12 @@ class StatementShapeTest {
     assertThat(StatementShape.of(unquoted, Engine.MYSQL).orElseThrow().whereColumns())
         .containsExactly("amount");
     for (Engine e : Engine.values()) {
-      assertThat(StatementShape.of(quoted, e).orElseThrow().whereColumns())
+      // in a session where double quotes quote identifiers (MySQL with ANSI_QUOTES)
+      SqlAst ast = SqlAst.parse(quoted, e, true).orElseThrow();
+      assertThat(StatementShape.of(ast).orElseThrow().whereColumns())
           .as("%s keeps a quoted name", e)
           .containsExactly("Amount");
-      assertThat(StatementShape.of(quoted, e).orElseThrow().isKeyEquality(List.of("Amount")))
+      assertThat(StatementShape.of(ast).orElseThrow().isKeyEquality(List.of("Amount")))
           .as("%s matches the catalog spelling when quoted", e)
           .isTrue();
     }

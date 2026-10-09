@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "043"
 tags: [code-review, correctness, engine]
@@ -95,6 +95,14 @@ To be filled during triage.
 
 **Learnings:**
 - "Fold like the engine" means the engine's character class, not Java's.
+
+### 2026-10-09 - Decision and fix: the server folds on Oracle
+
+**By:** Claude Code
+
+**Actions:**
+- PostgreSQL: Engine.resolveIdentifier lower-cases A-Z only, PostgreSQL's own rule, so Ärger stays Ärger. Oracle: an unquoted name with characters beyond ASCII is folded by Oracle itself (Engine.needsServerFold, Engine.serverFold with SELECT UPPER(?) FROM dual on the catalog connection), cached per name in the catalog; Java's own upper-casing for Oracle is now code point by code point, so it never expands ß into SS. Column names in StatementShape still fold in Java with that simple mapping (no server round trip on the statement path); recorded as a limit for non-ASCII column names on Oracle.
+- Tests: EngineTest.nonAsciiNames_foldAsTheEnginesDo; on Oracle a table created unquoted as größe is imported under the name Oracle stored and found by the unquoted lookup.
 
 ## Notes
 

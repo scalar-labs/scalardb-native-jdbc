@@ -157,6 +157,14 @@ public final class Catalog implements AutoCloseable {
     }
   }
 
+  private final Map<String, String> folds =
+      new LinkedHashMap<String, String>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
+          return size() > RESOLUTION_CACHE_SIZE;
+        }
+      };
+
   private final Map<String, Resolution> resolutions =
       new LinkedHashMap<String, Resolution>(64, 0.75f, true) {
         @Override
@@ -231,8 +239,8 @@ public final class Catalog implements AutoCloseable {
    */
   public TableInfo lookup(List<String> sessionSchemas, @Nullable String rawSchema, String rawTable)
       throws SQLException {
-    String schema = rawSchema == null ? null : engine.resolveIdentifier(rawSchema);
-    String table = engine.resolveIdentifier(rawTable);
+    String schema = rawSchema == null ? null : fold(rawSchema);
+    String table = fold(rawTable);
     Snapshot current = snapshot();
     if (!current.present) {
       return plain(schema, sessionSchemas, table); // no ScalarDB catalog, by permission
@@ -252,6 +260,27 @@ public final class Catalog implements AutoCloseable {
       resolution.classified = c;
     }
     return c.get();
+  }
+
+  /**
+   * Resolves an identifier as written; an unquoted Oracle name beyond ASCII is folded by Oracle
+   * itself, once, since its upper-casing of those characters is the database's to decide.
+   */
+  private String fold(String raw) throws SQLException {
+    if (!engine.needsServerFold(raw)) {
+      return engine.resolveIdentifier(raw);
+    }
+    synchronized (folds) {
+      String cached = folds.get(raw);
+      if (cached != null) {
+        return cached;
+      }
+    }
+    String folded = withConnection(c -> engine.serverFold(c, raw));
+    synchronized (folds) {
+      folds.put(raw, folded);
+    }
+    return folded;
   }
 
   /** Forgets everything loaded and resolved, so the next lookup reads both catalogs again. */
@@ -582,6 +611,10 @@ public final class Catalog implements AutoCloseable {
 
     TableInfo classify(QualifiedName q) throws SQLException {
       String full = q.schema() + "." + q.table();
+      if (q.isSynonym()) {
+        throw new SQLException(
+            full + " is a synonym; name the table it stands for instead", "42000");
+      }
       String k = key(full);
       VirtualTable v = byName.get(k);
       if (v != null) {

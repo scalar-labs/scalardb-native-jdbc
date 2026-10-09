@@ -121,6 +121,13 @@ To be filled during triage.
 **Actions:**
 - Engine.java:16 cites a design heading "Identifiers per engine" that does not exist in design.md (dangling reference; the folding, comparison, session-schema and synonym rules live only in javadoc). design.md:193 "read once per driver instance" is now one catalog per (database, credentials, metadata schema) with its own connection. design.md:765 "refresh on a miss" is unimplementable with a whole-catalog load; the real contract is "a table imported after the load is plain until the TTL expires or invalidate() is called", a fail-open window the design must state. The TTL is a correctness knob hard-coded to 60 s, neither a property nor documented. The committed design says Oracle synonyms resolve (and the integration test asserts the public-synonym case) while the uncommitted section 4.7 draft says synonyms pass through as plain; reconcile with todo 040.
 
+### 2026-10-09 - Decisions to record
+
+**By:** Claude Code
+
+**Actions:**
+- Synonyms are refused with 42000 on every engine (040); unquoted non-ASCII names are folded by Oracle itself and by A-Z only on PostgreSQL (043); a double-quoted name is refused where the session reads a string, the setting being part of the session state the proxy captures (049).
+
 ## Notes
 
 - Do not describe internal or private projects in the doc.

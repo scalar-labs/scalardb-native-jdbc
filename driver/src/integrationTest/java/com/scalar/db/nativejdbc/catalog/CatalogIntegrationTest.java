@@ -28,6 +28,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -78,10 +79,18 @@ class CatalogIntegrationTest {
           e.execute(c, "CREATE TABLE public.orders (id INT PRIMARY KEY)");
         }
         case SQLSERVER -> {
-          e.execute(c, "CREATE TABLE dbo.Orders (id INT PRIMARY KEY)");
+          e.execute(
+              c,
+              "CREATE TABLE dbo.Orders (id INT PRIMARY KEY)",
+              "CREATE SYNONYM app.orders_syn FOR app.Orders");
         }
         case ORACLE -> {
-          e.execute(c, "CREATE PUBLIC SYNONYM orders_syn FOR app.orders");
+          e.execute(
+              c,
+              "CREATE PUBLIC SYNONYM orders_syn FOR app.orders",
+              "CREATE SYNONYM app.orders_priv FOR app.orders",
+              // an unquoted name beyond ASCII, folded by Oracle itself
+              "CREATE TABLE app.größe (id NUMBER(10) PRIMARY KEY)");
         }
         default -> {}
       }
@@ -293,6 +302,8 @@ class CatalogIntegrationTest {
               .isEqualTo(Layout.DECOUPLED_IMPORTED);
           assertThat(catalog.lookup(List.of("app"), null, "plain").layout())
               .isEqualTo(Layout.PLAIN);
+          assertRefusedAsSynonym(catalog, NO_SESSION, "app", "orders_syn");
+          assertRefusedAsSynonym(catalog, List.of("app"), null, "orders_syn");
         }
       }
       default -> {
@@ -305,11 +316,10 @@ class CatalogIntegrationTest {
           assertThat(session).containsExactly("APP");
           assertThat(catalog.lookup(session, null, "orders").layout())
               .isEqualTo(Layout.DECOUPLED_IMPORTED);
-          // a public synonym from any schema leads to the table it stands for
-          TableInfo viaSynonym = catalog.lookup(List.of("SYSTEM"), null, "orders_syn");
-          assertThat(viaSynonym.layout()).isEqualTo(Layout.DECOUPLED_IMPORTED);
-          assertThat(viaSynonym.namespace()).isEqualTo("APP");
-          assertThat(viaSynonym.table()).isEqualTo("ORDERS");
+          // a synonym is refused, public or private, qualified or not
+          assertRefusedAsSynonym(catalog, List.of("SYSTEM"), null, "orders_syn");
+          assertRefusedAsSynonym(catalog, List.of("APP"), null, "orders_priv");
+          assertRefusedAsSynonym(catalog, NO_SESSION, "app", "orders_priv");
         }
       }
     }
@@ -326,6 +336,52 @@ class CatalogIntegrationTest {
     assertRefused(catalog, engine.quote("ns"), engine.quote("Orders_data"), "data table");
     assertRefused(
         catalog, engine.quote("ns"), engine.quote("Orders_tx_metadata"), "transaction metadata");
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
+  void theSessionSaysWhetherDoubleQuotesQuoteIdentifiers(Engines e) throws Exception {
+    prepare(e);
+    try (Connection c = e.open()) {
+      Engine engine = e.engine();
+      assertThat(engine.doubleQuotesQuoteIdentifiers(c))
+          .isEqualTo(engine.doubleQuotesQuoteIdentifiersByDefault());
+      switch (e) {
+        case MYSQL, MYSQL_LOWER_CASE, MARIADB -> {
+          e.execute(c, "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')");
+          assertThat(engine.doubleQuotesQuoteIdentifiers(c)).isTrue();
+        }
+        case SQLSERVER -> {
+          e.execute(c, "SET QUOTED_IDENTIFIER OFF");
+          assertThat(engine.doubleQuotesQuoteIdentifiers(c)).isFalse();
+        }
+        default -> {}
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
+  void anUnquotedNonAsciiName_isFoldedByOracle(Engines e) throws Exception {
+    Assumptions.assumeTrue(e == Engines.ORACLE, "only Oracle folds beyond ASCII its own way");
+    prepare(e);
+    String stored;
+    try (Connection c = e.open();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT table_name FROM all_tables WHERE owner = 'APP' AND table_name LIKE 'GR%'");
+        java.sql.ResultSet rs = ps.executeQuery()) {
+      assertThat(rs.next()).isTrue();
+      stored = rs.getString(1);
+    }
+    try (DistributedTransactionAdmin admin = e.admin()) {
+      admin.importTable("APP", stored, DECOUPLED, Map.of());
+    }
+    try (Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open)) {
+      TableInfo t = catalog.lookup(NO_SESSION, "app", "größe");
+      assertThat(t.layout()).isEqualTo(Layout.DECOUPLED_IMPORTED);
+      assertThat(t.table()).isEqualTo(stored);
+    }
   }
 
   @ParameterizedTest
@@ -544,5 +600,14 @@ class CatalogIntegrationTest {
     return (Connection)
         Proxy.newProxyInstance(
             Connection.class.getClassLoader(), new Class<?>[] {Connection.class}, onConnection);
+  }
+
+  private static void assertRefusedAsSynonym(
+      Catalog catalog, List<String> session, @Nullable String rawSchema, String rawTable) {
+    assertThatThrownBy(() -> catalog.lookup(session, rawSchema, rawTable))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("synonym")
+        .extracting("SQLState")
+        .isEqualTo("42000");
   }
 }

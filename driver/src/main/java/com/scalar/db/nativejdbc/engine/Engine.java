@@ -49,16 +49,39 @@ public enum Engine {
   public static final class QualifiedName {
     private final String schema;
     private final String table;
+    private final boolean synonym;
 
     /**
-     * Creates a stored name.
+     * Creates a stored name of a table or view.
      *
      * @param schema the schema in its stored spelling
      * @param table the table in its stored spelling
      */
     public QualifiedName(String schema, String table) {
+      this(schema, table, false);
+    }
+
+    /**
+     * Creates a stored name.
+     *
+     * @param schema the schema in its stored spelling
+     * @param table the object's name in its stored spelling
+     * @param synonym whether the name is a synonym rather than a table or view
+     */
+    public QualifiedName(String schema, String table, boolean synonym) {
       this.schema = schema;
       this.table = table;
+      this.synonym = synonym;
+    }
+
+    /**
+     * Returns whether the name is a synonym. The driver refuses a statement that names a table
+     * through a synonym: which table it stands for is the engine's to say, chains included.
+     *
+     * @return whether it is a synonym
+     */
+    public boolean isSynonym() {
+      return synonym;
     }
 
     /**
@@ -164,13 +187,123 @@ public enum Engine {
     }
     switch (fold) {
       case LOWER:
-        return s.toLowerCase(Locale.ROOT);
+        return lowerAscii(s); // PostgreSQL folds A-Z only
       case UPPER:
-        return s.toUpperCase(Locale.ROOT);
+        return upperSimple(s); // see needsServerFold for names this cannot decide
       case NONE:
         return s;
     }
     throw new AssertionError(fold);
+  }
+
+  private static String lowerAscii(String s) {
+    StringBuilder b = new StringBuilder(s.length());
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      b.append(c >= 'A' && c <= 'Z' ? (char) (c + ('a' - 'A')) : c);
+    }
+    return b.toString();
+  }
+
+  /** Code point by code point, never expanding one character into two as String does for ß. */
+  private static String upperSimple(String s) {
+    StringBuilder b = new StringBuilder(s.length());
+    s.codePoints().forEach(cp -> b.appendCodePoint(Character.toUpperCase(cp)));
+    return b.toString();
+  }
+
+  /**
+   * Returns whether the engine itself must fold this identifier: an unquoted name with characters
+   * beyond ASCII on Oracle, whose upper-casing of them follows the database's character set rather
+   * than Java's rules. {@link #serverFold} asks it.
+   *
+   * @param raw the identifier as written
+   * @return whether to ask the engine
+   */
+  public boolean needsServerFold(String raw) {
+    if (this != ORACLE) {
+      return false;
+    }
+    String s = raw.strip();
+    if (s.startsWith("\"")) {
+      return false;
+    }
+    return s.chars().anyMatch(c -> c > 0x7f);
+  }
+
+  /**
+   * Folds an unquoted identifier the way the engine does, by asking it.
+   *
+   * @param connection a connection to the database
+   * @param raw the unquoted identifier
+   * @return the folded identifier
+   * @throws SQLException if the engine cannot be asked
+   */
+  public String serverFold(Connection connection, String raw) throws SQLException {
+    if (this != ORACLE) {
+      return resolveIdentifier(raw);
+    }
+    try (PreparedStatement ps = connection.prepareStatement("SELECT UPPER(?) FROM dual")) {
+      ps.setString(1, raw.strip());
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getString(1);
+      }
+    }
+  }
+
+  /**
+   * Returns whether {@code "x"} quotes an identifier on an engine left at its default settings: not
+   * on MySQL and MariaDB, where it is a string unless {@code ANSI_QUOTES} is set.
+   *
+   * @return whether double quotes quote identifiers by default
+   */
+  public boolean doubleQuotesQuoteIdentifiersByDefault() {
+    return this != MYSQL && this != MARIADB;
+  }
+
+  /**
+   * Returns whether {@code "x"} quotes an identifier in this session: on MySQL and MariaDB when
+   * {@code sql_mode} includes {@code ANSI_QUOTES}, on SQL Server when {@code QUOTED_IDENTIFIER} is
+   * on; always on PostgreSQL and Oracle. Read with the other session state and passed to the
+   * parser, which refuses a statement that uses {@code "x"} where the engine would read a string.
+   *
+   * @param connection the user's connection
+   * @return whether double quotes quote identifiers
+   * @throws SQLException if the setting cannot be read
+   */
+  public boolean doubleQuotesQuoteIdentifiers(Connection connection) throws SQLException {
+    String sql = doubleQuoteSettingQuery();
+    if (sql == null) {
+      return true;
+    }
+    try (PreparedStatement ps = connection.prepareStatement(sql);
+        ResultSet rs = ps.executeQuery()) {
+      if (!rs.next()) {
+        return doubleQuotesQuoteIdentifiersByDefault();
+      }
+      String value = rs.getString(1);
+      if (value == null) {
+        return doubleQuotesQuoteIdentifiersByDefault();
+      }
+      return this == SQLSERVER
+          ? value.equals("1")
+          : value.toUpperCase(Locale.ROOT).contains("ANSI_QUOTES");
+    }
+  }
+
+  private @Nullable String doubleQuoteSettingQuery() {
+    switch (this) {
+      case MYSQL:
+      case MARIADB:
+        return "SELECT @@SESSION.sql_mode";
+      case SQLSERVER:
+        return "SELECT CASE WHEN (@@OPTIONS & 256) = 256 THEN 1 ELSE 0 END";
+      case POSTGRESQL:
+      case ORACLE:
+        return null;
+    }
+    throw new AssertionError(this);
   }
 
   /**
@@ -275,16 +408,19 @@ public enum Engine {
           String second = schema != null ? schema : "dbo";
           try (PreparedStatement ps =
               connection.prepareStatement(
-                  "SELECT TOP 1 s.name, o.name FROM sys.objects o JOIN sys.schemas s"
+                  "SELECT TOP 1 s.name, o.name, o.type FROM sys.objects o JOIN sys.schemas s"
                       + " ON s.schema_id = o.schema_id"
-                      + " WHERE o.name = ? AND o.type IN ('U', 'V') AND s.name IN (?, ?)"
+                      + " WHERE o.name = ? AND o.type IN ('U', 'V', 'SN') AND s.name IN (?, ?)"
                       + " ORDER BY CASE WHEN s.name = ? THEN 0 ELSE 1 END")) {
             ps.setString(1, table);
             ps.setString(2, first);
             ps.setString(3, second);
             ps.setString(4, first);
             try (ResultSet rs = ps.executeQuery()) {
-              return rs.next() ? new QualifiedName(rs.getString(1), rs.getString(2)) : null;
+              return rs.next()
+                  ? new QualifiedName(
+                      rs.getString(1), rs.getString(2), rs.getString(3).strip().equals("SN"))
+                  : null;
             }
           }
         }
@@ -323,40 +459,43 @@ public enum Engine {
     }
   }
 
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "the query text is assembled from constants; the names are bound")
   private static @Nullable QualifiedName resolveOracle(
       Connection c, List<String> sessionSchemas, @Nullable String schema, String table)
       throws SQLException {
-    String objects =
-        "SELECT owner, object_name FROM all_objects WHERE owner = ? AND object_name = ?"
-            + " AND object_type IN ('TABLE', 'VIEW')";
+    // a synonym is reported as one, never followed: the driver refuses it
+    String own =
+        "SELECT owner, object_name, object_type, 0 pri FROM all_objects"
+            + " WHERE owner = ? AND object_name = ? AND object_type IN ('TABLE', 'VIEW', 'SYNONYM')";
+    String sql;
+    String owner;
     if (schema != null) {
-      return one(c, objects, schema, table);
-    }
-    if (sessionSchemas.isEmpty()) {
+      sql = own;
+      owner = schema;
+    } else if (sessionSchemas.isEmpty()) {
       return null;
+    } else {
+      // the current schema's own object or private synonym, then a public synonym
+      sql =
+          "SELECT owner, object_name, object_type, pri FROM ("
+              + own
+              + " UNION ALL SELECT owner, synonym_name, 'SYNONYM', 1 FROM all_synonyms"
+              + " WHERE owner = 'PUBLIC' AND synonym_name = ?)"
+              + " ORDER BY pri FETCH FIRST 1 ROW ONLY";
+      owner = sessionSchemas.get(0);
     }
-    // the current schema's own table or view, then a private synonym of it, then a public one
-    // (one level, to a table or view), in one round trip
-    String current = sessionSchemas.get(0);
-    try (PreparedStatement ps =
-        c.prepareStatement(
-            "SELECT owner, object_name FROM ("
-                + "SELECT owner, object_name, 0 pri FROM all_objects"
-                + " WHERE owner = ? AND object_name = ? AND object_type IN ('TABLE', 'VIEW')"
-                + " UNION ALL"
-                + " SELECT o.owner, o.object_name,"
-                + " CASE s.owner WHEN 'PUBLIC' THEN 2 ELSE 1 END pri"
-                + " FROM all_synonyms s JOIN all_objects o"
-                + " ON o.owner = s.table_owner AND o.object_name = s.table_name"
-                + " WHERE s.synonym_name = ? AND s.owner IN (?, 'PUBLIC')"
-                + " AND o.object_type IN ('TABLE', 'VIEW'))"
-                + " ORDER BY pri FETCH FIRST 1 ROW ONLY")) {
-      ps.setString(1, current);
+    try (PreparedStatement ps = c.prepareStatement(sql)) {
+      ps.setString(1, owner);
       ps.setString(2, table);
-      ps.setString(3, table);
-      ps.setString(4, current);
+      if (schema == null) {
+        ps.setString(3, table);
+      }
       try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? new QualifiedName(rs.getString(1), rs.getString(2)) : null;
+        return rs.next()
+            ? new QualifiedName(rs.getString(1), rs.getString(2), "SYNONYM".equals(rs.getString(3)))
+            : null;
       }
     }
   }

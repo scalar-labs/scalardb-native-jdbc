@@ -154,6 +154,15 @@ class CatalogTest {
   }
 
   @Test
+  void aSynonym_isRefused_whateverItStandsFor() {
+    assertThatThrownBy(() -> snapshot().classify(new QualifiedName("app", "orders_syn", true)))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("synonym")
+        .extracting("SQLState")
+        .isEqualTo("42000");
+  }
+
+  @Test
   void refusals_nameTheTableToUseInstead() {
     assertThatThrownBy(() -> snapshot().classify(new QualifiedName("ns", "Orders_data")))
         .hasMessageContaining("ns.Orders");

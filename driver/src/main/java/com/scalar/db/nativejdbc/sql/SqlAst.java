@@ -177,15 +177,32 @@ public final class SqlAst {
   }
 
   /**
+   * Parses one statement for an engine left at its default settings, where {@code "x"} quotes an
+   * identifier except on MySQL and MariaDB.
+   *
+   * @param sql the statement
+   * @param engine the engine whose identifier rules apply
+   * @return the AST, or empty as {@link #parse(String, Engine, boolean)} says
+   */
+  public static Optional<SqlAst> parse(String sql, Engine engine) {
+    return parse(sql, engine, engine.doubleQuotesQuoteIdentifiersByDefault());
+  }
+
+  /**
    * Parses one statement. Names local to the statement, CTE names and the table names column
    * qualifiers refer to, are matched the way {@code engine} matches them.
    *
    * @param sql the statement
    * @param engine the engine whose identifier rules apply
+   * @param doubleQuotesQuoteIdentifiers whether {@code "x"} quotes an identifier in the session
+   *     ({@link Engine#doubleQuotesQuoteIdentifiers}); when it does not, the engine reads {@code
+   *     "x"} as a string, while the parser reads it as a name, so such a statement is refused
    * @return the AST, or empty when the text is not exactly one statement, when the parser or the
-   *     reference walk cannot handle it, or when the syntax tree holds a table the walk missed
+   *     reference walk cannot handle it, when the syntax tree holds a table the walk missed, or
+   *     when a name is double-quoted where the session reads a string
    */
-  public static Optional<SqlAst> parse(String sql, Engine engine) {
+  public static Optional<SqlAst> parse(
+      String sql, Engine engine, boolean doubleQuotesQuoteIdentifiers) {
     Statement stmt;
     try {
       // parseStatements, not parse: the latter silently keeps only the first of "a; b"
@@ -265,6 +282,13 @@ public final class SqlAst {
       lockingOrInto |= isLockingOrInto(s);
     }
     accounted.addAll(forUpdateTables);
+    if (!doubleQuotesQuoteIdentifiers) {
+      for (Table t : accounted) {
+        if (isDoubleQuoted(t.getName()) || isDoubleQuoted(t.getSchemaName())) {
+          return Optional.empty();
+        }
+      }
+    }
     // A placeholder that is the operand of a cast or a sign has no tree node of its own, so the
     // placeholders are the union of what the tree and the walk found.
     Set<Object> parameters = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -282,6 +306,13 @@ public final class SqlAst {
         columns.add(new ColumnRef((Column) v, null)); // a column the walk skipped
       }
     }
+    if (!doubleQuotesQuoteIdentifiers) {
+      for (Column c : walked) {
+        if (isDoubleQuoted(c.getColumnName())) {
+          return Optional.empty(); // a string to the engine, a column to the parser
+        }
+      }
+    }
     return Optional.of(
         new SqlAst(
             sql,
@@ -295,6 +326,10 @@ public final class SqlAst {
             parameters.size(),
             lockingOrInto,
             List.copyOf(forUpdateTables)));
+  }
+
+  private static boolean isDoubleQuoted(@Nullable String name) {
+    return name != null && name.length() >= 2 && name.startsWith("\"") && name.endsWith("\"");
   }
 
   /** The key under which a name local to the statement is compared on {@code engine}. */

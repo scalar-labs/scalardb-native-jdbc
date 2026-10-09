@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "040"
 tags: [code-review, correctness, engine]
@@ -101,6 +101,15 @@ To be filled during triage.
 
 **Learnings:**
 - `null` from `Engine.resolve` means two different things, "no such object" and "an object I cannot resolve"; only the first may become `PLAIN`.
+
+### 2026-10-09 - Decision and fix: refuse synonyms
+
+**By:** Claude Code
+
+**Actions:**
+- The maintainer chose to refuse rather than follow synonyms. Engine.resolve reports a synonym as one instead of following it (Engine.QualifiedName.isSynonym): on SQL Server sys.objects type SN is included; on Oracle the own object may be a TABLE, VIEW or SYNONYM, then a public synonym, in one query, qualified or not. Catalog.Snapshot.classify refuses a synonym with SQLSTATE 42000 "is a synonym; name the table it stands for instead", whatever it points at, so chains and synonyms to plain tables are refused too.
+- Tests: CatalogTest.aSynonym_isRefused_whateverItStandsFor; on Oracle a public synonym, a private one unqualified and a private one qualified are refused; on SQL Server a synonym qualified and unqualified is refused.
+- Design: the committed design says Oracle synonyms resolve and the uncommitted section 4.7 draft says synonyms pass through as plain; both must now say "refused" (todo 027).
 
 ## Notes
 

@@ -281,6 +281,22 @@ class SqlAstTest {
   }
 
   @Test
+  void doubleQuotedNames_areRefusedWhereTheSessionReadsAString() {
+    String sql = "update t set x = ? where status = \"active\"";
+    // MySQL and MariaDB without ANSI_QUOTES: "active" is a string to the engine, a column here
+    assertThat(SqlAst.parse(sql, Engine.MYSQL)).isEmpty();
+    assertThat(SqlAst.parse(sql, Engine.MARIADB)).isEmpty();
+    assertThat(SqlAst.parse("select * from \"t\"", Engine.MYSQL)).isEmpty();
+    assertThat(SqlAst.parse(sql, Engine.MYSQL, true)).isPresent(); // with ANSI_QUOTES
+    assertThat(SqlAst.parse(sql, Engine.SQLSERVER, false)).isEmpty(); // QUOTED_IDENTIFIER OFF
+    assertThat(SqlAst.parse(sql, Engine.POSTGRESQL)).isPresent();
+    assertThat(SqlAst.parse(sql, Engine.ORACLE)).isPresent();
+    // a string literal is not affected
+    assertThat(SqlAst.parse("update t set x = ? where status = 'active'", Engine.MYSQL))
+        .isPresent();
+  }
+
+  @Test
   void topPlaceholder_isCounted() {
     assertThat(parse("select top ? * from t where id = ?").parameterCount()).isEqualTo(2);
     assertThat(

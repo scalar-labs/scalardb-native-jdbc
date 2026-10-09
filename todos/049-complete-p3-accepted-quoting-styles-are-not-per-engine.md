@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "049"
 tags: [code-review, correctness, engine]
@@ -88,6 +88,14 @@ To be filled during triage.
 
 **Learnings:**
 - Quoting is an engine rule in both directions: how to emit and what to accept.
+
+### 2026-10-09 - Decision and fix: read the session's double-quote setting
+
+**By:** Claude Code
+
+**Actions:**
+- Engine.doubleQuotesQuoteIdentifiers(Connection) reads the session: sql_mode containing ANSI_QUOTES on MySQL and MariaDB, QUOTED_IDENTIFIER (@@OPTIONS & 256) on SQL Server, always true on PostgreSQL and Oracle; doubleQuotesQuoteIdentifiersByDefault() is the default per engine. SqlAst.parse(sql, engine, doubleQuotesQuoteIdentifiers) refuses a statement whose table, schema or column name is double-quoted when the session reads "x" as a string; parse(sql, engine) uses the engine's default. The proxy must read the setting with the other session state (todo 039).
+- Tests: SqlAstTest.doubleQuotedNames_areRefusedWhereTheSessionReadsAString; the integration test reads the setting on every configuration and flips it with SET sql_mode on MySQL and MariaDB and SET QUOTED_IDENTIFIER OFF on SQL Server.
 
 ## Notes
 
