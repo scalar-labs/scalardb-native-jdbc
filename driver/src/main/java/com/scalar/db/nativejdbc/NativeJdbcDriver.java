@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc;
 
 import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.jdbc.Proxies;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -116,7 +117,9 @@ public final class NativeJdbcDriver implements Driver {
     try {
       // then the catalog: a database without ScalarDB's catalog, or a user who cannot read it, is
       // refused here rather than at the first statement
-      catalog(parsed, settings, vendor, vendorProperties).verify();
+      Catalog catalog = catalog(parsed, settings, vendor, vendorProperties);
+      catalog.verify();
+      return Proxies.connection(connection, parsed.engine(), catalog);
     } catch (SQLException | RuntimeException e) {
       try {
         connection.close();
@@ -125,9 +128,6 @@ public final class NativeJdbcDriver implements Driver {
       }
       throw e;
     }
-    // The connection proxy of docs/design.md ("Architecture") wraps this connection next; until
-    // then the vendor connection is returned as is.
-    return connection;
   }
 
   /**

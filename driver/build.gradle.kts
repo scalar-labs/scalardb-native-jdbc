@@ -54,6 +54,8 @@ dependencies {
     "integrationTestRuntimeOnly"(libs.mssql.jdbc)
     "integrationTestRuntimeOnly"(libs.ojdbc11)
     "integrationTestRuntimeOnly"(libs.logback.classic)
+    // the pool most applications put in front of a driver; the version ScalarDB itself brings
+    "integrationTestImplementation"(libs.hikaricp)
 }
 
 // Which engines the integration tests run against: -Dnativejdbc.engines=postgresql,oracle or "all".

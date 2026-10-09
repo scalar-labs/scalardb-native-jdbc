@@ -315,6 +315,16 @@ public final class Catalog implements AutoCloseable {
     snapshot();
   }
 
+  /**
+   * Forgets the resolved names but keeps ScalarDB's catalog: after DDL, which may create a table
+   * that shadows another or drop one, but cannot change what ScalarDB registered.
+   */
+  public void invalidateResolutions() {
+    synchronized (resolutions) {
+      resolutions.clear();
+    }
+  }
+
   /** Forgets everything loaded and resolved, so the next lookup reads both catalogs again. */
   public void invalidate() {
     snapshot = null;

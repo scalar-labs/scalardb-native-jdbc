@@ -34,4 +34,16 @@
     <Class name="~.*Test(\$.*)?"/>
     <Bug pattern="HARD_CODE_PASSWORD"/>
   </Match>
+  <!-- A statement expected to be refused inside an assertThatThrownBy lambda never returns a result
+       to use or close. -->
+  <Match>
+    <Class name="~.*Test(\$.*)?"/>
+    <Method name="~lambda\$.*"/>
+    <Bug code="RV,OBL"/>
+  </Match>
+  <!-- getConnection() and getStatement() return the driver's proxies by contract (JDBC 4.3) -->
+  <Match>
+    <Class name="~com\.scalar\.db\.nativejdbc\.jdbc\.Proxies\$.*Handler"/>
+    <Bug pattern="EI_EXPOSE_REP"/>
+  </Match>
 </FindBugsFilter>

@@ -376,6 +376,27 @@ class SqlAstTest {
   }
 
   @Test
+  void sessionStatements_areAccepted_withoutTables_unlessTheyReadOne() {
+    for (String sql :
+        new String[] {
+          "SET search_path = app, public",
+          "SET ROLE app",
+          "RESET ALL",
+          "USE app",
+          "SET NAMES utf8mb4",
+          "ALTER SESSION SET CURRENT_SCHEMA = app"
+        }) {
+      SqlAst ast = parse(sql);
+      assertThat(ast.kind()).as(sql).isEqualTo(SqlAst.Kind.SESSION);
+      assertThat(ast.tableRefs()).as(sql).isEmpty();
+    }
+    // a subquery in a SET reads a table the walk does not visit: refused
+    assertThat(SqlAst.parse("SET x = (SELECT a FROM t)")).isEmpty();
+    assertThat(SqlAst.analyze("CALL p(?)", Engine.POSTGRESQL, true).reason())
+        .contains("procedure call");
+  }
+
+  @Test
   void topPlaceholder_isCounted() {
     assertThat(parse("select top ? * from t where id = ?").parameterCount()).isEqualTo(2);
     assertThat(

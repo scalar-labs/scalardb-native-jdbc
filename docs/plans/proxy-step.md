@@ -69,6 +69,11 @@ comment forms.
 
 ### Milestone 1: wrapped connection, pass-through, refusals
 
+**Done 2026-10-10** (todo 039), in the `jdbc` package: `Proxies`, `Router`, `Session`, `Errors`.
+Two items moved: the rollback-only state of 4.4 goes to milestone 4, since nothing aborts a
+transaction before the driver writes; `DriverErrors` is the one-method `Errors`, grown when a milestone
+needs more. SQL Server `USE` of another database is documented as unsupported, not detected (milestone 8).
+
 - **Proxies.** `java.lang.reflect.Proxy` over `Connection`, `Statement`, `PreparedStatement`,
   `CallableStatement` (refused for ScalarDB tables, passed through otherwise), `ResultSet` and
   `DatabaseMetaData`, each forwarding every method it does not intercept, as the design's Architecture

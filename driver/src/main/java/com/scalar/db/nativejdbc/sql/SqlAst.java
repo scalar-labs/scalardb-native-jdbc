@@ -25,9 +25,14 @@ import net.sf.jsqlparser.parser.ParseException;
 import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
+import net.sf.jsqlparser.statement.ResetStatement;
+import net.sf.jsqlparser.statement.SetStatement;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
+import net.sf.jsqlparser.statement.UseStatement;
+import net.sf.jsqlparser.statement.alter.AlterSession;
 import net.sf.jsqlparser.statement.delete.Delete;
+import net.sf.jsqlparser.statement.execute.Execute;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.merge.Merge;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
@@ -85,6 +90,11 @@ public final class SqlAst {
     TRUNCATE,
     /** {@code CREATE}, {@code ALTER}, {@code DROP} or {@code COMMENT}. */
     DDL,
+    /**
+     * A statement that changes the session, {@code SET}, {@code RESET}, {@code USE} or {@code ALTER
+     * SESSION}: after it the session's schemas and settings must be read again.
+     */
+    SESSION,
     /** Anything else. */
     OTHER
   }
@@ -219,11 +229,20 @@ public final class SqlAst {
     } catch (Exception e) {
       return Outcome.refused("the statement cannot be parsed: " + firstLine(e));
     }
+    if (stmt instanceof Execute) {
+      return Outcome.refused(
+          "a procedure call cannot be inspected; run it with the passthrough setting if it does"
+              + " not touch ScalarDB tables");
+    }
     Walker walker = new Walker();
     try {
       walker.getTables(stmt);
     } catch (RuntimeException e) {
-      return Outcome.refused("the statement's table references cannot be enumerated");
+      // the walk does not know SET and RESET; they name no table unless an expression holds a
+      // subquery, and the check below refuses any table node the walk did not visit
+      if (!(stmt instanceof SetStatement) && !(stmt instanceof ResetStatement)) {
+        return Outcome.refused("the statement's table references cannot be enumerated");
+      }
     }
     Set<String> cteKeys = new LinkedHashSet<>();
     for (String raw : walker.cteNames) {
@@ -538,6 +557,12 @@ public final class SqlAst {
    * @return the kind
    */
   public Kind kind() {
+    if (statement instanceof SetStatement
+        || statement instanceof ResetStatement
+        || statement instanceof UseStatement
+        || statement instanceof AlterSession) {
+      return Kind.SESSION;
+    }
     if (statement instanceof Select) {
       return Kind.SELECT;
     }

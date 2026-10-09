@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "039"
 tags: [code-review, architecture, design, engine]
@@ -58,6 +58,14 @@ dependencies: []
 **Risk:** Medium
 
 ## Recommended Action
+
+Option 1, done in milestone 1 (2026-10-10). `Kind.SESSION` covers SET, RESET, USE and ALTER SESSION.
+`Session` marks the schemas and the double-quote setting stale after `setSchema`, `setCatalog` and any
+statement not classified as SELECT or DML, including passthrough, and again at `commit`/`rollback` when
+that happened inside the transaction; it re-reads before the next lookup. DDL and TRUNCATE invalidate the
+catalog's resolutions. `RoutingIntegrationTest` covers `SET search_path`, `setSchema` and a rolled-back
+`SET LOCAL`. Left as documented limits in design section 1: temporary tables named like a ScalarDB
+table, and SQL Server `USE` of another database.
 
 To be filled during triage.
 

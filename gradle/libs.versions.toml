@@ -7,6 +7,7 @@ jsqlparser = "5.4"
 # Kept at ScalarDB's version, since the driver is loaded next to ScalarDB in the tests
 slf4j = "1.7.36"
 logback = "1.5.38"
+hikaricp = "4.0.3"
 picocli = "4.7.7"
 # Vendor JDBC drivers: the application supplies its own; these are the versions the tests run
 postgresql = "42.7.14"
@@ -40,6 +41,7 @@ scalardb = { module = "com.scalar-labs:scalardb", version.ref = "scalardb" }
 jsqlparser = { module = "com.github.jsqlparser:jsqlparser", version.ref = "jsqlparser" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
 picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
 mysql-connector-j = { module = "com.mysql:mysql-connector-j", version.ref = "mysql" }
