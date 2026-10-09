@@ -114,6 +114,13 @@ To be filled during triage.
 **Actions:**
 - From the five-engine probe and the catalog rework, design.md should state: the per-engine identifier table (folding, column comparison, where an unqualified name resolves and the engine query used); that ScalarDB creates a real view for every decoupled table's virtual name on every engine; that the catalog is loaded whole per database on the driver's own connection with a TTL, and that the session schemas are captured on the user's connection at connect and after session-changing statements; that ScalarDB cannot import an Oracle INT column (NUMBER(38,0)), so NUMBER(10) or NUMBER(19) is needed; and that the driver's catalog queries quote ScalarDB's column names because Oracle stores them in lower case.
 
+### 2026-10-09 - Four new divergences from 75106c2 (architecture and agent-native reviews)
+
+**By:** Claude Code
+
+**Actions:**
+- Engine.java:16 cites a design heading "Identifiers per engine" that does not exist in design.md (dangling reference; the folding, comparison, session-schema and synonym rules live only in javadoc). design.md:193 "read once per driver instance" is now one catalog per (database, credentials, metadata schema) with its own connection. design.md:765 "refresh on a miss" is unimplementable with a whole-catalog load; the real contract is "a table imported after the load is plain until the TTL expires or invalidate() is called", a fail-open window the design must state. The TTL is a correctness knob hard-coded to 60 s, neither a property nor documented. The committed design says Oracle synonyms resolve (and the integration test asserts the public-synonym case) while the uncommitted section 4.7 draft says synonyms pass through as plain; reconcile with todo 040.
+
 ## Notes
 
 - Do not describe internal or private projects in the doc.

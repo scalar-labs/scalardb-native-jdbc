@@ -141,6 +141,13 @@ To be filled during triage.
 
 ---
 
+### 2026-10-09 - Status after 75106c2 (performance review)
+
+**By:** Claude Code
+
+**Actions:**
+- Unchanged by the commit. New measurements: pipeline 343 us / 348 KB for the Hibernate key select (was ~320 us); joinTokens(null) still re-parses (106 us); one platform thread per parse and per joinTokens (parseStatements creates the same executor); a refused DDL costs 180 us and a syntax error 446 us per execution, uncached. The shape step itself fell from 312 us to 2.5 us on the IN(50) statement because the second parse inside of(String) is gone. Acceptance criteria unchanged and unmet.
+
 ## Notes
 
 - The measurements are order-of-magnitude from a warmed loop, not JMH; re-measure after the change with the same harness.

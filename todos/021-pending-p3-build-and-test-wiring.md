@@ -130,6 +130,13 @@ To be filled during triage.
 **Actions:**
 - Engines (integrationTest, package testing) starts one container per engine per JVM lazily and reaps it at exit; -Dnativejdbc.engines selects a subset and "all" is the default; CatalogIntegrationTest is parameterised over the selected engines. The four extra vendor drivers and Testcontainers modules are on the integrationTest classpath, with ScalarDB's ojdbc8 excluded in favour of ojdbc11. Still open: check runs every engine locally (no tag-based subset), the unit suite still carries scalardb and pgjdbc, SpotBugs still runs on the test source sets.
 
+### 2026-10-09 - Harness items beyond this todo
+
+**By:** Claude Code
+
+**Actions:**
+- The second review listed harness gaps for the five-engine matrix in todo 052: serial container start (Startables.deepStart), no external-database override, SQL Server's appdb without READ_COMMITTED_SNAPSHOT / ALLOW_SNAPSHOT_ISOLATION, ScalarDB isolation fixed per engine rather than per test, Oracle run as SYSTEM, and no CI matrix job.
+
 ## Notes
 
 - The build layout mirrors the sibling repositories at the maintainer's request; keep the convention-plugin structure and change only the wiring described here.

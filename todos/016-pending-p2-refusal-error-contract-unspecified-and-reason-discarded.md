@@ -112,6 +112,13 @@ To be filled during triage.
 
 ---
 
+### 2026-10-09 - Status after 75106c2 (agent-native review)
+
+**By:** Claude Code
+
+**Actions:**
+- The commit added about fifteen new silent refusal causes to StatementShape (table hints, TABLESAMPLE, PIVOT, SKIP LOCKED, NOWAIT, WAIT, INSERT IGNORE, ON DUPLICATE KEY, ON CONFLICT, OUTPUT, hints, "predicate not inspectable") and removed SqlAst.unknownNodes(), which this todo's Option 1 relied on; hasSecondStatement moved into SqlAst.parse, which still swallows the parser message. New direction: a Builder.refuse(String why) that records the clause and returns false, and of() returning the reason with the empty result; ModulePathCheck and StatementShapeTest should assert the reason.
+
 ## Notes
 
 - `0A000` ("feature not supported") is what pgjdbc and ojdbc use for unsupported JDBC features, so frameworks already translate it as non-transient.

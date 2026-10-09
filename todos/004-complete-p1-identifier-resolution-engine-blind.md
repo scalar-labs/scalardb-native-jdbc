@@ -155,6 +155,13 @@ To be filled during triage.
 **Learnings:**
 - Resolving the name through the engine removes the need for any Java-side table-name comparison rule: ScalarDB stores exactly what the engine stores.
 
+### 2026-10-09 - Reopened in part by the second review
+
+**By:** Claude Code
+
+**Actions:**
+- Two residuals found by the review of 75106c2: the catalog classifies by the exact spelling ScalarDB recorded, which differs from the engine's stored spelling on SQL Server and on MySQL/MariaDB with lower_case_table_names=1 (todo 032, verified live); and SqlAst still folds CTE names and column qualifiers with the PostgreSQL rule (todo 038). This item stays complete for what it covered; the two residuals have their own todos.
+
 ## Notes
 
 - Related: todo 005 (catalog connection and current schema), todo 018 (unquoting escapes), todo 024 (engine package).

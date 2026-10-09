@@ -125,6 +125,13 @@ To be filled during triage.
 **Actions:**
 - The reflective scan, its Field copies and the per-call rescans are gone; parameterCount() is computed once at parse. Remaining from this item: TableInfo.keyColumns()/nonKeyColumns() allocation per call, ColumnRef.qualifier() allocation, and resolve() lower-casing per comparison.
 
+### 2026-10-09 - Status after 75106c2 (performance review)
+
+**By:** Claude Code
+
+**Actions:**
+- The scan part is resolved: valuesUnder(root) costs 0.5 us (Hibernate select) to 87 us (400-row insert), about 10x faster and 30x less allocation than the reflective scan, and runs once at parse. Still open: TableInfo.keyColumns()/nonKeyColumns() build lists per call, ColumnRef.qualifier() allocates a TableRef per column per check, and sameIdentifier now calls engine.resolveIdentifier twice per comparison. The retained treeValues set per SqlAst is todo 048.
+
 ## Notes
 
 - If todo 003 is resolved by moving to visitors, Option 2 here comes for free and Option 1 shrinks to the `TableInfo` and `ColumnRef` allocations.

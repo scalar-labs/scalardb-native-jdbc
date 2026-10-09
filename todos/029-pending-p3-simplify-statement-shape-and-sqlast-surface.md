@@ -132,6 +132,13 @@ To be filled during triage.
 - The simplicity reviewer confirmed the token-join rewrite is required by the design, so the cuts are all
   around it, not in it.
 
+### 2026-10-09 - New weight of the same kind in 75106c2
+
+**By:** Claude Code
+
+**Actions:**
+- Listed in todo 050: the second unquoting rule in SqlAst (038), resolvedName x2 now callerless, treeValues, Engine.of unused while NativeJdbcUrl rebuilds the set, Engine.sameColumn, Catalog.engine(), QualifiedName.toString, Query/withConnection, Engines.url()/useSchema(), an inline new java.util.HashSet<>() in NativeJdbcUrl.
+
 ## Notes
 
 - Pair with 012 so the fragment emitter and the deletions land as one change to the `sql` surface.
