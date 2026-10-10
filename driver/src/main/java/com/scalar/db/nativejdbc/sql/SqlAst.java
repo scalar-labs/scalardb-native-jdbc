@@ -10,11 +10,13 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.parser.ASTNodeAccess;
@@ -143,6 +145,7 @@ public final class SqlAst {
   private final int parameterCount;
   private final boolean lockingOrInto;
   private final List<Table> forUpdateTables;
+  private final boolean setsSessionInAnExpression;
 
   private SqlAst(
       String source,
@@ -155,7 +158,9 @@ public final class SqlAst {
       Node root,
       int parameterCount,
       boolean lockingOrInto,
-      List<Table> forUpdateTables) {
+      List<Table> forUpdateTables,
+      boolean setsSessionInAnExpression) {
+    this.setsSessionInAnExpression = setsSessionInAnExpression;
     this.source = source;
     this.statement = statement;
     this.tableRefs = tableRefs;
@@ -281,6 +286,24 @@ public final class SqlAst {
       return Outcome.refused(comment);
     }
     Set<Object> values = valuesUnder(root);
+    boolean setsSession = false;
+    for (Object v : values) {
+      if (v instanceof Function) {
+        List<String> parts = new ArrayList<>();
+        for (String p : functionNameParts((Function) v)) {
+          parts.add(unquoted(p.strip()).toLowerCase(Locale.ROOT));
+        }
+        if (engine.runsSqlText(parts)) {
+          return Outcome.refused(
+              "the function "
+                  + String.join(".", parts)
+                  + " runs SQL given as text, which cannot be inspected; run it with the"
+                  + " passthrough setting if that SQL does not touch ScalarDB tables");
+        }
+        // PostgreSQL's SET as a function
+        setsSession |= !parts.isEmpty() && parts.get(parts.size() - 1).equals("set_config");
+      }
+    }
     // Every SELECT of the statement, wherever it is nested: the walk visits them, and the tree
     // holds the rest.
     Set<Select> selects = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -383,7 +406,8 @@ public final class SqlAst {
             root,
             parameters.size(),
             lockingOrInto,
-            List.copyOf(forUpdateTables)));
+            List.copyOf(forUpdateTables),
+            setsSession));
   }
 
   /**
@@ -557,7 +581,8 @@ public final class SqlAst {
    * @return the kind
    */
   public Kind kind() {
-    if (statement instanceof SetStatement
+    if (setsSessionInAnExpression
+        || statement instanceof SetStatement
         || statement instanceof ResetStatement
         || statement instanceof UseStatement
         || statement instanceof AlterSession) {
@@ -1232,6 +1257,34 @@ public final class SqlAst {
   static @Nullable Set<Object> valuesUnder(Expression expression) {
     Node n = expression.getASTNode();
     return n == null ? null : valuesUnder(n);
+  }
+
+  /**
+   * The parts of a function's name. The parser leaves them out for a table function with a column
+   * definition list, {@code f(...) AS r(a int)}, so they are then read from its text.
+   */
+  private static List<String> functionNameParts(Function f) {
+    List<String> parts = f.getMultipartName();
+    if (parts != null) {
+      return parts;
+    }
+    String text = f.toString();
+    int paren = text.indexOf('(');
+    return List.of((paren < 0 ? text : text.substring(0, paren)).split("\\."));
+  }
+
+  /** A name part without its quotes, in any of the engines' quoting styles. */
+  private static String unquoted(String part) {
+    if (part.length() >= 2) {
+      char first = part.charAt(0);
+      char last = part.charAt(part.length() - 1);
+      if ((first == '"' && last == '"')
+          || (first == '`' && last == '`')
+          || (first == '[' && last == ']')) {
+        return part.substring(1, part.length() - 1);
+      }
+    }
+    return part;
   }
 
   /** Iterative, with no depth limit: a predicate of any length is walked in full. */

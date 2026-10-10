@@ -13,6 +13,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Properties;
 import org.jspecify.annotations.Nullable;
@@ -163,10 +165,29 @@ public final class Proxies {
             return r;
           }
         case "commit":
-        case "rollback":
           {
             Object r = forward(vendor, method, args);
             session.transactionEnded();
+            return r;
+          }
+        case "rollback":
+          {
+            Object r = forward(vendor, method, args);
+            if (args == null || args.length == 0) {
+              session.transactionEnded();
+            } else {
+              session.rolledBackToSavepoint(); // the transaction goes on
+            }
+            return r;
+          }
+        case "setAutoCommit":
+          {
+            // switching autocommit on commits an open transaction (Connection.setAutoCommit)
+            boolean wasInTransaction = !vendor.getAutoCommit();
+            Object r = forward(vendor, method, args);
+            if (wasInTransaction && Boolean.TRUE.equals(args[0])) {
+              session.transactionEnded();
+            }
             return r;
           }
         case "setClientInfo":
@@ -213,7 +234,9 @@ public final class Proxies {
     final Statement vendor;
     final Connection connection;
     final ConnectionHandler owner;
-    final Router.@Nullable Route prepared;
+    Router.@Nullable Route prepared;
+    // the routes of the statements added with addBatch(String), applied when the batch runs
+    final List<Router.Route> batched = new ArrayList<>();
 
     StatementHandler(
         Statement vendor,
@@ -239,18 +262,46 @@ public final class Proxies {
         return connection;
       }
       boolean takesSql = args != null && args.length > 0 && args[0] instanceof String;
-      Router.Route route = null;
+      if (name.equals("clearBatch")) {
+        batched.clear();
+        return forward(vendor, method, args);
+      }
+      if (takesSql && name.equals("addBatch")) {
+        Router.Route route = owner.router.route(owner.vendor, (String) args[0]);
+        Object[] routed = args.clone();
+        routed[0] = route.sql;
+        Object result = forward(vendor, method, routed);
+        batched.add(route);
+        return result;
+      }
+      List<Router.Route> ran = new ArrayList<>();
       Object[] routed = args;
-      if (takesSql && (name.startsWith("execute") || name.equals("addBatch"))) {
-        route = owner.router.route(owner.vendor, (String) args[0]);
+      if (takesSql && name.startsWith("execute")) {
+        Router.Route route = owner.router.route(owner.vendor, (String) args[0]);
         routed = args.clone();
         routed[0] = route.sql;
+        ran.add(route);
       } else if (prepared != null && name.startsWith("execute")) {
-        route = prepared;
+        Router.Route route = owner.router.current(owner.vendor, prepared);
+        if (!route.sql.equals(prepared.sql)) {
+          // the vendor statement holds the old text
+          throw Errors.unsupported(
+              "the statement now routes differently from when it was prepared; prepare it again");
+        }
+        prepared = route;
+        ran.add(route);
       }
-      Object result = forward(vendor, method, routed);
-      if (route != null && !name.equals("addBatch")) {
-        owner.router.ran(owner.vendor, route);
+      if (name.startsWith("execute") && name.endsWith("Batch")) {
+        ran.addAll(batched); // the driver clears the batch when it runs, whatever the outcome
+        batched.clear();
+      }
+      Object result;
+      try {
+        result = forward(vendor, method, routed);
+      } finally {
+        for (Router.Route route : ran) {
+          owner.router.ran(owner.vendor, route);
+        }
       }
       if (result instanceof ResultSet) {
         return proxy(ResultSet.class, new ChildHandler(result, connection, (Statement) proxy));

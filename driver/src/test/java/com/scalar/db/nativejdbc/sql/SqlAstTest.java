@@ -3,6 +3,7 @@ package com.scalar.db.nativejdbc.sql;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.nativejdbc.engine.Engine;
+import java.util.List;
 import java.util.stream.Stream;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import org.jspecify.annotations.Nullable;
@@ -373,6 +374,44 @@ class SqlAstTest {
     assertThat(SqlAst.parse("select * from s.\"Orders\" where id = ?", Engine.POSTGRESQL))
         .isPresent();
     assertThat(SqlAst.parse("select id as \"a.b\" from t", Engine.POSTGRESQL)).isPresent();
+  }
+
+  @Test
+  void setConfig_changesTheSession_inAnyForm() {
+    for (String sql :
+        List.of(
+            "SELECT set_config('search_path', 'app', false)",
+            "SELECT pg_catalog.set_config('search_path', 'app', false)",
+            "SELECT \"set_config\"('search_path', 'app', false)",
+            "SELECT x FROM t WHERE y = set_config('a.b', 'c', true)")) {
+      assertThat(parse(sql).kind()).as(sql).isEqualTo(SqlAst.Kind.SESSION);
+    }
+    assertThat(parse("SELECT current_setting('search_path')").kind()).isEqualTo(SqlAst.Kind.SELECT);
+  }
+
+  @Test
+  void functionsThatRunSqlText_areRefused_perEngine() {
+    String[][] cases = {
+      {"POSTGRESQL", "SELECT query_to_xml('SELECT * FROM s', true, false, '')"},
+      {"POSTGRESQL", "SELECT * FROM query_to_xml('SELECT * FROM s', true, false, '')"},
+      {"POSTGRESQL", "SELECT table_to_xml('s', true, false, '')"},
+      {"POSTGRESQL", "SELECT x FROM t WHERE y IN (SELECT dblink('c', 'SELECT 1'))"},
+      {"POSTGRESQL", "SELECT * FROM crosstab('SELECT a, b, c FROM s') AS r(a int, b int)"},
+      {"ORACLE", "SELECT dbms_xmlgen.getxml('SELECT * FROM s') FROM dual"},
+      {"ORACLE", "SELECT sys.dbms_xmlgen.getxml('SELECT * FROM s') FROM dual"},
+      {"SQLSERVER", "SELECT * FROM OPENQUERY(lnk, 'SELECT * FROM s')"},
+      {"SQLSERVER", "SELECT * FROM OPENROWSET('SQLNCLI', 'x', 'SELECT * FROM s') AS r"},
+    };
+    for (String[] c : cases) {
+      Outcome<SqlAst> o = SqlAst.analyze(c[1], Engine.valueOf(c[0]), true);
+      assertThat(o.isPresent()).as(c[1]).isFalse();
+      assertThat(o.reason()).as(c[1]).contains("runs SQL given as text").contains("passthrough");
+    }
+    // the same names are ordinary functions where the engine has no such function
+    assertThat(SqlAst.analyze("SELECT query_to_xml(a) FROM t", Engine.MYSQL, true).isPresent())
+        .isTrue();
+    assertThat(SqlAst.analyze("SELECT count(*), upper(x) FROM t", Engine.POSTGRESQL, true))
+        .matches(Outcome::isPresent);
   }
 
   @Test

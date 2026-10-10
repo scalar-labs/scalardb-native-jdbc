@@ -253,6 +253,60 @@ public enum Engine {
   }
 
   /**
+   * Returns whether a function of this name runs SQL it receives as text, which the driver cannot
+   * inspect (design 4.1). A function written by the user that does so cannot be recognised; this
+   * covers the engine's own.
+   *
+   * @param nameParts the parts of the function's name, unquoted and in lower case
+   * @return whether any part names such a function or package
+   */
+  public boolean runsSqlText(List<String> nameParts) {
+    for (String part : nameParts) {
+      switch (this) {
+        case POSTGRESQL:
+          // the XML exports, dblink, the tablefunc extension and the text-search statistics all
+          // take a query or a table name as a string
+          if (part.startsWith("query_to_xml")
+              || part.startsWith("cursor_to_xml")
+              || part.startsWith("table_to_xml")
+              || part.startsWith("schema_to_xml")
+              || part.startsWith("database_to_xml")
+              || part.startsWith("dblink")
+              || part.startsWith("crosstab")
+              || part.equals("connectby")
+              || part.equals("ts_stat")
+              || part.equals("ts_rewrite")) {
+            return true;
+          }
+          break;
+        case ORACLE:
+          // the packages run a query string; XQuery reads tables through fn:collection("oradb:...")
+          if (part.equals("dbms_xmlgen")
+              || part.equals("dbms_xmlquery")
+              || part.equals("dbms_xmlstore")
+              || part.equals("dbms_sql")
+              || part.equals("xmlquery")
+              || part.equals("xmltable")
+              || part.equals("xmlexists")) {
+            return true;
+          }
+          break;
+        case SQLSERVER:
+          if (part.equals("openquery")
+              || part.equals("openrowset")
+              || part.equals("opendatasource")) {
+            return true;
+          }
+          break;
+        case MYSQL:
+        case MARIADB:
+          break;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Returns whether {@code "x"} quotes an identifier on an engine left at its default settings: not
    * on MySQL and MariaDB, where it is a string unless {@code ANSI_QUOTES} is set.
    *

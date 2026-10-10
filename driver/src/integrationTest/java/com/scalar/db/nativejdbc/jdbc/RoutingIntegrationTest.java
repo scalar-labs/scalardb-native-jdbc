@@ -200,4 +200,130 @@ class RoutingIntegrationTest {
       }
     }
   }
+
+  // Review findings 055-058: each must end in a refusal. The helper reports which table a statement
+  // actually read when the driver let it through: "scalardb" is the raw ScalarDB table m1.s.
+
+  private static void seedDistinctRows() throws SQLException {
+    try (Connection c = PG.open()) {
+      PG.execute(
+          c,
+          "INSERT INTO m1.s VALUES (99, 'scalardb') ON CONFLICT DO NOTHING",
+          "INSERT INTO m1plain.s VALUES (1, 'plain') ON CONFLICT DO NOTHING");
+    }
+  }
+
+  private interface Query {
+    ResultSet run() throws SQLException;
+  }
+
+  private static String outcome(Query query) {
+    try (ResultSet rs = query.run()) {
+      return rs.next() ? "read " + rs.getString(1) : "read nothing";
+    } catch (SQLException e) {
+      return "refused " + e.getSQLState();
+    }
+  }
+
+  @Test
+  void finding055_aBatchedSet_isSeenByTheNextLookup() throws SQLException {
+    seedDistinctRows();
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      st.execute("SET search_path = m1plain");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
+      st.addBatch("SET search_path = m1");
+      st.executeBatch();
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0A000");
+    }
+  }
+
+  @Test
+  void finding056_aPreparedStatement_isCheckedAgainAfterTheSessionChanges() throws SQLException {
+    seedDistinctRows();
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      c.setSchema("m1plain");
+      try (PreparedStatement ps = c.prepareStatement("SELECT x FROM s")) {
+        assertThat(outcome(ps::executeQuery)).isEqualTo("read plain");
+        st.execute("SET search_path = m1");
+        assertThat(outcome(ps::executeQuery)).isEqualTo("refused 0A000");
+      }
+    }
+  }
+
+  @Test
+  void finding056_aStatementPreparedInPassthrough_isCheckedAgainWhenPassthroughEnds()
+      throws SQLException {
+    try (Connection c = connect()) {
+      c.setClientInfo(Proxies.PASSTHROUGH, "true");
+      try (PreparedStatement ps = c.prepareStatement("VACUUM m1.p")) {
+        ps.execute();
+        c.setClientInfo(Proxies.PASSTHROUGH, "false");
+        assertRefused(ps::execute, "0A000", "cannot be parsed");
+        c.setClientInfo(Proxies.PASSTHROUGH, "true");
+        c.setAutoCommit(false);
+        assertRefused(ps::execute, "0A000", "autocommit");
+        c.setAutoCommit(true);
+      }
+    }
+  }
+
+  @Test
+  void finding057_setAutoCommitTrue_endsTheTransaction_forTheSessionToo() throws SQLException {
+    seedDistinctRows();
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      st.execute("SET search_path = m1");
+      c.setAutoCommit(false);
+      st.execute("SET LOCAL search_path = m1plain");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
+      c.setAutoCommit(true); // commits; PostgreSQL reverts the path to m1
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0A000");
+    }
+  }
+
+  @Test
+  void finding057_rollbackToASavepoint_doesNotEndTheTransaction() throws SQLException {
+    seedDistinctRows();
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      st.execute("SET search_path = m1");
+      c.setAutoCommit(false);
+      st.execute("SET LOCAL search_path = m1plain");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
+      c.rollback(c.setSavepoint());
+      // the path is still m1plain until the transaction ends
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
+      c.commit(); // reverts the path to m1
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0A000");
+      c.setAutoCommit(true);
+    }
+  }
+
+  @Test
+  void finding058_setConfig_isSeenByTheNextLookup() throws SQLException {
+    seedDistinctRows();
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      st.execute("SET search_path = m1plain");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
+      st.executeQuery("SELECT set_config('search_path', 'm1', false)").close();
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0A000");
+    }
+  }
+
+  @Test
+  void finding058_dynamicSqlInAFunction_isRefused() throws SQLException {
+    seedDistinctRows();
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      assertThat(
+              outcome(
+                  () ->
+                      st.executeQuery(
+                          "SELECT query_to_xml('SELECT x FROM m1.s', true, false, '')")))
+          .isEqualTo("refused 0A000");
+    }
+  }
 }

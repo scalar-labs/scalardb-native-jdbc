@@ -17,6 +17,7 @@ final class Session {
   private boolean doubleQuotesQuoteIdentifiers;
   private boolean stale = true;
   private boolean changedInTransaction;
+  private long generation;
 
   Session(Engine engine) {
     this.engine = engine;
@@ -38,9 +39,15 @@ final class Session {
    * Marks the session as changed by a statement or a call. Inside a transaction a change may also
    * be undone at its end ({@code SET LOCAL}, a rolled-back {@code SET}), so the end marks it again.
    */
-  void changed(Connection vendor) throws SQLException {
-    stale = true;
-    if (!vendor.getAutoCommit()) {
+  void changed(Connection vendor) {
+    markStale();
+    boolean autoCommit;
+    try {
+      autoCommit = vendor.getAutoCommit();
+    } catch (SQLException e) {
+      autoCommit = false; // unknown: assume a transaction, so its end marks the session again
+    }
+    if (!autoCommit) {
       changedInTransaction = true;
     }
   }
@@ -48,9 +55,29 @@ final class Session {
   /** At commit or rollback: a change made inside the transaction may have been undone. */
   void transactionEnded() {
     if (changedInTransaction) {
-      stale = true;
+      markStale();
       changedInTransaction = false;
     }
+  }
+
+  /**
+   * At a rollback to a savepoint: a change made after the savepoint is undone, one made before it
+   * holds until the transaction ends, so the transaction's end must still mark the session.
+   */
+  void rolledBackToSavepoint() {
+    if (changedInTransaction) {
+      markStale();
+    }
+  }
+
+  /** Moves on whenever the session state may have changed; a route records the one it saw. */
+  long generation() {
+    return generation;
+  }
+
+  private void markStale() {
+    stale = true;
+    generation++;
   }
 
   private void refreshIfStale(Connection vendor) throws SQLException {

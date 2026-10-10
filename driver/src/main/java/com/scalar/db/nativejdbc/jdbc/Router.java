@@ -20,16 +20,34 @@ import net.sf.jsqlparser.statement.SetStatement;
  */
 final class Router {
 
-  /** What to do with a statement, and what running it does to the session and the catalog. */
+  /**
+   * What to do with a statement, what running it does to the session and the catalog, and the state
+   * it was decided under: a prepared statement is routed again before it runs if that state moved.
+   */
   static final class Route {
+    final String source;
     final String sql;
     final boolean changesSession;
     final boolean changesNames;
+    final boolean passthrough;
+    final long sessionGeneration;
+    final long catalogGeneration;
 
-    Route(String sql, boolean changesSession, boolean changesNames) {
+    private Route(
+        String source,
+        String sql,
+        boolean changesSession,
+        boolean changesNames,
+        boolean passthrough,
+        long sessionGeneration,
+        long catalogGeneration) {
+      this.source = source;
       this.sql = sql;
       this.changesSession = changesSession;
       this.changesNames = changesNames;
+      this.passthrough = passthrough;
+      this.sessionGeneration = sessionGeneration;
+      this.catalogGeneration = catalogGeneration;
     }
   }
 
@@ -67,7 +85,7 @@ final class Router {
         throw Errors.unsupported("the passthrough setting applies in autocommit mode only");
       }
       // anything may run here, so assume it changed the session and the names
-      return new Route(sql, true, true);
+      return route(sql, true, true, true);
     }
     Outcome<SqlAst> parsed =
         SqlAst.analyze(sql, engine, session.doubleQuotesQuoteIdentifiers(vendor));
@@ -98,11 +116,45 @@ final class Router {
     }
     boolean changesSession = kind != SqlAst.Kind.SELECT && kind != SqlAst.Kind.DML;
     boolean changesNames = kind == SqlAst.Kind.DDL || kind == SqlAst.Kind.TRUNCATE;
-    return new Route(sql, changesSession, changesNames);
+    return route(sql, changesSession, changesNames, false);
   }
 
-  /** After a routed statement ran: re-read the session, forget resolved names, as it requires. */
-  void ran(Connection vendor, Route route) throws SQLException {
+  private Route route(
+      String sql, boolean changesSession, boolean changesNames, boolean passthrough) {
+    return new Route(
+        sql,
+        sql,
+        changesSession,
+        changesNames,
+        passthrough,
+        session.generation(),
+        catalog.generation());
+  }
+
+  /**
+   * The route a prepared statement runs with now: its own if nothing it was decided under has
+   * moved, otherwise the statement routed again, which refuses it if it now names a ScalarDB table
+   * or the passthrough setting no longer applies.
+   *
+   * @param vendor the vendor connection
+   * @param prepared the route decided when the statement was prepared
+   * @return the route to run with
+   * @throws SQLException as {@link #route}
+   */
+  Route current(Connection vendor, Route prepared) throws SQLException {
+    boolean unchanged =
+        prepared.sessionGeneration == session.generation()
+            && prepared.catalogGeneration == catalog.generation()
+            && prepared.passthrough == passthrough
+            && (!prepared.passthrough || vendor.getAutoCommit());
+    return unchanged ? prepared : route(vendor, prepared.source);
+  }
+
+  /**
+   * After a routed statement ran, or failed, since it may have taken effect before failing: re-read
+   * the session and forget resolved names, as it requires. Never throws.
+   */
+  void ran(Connection vendor, Route route) {
     if (route.changesSession) {
       session.changed(vendor);
     }

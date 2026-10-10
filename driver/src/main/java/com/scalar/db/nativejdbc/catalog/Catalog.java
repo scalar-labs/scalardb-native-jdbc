@@ -26,6 +26,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
@@ -136,6 +137,7 @@ public final class Catalog implements AutoCloseable {
   private final ReentrantLock connectionLock = new ReentrantLock();
   private @Nullable Connection connection; // guarded by connectionLock
   private volatile boolean closed;
+  private final AtomicLong generation = new AtomicLong();
 
   /**
    * A resolved name with the instant it was resolved at, and the classification of that name
@@ -323,6 +325,18 @@ public final class Catalog implements AutoCloseable {
     synchronized (resolutions) {
       resolutions.clear();
     }
+    generation.incrementAndGet();
+  }
+
+  /**
+   * Moves on whenever what a name resolves to may have changed: resolutions forgotten, or
+   * ScalarDB's catalog loaded again. A statement prepared earlier is checked again when it has
+   * moved.
+   *
+   * @return the current generation
+   */
+  public long generation() {
+    return generation.get();
   }
 
   /** Forgets everything loaded and resolved, so the next lookup reads both catalogs again. */
@@ -331,6 +345,7 @@ public final class Catalog implements AutoCloseable {
     synchronized (resolutions) {
       resolutions.clear();
     }
+    generation.incrementAndGet();
   }
 
   /**
@@ -389,6 +404,7 @@ public final class Catalog implements AutoCloseable {
       }
       Snapshot loaded = withConnection(c -> load(c, now));
       snapshot = loaded;
+      generation.incrementAndGet();
       return loaded;
     } finally {
       loadLock.unlock();

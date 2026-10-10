@@ -248,7 +248,13 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   change it: `setSchema`, `setCatalog`, any statement the driver did not classify as a SELECT or DML on
   known tables (`SET search_path`, `SET ROLE`, `USE`, `ALTER SESSION`, `EXECUTE AS` and passthrough
   statements included, since JSQLParser does not parse several of them), and `commit` or `rollback`
-  after a `SET` inside the transaction (`SET LOCAL` reverts). DDL invalidates the catalog's resolutions.
+  after a `SET` inside the transaction (`SET LOCAL` reverts), including the commit `setAutoCommit(true)`
+  makes; a rollback to a savepoint marks it too but keeps the transaction's record. PostgreSQL's
+  `set_config` counts as a `SET` wherever it appears, and a statement that fails counts as one that
+  ran, since it may have taken effect first. DDL invalidates the catalog's resolutions. A prepared
+  statement keeps its route only while the session, the catalog's resolutions, the passthrough
+  setting and, for a passthrough statement, autocommit are as they were when it was prepared; when
+  any has moved it is routed again before it runs, and refused if the answer differs.
   A re-read is a SELECT; inside a transaction it takes the first-statement slot the coarse SERIALIZABLE
   path of 4.2 needs, so a session-changing statement inside a SERIALIZABLE transaction forces the
   statement-level path. Not supported: temporary tables named like a ScalarDB table (PostgreSQL
@@ -577,6 +583,7 @@ runs a second lookup on the before image index; for other columns it uses the OR
 | DML on several tables, INSERT ... SELECT, MERGE, DML mixing plain and ScalarDB tables, UPDATE of a key column, anything the parser cannot interpret | **refuse** with a clear error; never guess. 4.7 lists the vendor syntax the parser does not interpret and the hints refused on a ScalarDB table |
 | A session statement: `SET`, `RESET`, `USE`, `ALTER SESSION` | pass through, then re-read the session state (section 1); refused if it reads a table, as in `SET x = (SELECT ...)`, and `SET autocommit` and `SET TRANSACTION` are refused, since the JDBC methods carry those. Forms JSQLParser does not parse, such as PostgreSQL `SET search_path TO a` (write `= a`, or call `setSchema`) and `BEGIN`, fall under "anything the parser cannot interpret" |
 | A procedure call: `CALL`, `EXEC`, `{call ...}` | **refuse** (`0A000`): the driver cannot see what the procedure touches; run it in passthrough mode if it touches no ScalarDB table |
+| A function that runs SQL given as text: PostgreSQL `query_to_xml` and the other XML exports, `dblink`, `crosstab`, `connectby`, `ts_stat`, `ts_rewrite`; Oracle `dbms_xmlgen`, `dbms_xmlquery`, `dbms_xmlstore`, `dbms_sql`, `XMLQUERY`, `XMLTABLE`, `XMLEXISTS` (XQuery reads tables through `fn:collection("oradb:...")`); SQL Server `OPENQUERY`, `OPENROWSET`, `OPENDATASOURCE` | **refuse** (`0A000`) wherever it appears, for the same reason; run it in passthrough mode if its SQL touches no ScalarDB table. A function the user wrote that runs SQL or changes the session cannot be recognised and is not supported on a connection that also reaches ScalarDB tables |
 | A name through a synonym, `T_data`, `T_tx_metadata` or `T_scalardb` | **refuse** (`42000`), naming the table to use (section 1, "The catalog") |
 | DDL, bulk maintenance | passthrough mode only, in autocommit, with the table quiesced; ScalarDB refuses schema changes on decoupled tables, such as adding a column (`throwIfTransactionMetadataDecouplingApplied`), so DDL there goes through ScalarDB's admin or not at all |
 
