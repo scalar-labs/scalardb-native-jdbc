@@ -288,6 +288,11 @@ public final class SqlAst {
     if (root == null) {
       return Outcome.refused("the statement's tokens cannot be located");
     }
+    if (engine == Engine.POSTGRESQL && hasUnicodeEscapedIdentifier(root)) {
+      return Outcome.refused(
+          "a Unicode-escaped identifier (U&\"...\") is not supported: the parser does not read"
+              + " the name the database does");
+    }
     String comment = commentAnEngineMayExecute(root, engine);
     if (comment != null) {
       return Outcome.refused(comment);
@@ -487,6 +492,30 @@ public final class SqlAst {
    * its first closer, where the parser, PostgreSQL and SQL Server nest. On the other engines the
    * same text is a comment, as Oracle's {@code --+} hints are.
    */
+  private static boolean hasUnicodeEscapedIdentifier(Node root) {
+    // the parser reads U&"x" as the column U, a bitwise AND and the name "x", escapes undecoded,
+    // where PostgreSQL reads one identifier: refuse U, & and a quoted name written together
+    for (Token t = root.jjtGetFirstToken(); t != null; t = t.next) {
+      Token amp = t.next;
+      Token quoted = amp == null ? null : amp.next;
+      if (t.image != null
+          && t.image.equalsIgnoreCase("u")
+          && quoted != null
+          && "&".equals(amp.image)
+          && quoted.image != null
+          && quoted.image.startsWith("\"")
+          && adjacent(t, amp)
+          && adjacent(amp, quoted)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean adjacent(Token a, Token b) {
+    return a.endLine == b.beginLine && a.endColumn + 1 == b.beginColumn;
+  }
+
   private static @Nullable String commentAnEngineMayExecute(Node root, Engine engine) {
     boolean mysqlLike = engine == Engine.MYSQL || engine == Engine.MARIADB;
     boolean flatBlockComments = mysqlLike || engine == Engine.ORACLE;

@@ -280,10 +280,15 @@ public enum Engine {
           }
           break;
         case ORACLE:
-          // the packages run a query string; XQuery reads tables through fn:collection("oradb:...")
+          // the packages run a query string; XQuery reads tables through
+          // fn:collection("oradb:...");
+          // the URI types (DBURITYPE, XDBURITYPE, HTTPURITYPE, URITYPE) read a table by a path
           if (part.equals("dbms_xmlgen")
               || part.equals("dbms_xmlquery")
               || part.equals("dbms_xmlstore")
+              || part.equals("dbms_xmlsave")
+              || part.endsWith("uritype")
+              || part.equals("sys_dburigen")
               || part.equals("dbms_sql")
               || part.equals("xmlquery")
               || part.equals("xmltable")

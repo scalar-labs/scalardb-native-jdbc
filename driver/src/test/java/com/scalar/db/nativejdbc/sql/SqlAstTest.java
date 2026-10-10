@@ -401,6 +401,22 @@ class SqlAstTest {
   }
 
   @Test
+  void unicodeEscapedIdentifiers_areRefused_onPostgresql() {
+    // the parser reads U&"x" as U & "x" with the escapes undecoded; PostgreSQL as one name
+    for (String sql :
+        List.of(
+            "SELECT U&\"query\\005fto_xml\"('SELECT * FROM s', true, false, '')",
+            "SELECT u&\"x\" FROM t")) {
+      Outcome<SqlAst> o = SqlAst.analyze(sql, Engine.POSTGRESQL, true);
+      assertThat(o.isPresent()).as(sql).isFalse();
+      assertThat(o.reason()).as(sql).contains("Unicode-escaped");
+    }
+    // a bitwise AND written with spaces is not one
+    assertThat(SqlAst.analyze("SELECT u & \"x\" FROM t", Engine.POSTGRESQL, true).isPresent())
+        .isTrue();
+  }
+
+  @Test
   void setConfig_changesTheSession_inAnyForm() {
     for (String sql :
         List.of(
@@ -423,6 +439,9 @@ class SqlAstTest {
       {"POSTGRESQL", "SELECT * FROM crosstab('SELECT a, b, c FROM s') AS r(a int, b int)"},
       {"ORACLE", "SELECT dbms_xmlgen.getxml('SELECT * FROM s') FROM dual"},
       {"ORACLE", "SELECT sys.dbms_xmlgen.getxml('SELECT * FROM s') FROM dual"},
+      {"ORACLE", "SELECT DBURITYPE('/M1/S').getxml() FROM dual"},
+      {"ORACLE", "SELECT sys.xdburitype('/M1/S').getclob() FROM dual"},
+      {"ORACLE", "SELECT x FROM t WHERE y = SYS_DBURIGEN(a)"},
       {"SQLSERVER", "SELECT * FROM OPENQUERY(lnk, 'SELECT * FROM s')"},
       {"SQLSERVER", "SELECT * FROM OPENROWSET('SQLNCLI', 'x', 'SELECT * FROM s') AS r"},
     };

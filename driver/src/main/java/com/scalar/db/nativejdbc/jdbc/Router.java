@@ -7,6 +7,7 @@ import com.scalar.db.nativejdbc.sql.Outcome;
 import com.scalar.db.nativejdbc.sql.SqlAst;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,6 +31,7 @@ final class Router {
     final boolean passthrough;
     final long sessionGeneration;
     final long catalogGeneration;
+    final Instant trustedUntil;
 
     private Route(
         String source,
@@ -38,7 +40,9 @@ final class Router {
         boolean changesNames,
         boolean passthrough,
         long sessionGeneration,
-        long catalogGeneration) {
+        long catalogGeneration,
+        Instant trustedUntil) {
+      this.trustedUntil = trustedUntil;
       this.source = source;
       this.sql = sql;
       this.changesSession = changesSession;
@@ -120,7 +124,8 @@ final class Router {
         changesNames,
         passthrough,
         session.generation(),
-        catalog.generation());
+        catalog.generation(),
+        catalog.trustedUntil());
   }
 
   /**
@@ -137,6 +142,7 @@ final class Router {
     boolean unchanged =
         prepared.sessionGeneration == session.generation()
             && prepared.catalogGeneration == catalog.generation()
+            && !catalog.hasPassed(prepared.trustedUntil)
             && prepared.passthrough == passthrough
             && (!prepared.passthrough || vendor.getAutoCommit());
     return unchanged ? prepared : route(vendor, prepared.source);

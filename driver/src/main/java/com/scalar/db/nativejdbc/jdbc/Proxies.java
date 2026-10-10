@@ -260,6 +260,12 @@ public final class Proxies {
       boolean takesSql = args != null && args.length > 0 && args[0] instanceof String;
       if (takesSql && name.equals("addBatch")) {
         Router.Route route = owner.route((String) args[0]);
+        if (!route.passthrough && (route.changesSession || route.changesNames)) {
+          // the entries after it were routed before it changed what their names mean
+          throw Errors.unsupported(
+              "a statement that changes the session or what names resolve to cannot be batched;"
+                  + " run it on its own");
+        }
         Object result = forward(vendor, method, withSql(args, route));
         batched.add(route);
         return result;
@@ -281,8 +287,22 @@ public final class Proxies {
         ran.add(route);
       }
       if (name.startsWith("execute") && name.endsWith("Batch")) {
-        ran.addAll(batched); // the driver clears the batch when it runs, whatever the outcome
-        batched.clear();
+        // each entry was routed when it was added; check it again under the state it runs in
+        List<Router.Route> entries = new ArrayList<>(batched);
+        batched.clear(); // the driver clears the batch when it runs, whatever the outcome
+        try {
+          for (Router.Route entry : entries) {
+            Router.Route now = owner.current(entry);
+            if (!now.sql.equals(entry.sql)) {
+              throw Errors.unsupported(
+                  "a batched statement now routes differently from when it was added");
+            }
+            ran.add(now);
+          }
+        } catch (SQLException e) {
+          vendor.clearBatch();
+          throw e;
+        }
       }
       Object result;
       try {

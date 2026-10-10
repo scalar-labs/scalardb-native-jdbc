@@ -339,6 +339,27 @@ public final class Catalog implements AutoCloseable {
     return generation.get();
   }
 
+  /**
+   * Until when a decision taken now on this catalog's answers may be kept: now plus the TTL. The
+   * catalog expires lazily, on a lookup, so a decision kept without one, such as a prepared
+   * statement's route, must also expire by time.
+   *
+   * @return the instant the decision expires
+   */
+  public Instant trustedUntil() {
+    return clock.instant().plus(ttl);
+  }
+
+  /**
+   * Whether an instant from {@link #trustedUntil} has passed.
+   *
+   * @param until the instant
+   * @return whether it has passed
+   */
+  public boolean hasPassed(Instant until) {
+    return !clock.instant().isBefore(until);
+  }
+
   /** Forgets everything loaded and resolved, so the next lookup reads both catalogs again. */
   public void invalidate() {
     snapshot = null;

@@ -256,9 +256,85 @@ class RoutingIntegrationTest {
         Statement st = c.createStatement()) {
       st.execute("SET search_path = m1plain");
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
+      // only passthrough may batch a SET (backgroundReview_aSetInsideABatch_isRefused); its effect
+      // must still reach the next lookup
+      c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "true");
       st.addBatch("SET search_path = m1");
       st.executeBatch();
+      c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "false");
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
+    }
+  }
+
+  private static String rawRow(int id) throws SQLException {
+    try (Connection c = PG.open();
+        PreparedStatement ps = c.prepareStatement("SELECT x FROM m1.s WHERE id = ?")) {
+      ps.setInt(1, id);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? "written into m1.s" : "not in m1.s";
+      }
+    }
+  }
+
+  private static String batchOutcome(Statement st) {
+    try {
+      st.executeBatch();
+      return "ran";
+    } catch (SQLException e) {
+      return "refused " + e.getSQLState();
+    }
+  }
+
+  @Test
+  void backgroundReview_aSetInsideABatch_isRefused() throws SQLException {
+    seedDistinctRows();
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      st.execute("SET search_path = m1plain");
+      // the INSERT after it would have been routed under m1plain and run under m1
+      assertRefused(() -> st.addBatch("SET search_path = m1"), "0AN01", "cannot be batched");
+      assertRefused(
+          () -> st.addBatch("CREATE TABLE m1plain.t2 (id INT)"), "0AN01", "cannot be batched");
+    }
+  }
+
+  @Test
+  void backgroundReview_setSchemaBetweenAddBatchAndExecuteBatch() throws SQLException {
+    seedDistinctRows();
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      c.setSchema("m1plain");
+      st.addBatch("INSERT INTO s VALUES (102, 'raw')");
+      c.setSchema("m1");
+      String outcome = batchOutcome(st);
+      assertThat(outcome + ", " + rawRow(102)).isEqualTo("refused 0AN01, not in m1.s");
+    }
+  }
+
+  @Test
+  void backgroundReview_aPreparedRoute_expiresWithTheCatalogTtl() throws Exception {
+    try (Connection c = PG.open()) {
+      PG.execute(c, "CREATE TABLE IF NOT EXISTS m1.late (id INT PRIMARY KEY, x TEXT)");
+    }
+    try (DistributedTransactionAdmin admin = PG.admin()) {
+      if (admin.tableExists("m1", "late")) {
+        admin.dropTable("m1", "late"); // a previous run imported it
+        try (Connection c = PG.open()) {
+          PG.execute(c, "CREATE TABLE IF NOT EXISTS m1.late (id INT PRIMARY KEY, x TEXT)");
+        }
+      }
+    }
+    Properties shortTtl = (Properties) props.clone();
+    shortTtl.setProperty("scalardbnative.catalogTtlMs", "300");
+    try (Connection c = DriverManager.getConnection(url, shortTtl);
+        PreparedStatement ps = c.prepareStatement("SELECT x FROM m1.late")) {
+      assertThat(outcome(ps::executeQuery)).isEqualTo("read nothing"); // a plain table
+      try (DistributedTransactionAdmin admin = PG.admin()) {
+        admin.importTable(
+            "m1", "late", Map.of("transaction-metadata-decoupling", "true"), Map.of());
+      }
+      Thread.sleep(600); // past the TTL, with no lookup on this catalog in between
+      assertThat(outcome(ps::executeQuery)).isEqualTo("refused 0AN01");
     }
   }
 
