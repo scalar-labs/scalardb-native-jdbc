@@ -362,17 +362,28 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   inside the host part, which the vendor drivers read differently, refuses it too. `catalogTtlMs` is at
   most one hour. The driver strips its own keys before handing the rest to the vendor driver, and
   `getPropertyInfo` lists them ahead of the vendor's.
+- **What the application holds.** Every JDBC object the driver hands out is its own proxy, and so is
+  anything such an object hands back: a statement's connection, a result set's statement (null for a
+  metadata result set), a metadata object's connection. `unwrap` to a vendor interface, such as
+  `PGConnection`, returns the vendor's object, as JDBC requires; it is an escape hatch like passthrough,
+  since SQL run on it reaches the database unchecked. Passthrough, in turn, is per connection, off
+  again after `setAutoCommit(false)` or a `setClientInfo(Properties)` without the key; a pool does not
+  reset client info, so an application that turns it on turns it off before returning the connection.
 - **Errors.** Every error the driver raises itself is a standard JDBC subclass with a fixed SQLSTATE,
   so a caller can tell what to do without parsing messages; a message never contains the URL.
 
   | SQLSTATE | Exception | Meaning | What the caller does |
   |---|---|---|---|
   | `40001` | `SQLTransactionRollbackException` | a driver-decided abort: a conflict with a ScalarDB or driver transaction (4.4, section 6) | roll back and retry the transaction |
-  | `0A000` | `SQLFeatureNotSupportedException` | a statement the driver does not handle on a ScalarDB table, with the reason (4.1); `READ_UNCOMMITTED` | rewrite the statement; never retry |
+  | `0AN01` | `SQLFeatureNotSupportedException` | a statement or setting the driver does not handle, with the reason: a statement on a ScalarDB table it cannot rewrite, one the parser cannot interpret, a procedure call or a function that runs SQL text (4.1), the transaction mode set in SQL, a passthrough statement outside autocommit; `READ_UNCOMMITTED` | rewrite the statement; never retry |
   | `42000` | `SQLSyntaxErrorException` | a name a statement must not use: `T_data`, `T_tx_metadata`, `T_scalardb`, a synonym; the message names the table to use | rewrite the statement |
   | `42501` | `SQLSyntaxErrorException` | ScalarDB's catalog exists but this user cannot read it | grant SELECT on the catalog tables |
   | `08004` | `SQLNonTransientConnectionException` | refused at connect: no ScalarDB catalog (unless allowed), a table without the setup of section 3, SQL Server without `READ_COMMITTED_SNAPSHOT` | fix the configuration or run the setup |
   | `08001` | `SQLException` | a malformed URL or driver property, a missing vendor driver | fix the URL or the class path |
+
+  A refusal uses `0AN01`, an implementation-defined subclass of the standard's feature-not-supported
+  class, and not `0AN01` itself: HikariCP treats `0AN01` as a broken connection and evicts it,
+  ending any transaction on it, while the connection is in fact fine.
 
   Errors the database raises pass through unchanged. The isolation level is not a URL
   property; it is `Connection.setTransactionIsolation`, so `@Transactional(isolation = ...)` works as is.
@@ -582,8 +593,8 @@ runs a second lookup on the before image index; for other columns it uses the OR
 | INSERT / UPDATE / DELETE on exactly one ScalarDB table | 4.3 |
 | DML on several tables, INSERT ... SELECT, MERGE, DML mixing plain and ScalarDB tables, UPDATE of a key column, anything the parser cannot interpret | **refuse** with a clear error; never guess. 4.7 lists the vendor syntax the parser does not interpret and the hints refused on a ScalarDB table |
 | A session statement: `SET`, `RESET`, `USE`, `ALTER SESSION` | pass through, then re-read the session state (section 1); refused if it reads a table, as in `SET x = (SELECT ...)`, and `SET autocommit` and `SET TRANSACTION` are refused, since the JDBC methods carry those. Forms JSQLParser does not parse, such as PostgreSQL `SET search_path TO a` (write `= a`, or call `setSchema`) and `BEGIN`, fall under "anything the parser cannot interpret" |
-| A procedure call: `CALL`, `EXEC`, `{call ...}` | **refuse** (`0A000`): the driver cannot see what the procedure touches; run it in passthrough mode if it touches no ScalarDB table |
-| A function that runs SQL given as text: PostgreSQL `query_to_xml` and the other XML exports, `dblink`, `crosstab`, `connectby`, `ts_stat`, `ts_rewrite`; Oracle `dbms_xmlgen`, `dbms_xmlquery`, `dbms_xmlstore`, `dbms_sql`, `XMLQUERY`, `XMLTABLE`, `XMLEXISTS` (XQuery reads tables through `fn:collection("oradb:...")`); SQL Server `OPENQUERY`, `OPENROWSET`, `OPENDATASOURCE` | **refuse** (`0A000`) wherever it appears, for the same reason; run it in passthrough mode if its SQL touches no ScalarDB table. A function the user wrote that runs SQL or changes the session cannot be recognised and is not supported on a connection that also reaches ScalarDB tables |
+| A procedure call: `CALL`, `EXEC`, `{call ...}` | **refuse** (`0AN01`): the driver cannot see what the procedure touches; run it in passthrough mode if it touches no ScalarDB table |
+| A function that runs SQL given as text: PostgreSQL `query_to_xml` and the other XML exports, `dblink`, `crosstab`, `connectby`, `ts_stat`, `ts_rewrite`; Oracle `dbms_xmlgen`, `dbms_xmlquery`, `dbms_xmlstore`, `dbms_sql`, `XMLQUERY`, `XMLTABLE`, `XMLEXISTS` (XQuery reads tables through `fn:collection("oradb:...")`); SQL Server `OPENQUERY`, `OPENROWSET`, `OPENDATASOURCE` | **refuse** (`0AN01`) wherever it appears, for the same reason; run it in passthrough mode if its SQL touches no ScalarDB table. A function the user wrote that runs SQL or changes the session cannot be recognised and is not supported on a connection that also reaches ScalarDB tables |
 | A name through a synonym, `T_data`, `T_tx_metadata` or `T_scalardb` | **refuse** (`42000`), naming the table to use (section 1, "The catalog") |
 | DDL, bulk maintenance | passthrough mode only, in autocommit, with the table quiesced; ScalarDB refuses schema changes on decoupled tables, such as adding a column (`throwIfTransactionMetadataDecouplingApplied`), so DDL there goes through ScalarDB's admin or not at all |
 

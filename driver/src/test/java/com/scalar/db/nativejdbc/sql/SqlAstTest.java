@@ -377,6 +377,30 @@ class SqlAstTest {
   }
 
   @Test
+  void settingTheTransactionModeInSql_isRefused_inEverySpelling() {
+    for (String sql :
+        List.of(
+            "SET autocommit = 0",
+            "SET @@autocommit = 0",
+            "SET @@session.autocommit = 0",
+            "SET @@local.autocommit = 0",
+            "SET SESSION autocommit = 0",
+            "SET LOCAL autocommit = 0",
+            "SET @@session.transaction_isolation = 'READ-UNCOMMITTED'",
+            "SET tx_isolation = 'READ-UNCOMMITTED'",
+            "SET transaction_read_only = 1",
+            "SET default_transaction_isolation = 'read uncommitted'",
+            "SET completion_type = 1",
+            "SET GLOBAL transaction_isolation = 'READ-UNCOMMITTED'",
+            "SET @x = 1, @@session.autocommit = 0")) {
+      assertThat(SqlAst.analyze(sql, Engine.MYSQL, false).isPresent()).as(sql).isFalse();
+    }
+    assertThat(SqlAst.analyze("SET search_path = a, b", Engine.POSTGRESQL, true).isPresent())
+        .isTrue();
+    assertThat(SqlAst.analyze("SET @x = 1", Engine.MYSQL, false).isPresent()).isTrue();
+  }
+
+  @Test
   void setConfig_changesTheSession_inAnyForm() {
     for (String sql :
         List.of(

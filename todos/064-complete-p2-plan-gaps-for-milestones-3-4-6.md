@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "064"
 tags: [code-review, architecture, plan]
@@ -36,6 +36,8 @@ The proxy forwards PreparedStatement parameters straight to one vendor statement
 
 ## Recommended Action
 
+Done 2026-10-10. Plan updated: milestone 3 records parameter calls and gives `Route` a plan; a per-transaction object in `jdbc`; milestone 6 cache key includes the session's schemas and the catalog generation; package table matches the code.
+
 ## Technical Details
 
 - Commit under review: df9580b (milestone 1), diff f48bace..df9580b.
@@ -43,7 +45,7 @@ The proxy forwards PreparedStatement parameters straight to one vendor statement
 
 ## Acceptance Criteria
 
-- [ ] `docs/plans/proxy-step.md` updated for M3, M4 and M6.
+- [x] `docs/plans/proxy-step.md` updated for M3, M4 and M6.
 
 ## Work Log
 

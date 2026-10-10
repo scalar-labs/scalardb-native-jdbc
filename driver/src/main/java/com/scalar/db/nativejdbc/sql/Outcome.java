@@ -7,7 +7,7 @@ import org.jspecify.annotations.Nullable;
 /**
  * What a classification produced: a value, or the reason the statement was refused. The reason is
  * written for the application developer who must change the statement, and becomes the message of
- * the {@code 0A000} the driver raises (docs/design.md, "Errors").
+ * the {@code 0AN01} the driver raises (docs/design.md, "Errors").
  *
  * @param <T> the value's type
  */

@@ -19,6 +19,7 @@ import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
+import net.sf.jsqlparser.expression.VariableAssignment;
 import net.sf.jsqlparser.parser.ASTNodeAccess;
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
@@ -238,6 +239,12 @@ public final class SqlAst {
       return Outcome.refused(
           "a procedure call cannot be inspected; run it with the passthrough setting if it does"
               + " not touch ScalarDB tables");
+    }
+    if (stmt instanceof SetStatement) {
+      String why = transactionModeSet((SetStatement) stmt);
+      if (why != null) {
+        return Outcome.refused(why);
+      }
     }
     Walker walker = new Walker();
     try {
@@ -1271,6 +1278,40 @@ public final class SqlAst {
     String text = f.toString();
     int paren = text.indexOf('(');
     return List.of((paren < 0 ? text : text.substring(0, paren)).split("\\."));
+  }
+
+  /**
+   * Why a SET is refused for setting the transaction mode, which the JDBC methods carry, or null.
+   * The parser reads {@code SET GLOBAL v = x} as a variable named GLOBAL and a second assignment of
+   * {@code SET a = 1, b = 2} as part of the first value, so both forms are refused outright: they
+   * would hide the variable they set.
+   */
+  private static @Nullable String transactionModeSet(SetStatement set) {
+    for (int i = 0; i < set.getKeyValuePairs().size(); i++) {
+      Object rawName = set.getName(i);
+      String name = rawName == null ? "" : rawName.toString().strip().toLowerCase(Locale.ROOT);
+      if (name.equals("global") || name.equals("persist") || name.equals("persist_only")) {
+        return "a SET of a server-wide setting is not run through the driver; use the passthrough"
+            + " setting";
+      }
+      for (Expression value : set.getExpressions(i)) {
+        if (value instanceof VariableAssignment) {
+          return "a SET of several variables in one statement is not supported; set one per"
+              + " statement";
+        }
+      }
+      name = name.replaceFirst("^@@", "").replaceFirst("^(session|local|global)\\.", "");
+      if (name.equals("autocommit")
+          || name.equals("completion_type")
+          || name.equals("implicit_transactions")
+          || name.startsWith("transaction")
+          || name.startsWith("tx_")
+          || name.startsWith("default_transaction")) {
+        return "the transaction mode is set through Connection.setAutoCommit and"
+            + " Connection.setTransactionIsolation, not in SQL";
+      }
+    }
+    return null;
   }
 
   /** A name part without its quotes, in any of the engines' quoting styles. */

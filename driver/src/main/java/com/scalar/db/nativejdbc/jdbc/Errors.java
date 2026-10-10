@@ -7,8 +7,11 @@ final class Errors {
 
   private Errors() {}
 
-  /** A statement or setting the driver does not handle: 0A000, never retried. */
+  /**
+   * A statement or setting the driver does not handle: 0AN01, never retried. Not 0A000, which
+   * HikariCP takes for a broken connection and evicts.
+   */
   static SQLFeatureNotSupportedException unsupported(String reason) {
-    return new SQLFeatureNotSupportedException(reason, "0A000");
+    return new SQLFeatureNotSupportedException(reason, "0AN01");
   }
 }

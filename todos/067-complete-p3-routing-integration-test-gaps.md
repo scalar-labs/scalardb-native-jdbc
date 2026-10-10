@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "067"
 tags: [code-review, testing]
@@ -36,6 +36,8 @@ Several RoutingIntegrationTest cases do not prove what their names claim.
 
 ## Recommended Action
 
+Done 2026-10-10. `IsolationIntegrationTest` checks READ COMMITTED through the driver on every engine (it matters on MySQL and MariaDB); the pool test resolves an unqualified name across borrows, including the pool's own setSchema reset; the counting test has its own table; setup opens once. Kept the JOIN/subquery refusals as router coverage.
+
 ## Technical Details
 
 - Commit under review: df9580b (milestone 1), diff f48bace..df9580b.
@@ -43,7 +45,7 @@ Several RoutingIntegrationTest cases do not prove what their names claim.
 
 ## Acceptance Criteria
 
-- [ ] Each test fails if the behaviour it names is removed.
+- [x] Each test fails if the behaviour it names is removed.
 
 ## Work Log
 

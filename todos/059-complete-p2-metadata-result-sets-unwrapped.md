@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "059"
 tags: [code-review, security, correctness]
@@ -34,6 +34,8 @@ Result sets returned by `DatabaseMetaData` methods are the vendor's objects, so 
 
 ## Recommended Action
 
+Done 2026-10-10. `ChildHandler` wraps any result set it returns, with a null statement; integration test asserts `getMetaData().getTables(...).getStatement()` is null.
+
 ## Technical Details
 
 - Commit under review: df9580b (milestone 1), diff f48bace..df9580b.
@@ -41,7 +43,7 @@ Result sets returned by `DatabaseMetaData` methods are the vendor's objects, so 
 
 ## Acceptance Criteria
 
-- [ ] `getMetaData().getTables(...).getStatement()` is null; no vendor object reachable (integration test).
+- [x] `getMetaData().getTables(...).getStatement()` is null; no vendor object reachable (integration test).
 
 ## Work Log
 

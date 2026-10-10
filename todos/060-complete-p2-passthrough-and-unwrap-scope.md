@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "060"
 tags: [code-review, security, design]
@@ -59,6 +59,8 @@ The passthrough flag outlives the code that set it, and `unwrap` hands out an un
 
 ## Recommended Action
 
+Done 2026-10-10. Passthrough turns off on `setAutoCommit(false)` and on `setClientInfo(Properties)` without the key; the key moved to `NativeJdbcDriver.PASSTHROUGH` with the pool caveat; design section 1 "What the application holds" documents `unwrap` as an escape hatch and the pool caveat.
+
 ## Technical Details
 
 - Commit under review: df9580b (milestone 1), diff f48bace..df9580b.
@@ -66,9 +68,9 @@ The passthrough flag outlives the code that set it, and `unwrap` hands out an un
 
 ## Acceptance Criteria
 
-- [ ] Design section 1 states the scope of passthrough and of `unwrap`.
-- [ ] `setClientInfo(Properties)` without the key turns passthrough off.
-- [ ] Pool test: a connection returned with passthrough on is not handed out with it on (or the doc says so).
+- [x] Design section 1 states the scope of passthrough and of `unwrap`.
+- [x] `setClientInfo(Properties)` without the key turns passthrough off.
+- [x] Pool test: a connection returned with passthrough on is not handed out with it on (or the doc says so).
 
 ## Work Log
 

@@ -44,6 +44,10 @@
   <!-- getConnection() and getStatement() return the driver's proxies by contract (JDBC 4.3) -->
   <Match>
     <Class name="~com\.scalar\.db\.nativejdbc\.jdbc\.Proxies\$.*Handler"/>
+    <Or>
+      <Field name="connection"/>
+      <Field name="statement"/>
+    </Or>
     <Bug pattern="EI_EXPOSE_REP"/>
   </Match>
 </FindBugsFilter>

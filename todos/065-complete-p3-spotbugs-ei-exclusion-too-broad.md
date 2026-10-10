@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "065"
 tags: [code-review, quality, security]
@@ -32,6 +32,8 @@ The `EI_EXPOSE_REP` exclusion covers every `Proxies$*Handler`, so a future `retu
 
 ## Recommended Action
 
+Done 2026-10-10. Exclusion narrowed to the `connection` and `statement` fields.
+
 ## Technical Details
 
 - Commit under review: df9580b (milestone 1), diff f48bace..df9580b.
@@ -39,7 +41,7 @@ The `EI_EXPOSE_REP` exclusion covers every `Proxies$*Handler`, so a future `retu
 
 ## Acceptance Criteria
 
-- [ ] SpotBugs flags a handler returning its `vendor` field.
+- [x] SpotBugs flags a handler returning its `vendor` field.
 
 ## Work Log
 

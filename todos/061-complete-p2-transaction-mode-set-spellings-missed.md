@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "061"
 tags: [code-review, security, sql]
@@ -46,6 +46,8 @@ The SQL check that refuses setting the transaction mode in SQL matches only `aut
 
 ## Recommended Action
 
+Done 2026-10-10. The check moved into `SqlAst` (no JSQLParser types in `jdbc`): names normalised (`@@`, `session.`, `local.`, `global.`), autocommit, completion_type, implicit_transactions, transaction*, tx_*, default_transaction*; `SET GLOBAL`/`PERSIST` and multi-assignment SET refused outright, since the parser hides their variable. Unit test covers every spelling.
+
 ## Technical Details
 
 - Commit under review: df9580b (milestone 1), diff f48bace..df9580b.
@@ -53,8 +55,8 @@ The SQL check that refuses setting the transaction mode in SQL matches only `aut
 
 ## Acceptance Criteria
 
-- [ ] Each spelling above is refused (unit test per engine).
-- [ ] No JSQLParser import in `jdbc`.
+- [x] Each spelling above is refused (unit test per engine).
+- [x] No JSQLParser import in `jdbc`.
 
 ## Work Log
 

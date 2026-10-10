@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.nativejdbc.NativeJdbcDriver;
 import com.scalar.db.nativejdbc.testing.Engines;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -39,6 +40,7 @@ class RoutingIntegrationTest {
           "CREATE SCHEMA IF NOT EXISTS m1",
           "CREATE SCHEMA IF NOT EXISTS m1plain",
           "CREATE TABLE IF NOT EXISTS m1.p (id SERIAL PRIMARY KEY, x TEXT)",
+          "CREATE TABLE IF NOT EXISTS m1.counted (id SERIAL PRIMARY KEY, x TEXT)",
           "CREATE TABLE IF NOT EXISTS m1.s (id INT PRIMARY KEY, x TEXT)",
           "CREATE TABLE IF NOT EXISTS m1plain.s (id INT PRIMARY KEY, x TEXT)");
     }
@@ -74,21 +76,22 @@ class RoutingIntegrationTest {
   void plainTables_workAsWithoutTheDriver() throws Exception {
     try (Connection c = connect()) {
       try (Statement st = c.createStatement()) {
-        assertThat(st.executeUpdate("DELETE FROM m1.p")).isGreaterThanOrEqualTo(0);
+        assertThat(st.executeUpdate("DELETE FROM m1.counted")).isGreaterThanOrEqualTo(0);
         assertThat(
                 st.executeUpdate(
-                    "INSERT INTO m1.p (x) VALUES ('a')", Statement.RETURN_GENERATED_KEYS))
+                    "INSERT INTO m1.counted (x) VALUES ('a')", Statement.RETURN_GENERATED_KEYS))
             .isEqualTo(1);
         try (ResultSet keys = st.getGeneratedKeys()) {
           assertThat(keys.next()).isTrue();
           assertThat(keys.getStatement()).isSameAs(st);
         }
-        st.addBatch("INSERT INTO m1.p (x) VALUES ('b')");
-        st.addBatch("INSERT INTO m1.p (x) VALUES ('c')");
+        st.addBatch("INSERT INTO m1.counted (x) VALUES ('b')");
+        st.addBatch("INSERT INTO m1.counted (x) VALUES ('c')");
         assertThat(st.executeBatch()).containsExactly(1, 1);
         assertThat(st.getConnection()).isSameAs(c);
       }
-      try (PreparedStatement ps = c.prepareStatement("SELECT count(*) FROM m1.p WHERE x <> ?")) {
+      try (PreparedStatement ps =
+          c.prepareStatement("SELECT count(*) FROM m1.counted WHERE x <> ?")) {
         ps.setString(1, "z");
         try (ResultSet rs = ps.executeQuery()) {
           assertThat(rs.next()).isTrue();
@@ -97,6 +100,11 @@ class RoutingIntegrationTest {
         }
       }
       assertThat(c.getMetaData().getConnection()).isSameAs(c);
+      // a metadata result set hands back no vendor statement, so no way around the router (059)
+      try (ResultSet tables = c.getMetaData().getTables(null, "m1", "%", null)) {
+        assertThat(tables.getStatement()).isNull();
+        assertThat(tables.isWrapperFor(ResultSet.class)).isTrue();
+      }
       assertThat(c.unwrap(Class.forName("org.postgresql.PGConnection"))).isNotNull();
     }
   }
@@ -105,24 +113,24 @@ class RoutingIntegrationTest {
   void statementsOnAScalarDbTable_areRefused_everyWayTheyCanArrive() throws SQLException {
     try (Connection c = connect();
         Statement st = c.createStatement()) {
-      assertRefused(() -> st.executeQuery("SELECT * FROM m1.s"), "0A000", "m1.s");
+      assertRefused(() -> st.executeQuery("SELECT * FROM m1.s"), "0AN01", "m1.s");
       assertRefused(
-          () -> st.executeUpdate("UPDATE m1.s SET x = 'y' WHERE id = 1"), "0A000", "m1.s");
-      assertRefused(() -> st.execute("DELETE FROM m1.s"), "0A000", "m1.s");
-      assertRefused(() -> st.addBatch("INSERT INTO m1.s VALUES (1, 'a')"), "0A000", "m1.s");
-      assertRefused(() -> c.prepareStatement("SELECT * FROM m1.s WHERE id = ?"), "0A000", "m1.s");
+          () -> st.executeUpdate("UPDATE m1.s SET x = 'y' WHERE id = 1"), "0AN01", "m1.s");
+      assertRefused(() -> st.execute("DELETE FROM m1.s"), "0AN01", "m1.s");
+      assertRefused(() -> st.addBatch("INSERT INTO m1.s VALUES (1, 'a')"), "0AN01", "m1.s");
+      assertRefused(() -> c.prepareStatement("SELECT * FROM m1.s WHERE id = ?"), "0AN01", "m1.s");
       assertRefused(
           () -> st.executeQuery("SELECT * FROM m1.p JOIN m1.s ON m1.p.id = m1.s.id"),
-          "0A000",
+          "0AN01",
           "m1.s");
       assertRefused(
           () -> st.executeQuery("SELECT * FROM m1.p WHERE id IN (SELECT id FROM m1.s)"),
-          "0A000",
+          "0AN01",
           "m1.s");
       assertRefused(() -> st.executeQuery("SELECT * FROM m1.s_scalardb"), "42000", "virtual table");
       assertRefused(() -> st.executeQuery("SELECT * FROM m1.s_tx_metadata"), "42000", "metadata");
       // a subquery in a SET is a raw read too
-      assertRefused(() -> st.execute("SET x.y = (SELECT x FROM m1.s LIMIT 1)"), "0A000", "m1.s");
+      assertRefused(() -> st.execute("SET x.y = (SELECT x FROM m1.s LIMIT 1)"), "0AN01", "m1.s");
     }
   }
 
@@ -131,16 +139,23 @@ class RoutingIntegrationTest {
       throws SQLException {
     try (Connection c = connect();
         Statement st = c.createStatement()) {
-      assertRefused(() -> st.execute("VACUUM m1.p"), "0A000", "cannot be parsed");
-      assertRefused(() -> c.prepareCall("{call pg_sleep(0)}"), "0A000", "cannot be parsed");
-      c.setClientInfo(Proxies.PASSTHROUGH, "true");
-      assertThat(c.getClientInfo(Proxies.PASSTHROUGH)).isEqualTo("true");
+      assertRefused(() -> st.execute("VACUUM m1.p"), "0AN01", "cannot be parsed");
+      assertRefused(() -> c.prepareCall("{call pg_sleep(0)}"), "0AN01", "cannot be parsed");
+      c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "true");
+      assertThat(c.getClientInfo(NativeJdbcDriver.PASSTHROUGH)).isEqualTo("true");
       st.execute("VACUUM m1.p");
       c.setAutoCommit(false);
-      assertRefused(() -> st.execute("VACUUM m1.p"), "0A000", "autocommit");
+      // leaving autocommit turned passthrough off (060)
+      assertThat(c.getClientInfo(NativeJdbcDriver.PASSTHROUGH)).isEqualTo("false");
+      c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "true");
+      assertRefused(() -> st.execute("VACUUM m1.p"), "0AN01", "autocommit");
       c.setAutoCommit(true);
-      c.setClientInfo(Proxies.PASSTHROUGH, "false");
-      assertRefused(() -> st.execute("VACUUM m1.p"), "0A000", "cannot be parsed");
+      c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "false");
+      assertRefused(() -> st.execute("VACUUM m1.p"), "0AN01", "cannot be parsed");
+      // a set of client info without the key clears it, as JDBC says
+      c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "true");
+      c.setClientInfo(new Properties());
+      assertThat(c.getClientInfo(NativeJdbcDriver.PASSTHROUGH)).isEqualTo("false");
     }
   }
 
@@ -153,7 +168,7 @@ class RoutingIntegrationTest {
         assertThat(rs.next()).isTrue(); // the plain m1plain.s
       }
       st.execute("SET search_path = m1");
-      assertRefused(() -> st.executeQuery("SELECT count(*) FROM s"), "0A000", "m1.s");
+      assertRefused(() -> st.executeQuery("SELECT count(*) FROM s"), "0AN01", "m1.s");
       c.setSchema("m1plain");
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM s")) {
         assertThat(rs.next()).isTrue();
@@ -161,7 +176,7 @@ class RoutingIntegrationTest {
       // a SET inside a transaction that is rolled back is undone, and so is the driver's view
       c.setAutoCommit(false);
       st.execute("SET LOCAL search_path = m1");
-      assertRefused(() -> st.executeQuery("SELECT count(*) FROM s"), "0A000", "m1.s");
+      assertRefused(() -> st.executeQuery("SELECT count(*) FROM s"), "0AN01", "m1.s");
       c.rollback();
       c.setAutoCommit(true);
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM s")) {
@@ -176,27 +191,36 @@ class RoutingIntegrationTest {
       assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
       assertRefused(
           () -> c.setTransactionIsolation(Connection.TRANSACTION_READ_UNCOMMITTED),
-          "0A000",
+          "0AN01",
           "READ UNCOMMITTED");
     }
   }
 
   @Test
-  void aPoolOverTheDriver_behavesTheSame() throws SQLException {
+  void aPoolOverTheDriver_keepsTheDriversViewOfEachSession_acrossBorrows() throws SQLException {
+    seedDistinctRows();
     HikariConfig config = new HikariConfig();
     config.setJdbcUrl(url);
     config.setDataSourceProperties(props);
-    config.setMaximumPoolSize(2);
+    config.setMaximumPoolSize(1); // every borrow gets the same connection
+    config.setSchema("m1"); // set at creation, and restored on return when a borrower changed it
     try (HikariDataSource pool = new HikariDataSource(config)) {
-      for (int i = 0; i < 3; i++) {
-        try (Connection c = pool.getConnection();
-            Statement st = c.createStatement()) {
-          st.execute("SET search_path = m1plain");
-          try (ResultSet rs = st.executeQuery("SELECT 1 FROM m1.p LIMIT 1")) {
-            rs.next();
-          }
-          assertRefused(() -> st.executeQuery("SELECT * FROM m1.s"), "0A000", "m1.s");
-        }
+      try (Connection c = pool.getConnection();
+          Statement st = c.createStatement()) {
+        assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
+        c.setSchema("m1plain");
+        assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
+      }
+      try (Connection c = pool.getConnection();
+          Statement st = c.createStatement()) {
+        // the pool put m1 back through setSchema, and the driver followed
+        assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
+        st.execute("SET search_path = m1plain");
+      }
+      try (Connection c = pool.getConnection();
+          Statement st = c.createStatement()) {
+        // a SET is invisible to the pool and survives the return; the driver still knows it
+        assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
       }
     }
   }
@@ -234,7 +258,7 @@ class RoutingIntegrationTest {
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
       st.addBatch("SET search_path = m1");
       st.executeBatch();
-      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0A000");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
     }
   }
 
@@ -247,7 +271,7 @@ class RoutingIntegrationTest {
       try (PreparedStatement ps = c.prepareStatement("SELECT x FROM s")) {
         assertThat(outcome(ps::executeQuery)).isEqualTo("read plain");
         st.execute("SET search_path = m1");
-        assertThat(outcome(ps::executeQuery)).isEqualTo("refused 0A000");
+        assertThat(outcome(ps::executeQuery)).isEqualTo("refused 0AN01");
       }
     }
   }
@@ -256,14 +280,14 @@ class RoutingIntegrationTest {
   void finding056_aStatementPreparedInPassthrough_isCheckedAgainWhenPassthroughEnds()
       throws SQLException {
     try (Connection c = connect()) {
-      c.setClientInfo(Proxies.PASSTHROUGH, "true");
+      c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "true");
       try (PreparedStatement ps = c.prepareStatement("VACUUM m1.p")) {
         ps.execute();
-        c.setClientInfo(Proxies.PASSTHROUGH, "false");
-        assertRefused(ps::execute, "0A000", "cannot be parsed");
-        c.setClientInfo(Proxies.PASSTHROUGH, "true");
+        c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "false");
+        assertRefused(ps::execute, "0AN01", "cannot be parsed");
         c.setAutoCommit(false);
-        assertRefused(ps::execute, "0A000", "autocommit");
+        c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "true");
+        assertRefused(ps::execute, "0AN01", "autocommit");
         c.setAutoCommit(true);
       }
     }
@@ -279,7 +303,7 @@ class RoutingIntegrationTest {
       st.execute("SET LOCAL search_path = m1plain");
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
       c.setAutoCommit(true); // commits; PostgreSQL reverts the path to m1
-      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0A000");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
     }
   }
 
@@ -296,7 +320,7 @@ class RoutingIntegrationTest {
       // the path is still m1plain until the transaction ends
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
       c.commit(); // reverts the path to m1
-      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0A000");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
       c.setAutoCommit(true);
     }
   }
@@ -309,7 +333,7 @@ class RoutingIntegrationTest {
       st.execute("SET search_path = m1plain");
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
       st.executeQuery("SELECT set_config('search_path', 'm1', false)").close();
-      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0A000");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
     }
   }
 
@@ -323,7 +347,7 @@ class RoutingIntegrationTest {
                   () ->
                       st.executeQuery(
                           "SELECT query_to_xml('SELECT x FROM m1.s', true, false, '')")))
-          .isEqualTo("refused 0A000");
+          .isEqualTo("refused 0AN01");
     }
   }
 }

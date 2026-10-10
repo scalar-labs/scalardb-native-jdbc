@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "066"
 tags: [code-review, quality, simplicity]
@@ -39,6 +39,8 @@ Proxies dispatches through a `boolean[] handled` out-parameter repeated in three
 
 ## Recommended Action
 
+Done 2026-10-10. One `Handler` base class replaces the `boolean[]` dispatch; prepareStatement/prepareCall share a case using `method.getReturnType()`; `ConnectionHandler` exposes `route`/`current`/`ran`; `setClientInfo(Properties)` clones and removes; `PASSTHROUGH` moved to `NativeJdbcDriver`; design error table widened; refusals now use 0AN01 (HikariCP evicts on 0A000, found while fixing 067). Kept `Errors` (milestone 2 will add to it) and `Kind.SESSION` (used by milestone 6's narrowing, todo 063). The DDL-on-ScalarDB-table message is left for milestone 4.
+
 ## Technical Details
 
 - Commit under review: df9580b (milestone 1), diff f48bace..df9580b.
@@ -46,8 +48,8 @@ Proxies dispatches through a `boolean[] handled` out-parameter repeated in three
 
 ## Acceptance Criteria
 
-- [ ] No `boolean[]` dispatch.
-- [ ] Design error table matches the code.
+- [x] No `boolean[]` dispatch.
+- [x] Design error table matches the code.
 
 ## Work Log
 

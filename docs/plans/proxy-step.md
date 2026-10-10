@@ -40,7 +40,7 @@ Small, independent of each other, no proxy code yet.
 
 - **Error contract (todo 016).** `StatementShape` and `SqlAst` return the reason with an empty result (a
   small `Refusal` value: kind, clause, message). A `DriverErrors` class maps kinds to exceptions:
-  - `0A000`, `SQLFeatureNotSupportedException`, for a statement shape the driver does not handle, and for
+  - `0AN01`, `SQLFeatureNotSupportedException`, for a statement shape the driver does not handle, and for
     `READ_UNCOMMITTED` (never retry; rewrite the statement);
   - `42000` for a name a statement must not use (the catalog's refusals, already in place);
   - `08004`, `SQLNonTransientConnectionException`, for connect-time refusals (no catalog, a missing view
@@ -91,13 +91,13 @@ needs more. SQL Server `USE` of another database is documented as unsupported, n
   `rollback`); the passthrough flag of `setClientInfo` sends statements verbatim, only in autocommit.
 - **Router.** For each statement: parse with the engine and the session's double-quote setting; look up
   every table reference; route to pass-through (plain tables only), refusal (the contract of milestone 0),
-  or the ScalarDB route. Until milestones 3 and 4 the ScalarDB route refuses with `0A000` "not yet
+  or the ScalarDB route. Until milestones 3 and 4 the ScalarDB route refuses with `0AN01` "not yet
   supported", so the driver is safe from this milestone on: nothing reaches a ScalarDB table unrewritten.
 - **`DatabaseMetaData`** is forwarded as is; filtering `_data`, `_tx_metadata` and `virtual_tables` is
   deferred.
 
 Tests (integration, PostgreSQL): plain statements of every JDBC kind pass through with results, update
-counts and generated keys intact; every statement on a ScalarDB table is refused with `0A000`;
+counts and generated keys intact; every statement on a ScalarDB table is refused with `0AN01`;
 `SET search_path` then an unqualified name resolves the new way; `setSchema` likewise; a passthrough
 statement outside autocommit is refused; a HikariCP pool over the driver works (connection reset goes
 through `setSchema`/`setCatalog`).
@@ -127,13 +127,19 @@ NULL metadata; a table without setup is refused with `08004`.
     the first arm only, on the base tables for an imported table (4.2, locking clauses);
   - **the `rc_T` route** for every other shape (joins, subqueries), by table renaming as today, refused
     when `hasLockingOrIntoClause()` is true.
-- **Placeholder re-binding.** The `PreparedStatement` proxy records the user's parameters and binds them
-  at the positions the fragments report; `P` appears twice, so its parameters are bound twice.
+- **Placeholder re-binding.** The `PreparedStatement` proxy stops forwarding `setXxx` and records each
+  call, the setter and its arguments, per user ordinal; a stream or reader is read once into memory, since
+  it is bound more than once. Executing replays the calls at the positions the fragments report; `P`
+  appears twice, so its parameters are bound twice. A `Route` then carries either the verbatim text, for
+  plain tables, or a plan that runs against the vendor connection and the recorded parameters, which is
+  what milestone 4's several statements per execute need (todo 064).
 - **Result stripping.** The `ResultSet` proxy hides `tx_id`/`tx_version`, keeps the user's column labels
   and indexes, and serves `getMetaData` for the user's columns only.
 - **Anchors.** Each row read by key records `(tx_id, tx_version)` per key in the transaction's anchor
-  map, `(before_tx_id, before_tx_version)` for a second-arm row; the map is cleared at commit and
-  rollback.
+  map, `(before_tx_id, before_tx_version)` for a second-arm row. The map lives in a small per-transaction
+  object in `jdbc`, cleared by `commit`, `rollback` and `setAutoCommit(true)`; milestone 4 adds the
+  rollback-only state and the driver-opened autocommit transaction to the same object, and `Session`
+  keeps only the session's state (todo 064).
 
 Tests: unit tests of the fragment emitter and the rewrite text for the corpus; integration tests on both
 layouts: committed rows read as written; a row a ScalarDB transaction holds prepared reads as its before
@@ -178,7 +184,8 @@ driver transaction through the driver's JDBC URL and a ScalarDB transaction thro
 
 ### Milestone 6: parse once (todo 008)
 
-- A bounded statement cache keyed by (SQL text, engine, double-quote setting, catalog snapshot) holding
+- A bounded statement cache keyed by (SQL text, engine, double-quote setting, the session's schemas,
+  catalog generation) holding
   the route, the rewritten text and the placeholder map; `prepareStatement` fills it, `execute(String)`
   reads it.
 - No verification re-parse when nothing was replaced; the parser called directly, without JSQLParser's
@@ -217,8 +224,7 @@ New packages under `com.scalar.db.nativejdbc`, each depending only on what is li
 
 | Package | Contents | Depends on |
 |---|---|---|
-| `jdbc` | the proxies, `Session`, the rollback-only state | `route`, `catalog`, `engine` |
-| `route` | the router and the refusal contract | `sql`, `catalog`, `engine` |
+| `jdbc` | the proxies, `Session`, `Router` and the refusal contract, the per-transaction state | `sql`, `catalog`, `engine` (`rewrite` from milestone 3) |
 | `rewrite` | the two-arm read, the `rc_T` renaming, the write plans, the statement cache | `sql`, `catalog`, `engine` |
 | `sql`, `catalog`, `engine` | as today | as today |
 
@@ -245,7 +251,7 @@ code they name, not separately.
 
 1. **Classic-layout tables in the first deliverable.** The design covers them, but the user's main case
    is the imported decoupled layout. Proposal: milestones 3 and 4 handle the two decoupled layouts and
-   refuse classic tables with `0A000`; classic support follows in milestone 7 or 8.
+   refuse classic tables with `0AN01`; classic support follows in milestone 7 or 8.
 2. **Setup as a test helper first.** Proposal: yes, promoted to the `tools` module in milestone 9, so the
    protocol is proven before the operator surface is designed.
 3. **The first deliverable stops at milestone 6** with a preview build for PostgreSQL READ COMMITTED,
@@ -260,7 +266,7 @@ code they name, not separately.
 - **JDBC surface breadth.** Applications use far more of JDBC than the statements above (scrollable and
   updatable result sets, `getGeneratedKeys` variants, `setFetchSize`, savepoints, multiple result sets).
   The proxies forward by default; for ScalarDB tables anything the rewrite cannot honour, an updatable
-  result set for instance, is refused with `0A000` rather than approximated. The samples of milestone 9
+  result set for instance, is refused with `0AN01` rather than approximated. The samples of milestone 9
   are the check that common ORM usage is covered.
 - **Savepoints.** A user savepoint rolled back to between the driver's DML and its CAS would split a
   driver write. The driver's write steps run inside a savepoint of their own, or user savepoints on a
