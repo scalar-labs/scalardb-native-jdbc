@@ -110,16 +110,19 @@ milestone 9 adds, so the code does not move later. A table without setup is refu
 `08004`: the refusal comes per statement, and HikariCP evicts a connection on an `08` state. Classic
 tables are not set up yet; they come with classic support.
 
-- **Setup**, first as a test-fixture helper (`testing.Setup`), promoted to a `tools` module with a
-  command-line entry in milestone 9. Per ScalarDB table: create `rc_T` (section 3, both layouts); create
-  the in-flight partial index on `T_meta (<pk>) WHERE tx_state IN (1, 2)`; run the backfill of section 1
-  until no row has a NULL `tx_id` or a missing metadata row. Idempotent: create-if-absent, re-runnable.
-- **Verification at connect.** For each ScalarDB table of the catalog the driver checks that `rc_T` and
-  the in-flight index exist; a table without them is refused at first use with `08004` naming the setup
-  command. Checked once per catalog load, not per connection.
+- **Setup** (`setup.Setup`, in the driver). Per decoupled table, in order: the in-flight index, without
+  blocking writes where the engine can; on an imported table the backfill of section 1; last the view
+  `rc_T`, which also marks a completed backfill. Idempotent; one result per table, a failing table does
+  not stop the others; a teardown drops both objects.
+- **Verification at catalog load.** The catalog lists the setup's views (with their columns) and usable
+  indexes by name; a table is set up when both exist and the view has the table's columns. A statement
+  naming a table that is not set up is refused with `55000`. A listing failure other than a lost
+  connection keeps the previous answer.
 
-Tests: setup on a created and an imported table; re-running it changes nothing; the backfill leaves no
-NULL metadata; a table without setup is refused with `08004`.
+Tests: on all six configurations, setup on created, imported and key-only tables and a composite key;
+re-running changes nothing; the backfill stamps missing and all-NULL metadata and waits only for rows in
+flight over a deemed-committed row; the view's committed image for states 1 and 2, the NULL-row prepare
+and an in-flight insert; teardown; a table without setup is refused with `55000`.
 
 ### Milestone 3: reads under READ COMMITTED
 
@@ -219,8 +222,8 @@ table, so it detects them before stripping. Oracle maps SNAPSHOT and SERIALIZABL
 
 ### Milestone 9: tools and acceptance
 
-The `tools` module with the setup command (`setup`, `check`, `backfill`, `--dry-run`, exit codes, todo
-026), the sweeper calling `recoverRecord`, and the `samples/` applications of design 4.6 (plain JDBC,
+The `tools` module with the setup command (`setup`, `check`, `teardown`, `--dry-run`, exit codes, todo
+026), a command line over the driver's `setup.Setup`, which stays in the driver, the sweeper calling `recoverRecord`, and the `samples/` applications of design 4.6 (plain JDBC,
 Spring Data JDBC, JPA, MyBatis) as the acceptance suite. The CI engine matrix and the nightly (todos 021
 and 052).
 
@@ -232,6 +235,7 @@ New packages under `com.scalar.db.nativejdbc`, each depending only on what is li
 |---|---|---|
 | `jdbc` | the proxies, `Session`, `Router` and the refusal contract, the per-transaction state | `sql`, `catalog`, `engine` (`rewrite` from milestone 3) |
 | `rewrite` | the two-arm read, the `rc_T` renaming, the write plans, the statement cache | `sql`, `catalog`, `engine` |
+| `setup` | the setup and teardown of each table's view and index, the backfill | `catalog`, `engine` |
 | `sql`, `catalog`, `engine` | as today | as today |
 
 `sql` stays free of `java.sql`; JDBC calls live in `jdbc`, `catalog` and `engine` only.

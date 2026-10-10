@@ -2,6 +2,7 @@ package com.scalar.db.nativejdbc.catalog;
 
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.engine.Engine.QualifiedName;
+import com.scalar.db.nativejdbc.engine.SetupObjects;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -421,7 +422,7 @@ public final class Catalog implements AutoCloseable {
       @Nullable String schema, List<String> sessionSchemas, String table) {
     String ns = schema != null ? schema : sessionSchemas.isEmpty() ? "" : sessionSchemas.get(0);
     return new TableInfo(
-        ns, table, Layout.PLAIN, table, null, null, List.of(), List.of(), List.of());
+        ns, table, Layout.PLAIN, table, null, null, List.of(), List.of(), List.of(), true);
   }
 
   /**
@@ -631,22 +632,42 @@ public final class Catalog implements AutoCloseable {
       absent(c, e);
     }
     boolean caseInsensitive = present && engine.tableNamesCaseInsensitive(c);
-    Set<String> schemas = new LinkedHashSet<>();
-    for (VirtualTable v : virtualTables) {
-      schemas.add(split(v.name).schema());
-      schemas.add(split(v.left).schema());
-    }
-    Set<String> setupObjects;
-    try {
-      setupObjects = engine.setupObjects(c, schemas);
-    } catch (SQLException e) {
-      // every decoupled table is then refused as not set up, which names the setup to run
-      LOG.warn(
-          "The views and indexes of the ScalarDB schemas cannot be listed ({})", e.getMessage());
-      setupObjects = Set.of();
-    }
+    SetupObjects setupObjects = setupObjects(c, virtualTables, caseInsensitive);
     return new Snapshot(
-        engine, present, caseInsensitive, virtualTables, metadata, setupObjects, now.plus(ttl));
+        present, caseInsensitive, virtualTables, metadata, setupObjects, now.plus(ttl));
+  }
+
+  /**
+   * The setup's objects for every decoupled table, listed by name. A failure other than a lost
+   * connection keeps the previous load's answer, so a passing error does not refuse every table for
+   * a whole TTL; a lost connection is thrown, for the caller's reconnect.
+   */
+  private SetupObjects setupObjects(
+      Connection c, List<VirtualTable> virtualTables, boolean caseInsensitive) throws SQLException {
+    Set<String> schemas = new LinkedHashSet<>();
+    Set<String> views = new LinkedHashSet<>();
+    Set<String> indexes = new LinkedHashSet<>();
+    for (VirtualTable v : virtualTables) {
+      QualifiedName user = split(v.inner ? v.name : v.left);
+      schemas.add(user.schema());
+      views.add(engine.readViewName(user.table()));
+      indexes.add(engine.inflightIndexName(user.table()));
+    }
+    try {
+      return engine.setupObjects(c, schemas, views, indexes, caseInsensitive);
+    } catch (SQLException e) {
+      if (isConnectionFailure(e)) {
+        throw e;
+      }
+      Snapshot previous = snapshot;
+      LOG.warn(
+          "The setup's views and indexes cannot be listed; {} ({})",
+          previous != null
+              ? "keeping the previous answer"
+              : "every decoupled table counts as not set up",
+          e.getMessage());
+      return previous != null ? previous.setupObjects : SetupObjects.none(engine);
+    }
   }
 
   /** The metadata table is not visible: tell "no ScalarDB here" from "not allowed to look". */
@@ -712,8 +733,7 @@ public final class Catalog implements AutoCloseable {
     final boolean present;
     final boolean caseInsensitive;
     final Instant expiresAt;
-    private final Engine engine;
-    private final Set<String> setupObjects;
+    final SetupObjects setupObjects;
     private final Map<String, VirtualTable> byName = new HashMap<>();
     private final Map<String, VirtualTable> byLeft = new HashMap<>();
     private final Map<String, VirtualTable> byRight = new HashMap<>();
@@ -728,31 +748,9 @@ public final class Catalog implements AutoCloseable {
         boolean caseInsensitive,
         List<VirtualTable> virtualTables,
         Map<String, List<MetadataColumn>> metadata,
+        SetupObjects setupObjects,
         Instant expiresAt) {
-      this(
-          Engine.POSTGRESQL,
-          present,
-          caseInsensitive,
-          virtualTables,
-          metadata,
-          Set.of(),
-          expiresAt);
-    }
-
-    /**
-     * @param setupObjects the views and indexes found in the ScalarDB schemas, as {@link
-     *     Engine#setupObjects} lists them
-     */
-    Snapshot(
-        Engine engine,
-        boolean present,
-        boolean caseInsensitive,
-        List<VirtualTable> virtualTables,
-        Map<String, List<MetadataColumn>> metadata,
-        Set<String> setupObjects,
-        Instant expiresAt) {
-      this.engine = engine;
-      this.setupObjects = Set.copyOf(setupObjects);
+      this.setupObjects = setupObjects;
       this.present = present;
       this.caseInsensitive = caseInsensitive;
       this.expiresAt = expiresAt;
@@ -774,16 +772,6 @@ public final class Catalog implements AutoCloseable {
       return byName.values();
     }
 
-    /** A decoupled table is set up when its read view and its in-flight index both exist. */
-    private TableInfo marked(TableInfo t) {
-      String ns = t.namespace();
-      String view = "view:" + ns + "." + t.readView(engine);
-      String index = "index:" + ns + "." + t.metadataTable() + "." + t.inflightIndex(engine);
-      return t.withSetUp(
-          setupObjects.contains(view.toLowerCase(Locale.ROOT))
-              && setupObjects.contains(index.toLowerCase(Locale.ROOT)));
-    }
-
     TableInfo classify(QualifiedName q) throws SQLException {
       String full = q.schema() + "." + q.table();
       if (q.isSynonym()) {
@@ -803,17 +791,18 @@ public final class Catalog implements AutoCloseable {
         // ScalarDB registers metadata for the source tables, not for the virtual table: the keys
         // and the user's columns are the data table's entry
         Columns columns = keyed(v.left, full);
-        return marked(
-            new TableInfo(
-                q.schema(),
-                q.table(),
-                Layout.DECOUPLED_CREATED,
-                unqualified(v.left),
-                unqualified(v.right),
-                q.table(),
-                columns.partitionKey,
-                columns.clusteringKey,
-                columns.dataColumns));
+        String meta = unqualified(v.right);
+        return new TableInfo(
+            q.schema(),
+            q.table(),
+            Layout.DECOUPLED_CREATED,
+            unqualified(v.left),
+            meta,
+            q.table(),
+            columns.partitionKey,
+            columns.clusteringKey,
+            columns.dataColumns,
+            setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
       v = byLeft.get(k);
       if (v != null) {
@@ -825,17 +814,18 @@ public final class Catalog implements AutoCloseable {
               "42000");
         }
         Columns columns = keyed(full, full); // the user's name is the data table
-        return marked(
-            new TableInfo(
-                q.schema(),
-                q.table(),
-                Layout.DECOUPLED_IMPORTED,
-                q.table(),
-                unqualified(v.right),
-                unqualified(v.name),
-                columns.partitionKey,
-                columns.clusteringKey,
-                columns.dataColumns));
+        String meta = unqualified(v.right);
+        return new TableInfo(
+            q.schema(),
+            q.table(),
+            Layout.DECOUPLED_IMPORTED,
+            q.table(),
+            meta,
+            unqualified(v.name),
+            columns.partitionKey,
+            columns.clusteringKey,
+            columns.dataColumns,
+            setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
       v = byRight.get(k);
       if (v != null) {
@@ -860,7 +850,8 @@ public final class Catalog implements AutoCloseable {
             null,
             columns.partitionKey,
             columns.clusteringKey,
-            columns.dataColumns);
+            columns.dataColumns,
+            true);
       }
       return new TableInfo(
           q.schema(),
@@ -871,7 +862,8 @@ public final class Catalog implements AutoCloseable {
           null,
           List.of(),
           List.of(),
-          List.of());
+          List.of(),
+          true);
     }
 
     /**

@@ -28,7 +28,8 @@ public final class TableInfo {
       @Nullable String virtualTable,
       List<String> partitionKey,
       List<String> clusteringKey,
-      List<String> dataColumns) {
+      List<String> dataColumns,
+      boolean setUp) {
     this.namespace = namespace;
     this.table = table;
     this.layout = layout;
@@ -38,30 +39,14 @@ public final class TableInfo {
     this.partitionKey = List.copyOf(partitionKey);
     this.clusteringKey = List.copyOf(clusteringKey);
     this.dataColumns = List.copyOf(dataColumns);
-    this.setUp = true;
-  }
-
-  private TableInfo(TableInfo t, boolean setUp) {
-    this.namespace = t.namespace;
-    this.table = t.table;
-    this.layout = t.layout;
-    this.dataTable = t.dataTable;
-    this.metadataTable = t.metadataTable;
-    this.virtualTable = t.virtualTable;
-    this.partitionKey = t.partitionKey;
-    this.clusteringKey = t.clusteringKey;
-    this.dataColumns = t.dataColumns;
     this.setUp = setUp;
   }
 
-  TableInfo withSetUp(boolean setUp) {
-    return new TableInfo(this, setUp);
-  }
-
   /**
-   * Returns whether the driver's setup has been run for this table: its read view and in-flight
-   * index exist, as seen when the catalog was loaded. Always true for a table the setup does not
-   * concern.
+   * Returns whether the driver's setup has been run for this table: its in-flight index exists and
+   * its read view exists with the table's columns, as seen when the catalog was loaded. Always true
+   * for a table the setup does not concern yet: a plain table, and a classic one until classic
+   * support adds its setup.
    *
    * @return whether the table is set up
    */
@@ -77,7 +62,7 @@ public final class TableInfo {
    * @return the view's name
    */
   public String readView(Engine engine) {
-    return engine.affix("rc_") + table;
+    return engine.readViewName(table);
   }
 
   /**
@@ -87,7 +72,7 @@ public final class TableInfo {
    * @return the index's name
    */
   public String inflightIndex(Engine engine) {
-    return table + engine.affix("_inflight");
+    return engine.inflightIndexName(table);
   }
 
   /**

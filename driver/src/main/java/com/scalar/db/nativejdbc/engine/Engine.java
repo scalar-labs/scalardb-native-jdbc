@@ -10,7 +10,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -193,96 +193,195 @@ public enum Engine {
   }
 
   /**
-   * Lists the views and indexes in the given schemas, for the setup check: {@code
-   * view:<schema>.<view>} and {@code index:<schema>.<table>.<index>}, in lower case, since the
-   * check compares names the driver itself created.
+   * Returns the name of the read view the setup creates for a table, {@code rc_T} (design section
+   * 3).
+   *
+   * @param table the name statements use for the table, in its stored spelling
+   * @return the view's name
+   */
+  public String readViewName(String table) {
+    return affix("rc_") + table;
+  }
+
+  /**
+   * Returns the name of the in-flight index the setup creates on a table's metadata table.
+   *
+   * @param table the name statements use for the table, in its stored spelling
+   * @return the index's name
+   */
+  public String inflightIndexName(String table) {
+    return table + affix("_inflight");
+  }
+
+  /**
+   * Lists the read views, with their columns, and the usable in-flight indexes of the given names:
+   * only these names, so a load does not list every object of an application schema. An index the
+   * engine holds unusable (PostgreSQL {@code indisvalid}, Oracle {@code STATUS}, SQL Server {@code
+   * is_disabled}) is not listed.
    *
    * @param connection a connection to the database
    * @param schemas the schemas, in their stored spelling
-   * @return the keys of the views and indexes found
+   * @param views the view names
+   * @param indexes the index names
+   * @param caseInsensitive whether the database compares table names without regard to case
+   * @return the objects found
    * @throws SQLException if the engine's catalog cannot be read
    */
-  public Set<String> setupObjects(Connection connection, Collection<String> schemas)
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "the query text is constant apart from the number of placeholders")
+  public SetupObjects setupObjects(
+      Connection connection,
+      Collection<String> schemas,
+      Collection<String> views,
+      Collection<String> indexes,
+      boolean caseInsensitive)
       throws SQLException {
-    Set<String> out = new HashSet<>();
-    if (schemas.isEmpty()) {
+    SetupObjects out = new SetupObjects(this, caseInsensitive);
+    if (schemas.isEmpty() || views.isEmpty() || indexes.isEmpty()) {
       return out;
     }
-    String in = String.join(", ", Collections.nCopies(schemas.size(), "?"));
-    String[] queries = setupQueries(in);
-    collect(connection, queries[0], schemas, "view:", out);
-    collect(connection, queries[1], schemas, "index:", out);
+    List<String> s = spellings(schemas, caseInsensitive);
+    List<String> v = spellings(views, caseInsensitive);
+    List<String> i = spellings(indexes, caseInsensitive);
+    try (PreparedStatement ps = connection.prepareStatement(viewColumnsQuery(s.size(), v.size()))) {
+      bind(ps, s, v);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.addViewColumn(rs.getString(1), rs.getString(2), rs.getString(3));
+        }
+      }
+    }
+    try (PreparedStatement ps = connection.prepareStatement(indexesQuery(s.size(), i.size()))) {
+      bind(ps, s, i);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.addIndex(rs.getString(1), rs.getString(2), rs.getString(3));
+        }
+      }
+    }
     return out;
   }
 
-  /** The engine's catalog queries for its views and its indexes, with {@code in} placeholders. */
-  private String[] setupQueries(String in) {
+  /** The names to ask for: as given, and lower-cased where the database ignores case. */
+  private static List<String> spellings(Collection<String> names, boolean caseInsensitive) {
+    Set<String> out = new LinkedHashSet<>(names);
+    if (caseInsensitive) {
+      for (String n : names) {
+        out.add(n.toLowerCase(Locale.ROOT));
+      }
+    }
+    return new ArrayList<>(out);
+  }
+
+  private static void bind(PreparedStatement ps, List<String> first, List<String> second)
+      throws SQLException {
+    int p = 1;
+    for (String x : first) {
+      ps.setString(p++, x);
+    }
+    for (String x : second) {
+      ps.setString(p++, x);
+    }
+  }
+
+  private static String marks(int n) {
+    return String.join(", ", Collections.nCopies(n, "?"));
+  }
+
+  /** Schema, view, column of the named views, in column order; tables of the same name excluded. */
+  private String viewColumnsQuery(int schemas, int names) {
+    String s = marks(schemas);
+    String n = marks(names);
     switch (this) {
       case POSTGRESQL:
-        return new String[] {
-          "SELECT schemaname, viewname FROM pg_catalog.pg_views WHERE schemaname IN (" + in + ")",
-          "SELECT schemaname, tablename, indexname FROM pg_catalog.pg_indexes"
-              + " WHERE schemaname IN ("
-              + in
-              + ")"
-        };
+        // pg_catalog, not information_schema, which hides objects the user has no privilege on
+        return "SELECT n.nspname, c.relname, a.attname FROM pg_catalog.pg_attribute a"
+            + " JOIN pg_catalog.pg_class c ON c.oid = a.attrelid"
+            + " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+            + " WHERE c.relkind = 'v' AND a.attnum > 0 AND NOT a.attisdropped"
+            + " AND n.nspname IN ("
+            + s
+            + ") AND c.relname IN ("
+            + n
+            + ")"
+            + " ORDER BY n.nspname, c.relname, a.attnum";
       case MYSQL:
       case MARIADB:
-        return new String[] {
-          "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_SCHEMA IN ("
-              + in
-              + ")",
-          "SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS"
-              + " WHERE TABLE_SCHEMA IN ("
-              + in
-              + ")"
-        };
+        return "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME FROM information_schema.COLUMNS c"
+            + " JOIN information_schema.VIEWS v"
+            + " ON v.TABLE_SCHEMA = c.TABLE_SCHEMA AND v.TABLE_NAME = c.TABLE_NAME"
+            + " WHERE c.TABLE_SCHEMA IN ("
+            + s
+            + ") AND c.TABLE_NAME IN ("
+            + n
+            + ")"
+            + " ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION";
       case SQLSERVER:
-        return new String[] {
-          "SELECT s.name, v.name FROM sys.views v JOIN sys.schemas s ON s.schema_id = v.schema_id"
-              + " WHERE s.name IN ("
-              + in
-              + ")",
-          "SELECT s.name, t.name, i.name FROM sys.indexes i"
-              + " JOIN sys.tables t ON t.object_id = i.object_id"
-              + " JOIN sys.schemas s ON s.schema_id = t.schema_id"
-              + " WHERE i.name IS NOT NULL AND s.name IN ("
-              + in
-              + ")"
-        };
+        return "SELECT s.name, v.name, c.name FROM sys.views v"
+            + " JOIN sys.schemas s ON s.schema_id = v.schema_id"
+            + " JOIN sys.columns c ON c.object_id = v.object_id"
+            + " WHERE s.name IN ("
+            + s
+            + ") AND v.name IN ("
+            + n
+            + ")"
+            + " ORDER BY s.name, v.name, c.column_id";
       case ORACLE:
-        return new String[] {
-          "SELECT OWNER, VIEW_NAME FROM ALL_VIEWS WHERE OWNER IN (" + in + ")",
-          "SELECT TABLE_OWNER, TABLE_NAME, INDEX_NAME FROM ALL_INDEXES WHERE TABLE_OWNER IN ("
-              + in
-              + ")"
-        };
+        return "SELECT c.OWNER, c.TABLE_NAME, c.COLUMN_NAME FROM ALL_TAB_COLUMNS c"
+            + " JOIN ALL_VIEWS v ON v.OWNER = c.OWNER AND v.VIEW_NAME = c.TABLE_NAME"
+            + " WHERE c.OWNER IN ("
+            + s
+            + ") AND c.TABLE_NAME IN ("
+            + n
+            + ")"
+            + " ORDER BY c.OWNER, c.TABLE_NAME, c.COLUMN_ID";
     }
     throw new AssertionError(this);
   }
 
-  @SuppressFBWarnings(
-      value = "SQL_INJECTION_JDBC",
-      justification = "sql is one of the constant queries of setupQueries; the schemas are bound")
-  private static void collect(
-      Connection c, String sql, Collection<String> schemas, String kind, Set<String> out)
-      throws SQLException {
-    try (PreparedStatement ps = c.prepareStatement(sql)) {
-      int i = 1;
-      for (String schema : schemas) {
-        ps.setString(i++, schema);
-      }
-      try (ResultSet rs = ps.executeQuery()) {
-        int columns = rs.getMetaData().getColumnCount();
-        while (rs.next()) {
-          List<String> parts = new ArrayList<>();
-          for (int col = 1; col <= columns; col++) {
-            parts.add(rs.getString(col));
-          }
-          out.add(kind + String.join(".", parts).toLowerCase(Locale.ROOT));
-        }
-      }
+  /** Schema, table, index of the named indexes that the engine can use. */
+  private String indexesQuery(int schemas, int names) {
+    String s = marks(schemas);
+    String n = marks(names);
+    switch (this) {
+      case POSTGRESQL:
+        return "SELECT n.nspname, t.relname, i.relname FROM pg_catalog.pg_index x"
+            + " JOIN pg_catalog.pg_class i ON i.oid = x.indexrelid"
+            + " JOIN pg_catalog.pg_class t ON t.oid = x.indrelid"
+            + " JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace"
+            + " WHERE x.indisvalid AND n.nspname IN ("
+            + s
+            + ") AND i.relname IN ("
+            + n
+            + ")";
+      case MYSQL:
+      case MARIADB:
+        return "SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME, INDEX_NAME"
+            + " FROM information_schema.STATISTICS"
+            + " WHERE TABLE_SCHEMA IN ("
+            + s
+            + ") AND INDEX_NAME IN ("
+            + n
+            + ")";
+      case SQLSERVER:
+        return "SELECT s.name, t.name, i.name FROM sys.indexes i"
+            + " JOIN sys.tables t ON t.object_id = i.object_id"
+            + " JOIN sys.schemas s ON s.schema_id = t.schema_id"
+            + " WHERE i.is_disabled = 0 AND s.name IN ("
+            + s
+            + ") AND i.name IN ("
+            + n
+            + ")";
+      case ORACLE:
+        return "SELECT TABLE_OWNER, TABLE_NAME, INDEX_NAME FROM ALL_INDEXES"
+            + " WHERE STATUS = 'VALID' AND TABLE_OWNER IN ("
+            + s
+            + ") AND INDEX_NAME IN ("
+            + n
+            + ")";
     }
+    throw new AssertionError(this);
   }
 
   /**

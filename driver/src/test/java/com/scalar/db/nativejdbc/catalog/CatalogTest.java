@@ -6,7 +6,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.scalar.db.nativejdbc.catalog.Catalog.MetadataColumn;
 import com.scalar.db.nativejdbc.catalog.Catalog.Snapshot;
 import com.scalar.db.nativejdbc.catalog.Catalog.VirtualTable;
+import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.engine.Engine.QualifiedName;
+import com.scalar.db.nativejdbc.engine.SetupObjects;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -69,6 +71,7 @@ class CatalogTest {
             new VirtualTable(
                 "app.orders_scalardb", "app.orders", "app.orders_tx_metadata", "LEFT_OUTER")),
         metadata,
+        SetupObjects.none(Engine.POSTGRESQL),
         Instant.EPOCH);
   }
 
@@ -163,6 +166,7 @@ class CatalogTest {
             false,
             List.of(new VirtualTable("app.t_scalardb", "app.t", "app.t_tx_metadata", null)),
             metadata,
+            SetupObjects.none(Engine.POSTGRESQL),
             Instant.EPOCH);
     assertThat(s.classify(new QualifiedName("app", "t")).layout())
         .isEqualTo(Layout.DECOUPLED_IMPORTED);
@@ -176,6 +180,7 @@ class CatalogTest {
             false,
             List.of(new VirtualTable("ns.T", "ns.T_data", "ns.T_tx_metadata", "INNER")),
             new HashMap<>(), // the data table's metadata entry is missing
+            SetupObjects.none(Engine.POSTGRESQL),
             Instant.EPOCH);
     assertThatThrownBy(() -> s.classify(new QualifiedName("ns", "T")))
         .isInstanceOf(SQLException.class)

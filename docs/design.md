@@ -546,11 +546,30 @@ names a table without them is refused with `55000`. Example for `T(id, x, y)`; a
 every key column.
 
 The setup's names, in the table's schema: the view `rc_T` and, on the metadata table, the index
-`T_inflight`, each affix spelled the way the engine folds an unquoted name (`RC_ORDERS` on Oracle); a
-name beyond the engine's identifier limit is refused rather than truncated. The view is created with
-`CREATE OR REPLACE` (`CREATE OR ALTER` on SQL Server), the index only when absent, and the backfill
-stamps `tx_id = 'scalardb-native-backfill'`. On PostgreSQL the view depends on its tables, so dropping a
-set-up table through ScalarDB needs `DROP VIEW rc_T` first.
+`T_inflight`, each affix spelled the way the engine folds an unquoted name and joined to the table's
+stored spelling (`RC_ORDERS` for an Oracle table stored `ORDERS`, `RC_made` for one ScalarDB created
+as `"made"`); a name beyond the engine's identifier limit is refused rather than truncated. Per table,
+in order: the index, built without blocking writes where the engine can (`CREATE INDEX CONCURRENTLY` on
+PostgreSQL, `ALGORITHM=INPLACE, LOCK=NONE` on MySQL and MariaDB, `ONLINE` on SQL Server editions that
+have online builds and on Oracle where the edition allows); on an imported table the backfill, which
+stamps `tx_id = 'scalardb-native-backfill'`; last the view, with `CREATE OR REPLACE` (`CREATE OR
+ALTER` on SQL Server). The backfill waits only for rows ScalarDB has in flight over a deemed-committed
+row, which carry `before_tx_id` NULL and `before_tx_version` 0, never for an in-flight insert.
+
+A table is set up when its index exists and is usable (an invalid index a failed concurrent build left
+does not count) and its view exists with exactly the table's columns, in order. Because the view comes
+last, it also says that the backfill completed. Names compare exactly, except where the database
+compares table names without regard to case. The setup does not replace a view of the same name whose
+columns differ, since it did not create it. Other drivers see a new setup after their catalog TTL.
+
+Taking the setup down drops the view and the index. On PostgreSQL the view depends on its tables, so
+ScalarDB's `dropTable` and `dropNamespace` need the teardown first; ScalarDB itself refuses the other
+schema changes on a decoupled table (adding, altering, dropping or renaming a column, renaming the table,
+repairing it), so the view's columns cannot drift through ScalarDB, only through DDL run outside it,
+which the column check then reports as not set up. Two costs to know: on SQL Server the filtered index
+requires `QUOTED_IDENTIFIER`, `ANSI_NULLS`, `ANSI_PADDING` and `ANSI_WARNINGS` on in every session that
+writes the metadata table (the JDBC driver's defaults are), and on PostgreSQL the partial index's
+predicate on `tx_state` prevents heap-only-tuple updates when ScalarDB changes a row's state.
 
 ```sql
 -- cc_T: raw columns + metadata + before image. The driver's surface.

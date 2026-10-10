@@ -16,6 +16,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.Map;
 import java.util.Properties;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
@@ -53,7 +54,11 @@ class RoutingIntegrationTest {
       }
     }
     try (Connection c = PG.open()) {
-      Setup.run(new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open), c);
+      Setup.run(
+          new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open),
+          c,
+          t -> t.namespace().equals("m1"),
+          Duration.ofMinutes(1));
     }
     url = "jdbc:scalardb-native:" + PG.url().substring("jdbc:".length());
     props = new Properties();
@@ -324,7 +329,11 @@ class RoutingIntegrationTest {
     try (DistributedTransactionAdmin admin = PG.admin()) {
       if (admin.tableExists("m1", "late")) {
         try (Connection c = PG.open()) {
-          PG.execute(c, "DROP VIEW IF EXISTS m1.rc_late"); // the setup's view depends on it
+          // the setup's view depends on the table
+          Setup.teardown(
+              new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open),
+              c,
+              t -> t.table().equals("late"));
         }
         admin.dropTable("m1", "late"); // a previous run imported it
         try (Connection c = PG.open()) {
