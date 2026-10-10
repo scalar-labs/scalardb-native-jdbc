@@ -26,10 +26,12 @@ import org.jspecify.annotations.Nullable;
  * Sets up decoupled ScalarDB tables for the driver (design section 3), and takes the setup down
  * again. Per table, in this order: the in-flight index on the metadata table, built without
  * blocking writes where the engine can; on an imported table the backfill of section 1; last the
- * read view {@code rc_T}, so that the view existing also says the backfill completed. Every step is
- * create-if-absent or re-runnable, so running the setup again changes nothing. It needs DDL
- * privileges and is run by an operator, never at connect; the driver checks at catalog load that
- * the index and the view exist, and other drivers see a new setup after their catalog TTL.
+ * read view {@code rc_T}, so that the view existing also says the backfill completed, and a grant
+ * of SELECT on it to each application user. Every step is create-if-absent or re-runnable, so
+ * running the setup again changes nothing. It needs DDL privileges and is run by an operator, never
+ * at connect; the driver checks at catalog load that the index and the view exist, and other
+ * drivers see a new setup after their catalog TTL. The backfill writes every row of an imported
+ * table and belongs in a quiet window (design section 1).
  */
 @SuppressFBWarnings(
     value = {
@@ -119,14 +121,17 @@ public final class Setup {
   private final Engine engine;
   private final Connection connection;
   private final Duration backfillWait;
+  private final List<String> grantees;
   private final String txId;
   private final String txState;
   private final String txVersion;
 
-  private Setup(Engine engine, Connection connection, Duration backfillWait) {
+  private Setup(
+      Engine engine, Connection connection, Duration backfillWait, List<String> grantees) {
     this.engine = engine;
     this.connection = connection;
     this.backfillWait = backfillWait;
+    this.grantees = List.copyOf(grantees);
     this.txId = engine.quote("tx_id");
     this.txState = engine.quote("tx_state");
     this.txVersion = engine.quote("tx_version");
@@ -134,7 +139,7 @@ public final class Setup {
 
   /**
    * Sets up every decoupled table of the catalog, waiting up to a minute per table for the
-   * backfill.
+   * backfill, and grants nothing: the read view is readable by its owner only.
    *
    * @param catalog the catalog of the database
    * @param connection a connection to the same database, in autocommit, with DDL privileges
@@ -142,7 +147,7 @@ public final class Setup {
    * @throws SQLException if the connection is not in autocommit or the catalogs cannot be read
    */
   public static List<Result> run(Catalog catalog, Connection connection) throws SQLException {
-    return run(catalog, connection, t -> true, DEFAULT_BACKFILL_WAIT);
+    return run(catalog, connection, t -> true, DEFAULT_BACKFILL_WAIT, List.of());
   }
 
   /**
@@ -153,21 +158,31 @@ public final class Setup {
    * @param connection a connection to the same database, in autocommit, with DDL privileges
    * @param which the tables to set up
    * @param backfillWait how long to wait per table for in-flight rows the backfill must outlast
+   * @param grantees the application users or roles granted SELECT on each read view, spelled as the
+   *     engine stores them; on MySQL and MariaDB {@code user} or {@code user@host}
    * @return one result per table
    * @throws SQLException if the connection is not in autocommit or the catalogs cannot be read
    */
   public static List<Result> run(
-      Catalog catalog, Connection connection, Predicate<TableInfo> which, Duration backfillWait)
+      Catalog catalog,
+      Connection connection,
+      Predicate<TableInfo> which,
+      Duration backfillWait,
+      List<String> grantees)
       throws SQLException {
-    Setup setup = new Setup(catalog.engine(), connection, backfillWait);
+    Setup setup = new Setup(catalog.engine(), connection, backfillWait, grantees);
     List<TableInfo> tables = setup.tables(catalog, which);
     SetupObjects found = setup.list(tables);
     List<Result> results = new ArrayList<>();
+    int isolation = connection.getTransactionIsolation();
+    // the backfill's scans take no shared locks that stall ScalarDB and the application
+    connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
     try {
       for (TableInfo t : tables) {
         results.add(setup.up(t, found));
       }
     } finally {
+      connection.setTransactionIsolation(isolation);
       catalog.invalidate(); // the next lookup sees what was created
     }
     return results;
@@ -186,7 +201,7 @@ public final class Setup {
    */
   public static List<Result> teardown(
       Catalog catalog, Connection connection, Predicate<TableInfo> which) throws SQLException {
-    Setup setup = new Setup(catalog.engine(), connection, DEFAULT_BACKFILL_WAIT);
+    Setup setup = new Setup(catalog.engine(), connection, DEFAULT_BACKFILL_WAIT, List.of());
     List<TableInfo> tables = setup.tables(catalog, which);
     SetupObjects found = setup.list(tables);
     List<Result> results = new ArrayList<>();
@@ -262,6 +277,10 @@ public final class Setup {
       }
       execute(viewDdl(t, view));
       actions.add((found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);
+      for (String g : grantees) {
+        execute("GRANT SELECT ON " + name(ns, view) + " TO " + grantee(g));
+        actions.add("granted SELECT on " + view + " to " + g);
+      }
       return new Result(name, actions, stamped, null);
     } catch (SQLException e) {
       return new Result(name, actions, stamped, e);
@@ -323,34 +342,70 @@ public final class Setup {
   }
 
   /**
-   * The committed image of each row (design section 3): the before image while one is in flight.
+   * The committed image of each row (design section 3), as two arms: rows not in flight with their
+   * own columns, so a predicate or join on {@code T}'s columns uses {@code T}'s indexes, and the
+   * before image of each row in flight that has one, found through the in-flight index. The view
+   * runs with the reader's rights where the engine has that: PostgreSQL 15 and later, MySQL and
+   * MariaDB.
    */
-  private String viewDdl(TableInfo t, String view) {
-    List<String> select = new ArrayList<>();
+  private String viewDdl(TableInfo t, String view) throws SQLException {
+    List<String> committed = new ArrayList<>();
+    List<String> before = new ArrayList<>();
     List<String> keys = t.keyColumns();
     for (String c : t.dataColumns()) {
       String q = engine.quote(c);
-      select.add(
-          keys.contains(c)
-              ? "t." + q
-              : String.format(
-                  "CASE WHEN m.%s IN (1, 2) THEN m.%s ELSE t.%s END AS %s",
-                  txState, engine.quote("before_" + c), q, q));
+      committed.add("t." + q);
+      before.add(keys.contains(c) ? "t." + q : "m." + engine.quote("before_" + c) + " AS " + q);
     }
+    String data = name(t.namespace(), t.dataTable());
+    String meta = name(t.namespace(), metadataTable(t));
     return String.format(
-        "%s %s AS SELECT %s FROM %s t LEFT JOIN %s m ON %s"
-            + " WHERE COALESCE(m.%s, 3) = 3"
-            + " OR (m.%s IN (1, 2) AND (m.%s IS NOT NULL OR m.%s IS NOT NULL))",
-        engine == Engine.SQLSERVER ? "CREATE OR ALTER VIEW" : "CREATE OR REPLACE VIEW",
-        name(t.namespace(), view),
-        String.join(", ", select),
-        name(t.namespace(), t.dataTable()),
-        name(t.namespace(), metadataTable(t)),
+        "%s AS SELECT %s FROM %s t LEFT JOIN %s m ON %s WHERE COALESCE(m.%s, 3) = 3"
+            + " UNION ALL SELECT %s FROM %s t JOIN %s m ON %s"
+            + " WHERE m.%s IN (1, 2) AND (m.%s IS NOT NULL OR m.%s IS NOT NULL)",
+        createView(name(t.namespace(), view)),
+        String.join(", ", committed),
+        data,
+        meta,
         keyJoin(t),
         txState,
+        String.join(", ", before),
+        data,
+        meta,
+        keyJoin(t),
         txState,
         engine.quote("before_tx_id"),
         engine.quote("before_tx_version"));
+  }
+
+  private String createView(String view) throws SQLException {
+    switch (engine) {
+      case POSTGRESQL:
+        return "CREATE OR REPLACE VIEW "
+            + view
+            + (connection.getMetaData().getDatabaseMajorVersion() >= 15
+                ? " WITH (security_invoker = true)"
+                : "");
+      case MYSQL:
+      case MARIADB:
+        return "CREATE OR REPLACE SQL SECURITY INVOKER VIEW " + view;
+      case SQLSERVER:
+        return "CREATE OR ALTER VIEW " + view;
+      case ORACLE:
+        return "CREATE OR REPLACE VIEW " + view;
+    }
+    throw new AssertionError(engine);
+  }
+
+  /** A user or role, quoted; on MySQL and MariaDB an account, {@code user@host} or {@code user}. */
+  private String grantee(String g) {
+    if (engine == Engine.MYSQL || engine == Engine.MARIADB) {
+      int at = g.lastIndexOf('@');
+      return at < 0
+          ? engine.quote(g)
+          : engine.quote(g.substring(0, at)) + "@" + engine.quote(g.substring(at + 1));
+    }
+    return engine.quote(g);
   }
 
   /**
@@ -477,47 +532,92 @@ public final class Setup {
             engine.quote("before_tx_id"),
             engine.quote("before_tx_version"),
             engine == Engine.ORACLE ? " FROM dual" : "");
+    String inFlight =
+        String.format(
+            "SELECT COUNT(*) FROM %s WHERE %s IN (1, 2) AND %s IS NULL AND %s IS NOT NULL",
+            meta, txState, engine.quote("before_tx_id"), engine.quote("before_tx_version"));
     long stamped = 0;
     long deadline = System.nanoTime() + backfillWait.toNanos();
     while (true) {
       long now = System.currentTimeMillis();
-      try {
-        stamped += stamp(insert, now);
-      } catch (SQLException e) {
-        if (e.getSQLState() == null || !e.getSQLState().startsWith("23")) {
-          throw e;
-        }
-        // a ScalarDB transaction inserted one of these metadata rows first: count again
-      }
+      stamped += stamp(insert, now);
       stamped += stamp(update, now);
       long left = count(remaining);
       if (left == 0) {
         return stamped;
       }
-      if (System.nanoTime() > deadline) {
-        throw new SQLTransientException(
-            "the backfill is not complete: "
-                + left
-                + " rows still have no committed metadata or are in flight over such a row; run"
-                + " the setup again once ScalarDB's transactions on the table have finished",
-            "55000");
-      }
-      try {
-        Thread.sleep(1000);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new SQLTransientException("the backfill was interrupted", "57014", e);
-      }
+      // wait on the in-flight index alone, then one more full pass
+      do {
+        if (System.nanoTime() > deadline) {
+          throw new SQLTransientException(
+              "the backfill is not complete: "
+                  + left
+                  + " rows still have no committed metadata or are in flight over such a row;"
+                  + " run the setup again once ScalarDB's transactions on the table have finished",
+              "55000");
+        }
+        try {
+          Thread.sleep(1000);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new SQLTransientException("the backfill was interrupted", "57014", e);
+        }
+        left = count(inFlight);
+      } while (left > 0);
     }
   }
 
+  /**
+   * Runs one backfill step; a row ScalarDB inserted first, or a lock conflict with a transaction,
+   * counts as nothing done, and the next pass sees the rest.
+   */
   private int stamp(String sql, long now) throws SQLException {
     try (PreparedStatement ps = connection.prepareStatement(sql)) {
       ps.setString(1, BACKFILL_TX_ID);
       ps.setLong(2, now);
       ps.setLong(3, now);
       return ps.executeUpdate();
+    } catch (SQLException e) {
+      if (isUniqueViolation(e) || isLockConflict(e)) {
+        return 0;
+      }
+      throw e;
     }
+  }
+
+  private boolean isUniqueViolation(SQLException e) {
+    switch (engine) {
+      case POSTGRESQL:
+        return "23505".equals(e.getSQLState());
+      case MYSQL:
+      case MARIADB:
+        return e.getErrorCode() == 1062;
+      case SQLSERVER:
+        return e.getErrorCode() == 2627 || e.getErrorCode() == 2601;
+      case ORACLE:
+        return e.getErrorCode() == 1; // ORA-00001
+    }
+    throw new AssertionError(engine);
+  }
+
+  /** A deadlock or lock timeout: serialization failures and each engine's lock wait codes. */
+  private boolean isLockConflict(SQLException e) {
+    String state = e.getSQLState();
+    if ("40001".equals(state) || "40P01".equals(state) || "55P03".equals(state)) {
+      return true;
+    }
+    switch (engine) {
+      case MYSQL:
+      case MARIADB:
+        return e.getErrorCode() == 1205 || e.getErrorCode() == 1213;
+      case SQLSERVER:
+        return e.getErrorCode() == 1205 || e.getErrorCode() == 1222;
+      case ORACLE:
+        return e.getErrorCode() == 60; // ORA-00060
+      case POSTGRESQL:
+        return false;
+    }
+    throw new AssertionError(engine);
   }
 
   private long count(String sql) throws SQLException {

@@ -17,6 +17,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
@@ -58,7 +59,8 @@ class RoutingIntegrationTest {
           new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open),
           c,
           t -> t.namespace().equals("m1"),
-          Duration.ofMinutes(1));
+          Duration.ofMinutes(1),
+          List.of());
     }
     url = "jdbc:scalardb-native:" + PG.url().substring("jdbc:".length());
     props = new Properties();

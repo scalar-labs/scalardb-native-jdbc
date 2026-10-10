@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "072"
 tags: [code-review, security, setup, design]
@@ -34,6 +34,8 @@ The setup grants nothing and creates views that run with the creator's rights, s
 
 ## Recommended Action
 
+Option 1 (user, 2026-10-10).
+
 ## Technical Details
 
 - Commit under review: 5f95267 (milestone 2), diff e297037..5f95267.
@@ -41,8 +43,8 @@ The setup grants nothing and creates views that run with the creator's rights, s
 
 ## Acceptance Criteria
 
-- [ ] Design section 3 states the privilege model per engine.
-- [ ] An integration test with a second, unprivileged application user on at least PostgreSQL and MySQL.
+- [x] Design section 3 states the privilege model per engine.
+- [x] An integration test with a second, unprivileged application user on at least PostgreSQL and MySQL.
 
 ## Work Log
 
@@ -52,6 +54,8 @@ The setup grants nothing and creates views that run with the creator's rights, s
 
 - Found and checked against the code at 5f95267.
 - Verification (2026-10-10): Reproduced: PostgreSQL 16 with an RLS policy on the table, the app role sees 1 row through the table and 2 through the view. MySQL 8.4: an app user granted SELECT on the data table only sees 0 views and not the in-flight index in information_schema, so the driver would report the table not set up after the setup ran.
+
+- Resolved (2026-10-10): invoker rights on PostgreSQL 15+, MySQL and MariaDB; SQL Server and Oracle documented as owner's rights. `Setup.run` takes grantees and grants SELECT on each view; the 55000 message says "missing or not visible to this user". Tests: PostgreSQL row-level security holds through the view; a MySQL application user granted the view sees the table as set up and reads it.
 
 ## Resources
 

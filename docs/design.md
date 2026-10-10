@@ -116,13 +116,17 @@ anywhere, because the driver never reads it.
   creates an **empty** `_tx_metadata`, and a ScalarDB rollback over a row without metadata leaves a
   metadata row with `tx_id`, `tx_version` and `tx_state` all NULL (fact 2). ScalarDB reads both as
   committed, and so does the driver: every state 3 test in this document is `COALESCE(tx_state, 3) = 3`,
-  `rc_T` is a left outer join (section 3), and 4.4 defines the CAS for a NULL or missing metadata row and
+  the first arm of `rc_T` is a left outer join (section 3), and 4.4 defines the CAS for a NULL or missing metadata row and
   the tombstone a DELETE of such a row must leave.
   Run a backfill before the driver is enabled: a sentinel `tx_id`, version 1, state 3 and non-null
   timestamps for every row whose `tx_id` is NULL or whose metadata row is missing, repeated until no such
   row remains and no in-flight row has a NULL `before_tx_id`. After that the NULL case cannot recur, since
   every later before image carries a real `tx_id`; the driver's NULL handling covers the window before
-  the backfill completes. The backfill also protects ScalarDB's own liveness, because of a ScalarDB-side
+  the backfill completes. The backfill runs at READ COMMITTED, one statement per step over the whole
+  table, so it writes every row of the table in one transaction, holds those row locks and fills the
+  log for its duration (about 25 s for 5M rows on PostgreSQL): run it in a quiet window. A unique
+  violation, from a ScalarDB insert that came first, and a deadlock or lock timeout count as nothing
+  done and the next pass retries; any other error stops the table at once. The backfill also protects ScalarDB's own liveness, because of a ScalarDB-side
   defect: on an imported table ScalarDB cannot re-prepare a row whose metadata row exists with all NULLs.
   Its prepare condition `tx_id IS NULL` lands on the metadata table, and `JdbcDatabase` turns an
   all-IS-NULL condition on the right side of a LEFT OUTER virtual table into "insert if not exists" by
@@ -552,8 +556,8 @@ as `"made"`); a name beyond the engine's identifier limit is refused rather than
 in order: the index, built without blocking writes where the engine can (`CREATE INDEX CONCURRENTLY` on
 PostgreSQL, `ALGORITHM=INPLACE, LOCK=NONE` on MySQL and MariaDB, `ONLINE` on SQL Server editions that
 have online builds and on Oracle where the edition allows); on an imported table the backfill, which
-stamps `tx_id = 'scalardb-native-backfill'`; last the view, with `CREATE OR REPLACE` (`CREATE OR
-ALTER` on SQL Server). The backfill waits only for rows ScalarDB has in flight over a deemed-committed
+stamps `tx_id = 'scalardb-native-backfill'`; then the view, with `CREATE OR REPLACE` (`CREATE OR
+ALTER` on SQL Server); last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
 row, which carry `before_tx_id` NULL and `before_tx_version` 0, never for an in-flight insert.
 
 A table is set up when its index exists and is usable (an invalid index a failed concurrent build left
@@ -580,15 +584,36 @@ SELECT t.id, t.x, t.y,
 FROM T t JOIN T_meta m ON m.id = t.id;
 
 -- rc_T: the committed image. READ COMMITTED surface, also safe for any native reader.
-CREATE VIEW rc_T AS
-SELECT t.id,
-       CASE WHEN m.tx_state IN (1, 2) THEN m.before_x ELSE t.x END AS x,
-       CASE WHEN m.tx_state IN (1, 2) THEN m.before_y ELSE t.y END AS y
+CREATE VIEW rc_T AS                                     -- with the reader's rights, see below
+SELECT t.id, t.x, t.y                                   -- own columns: T's indexes apply
 FROM T t LEFT JOIN T_meta m ON m.id = t.id              -- never unmatched for a created table
 WHERE COALESCE(m.tx_state, 3) = 3                       -- NULL metadata is committed (fact 2)
-   OR (m.tx_state IN (1, 2)
-       AND (m.before_tx_id IS NOT NULL OR m.before_tx_version IS NOT NULL)); -- an in-flight insert has no committed image
+UNION ALL
+SELECT t.id, m.before_x AS x, m.before_y AS y           -- the before image of a row in flight
+FROM T t JOIN T_meta m ON m.id = t.id
+WHERE m.tx_state IN (1, 2)                              -- the in-flight index
+  AND (m.before_tx_id IS NOT NULL OR m.before_tx_version IS NOT NULL); -- an in-flight insert has no committed image
 ```
+
+The two arms are the two arms of 4.2 without the user's predicate. The first arm returns `T`'s own
+columns, so a filter or join on them reaches `T`'s indexes; a view of one `CASE` per column would hide
+every non-key column behind an expression and turn each such filter or join into a scan of both tables
+(measured on PostgreSQL, 2M rows: 515 ms against 1.3 ms for a non-key filter). PostgreSQL, SQL Server and
+Oracle push a filter or a join predicate into each arm of a UNION ALL view. MySQL and MariaDB push a
+constant filter (MySQL 8.0.29 and later) but never a join predicate, so there the driver writes the two
+arms in place of the table in a join or subquery instead of naming `rc_T` (4.2); the view itself serves
+native readers.
+
+**Privileges.** The view runs with the reader's rights where the engine has that: `security_invoker` on
+PostgreSQL 15 and later, `SQL SECURITY INVOKER` on MySQL and MariaDB, so row-level security, column
+grants and the like on `T` and `T_meta` hold through it. On PostgreSQL before 15, SQL Server (ownership
+chaining) and Oracle the view runs with its owner's rights over its tables: row-level security that
+predicates on the table (SQL Server security policies, Oracle VPD) still applies, column privileges do
+not, so grant the view only to users that may read every column of the table. The setup grants `SELECT`
+on the view to the application users it is given; they need their usual ScalarDB privileges on `T`,
+`T_meta` and ScalarDB's metadata schema besides. MySQL, SQL Server and Oracle list a view or an index
+only to a user with a privilege on it or its table, so without that grant the driver reports a set-up
+table as not set up; the `55000` message says the objects are missing or not visible to this user.
 
 A row in state 2 keeps its before image and stays visible until ScalarDB's record commit removes it.
 For an imported table the ScalarDB surface is the LEFT OUTER view `T_scalardb`; a row without metadata
@@ -680,8 +705,10 @@ union as a derived table.
   the writer's pair would let the CAS succeed after the writer committed, a lost update. Every other
   shape (joins, subqueries, a predicate that cannot be attributed to one table) runs against `rc_T` as
   written and takes no anchor; a single-table aggregate, DISTINCT or GROUP BY over an attributable `P`
-  keeps the two-arm form with the aggregate applied on top of the union; the CASE columns of `rc_T`
-  cannot use the index on `T(x)`, so selective predicates belong in the form above. A
+  keeps the two-arm form with the aggregate applied on top of the union. `rc_T` is the same two arms
+  without `P`, so a predicate or join through it still reaches `T`'s indexes on PostgreSQL, SQL Server
+  and Oracle; on MySQL and MariaDB, which do not push a join predicate into a UNION view, the driver
+  writes the two arms in place of each ScalarDB table instead of naming `rc_T` (section 3). A
   user `SELECT ... FOR UPDATE` or `FOR SHARE` keeps this form with the lock pushed into the **first
   arm's** derived table only, as in the SERIALIZABLE bullet, because PostgreSQL rejects a locking clause
   on the union itself; the lock lands on the rows of `T` and `T_meta`, or on `T` alone where the
@@ -758,7 +785,7 @@ union as a derived table.
   The transaction-wide snapshot of every engine at these levels is what makes a second statement safe.
 - **Locking clauses never go through a view with an outer join, on PostgreSQL.** PostgreSQL refuses
   `FOR UPDATE` and `FOR SHARE` on the nullable side of an outer join, and a locking clause on a view
-  applies to every table in the view. `rc_T` is a left join, and so is the `T_scalardb` view of an
+  applies to every table in the view. `rc_T`'s first arm is a left join, and so is the `T_scalardb` view of an
   imported table. The driver therefore rewrites every locking read on PostgreSQL, its own under
   SERIALIZABLE and a user's `FOR UPDATE` or `FOR SHARE` at any level, onto the base tables:
   `FROM T t LEFT JOIN T_meta m ON ... FOR SHARE OF t`, or `FOR UPDATE OF t`, locking the data-table side

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "073"
 tags: [code-review, performance, setup, operations]
@@ -35,6 +35,8 @@ The backfill runs each step as one statement over the whole table, retries the w
 
 ## Recommended Action
 
+Option 1 (user, 2026-10-10).
+
 ## Technical Details
 
 - Commit under review: 5f95267 (milestone 2), diff e297037..5f95267.
@@ -42,9 +44,9 @@ The backfill runs each step as one statement over the whole table, retries the w
 
 ## Acceptance Criteria
 
-- [ ] Setup session at READ COMMITTED on every engine.
-- [ ] A NOT NULL violation surfaces at once; a deadlock is retried.
-- [ ] Design section 1 states the operating window for the backfill.
+- [x] Setup session at READ COMMITTED on every engine.
+- [x] A NOT NULL violation surfaces at once; a deadlock is retried.
+- [x] Design section 1 states the operating window for the backfill.
 
 ## Work Log
 
@@ -54,6 +56,8 @@ The backfill runs each step as one statement over the whole table, retries the w
 
 - Found and checked against the code at 5f95267.
 - Verification (2026-10-10): Reproduced on MySQL 8.4 at the default REPEATABLE READ: an application UPDATE of a data row timed out (1205) while the backfill's INSERT ... SELECT was open. The 23xxx catch and the missing lock-conflict retry are confirmed in the code; the throughput numbers are the reviewer's measurement.
+
+- Resolved (2026-10-10): setup runs at READ COMMITTED; only unique violations (per engine) and lock conflicts are retried; the wait loop polls the in-flight count alone, then makes one more full pass; design section 1 states the quiet window. Test: a check violation fails the backfill at once on PostgreSQL. Key-range chunking not done; add it if online backfill of large tables becomes a requirement.
 
 ## Resources
 

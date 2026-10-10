@@ -219,7 +219,7 @@ class SetupIntegrationTest {
       throws SQLException {
     String su = e.storedSchema("su");
     try (Connection c = e.open()) {
-      return Setup.run(catalog, c, t -> t.namespace().equals(su), wait);
+      return Setup.run(catalog, c, t -> t.namespace().equals(su), wait, List.of());
     }
   }
 

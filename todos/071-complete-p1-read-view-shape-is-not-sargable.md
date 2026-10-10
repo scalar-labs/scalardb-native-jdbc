@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "071"
 tags: [code-review, performance, design, decision]
@@ -46,6 +46,8 @@ The `rc_T` view's CASE columns make any predicate or join on a non-key column a 
 
 ## Recommended Action
 
+Option 1 (user, 2026-10-10).
+
 ## Technical Details
 
 - Commit under review: 5f95267 (milestone 2), diff e297037..5f95267.
@@ -53,7 +55,7 @@ The `rc_T` view's CASE columns make any predicate or join on a non-key column a 
 
 ## Acceptance Criteria
 
-- [ ] Design section 3 and 4.2 updated with the chosen shape per engine.
+- [x] Design section 3 and 4.2 updated with the chosen shape per engine.
 - [ ] A benchmark of a non-key predicate and an FK join through the read surface on each engine.
 
 ## Work Log
@@ -64,6 +66,8 @@ The `rc_T` view's CASE columns make any predicate or join on a non-key column a 
 
 - Found and checked against the code at 5f95267.
 - Verification (2026-10-10): Measured: PostgreSQL 16, 2M rows: non-key filter 515 ms through the LEFT JOIN view against 1.3 ms through the UNION ALL form (same rows), plan = parallel hash left join over two seq scans; key lookup 0.3-0.4 ms either way. MySQL 8.4, 500k rows: non-key filter 403 ms against 1.2 ms (derived-condition pushdown works for constants), but a join on the non-key column 416 ms (LEFT JOIN view) and 645 ms (UNION ALL view): joins need the arms inline on MySQL.
+
+- Resolved (2026-10-10): `rc_T` is now the two arms of 4.2 as a UNION ALL on every engine; milestone 3 writes the arms inline on MySQL and MariaDB for joins and subqueries (plan updated). Test: on PostgreSQL a non-key filter through `rc_T` uses the table's index (`todo071_...`); the per-engine join benchmark is left to milestone 3, where the inline form exists.
 
 ## Resources
 

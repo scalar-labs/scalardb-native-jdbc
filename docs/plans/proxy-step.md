@@ -111,9 +111,11 @@ milestone 9 adds, so the code does not move later. A table without setup is refu
 tables are not set up yet; they come with classic support.
 
 - **Setup** (`setup.Setup`, in the driver). Per decoupled table, in order: the in-flight index, without
-  blocking writes where the engine can; on an imported table the backfill of section 1; last the view
-  `rc_T`, which also marks a completed backfill. Idempotent; one result per table, a failing table does
-  not stop the others; a teardown drops both objects.
+  blocking writes where the engine can; on an imported table the backfill of section 1, at READ
+  COMMITTED, retrying unique violations and lock conflicts only; then the view `rc_T`, which also marks
+  a completed backfill: the two arms of 4.2 as a UNION ALL, with the reader's rights where the engine
+  has them; last a grant of SELECT on it to the application users given. Idempotent; one result per
+  table, a failing table does not stop the others; a teardown drops both objects.
 - **Verification at catalog load.** The catalog lists the setup's views (with their columns) and usable
   indexes by name; a table is set up when both exist and the view has the table's columns. A statement
   naming a table that is not set up is refused with `55000`. A listing failure other than a lost
@@ -122,7 +124,10 @@ tables are not set up yet; they come with classic support.
 Tests: on all six configurations, setup on created, imported and key-only tables and a composite key;
 re-running changes nothing; the backfill stamps missing and all-NULL metadata and waits only for rows in
 flight over a deemed-committed row; the view's committed image for states 1 and 2, the NULL-row prepare
-and an in-flight insert; teardown; a table without setup is refused with `55000`.
+and an in-flight insert; teardown; a table without setup is refused with `55000`. On PostgreSQL: a
+non-key filter through `rc_T` uses the table's index, row-level security holds through the view, and a
+check violation fails the backfill at once; on MySQL an application user granted the view sees the
+table as set up.
 
 ### Milestone 3: reads under READ COMMITTED
 
@@ -135,7 +140,9 @@ and an in-flight insert; teardown; a table without setup is refused with `55000`
     LIMIT, OFFSET and aggregate on top as a derived table; a user `FOR UPDATE` or `FOR SHARE` pushed into
     the first arm only, on the base tables for an imported table (4.2, locking clauses);
   - **the `rc_T` route** for every other shape (joins, subqueries), by table renaming as today, refused
-    when `hasLockingOrIntoClause()` is true.
+    when `hasLockingOrIntoClause()` is true; on MySQL and MariaDB the two arms of `rc_T` are written in
+    place of the table as a derived table, since those engines push no join predicate into a UNION view
+    (todo 071).
 - **Placeholder re-binding.** The `PreparedStatement` proxy stops forwarding `setXxx` and records each
   call, the setter and its arguments, per user ordinal; a stream or reader is read once into memory, since
   it is bound more than once. Executing replays the calls at the positions the fragments report; `P`

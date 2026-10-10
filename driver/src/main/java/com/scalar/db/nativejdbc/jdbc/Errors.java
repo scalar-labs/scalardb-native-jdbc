@@ -24,8 +24,9 @@ final class Errors {
   static SQLNonTransientException notSetUp(String table) {
     return new SQLNonTransientException(
         table
-            + " is not set up for the driver: its read view or in-flight index is missing; run the"
-            + " driver's setup for this database",
+            + " is not set up for the driver: its read view or in-flight index is missing or not"
+            + " visible to this user; run the driver's setup for this database, granting this user"
+            + " SELECT on the read view",
         "55000");
   }
 }
