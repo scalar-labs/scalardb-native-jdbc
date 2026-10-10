@@ -1,14 +1,19 @@
 package com.scalar.db.nativejdbc.engine;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.nio.charset.StandardCharsets;
 import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -151,6 +156,133 @@ public enum Engine {
    */
   public String subProtocol() {
     return subProtocol;
+  }
+
+  /**
+   * Spells an affix the driver adds to a stored name, such as the {@code rc_} of a read view, the
+   * way this engine folds an unquoted identifier, so the result reads naturally next to names the
+   * engine stored: {@code RC_ORDERS} on Oracle, {@code rc_orders} on PostgreSQL.
+   *
+   * @param lower the affix in lower case
+   * @return the affix as this engine spells it
+   */
+  public String affix(String lower) {
+    return fold == Fold.UPPER ? lower.toUpperCase(Locale.ROOT) : lower;
+  }
+
+  /**
+   * Returns whether a name the driver creates fits the engine's identifier limit: 63 bytes on
+   * PostgreSQL, which truncates a longer one silently, 64 characters on MySQL and MariaDB, 128 on
+   * SQL Server and Oracle.
+   *
+   * @param name the name
+   * @return whether it fits
+   */
+  public boolean fitsIdentifier(String name) {
+    switch (this) {
+      case POSTGRESQL:
+        return name.getBytes(StandardCharsets.UTF_8).length <= 63;
+      case MYSQL:
+      case MARIADB:
+        return name.length() <= 64;
+      case SQLSERVER:
+      case ORACLE:
+        return name.length() <= 128;
+    }
+    throw new AssertionError(this);
+  }
+
+  /**
+   * Lists the views and indexes in the given schemas, for the setup check: {@code
+   * view:<schema>.<view>} and {@code index:<schema>.<table>.<index>}, in lower case, since the
+   * check compares names the driver itself created.
+   *
+   * @param connection a connection to the database
+   * @param schemas the schemas, in their stored spelling
+   * @return the keys of the views and indexes found
+   * @throws SQLException if the engine's catalog cannot be read
+   */
+  public Set<String> setupObjects(Connection connection, Collection<String> schemas)
+      throws SQLException {
+    Set<String> out = new HashSet<>();
+    if (schemas.isEmpty()) {
+      return out;
+    }
+    String in = String.join(", ", Collections.nCopies(schemas.size(), "?"));
+    String[] queries = setupQueries(in);
+    collect(connection, queries[0], schemas, "view:", out);
+    collect(connection, queries[1], schemas, "index:", out);
+    return out;
+  }
+
+  /** The engine's catalog queries for its views and its indexes, with {@code in} placeholders. */
+  private String[] setupQueries(String in) {
+    switch (this) {
+      case POSTGRESQL:
+        return new String[] {
+          "SELECT schemaname, viewname FROM pg_catalog.pg_views WHERE schemaname IN (" + in + ")",
+          "SELECT schemaname, tablename, indexname FROM pg_catalog.pg_indexes"
+              + " WHERE schemaname IN ("
+              + in
+              + ")"
+        };
+      case MYSQL:
+      case MARIADB:
+        return new String[] {
+          "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_SCHEMA IN ("
+              + in
+              + ")",
+          "SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS"
+              + " WHERE TABLE_SCHEMA IN ("
+              + in
+              + ")"
+        };
+      case SQLSERVER:
+        return new String[] {
+          "SELECT s.name, v.name FROM sys.views v JOIN sys.schemas s ON s.schema_id = v.schema_id"
+              + " WHERE s.name IN ("
+              + in
+              + ")",
+          "SELECT s.name, t.name, i.name FROM sys.indexes i"
+              + " JOIN sys.tables t ON t.object_id = i.object_id"
+              + " JOIN sys.schemas s ON s.schema_id = t.schema_id"
+              + " WHERE i.name IS NOT NULL AND s.name IN ("
+              + in
+              + ")"
+        };
+      case ORACLE:
+        return new String[] {
+          "SELECT OWNER, VIEW_NAME FROM ALL_VIEWS WHERE OWNER IN (" + in + ")",
+          "SELECT TABLE_OWNER, TABLE_NAME, INDEX_NAME FROM ALL_INDEXES WHERE TABLE_OWNER IN ("
+              + in
+              + ")"
+        };
+    }
+    throw new AssertionError(this);
+  }
+
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "sql is one of the constant queries of setupQueries; the schemas are bound")
+  private static void collect(
+      Connection c, String sql, Collection<String> schemas, String kind, Set<String> out)
+      throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(sql)) {
+      int i = 1;
+      for (String schema : schemas) {
+        ps.setString(i++, schema);
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        int columns = rs.getMetaData().getColumnCount();
+        while (rs.next()) {
+          List<String> parts = new ArrayList<>();
+          for (int col = 1; col <= columns; col++) {
+            parts.add(rs.getString(col));
+          }
+          out.add(kind + String.join(".", parts).toLowerCase(Locale.ROOT));
+        }
+      }
+    }
   }
 
   /**

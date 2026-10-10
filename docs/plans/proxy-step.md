@@ -104,6 +104,12 @@ through `setSchema`/`setCatalog`).
 
 ### Milestone 2: setup and connect-time verification
 
+**Done 2026-10-10**, on all five engines rather than PostgreSQL only (user's decision; the rest of
+milestone 8 stays there). `setup.Setup` lives in the main source set without a command line, which
+milestone 9 adds, so the code does not move later. A table without setup is refused with `55000`, not
+`08004`: the refusal comes per statement, and HikariCP evicts a connection on an `08` state. Classic
+tables are not set up yet; they come with classic support.
+
 - **Setup**, first as a test-fixture helper (`testing.Setup`), promoted to a `tools` module with a
   command-line entry in milestone 9. Per ScalarDB table: create `rc_T` (section 3, both layouts); create
   the in-flight partial index on `T_meta (<pk>) WHERE tx_state IN (1, 2)`; run the backfill of section 1

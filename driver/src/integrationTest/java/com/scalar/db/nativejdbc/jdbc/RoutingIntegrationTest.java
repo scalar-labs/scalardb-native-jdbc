@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.api.DistributedTransactionAdmin;
 import com.scalar.db.nativejdbc.NativeJdbcDriver;
+import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -49,6 +51,9 @@ class RoutingIntegrationTest {
       if (!admin.tableExists("m1", "s")) {
         admin.importTable("m1", "s", Map.of("transaction-metadata-decoupling", "true"), Map.of());
       }
+    }
+    try (Connection c = PG.open()) {
+      Setup.run(new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open), c);
     }
     url = "jdbc:scalardb-native:" + PG.url().substring("jdbc:".length());
     props = new Properties();
@@ -318,6 +323,9 @@ class RoutingIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       if (admin.tableExists("m1", "late")) {
+        try (Connection c = PG.open()) {
+          PG.execute(c, "DROP VIEW IF EXISTS m1.rc_late"); // the setup's view depends on it
+        }
         admin.dropTable("m1", "late"); // a previous run imported it
         try (Connection c = PG.open()) {
           PG.execute(c, "CREATE TABLE IF NOT EXISTS m1.late (id INT PRIMARY KEY, x TEXT)");
@@ -334,7 +342,8 @@ class RoutingIntegrationTest {
             "m1", "late", Map.of("transaction-metadata-decoupling", "true"), Map.of());
       }
       Thread.sleep(600); // past the TTL, with no lookup on this catalog in between
-      assertThat(outcome(ps::executeQuery)).isEqualTo("refused 0AN01");
+      // routed again: now a ScalarDB table, and one not set up yet
+      assertThat(outcome(ps::executeQuery)).isEqualTo("refused 55000");
     }
   }
 

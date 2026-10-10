@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc.catalog;
 
+import com.scalar.db.nativejdbc.engine.Engine;
 import java.util.ArrayList;
 import java.util.List;
 import org.jspecify.annotations.Nullable;
@@ -16,6 +17,7 @@ public final class TableInfo {
   private final List<String> partitionKey;
   private final List<String> clusteringKey;
   private final List<String> dataColumns;
+  private final boolean setUp;
 
   TableInfo(
       String namespace,
@@ -36,6 +38,56 @@ public final class TableInfo {
     this.partitionKey = List.copyOf(partitionKey);
     this.clusteringKey = List.copyOf(clusteringKey);
     this.dataColumns = List.copyOf(dataColumns);
+    this.setUp = true;
+  }
+
+  private TableInfo(TableInfo t, boolean setUp) {
+    this.namespace = t.namespace;
+    this.table = t.table;
+    this.layout = t.layout;
+    this.dataTable = t.dataTable;
+    this.metadataTable = t.metadataTable;
+    this.virtualTable = t.virtualTable;
+    this.partitionKey = t.partitionKey;
+    this.clusteringKey = t.clusteringKey;
+    this.dataColumns = t.dataColumns;
+    this.setUp = setUp;
+  }
+
+  TableInfo withSetUp(boolean setUp) {
+    return new TableInfo(this, setUp);
+  }
+
+  /**
+   * Returns whether the driver's setup has been run for this table: its read view and in-flight
+   * index exist, as seen when the catalog was loaded. Always true for a table the setup does not
+   * concern.
+   *
+   * @return whether the table is set up
+   */
+  public boolean isSetUp() {
+    return setUp;
+  }
+
+  /**
+   * Returns the name of the read view the setup creates in the table's schema, {@code rc_T} (design
+   * section 3).
+   *
+   * @param engine the engine, which spells the affix
+   * @return the view's name
+   */
+  public String readView(Engine engine) {
+    return engine.affix("rc_") + table;
+  }
+
+  /**
+   * Returns the name of the in-flight index the setup creates on the metadata table.
+   *
+   * @param engine the engine, which spells the affix
+   * @return the index's name
+   */
+  public String inflightIndex(Engine engine) {
+    return table + engine.affix("_inflight");
   }
 
   /**

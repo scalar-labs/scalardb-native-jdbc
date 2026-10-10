@@ -100,6 +100,9 @@ final class Router {
     List<String> scalarDb = new ArrayList<>();
     for (SqlAst.TableRef ref : ast.tableRefs()) {
       TableInfo table = catalog.lookup(schemas, ref.schema(), ref.name());
+      if (!table.isSetUp()) {
+        throw Errors.notSetUp(table.namespace() + "." + table.table());
+      }
       if (table.isScalarDb()) {
         scalarDb.add(table.namespace() + "." + table.table());
       }

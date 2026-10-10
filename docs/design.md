@@ -380,9 +380,10 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   |---|---|---|---|
   | `40001` | `SQLTransactionRollbackException` | a driver-decided abort: a conflict with a ScalarDB or driver transaction (4.4, section 6) | roll back and retry the transaction |
   | `0AN01` | `SQLFeatureNotSupportedException` | a statement or setting the driver does not handle, with the reason: a statement on a ScalarDB table it cannot rewrite, one the parser cannot interpret, a procedure call or a function that runs SQL text (4.1), the transaction mode set in SQL, a passthrough statement outside autocommit; `READ_UNCOMMITTED` | rewrite the statement; never retry |
+  | `55000` | `SQLNonTransientException` | a statement names a ScalarDB table the setup of section 3 has not been run for; not `08004`, since it is raised per statement and an `08` state makes a pool discard a working connection | run the setup |
   | `42000` | `SQLSyntaxErrorException` | a name a statement must not use: `T_data`, `T_tx_metadata`, `T_scalardb`, a synonym; the message names the table to use | rewrite the statement |
   | `42501` | `SQLSyntaxErrorException` | ScalarDB's catalog exists but this user cannot read it | grant SELECT on the catalog tables |
-  | `08004` | `SQLNonTransientConnectionException` | refused at connect: no ScalarDB catalog (unless allowed), a table without the setup of section 3, SQL Server without `READ_COMMITTED_SNAPSHOT` | fix the configuration or run the setup |
+  | `08004` | `SQLNonTransientConnectionException` | refused at connect: no ScalarDB catalog (unless allowed), SQL Server without `READ_COMMITTED_SNAPSHOT` | fix the configuration or run the setup |
   | `08001` | `SQLException` | a malformed URL or driver property, a missing vendor driver | fix the URL or the class path |
 
   A refusal uses `0AN01`, an implementation-defined subclass of the standard's feature-not-supported
@@ -540,8 +541,16 @@ split put or to a catalog table on either side fails a test the same day.
 Two surfaces per table. `cc_T` is ScalarDB's own virtual table, shown here in its own terms; `rc_T` is
 created by the driver's **setup command**, once per table, together with the in-flight index below and
 the backfill of section 1. The command needs DDL privileges and is run by an operator, never at connect;
-at connect the driver only verifies that the view and the index exist and refuses the table with a clear
-error if they do not. Example for `T(id, x, y)`; a composite key joins on every key column.
+when it loads the catalog the driver only checks that the view and the index exist, and a statement that
+names a table without them is refused with `55000`. Example for `T(id, x, y)`; a composite key joins on
+every key column.
+
+The setup's names, in the table's schema: the view `rc_T` and, on the metadata table, the index
+`T_inflight`, each affix spelled the way the engine folds an unquoted name (`RC_ORDERS` on Oracle); a
+name beyond the engine's identifier limit is refused rather than truncated. The view is created with
+`CREATE OR REPLACE` (`CREATE OR ALTER` on SQL Server), the index only when absent, and the backfill
+stamps `tx_id = 'scalardb-native-backfill'`. On PostgreSQL the view depends on its tables, so dropping a
+set-up table through ScalarDB needs `DROP VIEW rc_T` first.
 
 ```sql
 -- cc_T: raw columns + metadata + before image. The driver's surface.

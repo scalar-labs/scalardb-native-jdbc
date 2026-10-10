@@ -15,6 +15,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -394,6 +395,28 @@ public final class Catalog implements AutoCloseable {
     }
   }
 
+  /**
+   * Lists the decoupled ScalarDB tables of the catalog, for the setup: every table the driver will
+   * need a read view and an in-flight index for.
+   *
+   * @return the tables, in ScalarDB's spelling of their names
+   * @throws SQLException if the catalog cannot be read
+   */
+  public List<TableInfo> decoupledTables() throws SQLException {
+    Snapshot s = snapshot();
+    List<TableInfo> out = new ArrayList<>();
+    for (VirtualTable v : s.virtualTables()) {
+      out.add(s.classify(split(v.inner ? v.name : v.left)));
+    }
+    return out;
+  }
+
+  /** A full table name, {@code namespace.table}; a ScalarDB namespace holds no dot. */
+  private static QualifiedName split(String full) {
+    int dot = full.indexOf('.');
+    return new QualifiedName(full.substring(0, dot), full.substring(dot + 1));
+  }
+
   private static TableInfo plain(
       @Nullable String schema, List<String> sessionSchemas, String table) {
     String ns = schema != null ? schema : sessionSchemas.isEmpty() ? "" : sessionSchemas.get(0);
@@ -608,7 +631,22 @@ public final class Catalog implements AutoCloseable {
       absent(c, e);
     }
     boolean caseInsensitive = present && engine.tableNamesCaseInsensitive(c);
-    return new Snapshot(present, caseInsensitive, virtualTables, metadata, now.plus(ttl));
+    Set<String> schemas = new LinkedHashSet<>();
+    for (VirtualTable v : virtualTables) {
+      schemas.add(split(v.name).schema());
+      schemas.add(split(v.left).schema());
+    }
+    Set<String> setupObjects;
+    try {
+      setupObjects = engine.setupObjects(c, schemas);
+    } catch (SQLException e) {
+      // every decoupled table is then refused as not set up, which names the setup to run
+      LOG.warn(
+          "The views and indexes of the ScalarDB schemas cannot be listed ({})", e.getMessage());
+      setupObjects = Set.of();
+    }
+    return new Snapshot(
+        engine, present, caseInsensitive, virtualTables, metadata, setupObjects, now.plus(ttl));
   }
 
   /** The metadata table is not visible: tell "no ScalarDB here" from "not allowed to look". */
@@ -674,6 +712,8 @@ public final class Catalog implements AutoCloseable {
     final boolean present;
     final boolean caseInsensitive;
     final Instant expiresAt;
+    private final Engine engine;
+    private final Set<String> setupObjects;
     private final Map<String, VirtualTable> byName = new HashMap<>();
     private final Map<String, VirtualTable> byLeft = new HashMap<>();
     private final Map<String, VirtualTable> byRight = new HashMap<>();
@@ -689,6 +729,30 @@ public final class Catalog implements AutoCloseable {
         List<VirtualTable> virtualTables,
         Map<String, List<MetadataColumn>> metadata,
         Instant expiresAt) {
+      this(
+          Engine.POSTGRESQL,
+          present,
+          caseInsensitive,
+          virtualTables,
+          metadata,
+          Set.of(),
+          expiresAt);
+    }
+
+    /**
+     * @param setupObjects the views and indexes found in the ScalarDB schemas, as {@link
+     *     Engine#setupObjects} lists them
+     */
+    Snapshot(
+        Engine engine,
+        boolean present,
+        boolean caseInsensitive,
+        List<VirtualTable> virtualTables,
+        Map<String, List<MetadataColumn>> metadata,
+        Set<String> setupObjects,
+        Instant expiresAt) {
+      this.engine = engine;
+      this.setupObjects = Set.copyOf(setupObjects);
       this.present = present;
       this.caseInsensitive = caseInsensitive;
       this.expiresAt = expiresAt;
@@ -704,6 +768,20 @@ public final class Catalog implements AutoCloseable {
 
     private String key(String fullTableName) {
       return caseInsensitive ? fullTableName.toLowerCase(Locale.ROOT) : fullTableName;
+    }
+
+    Collection<VirtualTable> virtualTables() {
+      return byName.values();
+    }
+
+    /** A decoupled table is set up when its read view and its in-flight index both exist. */
+    private TableInfo marked(TableInfo t) {
+      String ns = t.namespace();
+      String view = "view:" + ns + "." + t.readView(engine);
+      String index = "index:" + ns + "." + t.metadataTable() + "." + t.inflightIndex(engine);
+      return t.withSetUp(
+          setupObjects.contains(view.toLowerCase(Locale.ROOT))
+              && setupObjects.contains(index.toLowerCase(Locale.ROOT)));
     }
 
     TableInfo classify(QualifiedName q) throws SQLException {
@@ -725,16 +803,17 @@ public final class Catalog implements AutoCloseable {
         // ScalarDB registers metadata for the source tables, not for the virtual table: the keys
         // and the user's columns are the data table's entry
         Columns columns = keyed(v.left, full);
-        return new TableInfo(
-            q.schema(),
-            q.table(),
-            Layout.DECOUPLED_CREATED,
-            unqualified(v.left),
-            unqualified(v.right),
-            q.table(),
-            columns.partitionKey,
-            columns.clusteringKey,
-            columns.dataColumns);
+        return marked(
+            new TableInfo(
+                q.schema(),
+                q.table(),
+                Layout.DECOUPLED_CREATED,
+                unqualified(v.left),
+                unqualified(v.right),
+                q.table(),
+                columns.partitionKey,
+                columns.clusteringKey,
+                columns.dataColumns));
       }
       v = byLeft.get(k);
       if (v != null) {
@@ -746,16 +825,17 @@ public final class Catalog implements AutoCloseable {
               "42000");
         }
         Columns columns = keyed(full, full); // the user's name is the data table
-        return new TableInfo(
-            q.schema(),
-            q.table(),
-            Layout.DECOUPLED_IMPORTED,
-            q.table(),
-            unqualified(v.right),
-            unqualified(v.name),
-            columns.partitionKey,
-            columns.clusteringKey,
-            columns.dataColumns);
+        return marked(
+            new TableInfo(
+                q.schema(),
+                q.table(),
+                Layout.DECOUPLED_IMPORTED,
+                q.table(),
+                unqualified(v.right),
+                unqualified(v.name),
+                columns.partitionKey,
+                columns.clusteringKey,
+                columns.dataColumns));
       }
       v = byRight.get(k);
       if (v != null) {
