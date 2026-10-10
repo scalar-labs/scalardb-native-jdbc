@@ -485,4 +485,11 @@ class SqlAstTest {
             parse("select top (?) * from t join u on t.id = u.id where t.id = ?").parameterCount())
         .isEqualTo(2);
   }
+
+  @Test
+  void joinTokens_renamesATableToABracketQuotedName_onSqlServer() {
+    SqlAst ast = SqlAst.parse("SELECT x FROM su.imp WHERE id = 1", Engine.SQLSERVER).orElseThrow();
+    assertThat(ast.joinTokens(r -> "[su].[rc_imp]"))
+        .isEqualTo("SELECT x FROM [su].[rc_imp] WHERE id = 1");
+  }
 }

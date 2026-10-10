@@ -23,7 +23,6 @@ import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
-import net.sf.jsqlparser.parser.Node;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
@@ -143,7 +142,7 @@ public final class StatementShape {
     if (table.partCount() > 2) {
       return Outcome.refused("the table name has more than a schema and a table");
     }
-    if (hasTableHint(table)) {
+    if (table.hasHintOrLink()) {
       return Outcome.refused(
           "the table carries a hint, a sample clause, a PIVOT or a database link");
     }
@@ -384,30 +383,6 @@ public final class StatementShape {
         || e instanceof TimeValue
         || e instanceof TimestampValue
         || e instanceof HexValue;
-  }
-
-  /**
-   * A hint, a sample clause or a database link on the table itself, which a renamed table may not
-   * carry: {@code t@remote} names a table elsewhere, not this one.
-   */
-  private static boolean hasTableHint(SqlAst.TableRef ref) {
-    Table t = ref.node();
-    return t.getIndexHint() != null
-        || t.getSqlServerHints() != null
-        || t.getSampleClause() != null
-        || t.getPivot() != null
-        || t.getUnPivot() != null
-        || hasDatabaseLink(t);
-  }
-
-  /**
-   * {@code t@remote}: the lexer keeps the link inside the name token (and {@code getDBLinkName()}
-   * answers the table's own name for a plain table), and a quoted name holding an {@code @} is
-   * mangled by the parser; both are refused by looking at the token.
-   */
-  private static boolean hasDatabaseLink(Table t) {
-    Node n = t.getASTNode();
-    return n != null && n.jjtGetLastToken() != null && n.jjtGetLastToken().image.indexOf('@') >= 0;
   }
 
   private static boolean nonEmpty(@Nullable List<?> list) {

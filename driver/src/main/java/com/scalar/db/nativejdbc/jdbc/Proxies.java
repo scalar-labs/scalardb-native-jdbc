@@ -161,7 +161,11 @@ public final class Proxies {
             throw Errors.unsupported(
                 "READ UNCOMMITTED is not supported: it would read ScalarDB's uncommitted writes");
           }
-          return forward(vendor, method, args);
+          {
+            Object r = forward(vendor, method, args);
+            router.setIsolation((Integer) args[0]);
+            return r;
+          }
         case "setSchema":
         case "setCatalog":
           {

@@ -807,7 +807,9 @@ public final class SqlAst {
     }
     String joined = out.toString().strip();
     try {
-      CCJSqlParserUtil.parse(joined); // two tokens may only have fused into one if this fails
+      // two tokens may only have fused into one if this fails; a replacement on SQL Server is
+      // bracket-quoted (Engine.quote), which quotes a name whatever QUOTED_IDENTIFIER says
+      CCJSqlParserUtil.parse(joined, p -> p.withSquareBracketQuotation(engine == Engine.SQLSERVER));
     } catch (Exception e) {
       return null;
     }
@@ -1087,6 +1089,34 @@ public final class SqlAst {
     public @Nullable String alias() {
       Alias a = node.getAlias();
       return a == null ? null : a.getName();
+    }
+
+    /**
+     * Returns whether the reference carries a hint, a sample clause, a PIVOT or a database link,
+     * which a table renamed to another object may not carry: {@code t@remote} names a table
+     * elsewhere, and a hint such as SQL Server's {@code NOLOCK} changes how the rows are read.
+     *
+     * @return whether it has one
+     */
+    public boolean hasHintOrLink() {
+      return node.getIndexHint() != null
+          || node.getSqlServerHints() != null
+          || node.getSampleClause() != null
+          || node.getPivot() != null
+          || node.getUnPivot() != null
+          || hasDatabaseLink(node);
+    }
+
+    /**
+     * {@code t@remote}: the lexer keeps the link inside the name token (and {@code getDBLinkName()}
+     * answers the table's own name for a plain table), and a quoted name holding an {@code @} is
+     * mangled by the parser; both are refused by looking at the token.
+     */
+    private static boolean hasDatabaseLink(Table t) {
+      Node n = t.getASTNode();
+      return n != null
+          && n.jjtGetLastToken() != null
+          && n.jjtGetLastToken().image.indexOf('@') >= 0;
     }
 
     /**

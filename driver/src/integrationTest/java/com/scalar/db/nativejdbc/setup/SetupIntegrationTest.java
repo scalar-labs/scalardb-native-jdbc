@@ -92,7 +92,7 @@ class SetupIntegrationTest {
     assertThat(result(first, "imp").rowsStamped()).isEqualTo(3); // two missing rows, one NULL
     assertThat(result(first, "konly").rowsStamped()).isEqualTo(1);
     assertThat(result(first, "comp").rowsStamped()).isZero(); // created, not imported
-    assertThat(viaDriver(e, "SELECT * FROM su.imp")).startsWith("refused 0AN01"); // set up
+    assertThat(viaDriver(e, "SELECT x FROM su.imp WHERE id = 1")).isEqualTo("read a"); // set up
     for (String table :
         List.of(e.storedTable("imp"), e.storedTable("konly"), engine.quote("comp"))) {
       TableInfo t = catalog.lookup(List.of(), su, table);

@@ -179,6 +179,11 @@ public enum Engines {
 
   /** ScalarDB's admin on this database. */
   public DistributedTransactionAdmin admin() throws Exception {
+    return scalarDb().getTransactionAdmin();
+  }
+
+  /** ScalarDB's Consensus Commit on this database, for its transaction managers. */
+  public TransactionFactory scalarDb() throws SQLException {
     Started s = started();
     Properties p = new Properties();
     p.setProperty("scalar.db.storage", "jdbc");
@@ -187,7 +192,18 @@ public enum Engines {
     p.setProperty("scalar.db.password", s.password);
     p.setProperty("scalar.db.transaction_manager", "consensus-commit");
     p.setProperty("scalar.db.jdbc.isolation_level", isolation());
-    return TransactionFactory.create(p).getTransactionAdmin();
+    return TransactionFactory.create(p);
+  }
+
+  /** Opens a connection through the driver, with a catalog of its own read afresh per lookup. */
+  public Connection openDriver() throws SQLException {
+    Started s = started();
+    Properties p = new Properties();
+    p.setProperty("user", s.username);
+    p.setProperty("password", s.password);
+    p.setProperty("scalardbnative.catalogTtlMs", "0");
+    return DriverManager.getConnection(
+        "jdbc:scalardb-native:" + s.url.substring("jdbc:".length()), p);
   }
 
   /** The stored spelling of a table name written unquoted in DDL on this engine. */

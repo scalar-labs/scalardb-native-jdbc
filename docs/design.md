@@ -599,10 +599,15 @@ The two arms are the two arms of 4.2 without the user's predicate. The first arm
 columns, so a filter or join on them reaches `T`'s indexes; a view of one `CASE` per column would hide
 every non-key column behind an expression and turn each such filter or join into a scan of both tables
 (measured on PostgreSQL, 2M rows: 515 ms against 1.3 ms for a non-key filter). PostgreSQL, SQL Server and
-Oracle push a filter or a join predicate into each arm of a UNION ALL view. MySQL and MariaDB push a
-constant filter (MySQL 8.0.29 and later) but never a join predicate, so there the driver writes the two
-arms in place of the table in a join or subquery instead of naming `rc_T` (4.2); the view itself serves
-native readers.
+Oracle push a filter or a join predicate into each arm of a UNION ALL view. MySQL (8.0.29 and later)
+and MariaDB push a filter into each arm, so a key lookup or an indexed filter through `rc_T` uses the
+indexes (checked with EXPLAIN on MySQL 8.4 and MariaDB 11.4), but never a join predicate: there a join on
+`rc_T` reads the table's whole committed image (measured on MySQL 8.4, 500k rows: 645 ms). Writing the arms
+inline as a derived table does not change that, since both engines materialise an inline UNION as they do
+the view; only a rewrite that distributes the join over the arms would, which is left until a workload
+needs it. MariaDB pushes a filter only when its value is written in the statement, as MariaDB Connector/J
+sends it by default; with `useServerPrepStmts=true` a `?` reaches the server unbound and a filter through
+`rc_T` scans the table. MySQL pushes a `?` of a server-side prepared statement as well.
 
 **Privileges.** The view runs with the reader's rights where the engine has that: `security_invoker` on
 PostgreSQL 15 and later, `SQL SECURITY INVOKER` on MySQL and MariaDB, so row-level security, column
@@ -706,9 +711,11 @@ union as a derived table.
   shape (joins, subqueries, a predicate that cannot be attributed to one table) runs against `rc_T` as
   written and takes no anchor; a single-table aggregate, DISTINCT or GROUP BY over an attributable `P`
   keeps the two-arm form with the aggregate applied on top of the union. `rc_T` is the same two arms
-  without `P`, so a predicate or join through it still reaches `T`'s indexes on PostgreSQL, SQL Server
-  and Oracle; on MySQL and MariaDB, which do not push a join predicate into a UNION view, the driver
-  writes the two arms in place of each ScalarDB table instead of naming `rc_T` (section 3). A
+  without `P`, and every engine pushes `P` into them, so until writes need the anchor every read at
+  this level runs against `rc_T` with the table renamed, whatever its shape: one statement, `P` once,
+  its placeholders where the user put them, and the user's own columns (milestone 3). The explicit
+  form above, which also returns the anchor, comes with the writes that consume it. On MySQL and
+  MariaDB a join predicate does not reach the arms (section 3). A
   user `SELECT ... FOR UPDATE` or `FOR SHARE` keeps this form with the lock pushed into the **first
   arm's** derived table only, as in the SERIALIZABLE bullet, because PostgreSQL rejects a locking clause
   on the union itself; the lock lands on the rows of `T` and `T_meta`, or on `T` alone where the

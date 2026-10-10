@@ -131,38 +131,35 @@ table as set up.
 
 ### Milestone 3: reads under READ COMMITTED
 
-- **Rewrite fragments (todo 012).** `SqlAst` gains a fragment emitter: the text of one subtree (the WHERE
-  clause, the select list, ORDER BY, LIMIT) with table and column substitutions, plus the ordinals of the
-  placeholders inside it. With it the rewriter builds:
-  - **the two-arm UNION ALL** of 4.2 for a single-table SELECT shape: the first arm over the ScalarDB
-    virtual table (`cc_T`) with `COALESCE(tx_state, 3) = 3 AND P`, the second with `tx_state IN (1, 2)
-    AND P_before AND (before_tx_id IS NOT NULL OR before_tx_version IS NOT NULL)`, the user's ORDER BY,
-    LIMIT, OFFSET and aggregate on top as a derived table; a user `FOR UPDATE` or `FOR SHARE` pushed into
-    the first arm only, on the base tables for an imported table (4.2, locking clauses);
-  - **the `rc_T` route** for every other shape (joins, subqueries), by table renaming as today, refused
-    when `hasLockingOrIntoClause()` is true; on MySQL and MariaDB the two arms of `rc_T` are written in
-    place of the table as a derived table, since those engines push no join predicate into a UNION view
-    (todo 071).
-- **Placeholder re-binding.** The `PreparedStatement` proxy stops forwarding `setXxx` and records each
-  call, the setter and its arguments, per user ordinal; a stream or reader is read once into memory, since
-  it is bound more than once. Executing replays the calls at the positions the fragments report; `P`
-  appears twice, so its parameters are bound twice. A `Route` then carries either the verbatim text, for
-  plain tables, or a plan that runs against the vendor connection and the recorded parameters, which is
-  what milestone 4's several statements per execute need (todo 064).
-- **Result stripping.** The `ResultSet` proxy hides `tx_id`/`tx_version`, keeps the user's column labels
-  and indexes, and serves `getMetaData` for the user's columns only.
-- **Anchors.** Each row read by key records `(tx_id, tx_version)` per key in the transaction's anchor
-  map, `(before_tx_id, before_tx_version)` for a second-arm row. The map lives in a small per-transaction
-  object in `jdbc`, cleared by `commit`, `rollback` and `setAutoCommit(true)`; milestone 4 adds the
-  rollback-only state and the driver-opened autocommit transaction to the same object, and `Session`
-  keeps only the session's state (todo 064).
+Done differently from the first plan. Every engine pushes the user's predicate into both arms of `rc_T`
+(design section 3), so a read needs no arms of its own: the router renames each ScalarDB table to its
+read view with the existing table renaming, and the statement keeps one predicate, its placeholders in
+place and the user's own columns. That removes, for reads, the fragment emitter, the placeholder
+re-binding and the result stripping; they move to milestone 4 with the anchors, which only writes
+consume.
 
-Tests: unit tests of the fragment emitter and the rewrite text for the corpus; integration tests on both
-layouts: committed rows read as written; a row a ScalarDB transaction holds prepared reads as its before
-image; an in-flight insert is not returned; ORDER BY, LIMIT and aggregates over the union; joins through
-`rc_T`; a user `FOR UPDATE` blocks a ScalarDB prepare until commit.
+- **Route.** A SELECT naming a ScalarDB table at READ COMMITTED runs with each such table renamed to
+  `schema.rc_T`; an alias, or the table's own name where a column qualifier uses it, keeps the
+  qualifiers working. The connection's isolation level is tracked through `setTransactionIsolation`,
+  and a prepared statement is routed again after it changes.
+- **Refused, with 0AN01:** a read at any other isolation level; a locking read or `SELECT ... INTO`
+  (milestone 4 places the lock); a table hint, sample clause, PIVOT or database link on a ScalarDB
+  table, since a hint such as `NOLOCK` would reach the base tables through the view; a table in the
+  classic layout; and every statement on a ScalarDB table that is not a SELECT.
+- **Not done:** distributing a join over the arms on MySQL and MariaDB, which do not push a join
+  predicate into a UNION (design section 3); `ResultSetMetaData.getTableName` names the view.
+
+Tests: on all six configurations and both layouts, with a ScalarDB two-phase-commit transaction holding
+an update, an insert and a delete prepared: the before images are read and the insert is not; a prepared
+statement with a key placeholder; a filter on a non-key column matches the before image; COUNT, ORDER BY
+with a row limit, a table name as a column qualifier, and a join of a created and an imported table;
+after the commit, the new values. On PostgreSQL the refusals above.
 
 ### Milestone 4: writes under READ COMMITTED
+
+Carried over from milestone 3: the fragment emitter (todo 012), placeholder re-binding, result stripping
+and the anchors, for the key read that returns `(tx_id, tx_version)` and for the write rewrites; a user
+`FOR UPDATE` or `FOR SHARE` on a ScalarDB table, pushed into the first arm.
 
 - **INSERT** (4.3): the user's INSERT on `T`, then the `T_meta` insert with the stamp of I5, both
   `ON CONFLICT DO NOTHING` with the row count checked; the duplicate classification (application

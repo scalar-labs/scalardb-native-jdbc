@@ -26,8 +26,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
- * Milestone 1 on PostgreSQL: every statement goes through the router; plain tables work as they do
- * without the driver, and nothing reaches a ScalarDB table unrewritten.
+ * Milestones 1 and 3 on PostgreSQL: every statement goes through the router; plain tables work as
+ * they do without the driver, and nothing reaches a ScalarDB table unrewritten. The probe {@code
+ * SELECT x FROM s} reads "plain" from m1plain.s and "scalardb" from m1.s, through its read view.
  */
 class RoutingIntegrationTest {
 
@@ -122,27 +123,48 @@ class RoutingIntegrationTest {
   }
 
   @Test
-  void statementsOnAScalarDbTable_areRefused_everyWayTheyCanArrive() throws SQLException {
+  void readsOfAScalarDbTable_goThroughTheReadView_andEverythingElseIsRefused() throws Exception {
+    seedDistinctRows();
     try (Connection c = connect();
         Statement st = c.createStatement()) {
-      assertRefused(() -> st.executeQuery("SELECT * FROM m1.s"), "0AN01", "m1.s");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM m1.s"))).isEqualTo("read scalardb");
+      assertThat(
+              outcome(
+                  () ->
+                      st.executeQuery(
+                          "SELECT count(*) FROM m1.p WHERE id IN (SELECT id FROM m1.s)")))
+          .startsWith("read");
+      try (PreparedStatement ps = c.prepareStatement("SELECT s.x FROM m1.s WHERE s.id = ?")) {
+        ps.setInt(1, 99);
+        assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
+      }
       assertRefused(
           () -> st.executeUpdate("UPDATE m1.s SET x = 'y' WHERE id = 1"), "0AN01", "m1.s");
       assertRefused(() -> st.execute("DELETE FROM m1.s"), "0AN01", "m1.s");
       assertRefused(() -> st.addBatch("INSERT INTO m1.s VALUES (1, 'a')"), "0AN01", "m1.s");
-      assertRefused(() -> c.prepareStatement("SELECT * FROM m1.s WHERE id = ?"), "0AN01", "m1.s");
-      assertRefused(
-          () -> st.executeQuery("SELECT * FROM m1.p JOIN m1.s ON m1.p.id = m1.s.id"),
-          "0AN01",
-          "m1.s");
-      assertRefused(
-          () -> st.executeQuery("SELECT * FROM m1.p WHERE id IN (SELECT id FROM m1.s)"),
-          "0AN01",
-          "m1.s");
       assertRefused(() -> st.executeQuery("SELECT * FROM m1.s_scalardb"), "42000", "virtual table");
       assertRefused(() -> st.executeQuery("SELECT * FROM m1.s_tx_metadata"), "42000", "metadata");
-      // a subquery in a SET is a raw read too
+      // a subquery in a SET is a read whose result changes the session: not a plain read
       assertRefused(() -> st.execute("SET x.y = (SELECT x FROM m1.s LIMIT 1)"), "0AN01", "m1.s");
+      assertRefused(
+          () -> st.executeQuery("SELECT x FROM m1.s WHERE id = 99 FOR UPDATE"), "0AN01", "locking");
+      assertRefused(
+          () -> st.executeQuery("SELECT x FROM m1.s TABLESAMPLE SYSTEM (100)"), "0AN01", "hint");
+    }
+  }
+
+  @Test
+  void aReadOfAScalarDbTable_isRefusedAtAnotherIsolationLevel_preparedOnesToo()
+      throws SQLException {
+    seedDistinctRows();
+    try (Connection c = connect();
+        Statement st = c.createStatement();
+        PreparedStatement ps = c.prepareStatement("SELECT x FROM m1.s")) {
+      c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+      assertRefused(() -> st.executeQuery("SELECT x FROM m1.s"), "0AN01", "READ COMMITTED");
+      assertRefused(ps::executeQuery, "0AN01", "READ COMMITTED");
+      c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
     }
   }
 
@@ -173,6 +195,7 @@ class RoutingIntegrationTest {
 
   @Test
   void anUnqualifiedName_resolvesTheWayTheSessionDoes_afterSetAndSetSchema() throws SQLException {
+    seedDistinctRows();
     try (Connection c = connect();
         Statement st = c.createStatement()) {
       st.execute("SET search_path = m1plain");
@@ -180,7 +203,7 @@ class RoutingIntegrationTest {
         assertThat(rs.next()).isTrue(); // the plain m1plain.s
       }
       st.execute("SET search_path = m1");
-      assertRefused(() -> st.executeQuery("SELECT count(*) FROM s"), "0AN01", "m1.s");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
       c.setSchema("m1plain");
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM s")) {
         assertThat(rs.next()).isTrue();
@@ -188,7 +211,7 @@ class RoutingIntegrationTest {
       // a SET inside a transaction that is rolled back is undone, and so is the driver's view
       c.setAutoCommit(false);
       st.execute("SET LOCAL search_path = m1");
-      assertRefused(() -> st.executeQuery("SELECT count(*) FROM s"), "0AN01", "m1.s");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
       c.rollback();
       c.setAutoCommit(true);
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM s")) {
@@ -219,14 +242,14 @@ class RoutingIntegrationTest {
     try (HikariDataSource pool = new HikariDataSource(config)) {
       try (Connection c = pool.getConnection();
           Statement st = c.createStatement()) {
-        assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
+        assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
         c.setSchema("m1plain");
         assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
       }
       try (Connection c = pool.getConnection();
           Statement st = c.createStatement()) {
         // the pool put m1 back through setSchema, and the driver followed
-        assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
+        assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
         st.execute("SET search_path = m1plain");
       }
       try (Connection c = pool.getConnection();
@@ -237,8 +260,8 @@ class RoutingIntegrationTest {
     }
   }
 
-  // Review findings 055-058: each must end in a refusal. The helper reports which table a statement
-  // actually read when the driver let it through: "scalardb" is the raw ScalarDB table m1.s.
+  // Review findings 055-058. The helper reports which table a statement actually read: "scalardb"
+  // is the ScalarDB table m1.s, which a read now reaches through its view.
 
   private static void seedDistinctRows() throws SQLException {
     try (Connection c = PG.open()) {
@@ -274,7 +297,7 @@ class RoutingIntegrationTest {
       st.addBatch("SET search_path = m1");
       st.executeBatch();
       c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "false");
-      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
     }
   }
 
@@ -399,7 +422,7 @@ class RoutingIntegrationTest {
       st.execute("SET LOCAL search_path = m1plain");
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
       c.setAutoCommit(true); // commits; PostgreSQL reverts the path to m1
-      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
     }
   }
 
@@ -416,7 +439,7 @@ class RoutingIntegrationTest {
       // the path is still m1plain until the transaction ends
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
       c.commit(); // reverts the path to m1
-      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
       c.setAutoCommit(true);
     }
   }
@@ -429,7 +452,7 @@ class RoutingIntegrationTest {
       st.execute("SET search_path = m1plain");
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read plain");
       st.executeQuery("SELECT set_config('search_path', 'm1', false)").close();
-      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("refused 0AN01");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
     }
   }
 
