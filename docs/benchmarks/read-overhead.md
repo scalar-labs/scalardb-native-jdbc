@@ -378,3 +378,27 @@ verified), so the driver
 should keep parallel plans off for the session and enable them only around statements whose plain
 plan is parallel, which are long anyway. SQL Server's NOT EXISTS (AJ) in the copy with every table
 committed reaches 13.5x on 4 tables by region remotely; the DISTINCT set (MH) holds 3.4x.
+
+## Derived-table fragments (2026-10-11)
+
+The driver should not edit the user's `WHERE` clause and column references per copy. Instead it
+replaces each split table reference with a derived table that carries the copy's committed check
+and exposes the copy's columns under their own names:
+
+```sql
+FROM (SELECT t.id, t.name, ... FROM customers t
+      WHERE NOT EXISTS (SELECT 1 FROM customers_inflight i WHERE i.id = t.id)) c
+```
+
+`SPLIT_D*` modes are the `SPLIT_*` modes emitted this way. Cold and hot, the results match BASE
+everywhere. Compared with the direct emission:
+
+- PostgreSQL, Oracle, SQL Server: the same, within noise. Every form merges into the outer query.
+- MySQL: the same, or faster (the HD form for joins: 2.7 ms to 1.7 ms).
+- MariaDB, HD/PH (the chosen form): the same on scans and large joins; 0.05-0.5 ms slower on
+  short queries (4 tables by key 2.3 ms to 2.9 ms).
+- MariaDB, NOT EXISTS (AJ, MX, PA): the derived table is materialized. Full scans are 3-4x slower
+  and joins over many rows 2.5x slower. MariaDB must not put NOT EXISTS inside a derived table,
+  which it would not use anyway.
+
+The driver therefore emits derived-table fragments.

@@ -768,10 +768,17 @@ union as a derived table.
     `AVG` as `SUM` and `COUNT`, each with its `GROUP BY`) is computed per copy and combined on top on
     every engine but PostgreSQL, so that no copy streams its rows through the union (full scans
     3-10x down to 1.2-2.5x); any other aggregate is applied on top of the union.
-  - **Subqueries.** An `IN` or `EXISTS` subquery over a ScalarDB table is split at the top, its
-    tables counted among the statement's: an IN over a UNION runs once per outer row on MySQL and
-    MariaDB. A ScalarDB table on the nullable side of a LEFT JOIN becomes an inner join per copy plus
-    one piece for the unmatched rows, with `NOT EXISTS` against both copies.
+  - **Which tables are split.** The copies are taken over the ScalarDB tables joined by inner joins
+    in the statement's top-level FROM clause, where a row of the result comes from exactly one row
+    of each table. A ScalarDB table anywhere else, in a subquery, a CTE, a set operation's branch or
+    on the nullable side of an outer join, reads the whole committed image through `rc_T`: splitting
+    it would be wrong, since an outer row whose `IN` or `EXISTS` subquery matches rows in both copies
+    would come out twice, and an outer join would add a NULL-extended row in each copy. Splitting
+    those correctly needs a first-match rule (a semi-join over the in-flight copy only where the
+    committed copy has no match, `NOT EXISTS` with UNKNOWN treated as no match) and, for an outer
+    join, an inner join per copy plus one piece for the rows matching neither copy; the benchmark
+    measured both (an IN over a UNION runs once per outer row on MySQL and MariaDB, 109-1200x), and
+    they are left for after the first version.
   - **Placeholders** that the copies repeat are re-bound in each copy (todo 012), and the statement is
     cached per text (todo 008).
   - **PostgreSQL parallel plans.** The split's estimated cost makes PostgreSQL start parallel workers,

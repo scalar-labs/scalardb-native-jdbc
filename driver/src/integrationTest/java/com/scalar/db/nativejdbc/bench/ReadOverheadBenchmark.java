@@ -90,7 +90,22 @@ class ReadOverheadBenchmark {
      */
     SPLIT_MX,
     /** SPLIT_MX with SPLIT_HD in the copy with every table committed. */
-    SPLIT_MH
+    SPLIT_MH,
+    /**
+     * SPLIT_AJ with each table of a copy replaced by a derived table holding that copy's rows under
+     * the table's own column names, so that the rest of the statement is left as written.
+     */
+    SPLIT_DAJ,
+    /** SPLIT_HD as derived tables. */
+    SPLIT_DHD,
+    /** SPLIT_MX as derived tables. */
+    SPLIT_DMX,
+    /** SPLIT_MH as derived tables. */
+    SPLIT_DMH,
+    /** SPLIT_PA as derived tables. */
+    SPLIT_DPA,
+    /** SPLIT_PH as derived tables. */
+    SPLIT_DPH
   }
 
   enum Param {
@@ -730,7 +745,9 @@ class ReadOverheadBenchmark {
     if (!split(m)) {
       return render(q.sql, m, Map.of()).replace("{LIMIT}", limit);
     }
-    boolean partial = m == Mode.SPLIT_PA || m == Mode.SPLIT_PH;
+    boolean partial =
+        m == Mode.SPLIT_PA || m == Mode.SPLIT_PH || m == Mode.SPLIT_DPA || m == Mode.SPLIT_DPH;
+    boolean derived = m.name().startsWith("SPLIT_D");
     List<String> arms = new ArrayList<>();
     int n = q.splitAliases.size();
     for (int bits = 0; bits < (1 << n); bits++) {
@@ -738,16 +755,73 @@ class ReadOverheadBenchmark {
       for (int i = 0; i < n; i++) {
         arm.put(q.splitAliases.get(i), (bits & (1 << i)) == 0 ? 'A' : 'B');
       }
-      Mode armMode = m;
-      if (m == Mode.SPLIT_MX || m == Mode.SPLIT_MH) {
-        armMode = bits != 0 ? Mode.SPLIT_LJ : m == Mode.SPLIT_MX ? Mode.SPLIT_AJ : Mode.SPLIT_HD;
+      Mode armMode = derived ? direct(m) : m;
+      if (armMode == Mode.SPLIT_MX || armMode == Mode.SPLIT_MH) {
+        armMode =
+            bits != 0 ? Mode.SPLIT_LJ : armMode == Mode.SPLIT_MX ? Mode.SPLIT_AJ : Mode.SPLIT_HD;
       }
-      arms.add(render(partial && q.partialInner != null ? q.partialInner : q.split, armMode, arm));
+      String template = partial && q.partialInner != null ? q.partialInner : q.split;
+      arms.add(derived ? renderDerived(template, armMode, arm) : render(template, armMode, arm));
     }
     String union = String.join(" UNION ALL ", arms);
     String outer = partial && q.partialOuter != null ? q.partialOuter : q.outer;
     String sql = outer == null ? union : outer.replace("{ARMS}", union);
     return sql.replace("{LIMIT}", limit);
+  }
+
+  /** The direct form a derived-table mode stands for. */
+  private static Mode direct(Mode m) {
+    switch (m) {
+      case SPLIT_DAJ:
+        return Mode.SPLIT_AJ;
+      case SPLIT_DHD:
+        return Mode.SPLIT_HD;
+      case SPLIT_DMX:
+        return Mode.SPLIT_MX;
+      case SPLIT_DMH:
+        return Mode.SPLIT_MH;
+      case SPLIT_DPA:
+        return Mode.SPLIT_PA;
+      case SPLIT_DPH:
+        return Mode.SPLIT_PH;
+      default:
+        throw new IllegalArgumentException(m.name());
+    }
+  }
+
+  /**
+   * A template with each table replaced by a derived table of its copy's rows, named by the table's
+   * alias and exposing the table's own column names, and nothing else in the statement changed.
+   */
+  private static String renderDerived(String template, Mode m, Map<String, Character> arms) {
+    Map<String, String> tables = new LinkedHashMap<>();
+    Matcher f = FROM.matcher(template);
+    while (f.find()) {
+      tables.put(f.group(2), TABLE.get(f.group(1)));
+    }
+    String s =
+        replace(
+            FROM,
+            template,
+            g -> {
+              String x = g.group(2);
+              String t = Objects.requireNonNull(tables.get(x));
+              Character arm = arm(arms, x, g.group(3));
+              StringBuilder cols = new StringBuilder(x + ".id");
+              for (String col : Objects.requireNonNull(NON_KEY.get(t))) {
+                cols.append(", ").append(column(x, col, m, arm)).append(" AS ").append(col);
+              }
+              return "(SELECT "
+                  + cols
+                  + " FROM "
+                  + from(t, x, m, arm)
+                  + " WHERE "
+                  + where(t, x, m, arm)
+                  + ") "
+                  + x;
+            });
+    s = replace(WHERE, s, g -> "1 = 1");
+    return replace(COLUMN, s, g -> g.group(1) + "." + g.group(2));
   }
 
   private static String lateral(Graph g, Mode m, Engine engine) {
