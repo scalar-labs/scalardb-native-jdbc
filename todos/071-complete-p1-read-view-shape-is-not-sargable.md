@@ -56,7 +56,7 @@ Option 1 (user, 2026-10-10).
 ## Acceptance Criteria
 
 - [x] Design section 3 and 4.2 updated with the chosen shape per engine.
-- [ ] A benchmark of a non-key predicate and an FK join through the read surface on each engine.
+- [x] A benchmark of a non-key predicate and an FK join through the read surface on each engine (`docs/benchmarks/read-overhead.md`).
 
 ## Work Log
 
@@ -72,3 +72,4 @@ Option 1 (user, 2026-10-10).
 ## Resources
 
 - `docs/design.md` sections 1, 3 and 4.2; `docs/plans/proxy-step.md` milestones 2, 3 and 9.
+- Benchmark (2026-10-11, `docs/benchmarks/read-overhead.md`): filters through `rc_T` are fast on every engine, but no engine pushes a join predicate into it, PostgreSQL included (24-236x for a key join from a plain table). Reads move to the split read of design 4.2, milestone 3b of `docs/plans/proxy-step.md`.

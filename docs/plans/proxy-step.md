@@ -146,8 +146,10 @@ consume.
   (milestone 4 places the lock); a table hint, sample clause, PIVOT or database link on a ScalarDB
   table, since a hint such as `NOLOCK` would reach the base tables through the view; a table in the
   classic layout; and every statement on a ScalarDB table that is not a SELECT.
-- **Not done:** distributing a join over the arms on MySQL and MariaDB, which do not push a join
-  predicate into a UNION (design section 3); `ResultSetMetaData.getTableName` names the view.
+- **Not done:** distributing a join over the arms. No engine pushes a join predicate into a UNION
+  (measured later, `docs/benchmarks/read-overhead.md`; the claim above that every engine pushes the
+  predicate holds for filters only), which milestone 3b fixes; `ResultSetMetaData.getTableName` names
+  the view.
 
 Tests: on all six configurations and both layouts, with a ScalarDB two-phase-commit transaction holding
 an update, an insert and a delete prepared: the before images are read and the insert is not; a prepared
@@ -155,11 +157,38 @@ statement with a key placeholder; a filter on a non-key column matches the befor
 with a row limit, a table name as a column qualifier, and a join of a created and an imported table;
 after the commit, the new values. On PostgreSQL the refusals above.
 
+### Milestone 3b: the split read
+
+Milestone 3's renaming to `rc_T` is correct but slow wherever a join meets the view: no engine pushes a
+join predicate into it (`docs/benchmarks/read-overhead.md`: 24-236x for a key join from a plain table,
+up to 1800x for two ScalarDB tables on MySQL). Reads move to the split read of design 4.2, measured at
+1.0-2.6x for one and two tables, before the writes, since both need the fragment emitter and the
+re-binding.
+
+- **The fragment emitter and placeholder re-binding** (todo 012): a statement re-emitted from the
+  parse tree with table references and column references substituted per copy, and a map from each
+  emitted placeholder to the user's parameter, applied when the user binds.
+- **The splitter**: 2^n copies of the statement over its ScalarDB tables, with the committed check per
+  engine (design 4.2), ORDER BY, row limits, DISTINCT and window functions on top, decomposable
+  aggregates per copy except on PostgreSQL, `IN` and `EXISTS` subqueries split at the top, a ScalarDB
+  table on the nullable side of a LEFT JOIN as an inner join per copy plus the unmatched rows. A shape
+  it does not handle, or more ScalarDB table references than the limit (default 4), stays on `rc_T`.
+- **Setup**: the `tx_state` histogram on Oracle and MySQL.
+- **PostgreSQL**: `max_parallel_workers_per_gather = 0` on the session, restored around a split read
+  whose plain statement's plan is parallel; the decision cached per statement.
+- **Statement cache** (milestone 6, todo 008) brought forward if the splitter's parse and emit cost,
+  measured here, exceeds the target there.
+
+Tests: the cases of milestone 3 on every engine, each also with a join, an IN subquery, a LEFT JOIN, an
+aggregate and three tables, with rows in flight; every split statement's rows equal to the same query
+over the committed image computed through ScalarDB. Acceptance: the benchmark's shapes, run through
+the driver, within the ratios the benchmark recorded for the chosen forms.
+
 ### Milestone 4: writes under READ COMMITTED
 
-Carried over from milestone 3: the fragment emitter (todo 012), placeholder re-binding, result stripping
-and the anchors, for the key read that returns `(tx_id, tx_version)` and for the write rewrites; a user
-`FOR UPDATE` or `FOR SHARE` on a ScalarDB table, pushed into the first arm.
+Carried over from milestone 3: result stripping and the anchors, for the key read that returns
+`(tx_id, tx_version)` and for the write rewrites, on the fragment emitter and re-binding of milestone
+3b; a user `FOR UPDATE` or `FOR SHARE` on a ScalarDB table, pushed into the committed copy.
 
 - **INSERT** (4.3): the user's INSERT on `T`, then the `T_meta` insert with the stamp of I5, both
   `ON CONFLICT DO NOTHING` with the row count checked; the duplicate classification (application

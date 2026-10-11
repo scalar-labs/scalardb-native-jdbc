@@ -557,7 +557,10 @@ in order: the index, built without blocking writes where the engine can (`CREATE
 PostgreSQL, `ALGORITHM=INPLACE, LOCK=NONE` on MySQL and MariaDB, `ONLINE` on SQL Server editions that
 have online builds and on Oracle where the edition allows); on an imported table the backfill, which
 stamps `tx_id = 'scalardb-native-backfill'`; then the view, with `CREATE OR REPLACE` (`CREATE OR
-ALTER` on SQL Server); last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
+ALTER` on SQL Server); then, on Oracle and MySQL, a histogram on the metadata table's `tx_state`
+(`DBMS_STATS` with `FOR COLUMNS TX_STATE SIZE 254`; `ANALYZE TABLE ... UPDATE HISTOGRAM ON tx_state`),
+without which both estimate `tx_state IN (1, 2)` as most of the table and scan it (Oracle 22x, MySQL
+12-69x on the split read); last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
 row, which carry `before_tx_id` NULL and `before_tx_version` 0, never for an in-flight insert.
 
 A table is set up when its index exists and is usable (an invalid index a failed concurrent build left
@@ -596,18 +599,16 @@ WHERE m.tx_state IN (1, 2)                              -- the in-flight index
 ```
 
 The two arms are the two arms of 4.2 without the user's predicate. The first arm returns `T`'s own
-columns, so a filter or join on them reaches `T`'s indexes; a view of one `CASE` per column would hide
-every non-key column behind an expression and turn each such filter or join into a scan of both tables
-(measured on PostgreSQL, 2M rows: 515 ms against 1.3 ms for a non-key filter). PostgreSQL, SQL Server and
-Oracle push a filter or a join predicate into each arm of a UNION ALL view. MySQL (8.0.29 and later)
-and MariaDB push a filter into each arm, so a key lookup or an indexed filter through `rc_T` uses the
-indexes (checked with EXPLAIN on MySQL 8.4 and MariaDB 11.4), but never a join predicate: there a join on
-`rc_T` reads the table's whole committed image (measured on MySQL 8.4, 500k rows: 645 ms). Writing the arms
-inline as a derived table does not change that, since both engines materialise an inline UNION as they do
-the view; only a rewrite that distributes the join over the arms would, which is left until a workload
-needs it. MariaDB pushes a filter only when its value is written in the statement, as MariaDB Connector/J
+columns, so a filter on them reaches `T`'s indexes; a view of one `CASE` per column would hide every
+non-key column behind an expression and turn each such filter or join into a scan (40-800x on a non-key
+predicate, `docs/benchmarks/read-overhead.md`). Every engine pushes a filter into each arm of the UNION
+ALL view, but none pushes a join predicate into it, PostgreSQL included: through `rc_T` a key join from
+a plain table is 24-236x slower than on `T`, and a join of two ScalarDB tables on MySQL up to 1800x.
+MariaDB also pushes a filter only when its value is written in the statement, as MariaDB Connector/J
 sends it by default; with `useServerPrepStmts=true` a `?` reaches the server unbound and a filter through
-`rc_T` scans the table. MySQL pushes a `?` of a server-side prepared statement as well.
+`rc_T` scans the table. So `rc_T` is the committed image for native readers and the driver's fallback,
+not its read route: the driver splits each read over the copies of its tables instead (4.2, the split
+read), which keeps every join and filter on the base tables' indexes.
 
 **Privileges.** The view runs with the reader's rights where the engine has that: `security_invoker` on
 PostgreSQL 15 and later, `SQL SECURITY INVOKER` on MySQL and MariaDB, so row-level security, column
@@ -677,7 +678,7 @@ hints, `TABLESAMPLE`, `PIVOT`, a database link, `DELETE ... USING`, `FOR PORTION
 `QUALIFY`, `LATERAL VIEW`, `FOR XML`, `INTO OUTFILE`, a temporary target table and `PREWHERE`; and a key
 equality is a key column compared with a placeholder or a literal, possibly signed or cast. A statement
 other than a single-table shape that locks rows or writes its result anywhere (`FOR UPDATE`, `FOR SHARE`,
-`SKIP LOCKED`, `INTO`) is refused on the `rc_T` route, and so is a rewrite that would rename a table a
+`SKIP LOCKED`, `INTO`) is refused on the split read (4.2), and so is a rewrite that would rename a table a
 `FOR UPDATE OF` names by its name.
 
 ### 4.2 Reads
@@ -708,14 +709,8 @@ union as a derived table.
   ScalarDB rollback restores exactly that pair, and a commit keeps the writer's `tx_id`, so the CAS of
   4.3 later matches if and only if the row is back at the version this transaction read. Anchoring on
   the writer's pair would let the CAS succeed after the writer committed, a lost update. Every other
-  shape (joins, subqueries, a predicate that cannot be attributed to one table) runs against `rc_T` as
-  written and takes no anchor; a single-table aggregate, DISTINCT or GROUP BY over an attributable `P`
-  keeps the two-arm form with the aggregate applied on top of the union. `rc_T` is the same two arms
-  without `P`, and every engine pushes `P` into them, so until writes need the anchor every read at
-  this level runs against `rc_T` with the table renamed, whatever its shape: one statement, `P` once,
-  its placeholders where the user put them, and the user's own columns (milestone 3). The explicit
-  form above, which also returns the anchor, comes with the writes that consume it. On MySQL and
-  MariaDB a join predicate does not reach the arms (section 3). A
+  shape (joins, subqueries, a predicate that cannot be attributed to one table) takes the split read
+  below and no anchor. A
   user `SELECT ... FOR UPDATE` or `FOR SHARE` keeps this form with the lock pushed into the **first
   arm's** derived table only, as in the SERIALIZABLE bullet, because PostgreSQL rejects a locking clause
   on the union itself; the lock lands on the rows of `T` and `T_meta`, or on `T` alone where the
@@ -723,8 +718,7 @@ union as a derived table.
   and MariaDB a user `FOR UPDATE` stays in the first arm, since an exclusive lock reaches the row; a user
   `FOR SHARE`, and on SQL Server any user locking clause, is taken as the separate primary-key re-read of
   the SERIALIZABLE bullet, since a shared lock through a covering index would not reach the row. A user
-  locking clause on a shape that runs against `rc_T` is refused, because the lock cannot be rewritten
-  through an arbitrary join. The second
+  locking clause on a split read of several ScalarDB tables is refused for now. The second
   arm is never locked: its rows are in flight, a lock on them would block
   the ScalarDB commit, rollback or recovery that has to settle them, and a later write to such a key by
   this transaction would then wait, in 4.3 step 1, on a row that cannot settle while this transaction
@@ -749,6 +743,46 @@ union as a derived table.
   Pipelining or a multi-statement string still gives two snapshots. Under SNAPSHOT and SERIALIZABLE the
   snapshot is transaction-wide, so two statements would be safe there and the single statement is only
   cheaper.
+- **The split read** (READ COMMITTED, any shape). A statement naming ScalarDB tables `T1 ... Tn` is
+  repeated once per combination of their **copies**, 2^n statements joined by UNION ALL into one: in a
+  copy each table is either *committed*, `T` with its rows in flight excluded and its own columns, or
+  *in flight*, `T JOIN T_meta` restricted to the rows in flight that have a before image, with every
+  non-key column `c` read as `before_c`. A row is in exactly one copy of its table, so the copies are
+  disjoint and need no dedup, and each copy is the user's own statement over base tables, so every
+  join and filter keeps its indexes; the copies with a table in flight start from the in-flight index
+  and are empty unless a matching row is in flight. Measured (`docs/benchmarks/read-overhead.md`):
+  one-table shapes 1.0-1.7x the plain query, joins of two tables up to 2.6x, three tables up to 3.1x,
+  four up to 5x, full scans up to 2.5x; with a 1 ms round trip to the database short queries come
+  within 1.0-1.8x. A form with n + 1 copies through LATERAL was measured and rejected: a table after
+  the in-flight one can be joined only through its unindexed before image.
+  - **How a committed table excludes its rows in flight**, per engine: `NOT EXISTS (SELECT 1 FROM
+    T_meta q WHERE q.<pk> = t.<pk> AND q.tx_state IN (1, 2))` on PostgreSQL and Oracle; on MySQL and
+    MariaDB a left join to `(SELECT DISTINCT <pk> FROM T_meta WHERE tx_state IN (1, 2))` with the key
+    NULL, which makes them build the in-flight keys once instead of probing the metadata per row; on
+    SQL Server `NOT EXISTS` in the all-committed copy of a statement over one or two ScalarDB tables
+    and the DISTINCT set over three or more, and in the copies with a table in flight a left join on
+    `T_meta`'s key with `COALESCE(tx_state, 3) = 3`, since SQL Server otherwise plans those copies as
+    if empty and scans the in-flight index once per row (5-10x with rows in flight).
+  - **On top of the union**: the user's ORDER BY, row limit, DISTINCT and window functions, over the
+    copies as a derived table. A whole-query aggregate that decomposes (`COUNT`, `SUM`, `MIN`, `MAX`,
+    `AVG` as `SUM` and `COUNT`, each with its `GROUP BY`) is computed per copy and combined on top on
+    every engine but PostgreSQL, so that no copy streams its rows through the union (full scans
+    3-10x down to 1.2-2.5x); any other aggregate is applied on top of the union.
+  - **Subqueries.** An `IN` or `EXISTS` subquery over a ScalarDB table is split at the top, its
+    tables counted among the statement's: an IN over a UNION runs once per outer row on MySQL and
+    MariaDB. A ScalarDB table on the nullable side of a LEFT JOIN becomes an inner join per copy plus
+    one piece for the unmatched rows, with `NOT EXISTS` against both copies.
+  - **Placeholders** that the copies repeat are re-bound in each copy (todo 012), and the statement is
+    cached per text (todo 008).
+  - **PostgreSQL parallel plans.** The split's estimated cost makes PostgreSQL start parallel workers,
+    about 10 ms, for statements that take 1 ms (12-28x). The driver keeps
+    `max_parallel_workers_per_gather = 0` on its sessions and restores the session's value around a
+    split read only when the plain statement's own plan is parallel, a long one; toggling it around
+    every statement cost about 1 ms each.
+  - **Not split, served through `rc_T`**: a shape the splitter does not handle yet (a correlated scalar
+    subquery over a ScalarDB table, a recursive CTE, a set operation whose branches name ScalarDB
+    tables), and a statement with more ScalarDB table references than the configured limit (default
+    4, 16 copies), which keeps the split statement bounded; correct, at the costs of section 3.
 - **SERIALIZABLE**: the SNAPSHOT form plus a read lock on every row of the first arm, held to commit.
   The second arm is never locked: its rows abort the transaction anyway, and a lock on them would block
   the ScalarDB commit, rollback or recovery that has to settle them. How the lock is taken differs by
@@ -1052,7 +1086,7 @@ like any other, with `isValid` forwarded.
 | `save` of an existing entity with `@Version` | `UPDATE ... WHERE id = ? AND version = ?` | key plus a condition: predicate DML on one key with the predicate re-applied; zero rows on a version mismatch, so Spring raises `OptimisticLockingFailureException` as expected; counts must mean rows matched (section 1, per-engine table) |
 | `deleteById` | DELETE by key | 4.3 |
 | `deleteAll` | DELETE with no WHERE | predicate DML with no predicate: one write per key, correct but slow on a large table; use passthrough or a truncate for that |
-| aggregate roots with child collections | separate per-table SELECTs by default; one joined SELECT with single-query loading enabled | per-table: two-arm form; joined: `rc_T` with no anchor under READ COMMITTED, the coarse check under the other levels (4.2) |
+| aggregate roots with child collections | separate per-table SELECTs by default; one joined SELECT with single-query loading enabled | per-table: two-arm form; joined: the split read with no anchor under READ COMMITTED, the coarse check under the other levels (4.2) |
 | `@Lock(PESSIMISTIC_WRITE)` | `FOR UPDATE` appended; on SQL Server a table hint, `WITH (UPDLOCK, ROWLOCK)` | the locking-clause rule (4.2); on SQL Server the table hint is stripped before parsing and re-applied as the separate locking re-read, because JSQLParser 5.4 does not parse `WITH (UPDLOCK, ROWLOCK)` (4.7); refused on the join shapes |
 | `insertAll`, batches | batched INSERT with generated keys | individual statements (4.4, Batches) |
 
@@ -1075,7 +1109,7 @@ exception translation above.
 **JPA and Hibernate, MyBatis.** The same rules apply statement by statement. Hibernate emits key-based
 UPDATE and DELETE with `@Version` conditions, INSERT with identity keys through `getGeneratedKeys` or
 `RETURNING` and with sequence keys through a separate `nextval` SELECT that passes through, `FOR UPDATE`
-for pessimistic locks, and JPQL joins that route to `rc_T`; its batched inserts fall under the batch
+for pessimistic locks, and JPQL joins that take the split read; its batched inserts fall under the batch
 rule. MyBatis emits whatever the mapper says, so each mapped statement is classified on its own, and a
 mapper that mixes plain and ScalarDB tables in one DML is refused like any other such statement. The
 repository's `samples/crud-jpa` and `samples/crud-mybatis` applications sit beside the Spring Data JDBC
@@ -1105,7 +1139,7 @@ the hint, `DELETE/*+ ... */`, which Oracle accepts; the token join does not have
 **ScalarDB tables.** A hint never changes a statement's shape: a hinted statement takes the route its
 unhinted form takes (4.1). Today the shape reader refuses an optimizer hint on SELECT, INSERT, UPDATE and
 DELETE and a table hint on the table (`StatementShape`), explicitly, so a hinted read falls to the
-`rc_T` route without an anchor and a hinted write is refused. That is safe, and is to be lifted by
+split read without an anchor and a hinted write is refused. That is safe, and is to be lifted by
 dropping those refusals, with the rules below in place.
 
 - **Statement hints that name no table** (`FIRST_ROWS(n)`, `ALL_ROWS`, `PARALLEL`,
@@ -1118,8 +1152,8 @@ dropping those refusals, with the rules below in place.
   such key. So the driver writes the **first arm over the base tables**, `T t LEFT JOIN T_meta m`, the
   same inlining the locking-clause rule uses, keeps the user's alias on `T`, and attaches the hint to
   that query block at its own `SELECT`, so no global `@qb` syntax is needed. The second arm never
-  carries a user hint; it has its own index (section 3). In the `rc_T` shapes the ScalarDB table stays a
-  view: a comment hint on it is left in place and ignored by the engine, a MySQL index hint on it is
+  carries a user hint; it has its own index (section 3). In the shapes served through `rc_T` (4.2) the
+  ScalarDB table stays a view: a comment hint on it is left in place and ignored by the engine, a MySQL index hint on it is
   removed.
 - **Locking hints.** Oracle `FOR UPDATE OF col`, `NOWAIT`, `WAIT n` and `SKIP LOCKED` are carried onto
   the separate base-table `FOR UPDATE` statement of 4.2, the column requalified to `T`. Until then
@@ -1216,7 +1250,7 @@ One setting, the native connection's isolation level, selects everything else.
 
 - **Detection**: `tx_state IN (1, 2)` on any row a statement would return, anchor, or match through
   `P_before`.
-- **READ COMMITTED read**: no wait; the two-arm form of 4.2, or `rc_T`, returns the before image, a
+- **READ COMMITTED read**: no wait; the two-arm form or the split read of 4.2 returns the before image, a
   committed value.
 - **READ COMMITTED write**: the in-flight check is step 1 of 4.3, a plain non-locking read before any
   DML, so a wait there holds no lock on the row. State 1 or 2 at that point: default abort with SQLSTATE
@@ -1333,7 +1367,7 @@ retries.
 
 | Anomaly | Scenario | Blocked by |
 |---|---|---|
-| Dirty read of a ScalarDB after image | row in state 1, driver reads `T` | `rc_T` CASE (READ COMMITTED); refuse state 1/2 (others) |
+| Dirty read of a ScalarDB after image | row in state 1, driver reads `T` | committed copies exclude rows in state 1/2, in-flight copies read their before image (READ COMMITTED); refuse state 1/2 (others) |
 | Before image used as a result | an in-flight row returned because its `before_x` matches | before image consulted only for state 1/2, and only as a detector or as the READ COMMITTED committed image |
 | Driver overwrites an in-flight row | ScalarDB prepared, driver updates | CAS requires `tx_state = 3` |
 | Aborted ScalarDB after image becomes permanent | driver stamps state 3 over a prepared row, ScalarDB then rolls back and no-ops | same |
