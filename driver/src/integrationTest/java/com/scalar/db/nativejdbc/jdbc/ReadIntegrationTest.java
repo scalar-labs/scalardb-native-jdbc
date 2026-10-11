@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.api.Delete;
 import com.scalar.db.api.DistributedTransaction;
@@ -173,6 +174,25 @@ class ReadIntegrationTest {
                         + mid
                         + " = i.id ORDER BY i.id"))
             .containsExactly("a/a", "b/b", "c/c");
+        splitReads(c, made, mid, mx);
+      }
+      try (Connection vendor = e.open()) {
+        // the reads above ran split, not through the read views
+        Router router = new Router(engine, catalog, new Session(engine));
+        String join =
+            "SELECT m." + mx + " FROM " + made + " m JOIN rd.imp i ON m." + mid + " = i.id";
+        assertThat(router.route(vendor, join).sql)
+            .contains("UNION ALL")
+            .doesNotContainIgnoringCase("rc_");
+        assertThat(router.route(vendor, join + " ORDER BY i.x").sql).contains("UNION ALL");
+        // a subquery's table is read through its view
+        assertThat(
+                router.route(
+                        vendor,
+                        "SELECT x FROM rd.imp WHERE id IN (SELECT " + mid + " FROM " + made + ")")
+                    .sql)
+            .contains("UNION ALL")
+            .containsIgnoringCase("rc_");
       }
       tx.commit();
     }
@@ -181,6 +201,71 @@ class ReadIntegrationTest {
       assertThat(rows(c, "SELECT " + mx + " FROM " + made + " ORDER BY " + mid))
           .containsExactly("a", "b2", "d");
       assertThat(rows(c, "SELECT x FROM rd.imp ORDER BY id")).containsExactly("A", "b", "c");
+    }
+  }
+
+  /**
+   * Split reads while {@code made} has rows 2 (b, updated), 3 (c, deleted) and 4 (inserted) in
+   * flight and {@code imp} row 1 (a, updated): every copy's rows, none twice.
+   */
+  @SuppressFBWarnings(
+      value = {
+        "SQL_INJECTION_JDBC",
+        "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
+        "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"
+      },
+      justification = "test queries written in the test sources")
+  private static void splitReads(Connection c, String made, String mid, String mx)
+      throws SQLException {
+    String join = " FROM " + made + " m JOIN rd.imp i ON m." + mid + " = i.id";
+    assertThat(rows(c, "SELECT m." + mid + ", m." + mx + ", i.x" + join))
+        .containsExactlyInAnyOrder("1/a/a", "2/b/b", "3/c/c");
+    // three references, eight copies
+    assertThat(
+            rows(
+                c,
+                "SELECT a."
+                    + mx
+                    + ", b.x, z."
+                    + mx
+                    + " FROM "
+                    + made
+                    + " a JOIN rd.imp b ON a."
+                    + mid
+                    + " = b.id JOIN "
+                    + made
+                    + " z ON z."
+                    + mid
+                    + " = b.id WHERE b.id < 3"))
+        .containsExactlyInAnyOrder("a/a/a", "b/b/b");
+    // the subquery's table is read whole; the outer row comes out once
+    assertThat(rows(c, "SELECT x FROM rd.imp WHERE id IN (SELECT " + mid + " FROM " + made + ")"))
+        .containsExactlyInAnyOrder("a", "b", "c");
+    // the nullable side of a LEFT JOIN is read whole
+    assertThat(
+            rows(
+                c,
+                "SELECT i.x, m."
+                    + mx
+                    + " FROM rd.imp i LEFT JOIN "
+                    + made
+                    + " m ON m."
+                    + mid
+                    + " = i.id + 2"))
+        .containsExactlyInAnyOrder("a/c", "b/null", "c/null");
+    assertThat(rows(c, "SELECT * FROM " + made + " ORDER BY " + mid))
+        .containsExactly("1/a", "2/b", "3/c");
+    try (PreparedStatement ps =
+        c.prepareStatement("SELECT m." + mx + join + " WHERE i.id >= ? ORDER BY i.x DESC")) {
+      assertThat(ps.getParameterMetaData().getParameterCount()).isEqualTo(1);
+      ps.setInt(1, 2);
+      assertThat(rows(ps)).containsExactly("c", "b");
+      ps.setInt(1, 1);
+      assertThat(rows(ps)).containsExactly("c", "b", "a");
+      assertThatThrownBy(() -> ps.setInt(2, 1))
+          .isInstanceOf(SQLException.class)
+          .extracting(t -> ((SQLException) t).getSQLState())
+          .isEqualTo("07009");
     }
   }
 

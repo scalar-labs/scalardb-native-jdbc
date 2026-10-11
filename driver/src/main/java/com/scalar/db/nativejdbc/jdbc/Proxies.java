@@ -3,12 +3,15 @@ package com.scalar.db.nativejdbc.jdbc;
 import com.scalar.db.nativejdbc.NativeJdbcDriver;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
+import java.io.InputStream;
+import java.io.Reader;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.ParameterMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -261,6 +264,20 @@ public final class Proxies {
         batched.clear();
         return forward(vendor, method, args);
       }
+      Router.Route split = prepared;
+      if (split != null && split.parameterSources != null) {
+        if (name.startsWith("set")
+            && args != null
+            && args.length >= 2
+            && args[0] instanceof Integer) {
+          bind(split, method, args);
+          return null;
+        }
+        if (name.equals("getParameterMetaData")) {
+          return proxy(
+              ParameterMetaData.class, new ParameterHandler(created(vendor, method, args), split));
+        }
+      }
       boolean takesSql = args != null && args.length > 0 && args[0] instanceof String;
       if (takesSql && name.equals("addBatch")) {
         Router.Route route = owner.route((String) args[0]);
@@ -321,10 +338,67 @@ public final class Proxies {
           : result;
     }
 
+    /** Binds a value to every placeholder of a split read that takes it. */
+    private void bind(Router.Route split, Method method, Object[] args) throws Throwable {
+      int index = (Integer) args[0];
+      checkIndex(index, split);
+      for (Object a : args) {
+        if (a instanceof InputStream || a instanceof Reader) {
+          throw Errors.unsupported(
+              "a stream cannot be bound to this read of ScalarDB tables, which reads each value"
+                  + " more than once; bind the value itself");
+        }
+      }
+      List<Integer> sources = Objects.requireNonNull(split.parameterSources);
+      for (int i = 0; i < sources.size(); i++) {
+        if (sources.get(i) == index) {
+          Object[] at = args.clone();
+          at[0] = i + 1;
+          forward(vendor, method, at);
+        }
+      }
+    }
+
     private static Object[] withSql(Object[] args, Router.Route route) {
       Object[] routed = args.clone();
       routed[0] = route.sql;
       return routed;
+    }
+  }
+
+  private static void checkIndex(int index, Router.Route split) throws SQLException {
+    if (index < 1 || index > split.parameters) {
+      throw new SQLException(
+          "parameter index " + index + " is out of range 1 to " + split.parameters, "07009");
+    }
+  }
+
+  /**
+   * The parameters of a split read as the application wrote them: the count of its own
+   * placeholders, and each described by the first placeholder that takes its value.
+   */
+  private static final class ParameterHandler extends Handler {
+    final Router.Route split;
+
+    ParameterHandler(Object vendor, Router.Route split) {
+      super(vendor);
+      this.split = split;
+    }
+
+    @Override
+    @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+      if (method.getName().equals("getParameterCount")) {
+        return split.parameters;
+      }
+      if (args != null && args.length == 1 && args[0] instanceof Integer) {
+        int index = (Integer) args[0];
+        checkIndex(index, split);
+        return forward(
+            target,
+            method,
+            new Object[] {Objects.requireNonNull(split.parameterSources).indexOf(index) + 1});
+      }
+      return forward(target, method, args);
     }
   }
 

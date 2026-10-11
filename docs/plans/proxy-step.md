@@ -165,19 +165,29 @@ up to 1800x for two ScalarDB tables on MySQL). Reads move to the split read of d
 1.0-2.6x for one and two tables, before the writes, since both need the fragment emitter and the
 re-binding.
 
-- **The fragment emitter and placeholder re-binding** (todo 012): a statement re-emitted from the
-  parse tree with table references and column references substituted per copy, and a map from each
-  emitted placeholder to the user's parameter, applied when the user binds.
-- **The splitter**: 2^n copies of the statement over its ScalarDB tables, with the committed check per
-  engine (design 4.2), ORDER BY, row limits, DISTINCT and window functions on top, decomposable
-  aggregates per copy except on PostgreSQL, `IN` and `EXISTS` subqueries split at the top, a ScalarDB
-  table on the nullable side of a LEFT JOIN as an inner join per copy plus the unmatched rows. A shape
-  it does not handle, or more ScalarDB table references than the limit (default 4), stays on `rc_T`.
+- **The fragment emitter and placeholder re-binding** (todo 012): each split table reference replaced
+  by a derived table holding its copy's rows under the table's own column names, so the user's
+  predicates, joins and select list stay as written (measured equal to editing them per copy, design
+  4.2); a map from each emitted placeholder to the user's, applied when the user binds.
+- **The splitter**: 2^n copies over the ScalarDB tables inner-joined in the top-level FROM clause (a
+  LEFT JOIN's preserved side included), with the committed check per engine (design 4.2); ORDER BY,
+  row limits and DISTINCT on top, over the copies as a derived table with the column labels restored.
+  ScalarDB tables elsewhere (subqueries, CTEs, the nullable side of an outer join) read through
+  `rc_T`. A shape it does not handle, or more split tables than the limit (4), stays on `rc_T`.
 - **Setup**: the `tx_state` histogram on Oracle and MySQL.
 - **PostgreSQL**: `max_parallel_workers_per_gather = 0` on the session, restored around a split read
   whose plain statement's plan is parallel; the decision cached per statement.
 - **Statement cache** (milestone 6, todo 008) brought forward if the splitter's parse and emit cost,
   measured here, exceeds the target there.
+
+Done (2026-10-11): the fragment emitter, the re-binding (`setX` to every copy's placeholder, the
+application's count and descriptions from `getParameterMetaData`, a stream refused since each value is
+read more than once), the splitter for statements without GROUP BY or aggregates (the select list's
+functions must be known row-wise ones), and the histogram. On `rc_T` for now: WITH clauses, GROUP BY
+and aggregates (per-copy aggregates next), window functions, an unaliased expression in the select
+list of a statement with ORDER BY, a limit or DISTINCT (its label differs by engine), and `*` over a
+plain table or subquery under ORDER BY. Not done: the per-copy aggregates, PostgreSQL's parallel
+plans, the statement cache. Open: todo 082, an Oracle read that returned no rows in two runs.
 
 Tests: the cases of milestone 3 on every engine, each also with a join, an IN subquery, a LEFT JOIN, an
 aggregate and three tables, with rows in flight; every split statement's rows equal to the same query

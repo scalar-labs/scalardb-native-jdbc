@@ -14,13 +14,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Decides, for one statement on one connection, what the vendor driver receives (design section
  * 4.1). A statement on plain tables only is forwarded exactly as written; one the parser cannot
- * interpret is refused with the reason; a read of ScalarDB tables at READ COMMITTED runs with each
- * such table renamed to its read view {@code rc_T} (4.2); any other statement that names a ScalarDB
- * table is refused until its path exists.
+ * interpret is refused with the reason; a read of ScalarDB tables at READ COMMITTED runs as the
+ * split read, or with each such table renamed to its read view {@code rc_T} where the split does
+ * not apply (4.2); any other statement that names a ScalarDB table is refused until its path
+ * exists.
  */
 final class Router {
 
@@ -39,6 +41,15 @@ final class Router {
     final long catalogGeneration;
     final Instant trustedUntil;
 
+    /**
+     * For each placeholder of {@link #sql}, the application's placeholder whose value it takes, or
+     * null when they are the same: a split read repeats the statement's placeholders.
+     */
+    final @Nullable List<Integer> parameterSources;
+
+    /** The number of placeholders the application binds. */
+    final int parameters;
+
     private Route(
         String source,
         String sql,
@@ -48,8 +59,12 @@ final class Router {
         int isolation,
         long sessionGeneration,
         long catalogGeneration,
-        Instant trustedUntil) {
+        Instant trustedUntil,
+        @Nullable List<Integer> parameterSources,
+        int parameters) {
       this.trustedUntil = trustedUntil;
+      this.parameterSources = parameterSources;
+      this.parameters = parameters;
       this.isolation = isolation;
       this.source = source;
       this.sql = sql;
@@ -101,7 +116,7 @@ final class Router {
         throw Errors.unsupported("the passthrough setting applies in autocommit mode only");
       }
       // anything may run here, so assume it changed the session and the names
-      return route(sql, sql, true, true, true);
+      return route(sql, sql, true, true, true, null, 0);
     }
     Outcome<SqlAst> parsed =
         SqlAst.analyze(sql, engine, session.doubleQuotesQuoteIdentifiers(vendor));
@@ -122,19 +137,19 @@ final class Router {
       }
     }
     if (!scalarDb.isEmpty()) {
-      return route(sql, read(ast, scalarDb), false, false, false);
+      return read(sql, ast, scalarDb);
     }
     boolean changesSession = kind != SqlAst.Kind.SELECT && kind != SqlAst.Kind.DML;
     boolean changesNames = kind == SqlAst.Kind.DDL || kind == SqlAst.Kind.TRUNCATE;
-    return route(sql, sql, changesSession, changesNames, false);
+    return route(sql, sql, changesSession, changesNames, false, null, ast.parameterCount());
   }
 
   /**
-   * A read at READ COMMITTED: every ScalarDB table renamed to its read view, which shows each row's
-   * committed image; the user's predicate reaches both arms of the view, and their indexes, through
-   * the engine's own pushdown (design section 3).
+   * A read at READ COMMITTED: the split read, whose copies keep every join and filter on the base
+   * tables' indexes; where it does not apply, every ScalarDB table renamed to its read view, which
+   * shows each row's committed image (design sections 3 and 4.2).
    */
-  private String read(SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
+  private Route read(String sql, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
       throws SQLException {
     Set<String> names = new TreeSet<>();
     for (TableInfo t : scalarDb.values()) {
@@ -175,11 +190,16 @@ final class Router {
       }
       views.put(e.getKey(), engine.quote(t.namespace()) + "." + engine.quote(t.readView(engine)));
     }
+    SqlAst.SplitText split = SplitRead.emit(engine, ast, scalarDb, views);
+    if (split != null) {
+      return route(
+          sql, split.sql(), false, false, false, split.parameterSources(), ast.parameterCount());
+    }
     String rewritten = ast.joinTokens(views::get);
     if (rewritten == null) {
       throw Errors.unsupported("the statement cannot be rewritten onto the read views" + tables);
     }
-    return rewritten;
+    return route(sql, rewritten, false, false, false, null, ast.parameterCount());
   }
 
   private Route route(
@@ -187,7 +207,9 @@ final class Router {
       String sql,
       boolean changesSession,
       boolean changesNames,
-      boolean passthrough) {
+      boolean passthrough,
+      @Nullable List<Integer> parameterSources,
+      int parameters) {
     return new Route(
         source,
         sql,
@@ -197,7 +219,9 @@ final class Router {
         isolation,
         session.generation(),
         catalog.generation(),
-        catalog.trustedUntil());
+        catalog.trustedUntil(),
+        parameterSources,
+        parameters);
   }
 
   /**

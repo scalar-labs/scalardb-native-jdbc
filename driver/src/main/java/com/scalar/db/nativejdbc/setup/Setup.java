@@ -277,6 +277,9 @@ public final class Setup {
       }
       execute(viewDdl(t, view));
       actions.add((found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);
+      if (gatherHistogram(t)) {
+        actions.add("gathered a histogram on " + meta + ".tx_state");
+      }
       for (String g : grantees) {
         execute("GRANT SELECT ON " + name(ns, view) + " TO " + grantee(g));
         actions.add("granted SELECT on " + view + " to " + g);
@@ -309,6 +312,40 @@ public final class Setup {
       return new Result(name, actions, 0, null);
     } catch (SQLException e) {
       return new Result(name, actions, 0, e);
+    }
+  }
+
+  /**
+   * On Oracle and MySQL, a histogram on the metadata table's {@code tx_state}: without one both
+   * estimate {@code tx_state IN (1, 2)} as most of the table and scan it where the split read
+   * probes the in-flight index (design section 3).
+   *
+   * @return whether one was gathered
+   */
+  private boolean gatherHistogram(TableInfo t) throws SQLException {
+    switch (engine) {
+      case ORACLE:
+        try (PreparedStatement ps =
+            connection.prepareStatement(
+                "BEGIN DBMS_STATS.GATHER_TABLE_STATS(ownname => ?, tabname => ?,"
+                    + " method_opt => ?); END;")) {
+          // quoted, so that DBMS_STATS takes the names as stored
+          ps.setString(1, '"' + t.namespace() + '"');
+          ps.setString(2, '"' + metadataTable(t) + '"');
+          ps.setString(3, "FOR COLUMNS " + txState + " SIZE 254");
+          ps.execute();
+        }
+        return true;
+      case MYSQL:
+        execute(
+            "ANALYZE TABLE "
+                + name(t.namespace(), metadataTable(t))
+                + " UPDATE HISTOGRAM ON "
+                + txState
+                + " WITH 16 BUCKETS");
+        return true;
+      default:
+        return false;
     }
   }
 
