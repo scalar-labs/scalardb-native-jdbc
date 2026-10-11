@@ -64,6 +64,9 @@ tasks.named<Test>("integrationTest") {
         "nativejdbc.engines",
         providers.systemProperty("nativejdbc.engines").getOrElse("all"),
     )
+    // -Dnativejdbc.bench=true runs the read-overhead benchmark (bench package), off by default;
+    // -Dnativejdbc.bench.* options are passed on (see ReadOverheadBenchmark)
+    systemProperties(providers.systemPropertiesPrefixedBy("nativejdbc.bench").get())
 }
 
 // The driver inspects statements through JSQLParser's public syntax tree, never through its private

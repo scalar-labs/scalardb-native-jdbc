@@ -167,6 +167,10 @@ public enum Engines {
     return started().url;
   }
 
+  public String username() throws SQLException {
+    return started().username;
+  }
+
   public String password() throws SQLException {
     return started().password;
   }
