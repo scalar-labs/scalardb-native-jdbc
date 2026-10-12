@@ -51,4 +51,10 @@ class PrinterTest {
             """);
     assertThat(print(new Printer.Rows("a"), null, true)).isEqualTo("(0 rows)\n\n");
   }
+
+  @Test
+  void aTitle_carriesNoEscapeSequence() {
+    assertThat(print(new Printer.Rows("a"), "Table \"s.\u001b[2Jt\"", false))
+        .startsWith("Table \"s.\\x1b[2Jt\"");
+  }
 }

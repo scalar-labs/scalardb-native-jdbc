@@ -29,7 +29,7 @@ input and Windows terminals.
 - `\i file`, `-c sql`, `-f file`, `ON_ERROR_STOP`; history in `~/.snsql_history`.
 - Ctrl-C cancels the running statement through `Statement.cancel`; at the prompt it clears the line.
 - `\dt`, `\dv`, `\dn`, `\di`, `\d table` (columns, types, nullability, defaults, primary key, indexes,
-  foreign keys), `\l`, `\c dbname` (or a URL), `\conninfo`, `\q`, `\?`, all from `DatabaseMetaData`, with
+  foreign keys), `\l`, `\c dbname`, `\conninfo`, `\q`, `\?`, all from `DatabaseMetaData`, with
   psql's patterns (`[schema.]name`, `*`, `?`, an unquoted name folded as the database folds it).
 - Server notices printed from the `SQLWarning` chain.
 
@@ -157,7 +157,10 @@ included (todo 082).
   still run on the plain one (milestone 1's note).
 - Ctrl-C's cancel is tested on every engine; SQL Server's `WAITFOR` runs under `\passthrough`, since the
   driver does not read it, and Oracle cancels a long cross join, having no sleep a query can call.
-- `\c` takes a database name or a URL, not psql's `\c dbname user`, which would need a new password.
+- `\c` takes a database name on the same server only, made of letters, digits, `_`, `$`, `.` and `-`:
+  not psql's `\c dbname user`, which would need a new password, and not a URL, since the session's
+  password would go to whatever server a URL in a `\i` script named. The name is checked so that it
+  cannot add URL parameters or change the host (`db?socketFactory=...`, `;serverName=...`).
 - Completion offers names only, no keywords.
 - The prompt shows passthrough as `db=!>`, which psql has no counterpart for.
 - Found todo 104: the driver refuses PostgreSQL's `SET search_path TO ...` (the `=` form works).

@@ -61,7 +61,7 @@ final class Repl {
     /**
      * Opens a connection.
      *
-     * @param target a database name or a URL; null for the current database again
+     * @param target a database name on the same server; null for the current database again
      * @return the new connection
      * @throws SQLException if it cannot be opened
      */
@@ -148,7 +148,7 @@ final class Repl {
   private static String database(Connection connection) throws SQLException {
     String catalog = connection.getCatalog();
     String schema = catalog == null || catalog.isEmpty() ? connection.getSchema() : catalog;
-    return schema == null || schema.isEmpty() ? "snsql" : schema;
+    return schema == null || schema.isEmpty() ? "snsql" : Printer.printable(schema);
   }
 
   /**
@@ -246,7 +246,7 @@ final class Repl {
    */
   String product() throws SQLException {
     DatabaseMetaData md = connection.getMetaData();
-    return md.getDatabaseProductName() + " " + md.getDatabaseProductVersion();
+    return Printer.printable(md.getDatabaseProductName() + " " + md.getDatabaseProductVersion());
   }
 
   /** Cancels the running statement, for Ctrl-C; called from the signal thread. */
@@ -354,7 +354,7 @@ final class Repl {
     out.println("General");
     out.println("  \\q                     quit snsql");
     out.println("  \\conninfo              display information about the current connection");
-    out.println("  \\c [DBNAME|URL]        connect to another database");
+    out.println("  \\c [DBNAME]            connect to another database on the server");
     out.println("  \\i FILE                execute commands from file");
     out.println("  \\timing [on|off]       toggle timing of commands");
     out.println("  \\x [on|off]            toggle expanded output");
@@ -478,7 +478,7 @@ final class Repl {
         "You are now connected to database \""
             + database
             + "\" as user \""
-            + connection.getMetaData().getUserName()
+            + Printer.printable(String.valueOf(connection.getMetaData().getUserName()))
             + "\".");
   }
 
@@ -488,18 +488,19 @@ final class Repl {
         "You are connected to database \""
             + database
             + "\" as user \""
-            + md.getUserName()
+            + Printer.printable(String.valueOf(md.getUserName()))
             + "\" via "
             + url
             + ".");
     out.println(
-        md.getDatabaseProductName()
-            + " "
-            + md.getDatabaseProductVersion()
-            + ", "
-            + md.getDriverName()
-            + " "
-            + md.getDriverVersion());
+        Printer.printable(
+            md.getDatabaseProductName()
+                + " "
+                + md.getDatabaseProductVersion()
+                + ", "
+                + md.getDriverName()
+                + " "
+                + md.getDriverVersion()));
   }
 
   /** Runs one statement; returns whether the session goes on. */

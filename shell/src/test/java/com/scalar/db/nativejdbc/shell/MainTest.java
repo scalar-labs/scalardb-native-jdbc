@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc.shell;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -27,6 +28,17 @@ class MainTest {
         .isEqualTo(P + "oracle:thin:@//h:1521/b");
     assertThat(Main.withDatabase(P + "oracle:thin:@h:1521:a", "b"))
         .isEqualTo(P + "oracle:thin:@h:1521:b");
+  }
+
+  /** Only a name: anything else would change the URL beyond its database. */
+  @Test
+  void withDatabase_takesANameOnly() {
+    for (String bad :
+        new String[] {"db?socketFactory=x", "db;serverName=evil", "db/x", "x@evil", "a b", ""}) {
+      assertThatThrownBy(() -> Main.withDatabase(P + "sqlserver://h:1433", bad))
+          .isInstanceOf(IllegalArgumentException.class);
+    }
+    assertThat(Main.withDatabase(P + "postgresql://h/a", "日本_db-1")).endsWith("/日本_db-1");
   }
 
   /** The unit tests run without vendor drivers, as a zip whose lib/ lost one. */

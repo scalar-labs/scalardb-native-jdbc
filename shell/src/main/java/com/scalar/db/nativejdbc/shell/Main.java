@@ -21,6 +21,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.Callable;
+import java.util.regex.Pattern;
 import org.jline.reader.Candidate;
 import org.jline.reader.Completer;
 import org.jline.reader.EOFError;
@@ -50,6 +51,9 @@ import picocli.CommandLine.Parameters;
     versionProvider = Main.Version.class,
     description = "The interactive SQL shell of ScalarDB Native JDBC.")
 public final class Main implements Callable<Integer> {
+
+  private static final Pattern DATABASE_NAME =
+      Pattern.compile("[\\w$.-]+", Pattern.UNICODE_CHARACTER_CLASS);
 
   private static final int EXIT_OK = 0;
   private static final int EXIT_FATAL = 1;
@@ -226,16 +230,12 @@ public final class Main implements Callable<Integer> {
         err.println("snsql: error: connection failed: " + e.getMessage());
         return EXIT_CONNECTION;
       }
-      // \c: another database on the same server with the same credentials, or another URL
+      // \c: another database on the same server with the same credentials; never another URL,
+      // which would hand the password to whatever server it names
       String[] current = {target};
       Repl.Connector connector =
           next -> {
-            String url =
-                next == null
-                    ? current[0]
-                    : next.startsWith("jdbc:")
-                        ? mysqlThroughMariaDb(next)
-                        : withDatabase(current[0], next);
+            String url = next == null ? current[0] : withDatabase(current[0], next);
             Repl.Connected opened = open(url, connect);
             current[0] = url;
             return opened;
@@ -284,6 +284,12 @@ public final class Main implements Callable<Integer> {
    * {@code databaseName}, Oracle's service name or SID.
    */
   static String withDatabase(String url, String database) {
+    // a name only: "db?socketFactory=..." or "db;serverName=..." would change more than the
+    // database
+    if (!DATABASE_NAME.matcher(database).matches()) {
+      throw new IllegalArgumentException(
+          "not a database name: \"" + Printer.printable(database) + "\"");
+    }
     String lower = url.toLowerCase(Locale.ROOT);
     if (lower.startsWith(NativeJdbcUrl.PREFIX + "sqlserver:")) {
       String without = url.replaceAll("(?i);\\s*(databaseName|database)\\s*=[^;]*", "");

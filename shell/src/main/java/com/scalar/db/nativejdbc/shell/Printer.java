@@ -73,13 +73,15 @@ final class Printer {
    * Prints rows, then {@code (n rows)} unless expanded, as psql does.
    *
    * @param rows the rows
-   * @param title a line centred above the table, such as {@code List of relations}, or null
+   * @param rawTitle a line centred above the table, such as {@code List of relations}, or null
    * @param expanded whether to print one record per block, psql's {@code \x}
    * @param footer whether to end with the row count
    * @param out where to print
    */
   static void print(
-      Rows rows, @Nullable String title, boolean expanded, boolean footer, PrintWriter out) {
+      Rows rows, @Nullable String rawTitle, boolean expanded, boolean footer, PrintWriter out) {
+    // a title may carry stored names, such as \d's Table "schema.name"
+    String title = rawTitle == null ? null : printable(rawTitle);
     if (expanded) {
       expanded(rows, title, out);
       return;
