@@ -47,16 +47,35 @@ five engines. **Effort:** Medium. **Risk:** Low.
 
 ## Recommended Action
 
+Measured 2026-10-12 (docs/benchmarks/read-overhead.md, "Row limits and DISTINCT inside each copy").
+Push ORDER BY and a limit of offset + n into each copy, per engine:
+
+- PostgreSQL, MariaDB: the current committed form, the limit inside each copy (1.2-2.5x).
+- MySQL: a per-row committed form under a limit, the left join on the metadata or NOT EXISTS with
+  `NO_SEMIJOIN` (1.3-5.7x); the DISTINCT set and plain NOT EXISTS materialize and stay 70-360x.
+- Oracle: `WHERE ROWNUM <= n` around each ordered copy (1.1-2.1x; FETCH FIRST does not stop early).
+- SQL Server: nothing (already 1.0-4.1x).
+- DISTINCT: push only on Oracle; MySQL and MariaDB stay 14-23x, a separate problem.
+
+Not yet implemented in the driver. Open: whether MySQL's choice should be the left join (what the
+mixed SQL Server form already uses) or the hint, and large offsets (3-18x outside PostgreSQL).
+
 ## Technical Details
 
 See Findings.
 
 ## Acceptance Criteria
 
-- [ ] Benchmark results for the shapes above recorded in docs/benchmarks/read-overhead.md.
+- [x] Benchmark results for the shapes above recorded in docs/benchmarks/read-overhead.md.
 - [ ] Per-copy limits or DISTINCT emitted on the engines where they measure better.
 
 ## Work Log
+
+### 2026-10-12 - Measured
+
+**By:** Claude Code
+- New shapes and modes in ReadOverheadBenchmark (SPLIT_DRV, SPLIT_DRVP and per-form variants); results
+  and MySQL's plan in the benchmark document.
 
 ### 2026-10-12 - Found in review
 

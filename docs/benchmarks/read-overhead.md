@@ -402,3 +402,73 @@ everywhere. Compared with the direct emission:
   which it would not use anyway.
 
 The driver therefore emits derived-table fragments.
+
+## Row limits and DISTINCT inside each copy (2026-10-12)
+
+The split read applies ORDER BY with a row limit, and DISTINCT, only on top of the copies. Pagination
+then reads every matching row of every copy before the limit applies (todo 089). New shapes:
+
+- `ORDER BY` the key `DESC`, 20 rows of `o` (500k), at offset 0 and 10,000;
+- the same over the join of `c` and `o`;
+- an indexed range of 30k rows of `c`, `ORDER BY` the key, 20 rows;
+- `DISTINCT` over an indexed column (1,000 values in 100k rows).
+
+New modes:
+
+- `SPLIT_DRV`: the form the driver emits on the engine (NOT EXISTS on PostgreSQL and Oracle, the
+  DISTINCT set on MySQL and MariaDB, MX on SQL Server), limit and DISTINCT on top only.
+- `SPLIT_DRVP`: the same with `ORDER BY` and a limit of offset + n rows (or the DISTINCT) also inside
+  each copy, which is wrapped as `SELECT * FROM (copy) pN`. The top keeps its own clauses.
+- `SPLIT_DAJP`, `SPLIT_DHDP`, `SPLIT_DLJP`: SPLIT_DRVP with NOT EXISTS, the DISTINCT set, or the left
+  join on the metadata as the committed form on every engine.
+- `SPLIT_DAJN`: SPLIT_DAJP with `/*+ NO_SEMIJOIN() */` in the NOT EXISTS (MySQL).
+- `SPLIT_DRVR`: Oracle, each copy limited by `WHERE ROWNUM <= n` around its ordered rows, not
+  `FETCH FIRST`.
+
+Every mode returned BASE's rows. Ratios to BASE, medians:
+
+| shape | engine | DRV (now) | DRVP | best per-copy form |
+|---|---|---|---|---|
+| 20 rows of 500k | PostgreSQL | 40.8x | 1.3x | DRVP 1.3x |
+| | MySQL | 162x | 150x | DLJP 1.3x, DAJN 1.3x |
+| | MariaDB | 365x | 1.5x | DRVP 1.5x |
+| | SQL Server | 1.5x | 1.5x | none needed |
+| | Oracle | 36.0x | 25.1x | DRVR 1.1x |
+| 20 rows after 10k | PostgreSQL | 11.4x | 1.2x | DRVP 1.2x |
+| | MySQL | 80.1x | 77.0x | DLJP 5.7x |
+| | MariaDB | 96.9x | 3.2x | DRVP 3.2x |
+| | SQL Server | 1.2x | 1.2x | none needed |
+| | Oracle | 36.1x | 31.7x | DRVR 18.4x |
+| JOIN, 20 rows | PostgreSQL | 109x | 2.5x | DRVP 2.5x |
+| | MySQL | 362x | 336x | DLJP 4.4x |
+| | MariaDB | 1.9x | 1.6x | DRVP 1.6x (BASE itself 121 ms) |
+| | SQL Server | 4.1x | 5.2x | none better |
+| | Oracle | 95.8x | 42.0x | DRVR 2.1x |
+| range of 30k, 20 rows | PostgreSQL | 10.3x | 1.4x | DAJP 1.2x |
+| | MySQL | 34.1x | 34.9x | DLJP 1.8x |
+| | MariaDB | 39.3x | 1.6x | DRVP 1.6x |
+| | SQL Server | 1.0x | 1.2x | none needed |
+| | Oracle | 4.3x | 3.8x | DRVR 1.2x |
+| DISTINCT, 1,000 of 100k | PostgreSQL | 1.5x | 1.6x | none better |
+| | MySQL | 15.2x | 14.3x | none better |
+| | MariaDB | 23.4x | 18.1x | none good |
+| | SQL Server | 2.6x | 2.5x | none better |
+| | Oracle | 1.8x | 1.2x | DRVP 1.2x |
+
+Findings:
+
+- **A limit inside each copy brings pagination close to the native query** on PostgreSQL, MariaDB
+  (with the engine's current form), MySQL and Oracle (each with its own form below). SQL Server
+  needs nothing: its plan already stops early over the union (Top over Merge Concatenation).
+- **MySQL needs a per-row committed check under a limit.** It turns NOT EXISTS into an anti-join
+  against a materialized copy of the subquery and builds the DISTINCT set the same way; both scan
+  all 500k metadata rows (52 ms) before the first row, so the limit saves nothing. The left join on
+  the metadata (a primary-key lookup per row) or NOT EXISTS with `NO_SEMIJOIN` keeps the index order,
+  and the copy stops after n rows.
+- **Oracle needs `ROWNUM`.** `FETCH FIRST` inside a copy becomes a window function over the whole
+  copy; `WHERE ROWNUM <= n` over the ordered copy is a stop key.
+- **The left-join form is never safe on PostgreSQL**: 2021x on the join, 36x at offset 10k.
+- **Large offsets stay expensive**: each copy returns offset + n rows (10,020 here), so offset 10k is
+  1.2x on PostgreSQL but 3-18x elsewhere.
+- **DISTINCT inside each copy helps only on Oracle**; on MySQL and MariaDB a DISTINCT over a split
+  table stays 14-23x whatever the form (not resolved here).

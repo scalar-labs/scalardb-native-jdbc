@@ -105,7 +105,29 @@ class ReadOverheadBenchmark {
     /** SPLIT_PA as derived tables. */
     SPLIT_DPA,
     /** SPLIT_PH as derived tables. */
-    SPLIT_DPH
+    SPLIT_DPH,
+    /**
+     * The form the driver emits on the engine: derived tables, NOT EXISTS on PostgreSQL and Oracle,
+     * the DISTINCT set on MySQL and MariaDB, SPLIT_DMX on SQL Server (SPLIT_DMH from three tables).
+     */
+    SPLIT_DRV,
+    /**
+     * SPLIT_DRV with the ORDER BY and row limit, or the DISTINCT, also applied inside each copy
+     * (the limit as offset + count), keeping them on top as well.
+     */
+    SPLIT_DRVP,
+    /** SPLIT_DRVP with NOT EXISTS as the committed form on every engine. */
+    SPLIT_DAJP,
+    /** SPLIT_DRVP with the DISTINCT set as the committed form on every engine. */
+    SPLIT_DHDP,
+    /** Oracle: SPLIT_DRVP with each copy's limit as {@code WHERE ROWNUM <= n}, not FETCH FIRST. */
+    SPLIT_DRVR,
+    /** SPLIT_LJ as derived tables. */
+    SPLIT_DLJ,
+    /** SPLIT_DRVP with the left join on the metadata as the committed form on every engine. */
+    SPLIT_DLJP,
+    /** MySQL: SPLIT_DAJP with NOT EXISTS kept a per-row probe ({@code NO_SEMIJOIN}). */
+    SPLIT_DAJN
   }
 
   enum Param {
@@ -138,7 +160,14 @@ class ReadOverheadBenchmark {
     final Param[] params;
     @Nullable String partialInner;
     @Nullable String partialOuter;
+    @Nullable String pushed;
     @Nullable Graph graph;
+
+    /** The text of each copy for SPLIT_DRVP, with the clauses applied inside it. */
+    Query pushed(String copy) {
+      pushed = copy;
+      return this;
+    }
 
     /** The same query as a join graph, for SPLIT_LT and SPLIT_LH. */
     Query graph(Graph g) {
@@ -390,7 +419,55 @@ class ReadOverheadBenchmark {
                       List.of("g:R", "a:C", "b:O", "e:O"),
                       List.of("a.region=g.id", "b.customer_id=a.id", "e.customer_id=a.id"),
                       "g.id",
-                      List.of("g.id", "g.label", "a.id", "b.id", "e.id"))));
+                      List.of("g.id", "g.label", "a.id", "b.id", "e.id"))),
+          // {PAGE:k:n}: n rows after k, in the engine's syntax
+          new Query(
+                  "page: ORDER BY key DESC, 20 rows of 500k",
+                  "SELECT b.id, {b.total} FROM {O:b} WHERE {W:b} ORDER BY b.id DESC{PAGE:0:20}",
+                  "SELECT b.id AS id, {b.total} AS total FROM {O:b} WHERE {W:b}",
+                  "SELECT v.id, v.total FROM ({ARMS}) v ORDER BY v.id DESC{PAGE:0:20}",
+                  List.of("b"))
+              .pushed(
+                  "SELECT b.id AS id, {b.total} AS total FROM {O:b} WHERE {W:b}"
+                      + " ORDER BY b.id DESC{PAGE:0:20}"),
+          new Query(
+                  "page: ORDER BY key DESC, 20 rows after 10k",
+                  "SELECT b.id, {b.total} FROM {O:b} WHERE {W:b} ORDER BY b.id DESC{PAGE:10000:20}",
+                  "SELECT b.id AS id, {b.total} AS total FROM {O:b} WHERE {W:b}",
+                  "SELECT v.id, v.total FROM ({ARMS}) v ORDER BY v.id DESC{PAGE:10000:20}",
+                  List.of("b"))
+              .pushed(
+                  "SELECT b.id AS id, {b.total} AS total FROM {O:b} WHERE {W:b}"
+                      + " ORDER BY b.id DESC{PAGE:0:10020}"),
+          new Query(
+                  "page: JOIN FK, ORDER BY key DESC, 20 rows",
+                  "SELECT a.id, b.id FROM {C:a} JOIN {O:b} ON {b.customer_id} = a.id"
+                      + " WHERE {W:a} AND {W:b} ORDER BY b.id DESC{PAGE:0:20}",
+                  "SELECT a.id AS aid, b.id AS bid FROM {C:a} JOIN {O:b} ON {b.customer_id} = a.id"
+                      + " WHERE {W:a} AND {W:b}",
+                  "SELECT v.aid, v.bid FROM ({ARMS}) v ORDER BY v.bid DESC{PAGE:0:20}",
+                  List.of("a", "b"))
+              .pushed(
+                  "SELECT a.id AS aid, b.id AS bid FROM {C:a} JOIN {O:b} ON {b.customer_id} = a.id"
+                      + " WHERE {W:a} AND {W:b} ORDER BY b.id DESC{PAGE:0:20}"),
+          new Query(
+                  "page: indexed range of 30k rows, ORDER BY key, 20 rows",
+                  "SELECT a.id, {a.name} FROM {C:a} WHERE {W:a} AND {a.region} < ?"
+                      + " ORDER BY a.id{PAGE:0:20}",
+                  "SELECT a.id AS id, {a.name} AS name FROM {C:a} WHERE {W:a} AND {a.region} < ?",
+                  "SELECT v.id, v.name FROM ({ARMS}) v ORDER BY v.id{PAGE:0:20}",
+                  List.of("a"),
+                  Param.SPAN300)
+              .pushed(
+                  "SELECT a.id AS id, {a.name} AS name FROM {C:a} WHERE {W:a} AND {a.region} < ?"
+                      + " ORDER BY a.id{PAGE:0:20}"),
+          new Query(
+                  "DISTINCT over an indexed column (1000 of 100k)",
+                  "SELECT DISTINCT {a.region} FROM {C:a} WHERE {W:a}",
+                  "SELECT {a.region} AS region FROM {C:a} WHERE {W:a}",
+                  "SELECT DISTINCT v.region FROM ({ARMS}) v",
+                  List.of("a"))
+              .pushed("SELECT DISTINCT {a.region} AS region FROM {C:a} WHERE {W:a}"));
 
   static List<Engines> engines() {
     return Engines.selected();
@@ -516,7 +593,8 @@ class ReadOverheadBenchmark {
       String suffix =
           (only.isEmpty() ? "" : "-" + only.replaceAll("\\W+", "_"))
               + (rtt > 0 ? "-rtt" + System.getProperty("nativejdbc.bench.rttMs") : "")
-              + (HOT ? "-hot" : "");
+              + (HOT ? "-hot" : "")
+              + (INFLIGHT != 100 ? "-inflight" + INFLIGHT : "");
       Path out = Path.of("build", "bench", "read-overhead-" + e + suffix + ".md");
       Files.createDirectories(Path.of("build", "bench"));
       Files.writeString(out, report.toString(), StandardCharsets.UTF_8);
@@ -735,6 +813,68 @@ class ReadOverheadBenchmark {
   private static final Pattern COLUMN = Pattern.compile("\\{(\\w+)\\.(\\w+)(?:/([AB]))?\\}");
 
   static @Nullable String render(Query q, Mode m, Engine engine) {
+    String sql = renderRaw(q, m, engine);
+    if (sql == null) {
+      return null;
+    }
+    Matcher page = PAGE.matcher(sql);
+    StringBuilder out = new StringBuilder();
+    while (page.find()) {
+      page.appendReplacement(
+          out,
+          Matcher.quoteReplacement(
+              page(engine, Integer.parseInt(page.group(1)), Integer.parseInt(page.group(2)))));
+    }
+    page.appendTail(out);
+    return out.toString();
+  }
+
+  private static final Pattern FIRST_ROWS = Pattern.compile("\\{PAGE:0:(\\d+)\\}$");
+
+  private static final Pattern PAGE = Pattern.compile("\\{PAGE:(\\d+):(\\d+)\\}");
+
+  /** {@code n} rows after the first {@code offset}, in the engine's syntax. */
+  private static String page(Engine engine, int offset, int n) {
+    return engine == Engine.SQLSERVER || engine == Engine.ORACLE
+        ? " OFFSET " + offset + " ROWS FETCH NEXT " + n + " ROWS ONLY"
+        : " LIMIT " + n + (offset > 0 ? " OFFSET " + offset : "");
+  }
+
+  /** The committed form the driver chooses on the engine for {@code n} tables (SplitRead). */
+  private static Mode driverMode(Engine engine, int n) {
+    switch (engine) {
+      case MYSQL:
+      case MARIADB:
+        return Mode.SPLIT_DHD;
+      case SQLSERVER:
+        return n <= 2 ? Mode.SPLIT_DMX : Mode.SPLIT_DMH;
+      default:
+        return Mode.SPLIT_DAJ;
+    }
+  }
+
+  private static @Nullable String renderRaw(Query q, Mode m, Engine engine) {
+    boolean rownum = m == Mode.SPLIT_DRVR;
+    boolean noSemijoin = m == Mode.SPLIT_DAJN;
+    boolean pushed =
+        m == Mode.SPLIT_DRVP
+            || m == Mode.SPLIT_DAJP
+            || m == Mode.SPLIT_DHDP
+            || m == Mode.SPLIT_DLJP
+            || noSemijoin
+            || rownum;
+    if (pushed && q.pushed == null || rownum && engine != Engine.ORACLE) {
+      return null;
+    }
+    if (m == Mode.SPLIT_DAJP || noSemijoin) {
+      m = Mode.SPLIT_DAJ;
+    } else if (m == Mode.SPLIT_DLJP) {
+      m = Mode.SPLIT_DLJ;
+    } else if (m == Mode.SPLIT_DHDP) {
+      m = Mode.SPLIT_DHD;
+    } else if (m == Mode.SPLIT_DRV || pushed) {
+      m = driverMode(engine, q.splitAliases.size());
+    }
     if (m == Mode.SPLIT_LT || m == Mode.SPLIT_LH) {
       return q.graph == null ? null : lateral(q.graph, m, engine);
     }
@@ -760,8 +900,29 @@ class ReadOverheadBenchmark {
         armMode =
             bits != 0 ? Mode.SPLIT_LJ : armMode == Mode.SPLIT_MX ? Mode.SPLIT_AJ : Mode.SPLIT_HD;
       }
-      String template = partial && q.partialInner != null ? q.partialInner : q.split;
-      arms.add(derived ? renderDerived(template, armMode, arm) : render(template, armMode, arm));
+      String template =
+          pushed
+              ? Objects.requireNonNull(q.pushed)
+              : partial && q.partialInner != null ? q.partialInner : q.split;
+      String copy =
+          derived ? renderDerived(template, armMode, arm) : render(template, armMode, arm);
+      // a copy with its own ORDER BY and limit is a derived table: UNION ALL takes it on every
+      // engine
+      if (noSemijoin) {
+        copy = copy.replace("NOT EXISTS (SELECT 1", "NOT EXISTS (SELECT /*+ NO_SEMIJOIN() */ 1");
+      }
+      Matcher first = FIRST_ROWS.matcher(copy);
+      if (rownum && first.find()) {
+        arms.add(
+            "SELECT * FROM ("
+                + copy.substring(0, first.start())
+                + ") p"
+                + bits
+                + " WHERE ROWNUM <= "
+                + first.group(1));
+      } else {
+        arms.add(pushed ? "SELECT * FROM (" + copy + ") p" + bits : copy);
+      }
     }
     String union = String.join(" UNION ALL ", arms);
     String outer = partial && q.partialOuter != null ? q.partialOuter : q.outer;
@@ -774,6 +935,8 @@ class ReadOverheadBenchmark {
     switch (m) {
       case SPLIT_DAJ:
         return Mode.SPLIT_AJ;
+      case SPLIT_DLJ:
+        return Mode.SPLIT_LJ;
       case SPLIT_DHD:
         return Mode.SPLIT_HD;
       case SPLIT_DMX:
@@ -1136,6 +1299,9 @@ class ReadOverheadBenchmark {
   // -Dnativejdbc.bench.hot=true: only customers and the region with rows in flight
   private static final boolean HOT = Boolean.getBoolean("nativejdbc.bench.hot");
 
+  // -Dnativejdbc.bench.inflight=10000: rows in flight per table, 100 by default
+  private static final int INFLIGHT = Integer.getInteger("nativejdbc.bench.inflight", 100);
+
   private static int customer(Random random) {
     return HOT ? 7 + 1000 * random.nextInt(100) : random.nextInt(100_000);
   }
@@ -1349,15 +1515,28 @@ class ReadOverheadBenchmark {
         "INSERT INTO bn.cm (id, tx_id, tx_state, tx_version) SELECT id, 'seed', 3, 1 FROM bn.c");
     ddl.add(
         "INSERT INTO bn.om (id, tx_id, tx_state, tx_version) SELECT id, 'seed', 3, 1 FROM bn.o");
-    // 100 rows in flight per table, their before image equal to the current values
+    // INFLIGHT rows in flight per table (at most half of c), their before image equal to the
+    // current values; the rows in flight at 100 stay in flight at any larger count
+    int perC = Math.max(2, 100_000 / INFLIGHT);
+    int perO = Math.max(2, 500_000 / INFLIGHT);
     ddl.add(
         "UPDATE bn.cm SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
             + " before_tx_version = 1, before_name = CONCAT('n', id), before_region = id - 1000 *"
-            + " FLOOR(id / 1000) WHERE id - 1000 * FLOOR(id / 1000) = 7");
+            + " FLOOR(id / 1000) WHERE id - "
+            + perC
+            + " * FLOOR(id / "
+            + perC
+            + ") = "
+            + 7 % perC);
     ddl.add(
         "UPDATE bn.om SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
             + " before_tx_version = 1, before_customer_id = id - 100000 * FLOOR(id / 100000),"
-            + " before_total = id - 1000 * FLOOR(id / 1000) WHERE id - 5000 * FLOOR(id / 5000) = 3");
+            + " before_total = id - 1000 * FLOOR(id / 1000) WHERE id - "
+            + perO
+            + " * FLOOR(id / "
+            + perO
+            + ") = "
+            + 3 % perO);
     String ix = engine == Engine.ORACLE ? "bn." : "";
     ddl.add("CREATE INDEX " + ix + "c_region ON bn.c (region)");
     ddl.add("CREATE INDEX " + ix + "o_customer ON bn.o (customer_id)");
