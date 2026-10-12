@@ -26,12 +26,9 @@ now is a paragraph of design, not code.
   sets `QUOTED_IDENTIFIER ON` itself on SQL Server rather than documenting it, exit codes and a machine-readable
   summary, that it never prompts, and the channel for the covering-index warning (today implied to be a log
   line; it belongs in `--check` output).
-- Sweeper (`docs/design.md` 4.4 and section 6): unspecified are its ScalarDB configuration surface
-  (`database.properties`, a different surface from the driver URL), one pass vs loop and its interval, table
-  discovery (reuse `Catalog`, so `tools` depends on `driver`, or duplicate the lookup), whether concurrent
-  sweepers are safe (`recoverRecord`'s lifetime guard makes them so; say it), per-row outcomes (recovered /
-  not yet expired / threw), exit code, and a `--dry-run` listing expired in-flight rows, which doubles as the
-  "what is stuck" diagnostic.
+- Sweeper: dropped on 2026-10-12. The driver does not settle rows, since that needs the coordinator and
+  ScalarDB's runtime; recovery is ScalarDB's (todo 084). Its "what is stuck" listing survives as the
+  stuck-row check (`docs/design.md` 4.4, todo 085), whose CLI contract belongs here with `check`.
 - Catalog refresh: `Catalog.invalidate()` is public
   (`driver/src/main/java/com/scalar/db/nativejdbc/catalog/Catalog.java:105`) but the `Catalog` will live inside
   the driver, and refresh is specified only as miss, "not found" error and TTL, none of which an operator can
@@ -45,10 +42,9 @@ now is a paragraph of design, not code.
 
 ### Option 1: One CLI paragraph and one logging paragraph in the design
 
-**Approach:** In section 3 fix the CLI contract: subcommands `setup`, `check`, `backfill`, `sweep`; `--table`
-or all; `--dry-run`; `sweep --once | --interval <ms>`; exit 0 / 1 (something missing or a `recoverRecord`
-threw) / 2 (error); a line-per-table or JSON summary; never prompts; sets `QUOTED_IDENTIFIER ON` itself.
-State that `tools` depends on `driver` for the catalog lookup and that concurrent sweepers are safe. Add a
+**Approach:** In section 3 fix the CLI contract: subcommands `setup`, `check` (including stuck rows), `backfill`; `--table`
+or all; `--dry-run`; exit 0 / 1 (something missing, or rows stuck) / 2 (error); a line-per-table or JSON summary; never prompts; sets `QUOTED_IDENTIFIER ON` itself.
+State that `tools` depends on `driver` for the catalog lookup and not on ScalarDB. Add a
 `setClientInfo("scalardbnative.refreshCatalog", ...)` key next to `passthrough` for refresh. Name the logger
 (`com.scalar.db.nativejdbc`), the events (rewritten SQL, refusals, catalog refreshes, in-flight waits) and
 their levels.
@@ -108,7 +104,7 @@ To be filled during triage.
 ## Acceptance Criteria
 
 - [ ] Section 3 states the CLI subcommands, arguments, dry-run, exit codes and summary format.
-- [ ] Section 4.4 or 6 states the sweeper's configuration surface, loop mode, discovery and concurrency safety.
+- [ ] Section 3 states the stuck-row check's output and exit code (todo 085).
 - [ ] The design lists a way to refresh the catalog from a live connection.
 - [ ] The logger category, events and levels are written down.
 - [ ] `getParentLogger` behaviour matches what the design says about logging.

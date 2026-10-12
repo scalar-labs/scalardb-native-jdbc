@@ -15,6 +15,7 @@ import com.scalar.db.api.Update;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
@@ -104,7 +105,9 @@ class ReadIntegrationTest {
       assertThat(results).allMatch(Setup.Result::succeeded, "succeeded");
     }
     // the created table's names are lower case, which Oracle reads only quoted
-    String made = engine == Engine.ORACLE ? "rd.\"made\"" : "rd.made";
+    String madeTable = engine == Engine.ORACLE ? "\"made\"" : "made";
+    String made = "rd." + madeTable;
+    assertSettled(e, catalog, rd, madeTable);
     String mid = engine == Engine.ORACLE ? "\"id\"" : "id";
     String mx = engine == Engine.ORACLE ? "\"x\"" : "x";
     String limit2 =
@@ -196,6 +199,7 @@ class ReadIntegrationTest {
       }
       tx.commit();
     }
+    assertSettled(e, catalog, rd, madeTable, imp);
 
     try (Connection c = e.openDriver()) {
       assertThat(rows(c, "SELECT " + mx + " FROM " + made + " ORDER BY " + mid))
@@ -266,6 +270,36 @@ class ReadIntegrationTest {
           .isInstanceOf(SQLException.class)
           .extracting(t -> ((SQLException) t).getSQLState())
           .isEqualTo("07009");
+    }
+  }
+
+  /**
+   * Fails when a committed ScalarDB transaction left records prepared. ScalarDB writes the records'
+   * commit after the coordinator's on a best-effort basis: a failure is logged as "Committing
+   * records failed" and left to lazy recovery, and until then the driver reads the before images
+   * (design section 7), which a later assertion would report only as wrong rows.
+   */
+  private static void assertSettled(Engines e, Catalog catalog, String rd, String... tables)
+      throws SQLException {
+    Engine engine = e.engine();
+    try (Connection v = e.open()) {
+      for (String t : tables) {
+        TableInfo info = catalog.lookup(List.of(), rd, t);
+        String meta =
+            engine.quote(info.namespace())
+                + "."
+                + engine.quote(Objects.requireNonNull(info.metadataTable()));
+        assertThat(
+                rows(
+                    v,
+                    "SELECT COUNT(*) FROM "
+                        + meta
+                        + " WHERE "
+                        + engine.quote("tx_state")
+                        + " <> 3"))
+            .as("records of %s that ScalarDB's record commit left prepared", t)
+            .containsExactly("0");
+      }
     }
   }
 

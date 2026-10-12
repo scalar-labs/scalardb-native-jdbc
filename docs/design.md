@@ -158,7 +158,7 @@ almost for free: the protocol is identical, and every two-table concern in this 
 | Tombstones, orphans (4.5) | required; "no metadata row" is ambiguous | gone; the deemed-committed condition is `WHERE pk AND tx_id IS NULL` on the row, and a deleted row fails it by itself |
 | Backfill | required for correctness and for ScalarDB's liveness | wanted only to end the NULL-rule window: the all-NULL liveness defect of section 1 does not exist here, since the deemed-committed condition is a row-level test; the driver's NULL anchor is a plain `tx_id IS NULL` on the row |
 | Locking clause through an outer-join view | rewritten onto the base tables | no join, no issue; the covering-index caveat of 4.2 also largely disappears, because the locking re-read fetches `tx_id` and `tx_version` from the row, which forces the clustered record to be locked, unless those columns are added to a secondary index |
-| Coarse SERIALIZABLE path, sweeper, in-flight index | on `T_data` and `T_meta` | on `T` |
+| Coarse SERIALIZABLE path, stuck-row check, in-flight index | on `T_data` and `T_meta` | on `T` |
 | ScalarDB facts | identical | identical: same composers, conditions, before-image nulling, validation |
 
 Three additions for the classic layout. User statements are kept away from the metadata columns:
@@ -420,7 +420,7 @@ scalardb-native-jdbc/
   build-logic/src/main/kotlin/  scalardb-native-jdbc.{base,java,java11,publishing,license-report}-conventions
   config/spotbugs/exclude.xml
   driver/                       the published driver: com.scalar-labs:scalardb-native-jdbc, package com.scalar.db.nativejdbc
-  tools/                        setup command and sweeper: com.scalar-labs:scalardb-native-jdbc-tools; depends on scalardb at runtime; added with the first tool
+  tools/                        setup command and stuck-row check: com.scalar-labs:scalardb-native-jdbc-tools; no ScalarDB dependency; added with the first tool
   samples/                      crud-jdbc, crud-spring-data-jdbc, crud-jpa, crud-mybatis: the ORM acceptance suite (4.6)
   docs/design.md                this document
   README.md, RELEASING.md                                  (no LICENSE during the private preview)
@@ -485,7 +485,7 @@ and Spring Boot 4 on Java 21, each with its own `release`.
 | Module | Runtime | Compile-only | Test |
 |---|---|---|---|
 | `driver` | `jsqlparser`, `slf4j-api`. **No ScalarDB dependency.** | the five vendor JDBC drivers, which the application supplies | `scalardb` (newest 3.19 patch), Testcontainers, the vendor drivers, JUnit, AssertJ, Mockito, `logback-classic` |
-| `tools` | `scalardb`, `picocli`, `slf4j-api`, `logback-classic` | | as above |
+| `tools` | the driver, `picocli`, `slf4j-api`, `logback-classic`. **No ScalarDB dependency**: settling rows is ScalarDB's (section 6) | | as above |
 | `samples` | Spring Boot and the ORM of each sample; the driver | | the sample's own tests, against the driver and real ScalarDB transactions |
 
 **Version and compatibility.** The driver version mirrors the ScalarDB line it is certified against:
@@ -994,11 +994,10 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   SNAPSHOT and SERIALIZABLE.
 - **Composite keys.** `k = :k` everywhere means all key columns; the anchor map is keyed by all of them.
 - **Timestamps** in the metadata are epoch milliseconds, as ScalarDB writes them.
-- **Sweeper contract.** Scan `T_meta WHERE tx_state IN (1, 2) AND tx_prepared_at < now_ms - 15000`,
-  served by the in-flight index, and call `ConsensusCommitManager.recoverRecord(namespace, table, pk,
-  ck)` with the **virtual table name** (`T` or `T_scalardb`), not `_data`. It runs inside a ScalarDB
-  process, because it needs the coordinator, and returns false for a writer not yet expired, so the row
-  is revisited on the next pass.
+- **Stuck-row check contract.** Scan `T_meta WHERE tx_state IN (1, 2) AND tx_prepared_at < now_ms -
+  15000`, served by the in-flight index, read-only and in autocommit, and report per table the count and
+  the oldest age. It never settles a row: whether a prepared row's transaction committed is known only to
+  the coordinator, and the driver depends on neither the coordinator nor ScalarDB's runtime (section 6).
 - **Catalog cache.** ScalarDB's catalog is loaded whole and trusted for `scalardbnative.catalogTtlMs`;
   each resolved name is trusted for the same time and cached with its classification, in a bounded LRU.
   No lock is held across a round trip: while one thread reloads, the others are served the previous
@@ -1049,7 +1048,7 @@ make to that key overwrite it (`JdbcAdmin.createVirtualTableView`, `JdbcDatabase
 - Reads start from the data table. The virtual table is `FROM <data> LEFT OUTER JOIN <metadata>`: a data
   row without metadata appears with NULL metadata, a metadata row without a data row does not appear.
   Every Get, Scan, validation re-read and lazy-recovery read goes through that view, so to ScalarDB the
-  key does not exist. The sweeper of 4.4 ignores it too, since it is state 3.
+  key does not exist. The stuck-row check of 4.4 ignores it too, since it is state 3.
 - A ScalarDB insert or upsert of the key overwrites it. Having read nothing, ScalarDB prepares with "not
   exists", which on an imported table applies to the data side only; the metadata side gets an
   unconditional put, run as an upsert (`INSERT ... ON CONFLICT DO UPDATE`, `ON DUPLICATE KEY UPDATE`).
@@ -1280,10 +1279,13 @@ One setting, the native connection's isolation level, selects everything else.
   SERIALIZABLE ScalarDB read of the row, or a READ_COMMITTED read-write one, which starts a background,
   best-effort roll at once if the coordinator holds a decision and otherwise after the 15 s lifetime by
   aborting the writer (fact 6). Without the coordinator the driver cannot settle a row itself. **ScalarDB ships no periodic recovery job.** Core exposes a per-record
-  `ConsensusCommitManager.recoverRecord` API with the same lifetime guard; a sweeper that scans `T_meta`
-  for states 1 and 2 older than the lifetime and calls it has to be written. Without it a crashed ScalarDB
-  transaction blocks driver writes on those keys, and aborts every SNAPSHOT or SERIALIZABLE driver read of
-  them, until some ScalarDB read happens to touch them.
+  `ConsensusCommitManager.recoverRecord` API with the same lifetime guard. The driver does not call it,
+  not even from a tool: it would need ScalarDB's configuration and the coordinator at run time, and the
+  driver depends on neither. A job that settles every prepared record whose transaction is decided or
+  expired is ScalarDB's to provide (todo 084); the driver only reports such rows (the stuck-row check
+  of 4.4). Until ScalarDB has one, a crashed ScalarDB transaction, or a record commit that failed, blocks
+  driver writes on those keys, and aborts every SNAPSHOT or SERIALIZABLE driver read of them, until some
+  ScalarDB read happens to touch them.
 - **ScalarDB waiting on the driver**: a prepare blocked by a `FOR SHARE` or CAS lock waits until the
   driver's transaction ends, then re-evaluates its condition. Deadlocks are detected by the database, and
   ScalarDB's JDBC adapter maps them to a retryable conflict (`RdbEngine.isConflict`: PostgreSQL `40001`
@@ -1324,9 +1326,15 @@ between `T` and plain tables are the database's own.
   reads are serializable against ScalarDB updates and deletes but not inserts.
 - **Recency in one failure path.** A ScalarDB record commit that failed after the coordinator write leaves
   rows in state 1; the driver returns the before image (READ COMMITTED) or retries (other levels) until
-  recovery runs, although ScalarDB told its client "committed".
-- **Liveness depends on ScalarDB-side recovery** for rows left by crashed ScalarDB transactions, and that
-  sweeper has to be built (section 6).
+  recovery runs, although ScalarDB told its client "committed". On Oracle this path is not rare: at the
+  SERIALIZABLE level that ScalarDB requires there for decoupled tables, a hard parse reads `SYS.USER$` at
+  the transaction's snapshot, every logon writes the user's last login time into `USER$`, and the read then
+  fails with ORA-08177, which ScalarDB's record commit does not retry (todos 082, 083). Oracle's hidden
+  `_disable_last_successful_login_time`, set by a DBA, and long-lived ScalarDB connection pools make it
+  rarer; neither removes the failure path.
+- **Liveness depends on ScalarDB-side recovery** for rows left by crashed ScalarDB transactions or failed
+  record commits, and ScalarDB has no job that runs it on its own (section 6, todo 084); the driver
+  reports such rows but cannot settle them.
 - **Retry rate** under the two stronger levels rises with the number of in-flight rows encountered. The
   coarse per-table check of 4.2 raises it further on busy tables.
 - **ScalarDB's own semantics are unchanged.** Its SNAPSHOT keeps its documented read skew; the driver cannot

@@ -37,7 +37,7 @@ design describes.
   although the design makes it an engine property; `NativeJdbcUrl.SUB_PROTOCOLS`
   (`driver/src/main/java/com/scalar/db/nativejdbc/NativeJdbcUrl.java:22-23`) will duplicate the engine enum.
 - Simplicity reviewer: the partition/clustering split in `TableInfo` (`TableInfo.java:16-17, 112-123`) is the
-  sweeper's concern (`recoverRecord` in `tools` has ScalarDB's API); every driver rule uses the whole key, and
+  sweeper's concern, and the sweeper is now ScalarDB's (todo 084); every driver rule uses the whole key, and
   `keyColumns()` (`:130-134`) allocates a list per call. Keep `Layout` with all four values: imported vs
   created differ in outer-join locking and tombstones.
 

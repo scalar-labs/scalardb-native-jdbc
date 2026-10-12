@@ -45,10 +45,28 @@ known wrong-result issue with NOT EXISTS in an inline view under UNION ALL in 23
 
 ## Recommended Action
 
+Cause found, outside the driver (work log): every Oracle logon writes the user's last login time
+into `SYS.USER$`; a hard parse inside a SERIALIZABLE transaction reads `USER$` at the transaction's
+snapshot and fails with ORA-08177 when a logon changed the block since. ScalarDB requires SERIALIZABLE
+on Oracle for decoupled tables (its default is the database's, READ COMMITTED, where ORA-08177 cannot
+occur), and its record commit ignores the failure, so the rows stay prepared and the
+driver returns their before images, as design section 7 ("Recency in one failure path") says it will.
+
+Test fix: the Oracle test container sets `_disable_last_successful_login_time = TRUE` (as SYSDBA),
+and `ReadIntegrationTest` checks after each ScalarDB commit that no records were left prepared, so a
+recurrence names its cause.
+
+Open for production, not done: any ScalarDB deployment on Oracle with connection churn can leave
+committed rows prepared this way, invisible to the driver until ScalarDB's lazy recovery reads them,
+and ScalarDB has no job that recovers them (section 6). Options: document the parameter (hidden, needs Oracle Support's
+blessing) or long-lived pools; have ScalarDB settle such rows with a recovery job of its own (todo 084), while the driver
+only reports them (todo 085); ask ScalarDB to retry
+ORA-08177 in the record commit. The upstream request is todo 083. Design section 7 names this Oracle failure mode (2026-10-12).
+
 ## Acceptance Criteria
 
-- [ ] The cause found and fixed, or ruled outside the driver with evidence.
-- [ ] 20 consecutive complete runs pass.
+- [x] The cause found and fixed, or ruled outside the driver with evidence.
+- [x] 20 consecutive complete runs pass (2026-10-12, with the fix; 4 of 20 failed without it).
 
 ## Work Log
 
@@ -56,3 +74,19 @@ known wrong-result issue with NOT EXISTS in an inline view under UNION ALL in 23
 
 **By:** Claude Code
 - Two failures, logged SQL correct, 13 passes since; see Findings.
+
+### 2026-10-11 - Cause found
+
+**By:** Claude Code
+- ScalarDB 3.19.1 `ParticipantCommitHandler.commitRecords` catches any failure, logs "Committing
+  records failed" at INFO and returns: the client is told "committed" while the records stay in
+  state 1. For inserted rows (no before image) the driver then returns nothing, the observed symptom.
+- Added `assertSettled` to `ReadIntegrationTest`. 20 complete runs: 4 Oracle failures, 3 of them the
+  check (3 records of `made` left prepared, log `Committing records failed ... ORA-00604: Error
+  occurred at recursive SQL level 1 ... ORA-08177`), 1 the same error in the test's 2PC `prepare`.
+- First guess, deferred segment creation, was wrong: with it off, 5 of 10 runs failed, one on a
+  ScalarDB read.
+- An `errorstack` event on 8177, read back through `v$diag_trace_file_contents`, caught the
+  recursive statement: `select user#, password, ... from user$ where name = :1`, failing in a
+  consistent read (`kcbgtcr -> ktrexc`). A probe showed each logon moving SYSTEM's `last_login`, and
+  `_disable_last_successful_login_time = TRUE` (SYSDBA only) stopping it.

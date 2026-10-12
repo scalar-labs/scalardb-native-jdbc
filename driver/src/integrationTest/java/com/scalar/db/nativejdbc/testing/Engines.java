@@ -89,6 +89,24 @@ public enum Engines {
     }
 
     @Override
+    String url(JdbcDatabaseContainer<?> c) throws SQLException {
+      // Each logon writes the user's last login time into SYS.USER$, and a hard parse inside a
+      // SERIALIZABLE transaction reads USER$ at the transaction's snapshot: with the pools' logons
+      // that read fails now and then with ORA-08177, and in ScalarDB's record commit, which ignores
+      // the failure, the rows stay prepared. Only SYSDBA may switch the logon write off.
+      Properties p = new Properties();
+      p.setProperty("user", "sys");
+      p.setProperty("password", c.getPassword());
+      p.setProperty("internal_logon", "sysdba");
+      try (Connection conn = DriverManager.getConnection(c.getJdbcUrl(), p);
+          Statement st = conn.createStatement()) {
+        st.execute(
+            "ALTER SYSTEM SET \"_disable_last_successful_login_time\" = TRUE SCOPE = MEMORY");
+      }
+      return c.getJdbcUrl();
+    }
+
+    @Override
     String username(JdbcDatabaseContainer<?> c) {
       return "system"; // ScalarDB creates a user per namespace, which needs DBA rights
     }
