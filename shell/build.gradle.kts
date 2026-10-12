@@ -47,9 +47,22 @@ dependencies {
 
     testCompileOnly(libs.spotbugs.annotations)
 
-    "integrationTestImplementation"(platform(libs.testcontainers.bom))
-    "integrationTestImplementation"(libs.testcontainers.postgresql)
-    "integrationTestRuntimeOnly"(libs.postgresql)
+    // the driver's engine containers, and ScalarDB to create the ScalarDB tables \dt marks
+    "integrationTestImplementation"(testFixtures(project(":driver")))
+    "integrationTestCompileOnly"(libs.spotbugs.annotations)
+    // Testcontainers' MySQL module loads Connector/J to wait for the server; the test deregisters
+    // it before snsql connects, so that MySQL goes through MariaDB Connector/J as in the zip
+    "integrationTestRuntimeOnly"(libs.mysql.connector.j)
+}
+
+// the tests run the drivers the zip bundles
+configurations["integrationTestRuntimeOnly"].extendsFrom(bundledDrivers)
+
+tasks.named<Test>("integrationTest") {
+    systemProperty(
+        "nativejdbc.engines",
+        providers.systemProperty("nativejdbc.engines").getOrElse("all"),
+    )
 }
 
 distributions.main {

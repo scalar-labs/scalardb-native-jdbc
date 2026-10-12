@@ -48,6 +48,12 @@ Option 1. Any difference found goes into the design's per-engine table.
 
 - From the shell plan's decision to bundle MariaDB Connector/J for MySQL.
 
+### 2026-10-13 - The shell's part
+
+**By:** Claude Code
+
+- The shell's integration tests run MySQL through MariaDB Connector/J only: Connector/J is deregistered from `DriverManager` once Testcontainers has used it to wait for the server, and a test checks `\conninfo` names MariaDB Connector/J. The driver's own suite still runs MySQL through Connector/J only; that is what remains here.
+
 ## Resources
 
 - `docs/design.md` section 1, URL scheme; `docs/plans/shell.md` decision 3.

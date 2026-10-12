@@ -1,7 +1,14 @@
 package com.scalar.db.nativejdbc.shell;
 
+import com.scalar.db.nativejdbc.NativeJdbcDriver;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
@@ -9,6 +16,7 @@ import java.sql.SQLException;
 import java.sql.SQLWarning;
 import java.sql.Statement;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -48,15 +56,50 @@ final class Repl {
               + LEVEL);
   private static final Pattern FIRST_WORDS = Pattern.compile("(\\w+)(?:\\s+(\\w+))?");
 
-  private final Connection connection;
-  private final StatementSplitter.Dialect dialect;
+  /** Opens the connection {@code \c} asks for. */
+  interface Connector {
+    /**
+     * Opens a connection.
+     *
+     * @param target a database name or a URL; null for the current database again
+     * @return the new connection
+     * @throws SQLException if it cannot be opened
+     */
+    Connected connect(@Nullable String target) throws SQLException;
+  }
+
+  /** A connection {@link Connector} opened, with what the session needs to know about it. */
+  static final class Connected {
+    final Connection connection;
+    final StatementSplitter.Dialect dialect;
+    final String url;
+
+    /**
+     * @param connection the driver's connection, in autocommit mode
+     * @param dialect the engine's lexical rules
+     * @param url the URL, without credentials, for {@code \conninfo}
+     */
+    Connected(Connection connection, StatementSplitter.Dialect dialect, String url) {
+      this.connection = connection;
+      this.dialect = dialect;
+      this.url = url;
+    }
+  }
+
+  private Connection connection;
+  private StatementSplitter.Dialect dialect;
   private final PrintWriter out;
-  private final String url;
-  private final String database;
+  private String url;
+  private String database;
+  private CatalogCommands catalog;
   private final boolean onErrorStop;
+  private final @Nullable Connector connector;
   private final StringBuilder buffer = new StringBuilder();
   private boolean inTransaction;
   private int sessionLevel;
+  private boolean expanded;
+  private boolean timing;
+  private @Nullable Set<String> completions;
   // the one field Ctrl-C's signal thread reads; everything else stays on the session's thread
   private final AtomicReference<@Nullable Statement> running = new AtomicReference<>();
 
@@ -77,15 +120,35 @@ final class Repl {
       PrintWriter out,
       boolean onErrorStop)
       throws SQLException {
-    this.connection = connection;
-    this.dialect = dialect;
-    this.url = url;
+    this(new Connected(connection, dialect, url), out, onErrorStop, null);
+  }
+
+  /**
+   * Starts a session on an open connection.
+   *
+   * @param connected the connection
+   * @param out where results and errors go
+   * @param onErrorStop whether an error ends the session, psql's {@code ON_ERROR_STOP}
+   * @param connector opens the connection {@code \c} asks for; null where {@code \c} is refused
+   * @throws SQLException if the connection cannot report its database
+   */
+  Repl(Connected connected, PrintWriter out, boolean onErrorStop, @Nullable Connector connector)
+      throws SQLException {
     this.out = out;
     this.onErrorStop = onErrorStop;
+    this.connector = connector;
+    this.connection = connected.connection;
+    this.dialect = connected.dialect;
+    this.url = connected.url;
+    this.catalog = new CatalogCommands(connection, dialect);
+    this.database = database(connection);
+    this.sessionLevel = connection.getTransactionIsolation();
+  }
+
+  private static String database(Connection connection) throws SQLException {
     String catalog = connection.getCatalog();
     String schema = catalog == null || catalog.isEmpty() ? connection.getSchema() : catalog;
-    this.database = schema == null || schema.isEmpty() ? "snsql" : schema;
-    this.sessionLevel = connection.getTransactionIsolation();
+    return schema == null || schema.isEmpty() ? "snsql" : schema;
   }
 
   /**
@@ -96,7 +159,30 @@ final class Repl {
    * @return the prompt
    */
   String prompt(boolean continuation) {
-    return database + (continuation ? "-" : "=") + (inTransaction ? "*" : "") + "> ";
+    return database
+        + (continuation ? "-" : "=")
+        + (inTransaction ? "*" : "")
+        + (passthrough() ? "!" : "")
+        + "> ";
+  }
+
+  /**
+   * The names to complete at the prompt: schemas, and the tables, views and columns of the current
+   * schema, read once and again after DDL or {@code \c}.
+   *
+   * @return the names; empty if they cannot be read
+   */
+  Set<String> completions() {
+    Set<String> names = completions;
+    if (names == null) {
+      try {
+        names = catalog.completions();
+      } catch (SQLException e) {
+        names = Set.of();
+      }
+      completions = names;
+    }
+    return names;
   }
 
   /**
@@ -152,6 +238,17 @@ final class Repl {
     return rest.isEmpty() || run(rest);
   }
 
+  /**
+   * The database product and version, for the banner.
+   *
+   * @return the product
+   * @throws SQLException if the connection cannot report it
+   */
+  String product() throws SQLException {
+    DatabaseMetaData md = connection.getMetaData();
+    return md.getDatabaseProductName() + " " + md.getDatabaseProductVersion();
+  }
+
   /** Cancels the running statement, for Ctrl-C; called from the signal thread. */
   void cancel() {
     Statement s = running.get();
@@ -183,69 +280,245 @@ final class Repl {
 
   private boolean meta(String line) {
     String[] parts = line.split("\\s+", 2);
-    switch (parts[0]) {
-      case "\\q":
-        return false;
-      case "\\?":
-        out.println("General");
-        out.println("  \\q                     quit snsql");
-        out.println("  \\conninfo              display information about the current connection");
-        out.println("  \\?                     show this help");
-        out.println();
-        out.println("Transactions");
-        out.println(
-            "  BEGIN, COMMIT, ROLLBACK and SET TRANSACTION ISOLATION LEVEL work as in psql;");
-        out.println("  snsql runs them through JDBC, since the driver must see every transaction.");
-        out.println();
-        break;
-      case "\\conninfo":
-        conninfo();
-        break;
-      default:
-        out.println("invalid command " + parts[0]);
-        out.println("Try \\? for help.");
-        break;
+    String arg = parts.length > 1 && !parts[1].isBlank() ? parts[1].strip() : null;
+    // psql's \dt+ and \dtS: more detail and system objects, which JDBC does not separate
+    String command = parts[0].length() > 2 ? parts[0].replaceAll("[+S]+$", "") : parts[0];
+    try {
+      switch (command) {
+        case "\\q":
+          return false;
+        case "\\?":
+          help();
+          break;
+        case "\\conninfo":
+          conninfo();
+          break;
+        case "\\c":
+        case "\\connect":
+          reconnect(arg);
+          break;
+        case "\\d":
+          if (arg == null) {
+            catalog.relations(null, expanded, out);
+          } else {
+            catalog.describe(arg, expanded, out);
+          }
+          break;
+        case "\\dt":
+          catalog.tables(arg, expanded, out);
+          break;
+        case "\\dv":
+          catalog.views(arg, expanded, out);
+          break;
+        case "\\di":
+          catalog.indexes(arg, expanded, out);
+          break;
+        case "\\dn":
+          catalog.schemas(arg, expanded, out);
+          break;
+        case "\\l":
+        case "\\list":
+          catalog.databases(expanded, out);
+          break;
+        case "\\x":
+          expanded = toggle(arg, expanded);
+          out.println("Expanded display is " + (expanded ? "on." : "off."));
+          break;
+        case "\\timing":
+          timing = toggle(arg, timing);
+          out.println("Timing is " + (timing ? "on." : "off."));
+          break;
+        case "\\passthrough":
+          return passthrough(arg);
+        case "\\i":
+        case "\\include":
+          return include(arg);
+        default:
+          out.println("invalid command " + parts[0]);
+          out.println("Try \\? for help.");
+          break;
+      }
+    } catch (SQLException e) {
+      error(e);
+      return !onErrorStop;
+    } catch (IllegalArgumentException e) {
+      out.println(parts[0] + ": " + e.getMessage());
+      return !onErrorStop;
+    } finally {
+      out.flush();
     }
-    out.flush();
     return true;
   }
 
-  private void conninfo() {
+  private void help() {
+    out.println("General");
+    out.println("  \\q                     quit snsql");
+    out.println("  \\conninfo              display information about the current connection");
+    out.println("  \\c [DBNAME|URL]        connect to another database");
+    out.println("  \\i FILE                execute commands from file");
+    out.println("  \\timing [on|off]       toggle timing of commands");
+    out.println("  \\x [on|off]            toggle expanded output");
+    out.println("  \\?                     show this help");
+    out.println();
+    out.println("Informational (PATTERN: [SCHEMA.]NAME, with * and ?)");
+    out.println("  \\d [NAME]              describe table, view or index; list relations");
+    out.println("  \\dt [PATTERN]          list tables, marking ScalarDB tables");
+    out.println("  \\dv [PATTERN]          list views");
+    out.println("  \\di [PATTERN]          list indexes");
+    out.println("  \\dn [PATTERN]          list schemas");
+    out.println("  \\l                     list databases");
+    out.println();
+    out.println("Transactions");
+    out.println("  BEGIN, COMMIT, ROLLBACK and SET TRANSACTION ISOLATION LEVEL work as in psql;");
+    out.println("  snsql runs them through JDBC, since the driver must see every transaction.");
+    out.println("  \\passthrough [on|off]  run statements unchecked by the driver, in autocommit");
+    out.println("                         only, for DDL and maintenance; the prompt shows !");
+    out.println();
+  }
+
+  private static boolean toggle(@Nullable String arg, boolean current) {
+    if (arg == null) {
+      return !current;
+    }
+    switch (arg.toLowerCase(Locale.ROOT)) {
+      case "on":
+      case "true":
+      case "1":
+        return true;
+      case "off":
+      case "false":
+      case "0":
+        return false;
+      default:
+        throw new IllegalArgumentException("unrecognized value \"" + arg + "\": on or off");
+    }
+  }
+
+  private boolean passthrough() {
     try {
-      DatabaseMetaData md = connection.getMetaData();
+      return Boolean.parseBoolean(connection.getClientInfo(NativeJdbcDriver.PASSTHROUGH));
+    } catch (SQLException e) {
+      return false;
+    }
+  }
+
+  /** {@code \passthrough}: the driver's passthrough setting, in autocommit only, as it requires. */
+  private boolean passthrough(@Nullable String arg) throws SQLException {
+    boolean on = toggle(arg, passthrough());
+    if (on && inTransaction) {
       out.println(
-          "You are connected to database \""
-              + database
-              + "\" as user \""
-              + md.getUserName()
-              + "\" via "
-              + url
-              + ".");
-      out.println(
-          md.getDatabaseProductName()
-              + " "
-              + md.getDatabaseProductVersion()
-              + ", "
-              + md.getDriverName()
-              + " "
-              + md.getDriverVersion());
+          "ERROR:  \\passthrough applies in autocommit mode only; end the transaction first");
+      return !onErrorStop;
+    }
+    connection.setClientInfo(NativeJdbcDriver.PASSTHROUGH, Boolean.toString(on));
+    completions = null; // anything may run now
+    out.println(
+        on
+            ? "Passthrough is on: statements reach the database unchecked by the driver."
+            : "Passthrough is off.");
+    return true;
+  }
+
+  /** {@code \i}: runs a file's commands in this session, as {@code -f} does. */
+  @SuppressFBWarnings(
+      value = "PATH_TRAVERSAL_IN",
+      justification = "the user names the script to run, with the user's own permissions")
+  private boolean include(@Nullable String file) {
+    if (file == null) {
+      throw new IllegalArgumentException("missing required argument");
+    }
+    try (BufferedReader reader = Files.newBufferedReader(Paths.get(file), StandardCharsets.UTF_8)) {
+      for (String line = reader.readLine(); line != null; line = reader.readLine()) {
+        if (!feed(line)) {
+          return false;
+        }
+      }
+    } catch (NoSuchFileException e) {
+      out.println(file + ": No such file or directory");
+      return !onErrorStop;
+    } catch (IOException e) {
+      out.println(file + ": " + e.getMessage());
+      return !onErrorStop;
+    }
+    return finish();
+  }
+
+  /** {@code \c}: a new connection replaces the current one only once it is open, as in psql. */
+  private void reconnect(@Nullable String target) throws SQLException {
+    if (connector == null) {
+      out.println("\\c is not available here");
+      return;
+    }
+    Connected next;
+    try {
+      next = connector.connect(target);
     } catch (SQLException e) {
       error(e);
+      out.println("Previous connection kept");
+      return;
     }
+    Connection previous = connection;
+    boolean wasInTransaction = inTransaction;
+    connection = next.connection;
+    dialect = next.dialect;
+    url = next.url;
+    catalog = new CatalogCommands(connection, dialect);
+    database = database(connection);
+    sessionLevel = connection.getTransactionIsolation();
+    inTransaction = false;
+    completions = null;
+    try {
+      if (wasInTransaction) {
+        previous.rollback();
+      }
+    } finally {
+      previous.close();
+    }
+    out.println(
+        "You are now connected to database \""
+            + database
+            + "\" as user \""
+            + connection.getMetaData().getUserName()
+            + "\".");
+  }
+
+  private void conninfo() throws SQLException {
+    DatabaseMetaData md = connection.getMetaData();
+    out.println(
+        "You are connected to database \""
+            + database
+            + "\" as user \""
+            + md.getUserName()
+            + "\" via "
+            + url
+            + ".");
+    out.println(
+        md.getDatabaseProductName()
+            + " "
+            + md.getDatabaseProductVersion()
+            + ", "
+            + md.getDriverName()
+            + " "
+            + md.getDriverVersion());
   }
 
   /** Runs one statement; returns whether the session goes on. */
   private boolean run(String sql) {
+    long start = System.nanoTime();
     try {
       String s = StatementSplitter.withoutLeadingComments(sql);
       if (!transactionCommand(s)) {
         execute(sql);
       }
-      out.flush();
       return true;
     } catch (SQLException e) {
       error(e);
       return !onErrorStop;
+    } finally {
+      if (timing) {
+        out.println(String.format(Locale.ROOT, "Time: %.3f ms", (System.nanoTime() - start) / 1e6));
+      }
+      out.flush();
     }
   }
 
@@ -353,14 +626,18 @@ final class Repl {
       while (true) {
         if (isResult) {
           try (ResultSet rs = st.getResultSet()) {
-            Printer.table(rs, out);
+            Printer.print(Printer.read(rs), null, expanded, true, out);
           }
         } else {
           int count = st.getUpdateCount();
           if (count < 0) {
             break;
           }
-          out.println(tag(sql, count));
+          String tag = tag(sql, count);
+          if (tag.startsWith("CREATE") || tag.startsWith("DROP") || tag.startsWith("ALTER")) {
+            completions = null; // the names may have changed
+          }
+          out.println(tag);
         }
         isResult = st.getMoreResults();
       }

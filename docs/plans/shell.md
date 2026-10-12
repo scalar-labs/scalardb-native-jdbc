@@ -1,7 +1,7 @@
 # Plan: the interactive SQL shell
 
 Status: accepted 2026-10-11 (todo 081), with the four decisions under "Decisions". Milestone 1
-done 2026-10-11; milestone 2 not started.
+done 2026-10-11, milestone 2 done 2026-10-13.
 
 ## Goal
 
@@ -29,7 +29,8 @@ input and Windows terminals.
 - `\i file`, `-c sql`, `-f file`, `ON_ERROR_STOP`; history in `~/.snsql_history`.
 - Ctrl-C cancels the running statement through `Statement.cancel`; at the prompt it clears the line.
 - `\dt`, `\dv`, `\dn`, `\di`, `\d table` (columns, types, nullability, defaults, primary key, indexes,
-  foreign keys), `\l`, `\c`, `\conninfo`, `\q`, `\?`, all from `DatabaseMetaData`.
+  foreign keys), `\l`, `\c dbname` (or a URL), `\conninfo`, `\q`, `\?`, all from `DatabaseMetaData`, with
+  psql's patterns (`[schema.]name`, `*`, `?`, an unquoted name folded as the database folds it).
 - Server notices printed from the `SQLWarning` chain.
 
 **Different, because of the driver.** The driver refuses `BEGIN`, `SET TRANSACTION` and `SET autocommit`
@@ -52,8 +53,11 @@ only warns. `SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL x` and M
 TRANSACTION ISOLATION LEVEL x` set the session's level. A failed commit is rolled back before the
 connection returns to autocommit, which would otherwise commit it. `ROLLBACK TO SAVEPOINT` and
 `SAVEPOINT` go through as SQL, as today. Additions no generic shell has:
-`\dt` marks ScalarDB tables, and `\passthrough on|off` wraps `setClientInfo("scalardbnative.passthrough", ...)`
-for DDL and maintenance, refused by the shell inside a transaction as the driver would.
+`\dt` marks ScalarDB tables in a `ScalarDB` column (`yes`, `yes, not set up`, or `internal` for the data,
+metadata and virtual tables ScalarDB keeps), and lists a ScalarDB table stored as a view, as a created
+decoupled table is, since users take it for a table; `\d table` says how the driver treats it.
+`\passthrough on|off` wraps `setClientInfo("scalardbnative.passthrough", ...)` for DDL and maintenance,
+refused by the shell inside a transaction as the driver would, and the prompt shows it, `db=!>`.
 
 **Not matched.** `\d` details JDBC metadata does not carry (check constraints, triggers, partitions,
 ACLs, `\dp`, `\du`, `\dx`), which need per-engine catalog queries; `\h`, which embeds PostgreSQL's grammar
@@ -144,6 +148,20 @@ leaving no change and `BEGIN ... COMMIT` leaving the row, `ON_ERROR_STOP`, the d
 Tests: the integration script widened to every engine configuration, MySQL through MariaDB Connector/J
 included (todo 082).
 
+**Done 2026-10-13.** Differences from the above:
+
+- The integration tests run on every engine but `mysql_lower_case`, which changes nothing in the shell,
+  with the drivers the zip bundles; MySQL Connector/J, which Testcontainers needs to start MySQL, is
+  deregistered before snsql connects. They share the driver's engine containers, now its test fixtures.
+  Each database holds a plain table and a table imported into ScalarDB and set up; the transactions
+  still run on the plain one (milestone 1's note).
+- Ctrl-C's cancel is tested on every engine; SQL Server's `WAITFOR` runs under `\passthrough`, since the
+  driver does not read it, and Oracle cancels a long cross join, having no sleep a query can call.
+- `\c` takes a database name or a URL, not psql's `\c dbname user`, which would need a new password.
+- Completion offers names only, no keywords.
+- The prompt shows passthrough as `db=!>`, which psql has no counterpart for.
+- Found todo 104: the driver refuses PostgreSQL's `SET search_path TO ...` (the `=` form works).
+
 ### Later, when asked for
 
 `\set` and `:var` interpolation, `\watch`, `\e`, `\o`, `\pset`, per-engine `\d` details, `\copy` on plain
@@ -169,8 +187,10 @@ to merge the drivers' `META-INF/services/java.sql.Driver` files and strip their 
 
 ## Code layout
 
-One package, `com.scalar.db.nativejdbc.shell`: `Main` (picocli options), `Repl` (the loop and the
-meta-commands), `StatementSplitter` (engine-aware, no JDBC), `Printer` (tables and expanded output).
+One package, `com.scalar.db.nativejdbc.shell`: `Main` (picocli options, connecting, the prompt's
+parser and completer), `Repl` (the session and the meta-commands), `CatalogCommands` (`\d` and its
+kin from `DatabaseMetaData`), `StatementSplitter` (engine-aware, no JDBC), `Printer` (tables and
+expanded output).
 `Repl` takes typed text and a `PrintWriter`, and the prompt's JLine parser asks it whether the text is
 complete, so `-f` and the tests run the same code as the prompt. Depends on the driver, JLine
 (`jline-reader`, `jline-terminal`, and `jline-terminal-jni` at run time) and picocli.
@@ -193,7 +213,8 @@ complete, so `-f` and the tests run the same code as the prompt. Depends on the 
 4. **Marking ScalarDB tables.** The classification is the catalog's (design section 2: two layouts,
    case rules, `virtual_tables`), and the shell must not repeat it: a small public interface in
    the driver, reached with `unwrap`, that answers whether a table is ScalarDB-managed; its first user is
-   the shell, and it is useful to operators' own tooling too.
+   the shell, and it is useful to operators' own tooling too. Implemented in milestone 2 as
+   `com.scalar.db.nativejdbc.ScalarDbTables`, `kind(schema, table)` by stored name.
 
 ## Risks
 
@@ -205,7 +226,7 @@ complete, so `-f` and the tests run the same code as the prompt. Depends on the 
   an Oracle PL/SQL block, a SQL Server batch. The splitter's unit tests carry one case per construct per
   engine; anything it cannot split, such as a MySQL procedure body (no `DELIMITER` command yet) or a
   PostgreSQL `BEGIN ATOMIC` body, is cut at its first `;` and the engine's error shown.
-- **`Statement.cancel` through the proxies.** The proxies forward it; Ctrl-C cancelled a long statement
-  on PostgreSQL by hand in milestone 1, and milestone 2 tests it on the other engines.
+- **`Statement.cancel` through the proxies.** The proxies forward it; milestone 2's integration test
+  cancels a long statement on every engine.
 - **Terminals.** JLine falls back to a dumb terminal when it cannot find a native one, losing editing but
   not function; the `-f` path needs no terminal at all.

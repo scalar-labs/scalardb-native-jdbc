@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.api.DistributedTransactionAdmin;
 import com.scalar.db.nativejdbc.NativeJdbcDriver;
+import com.scalar.db.nativejdbc.ScalarDbTables;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
@@ -119,6 +120,19 @@ class RoutingIntegrationTest {
         assertThat(tables.isWrapperFor(ResultSet.class)).isTrue();
       }
       assertThat(c.unwrap(Class.forName("org.postgresql.PGConnection"))).isNotNull();
+    }
+  }
+
+  @Test
+  void scalarDbTables_classifiesByStoredName() throws Exception {
+    try (Connection c = connect()) {
+      assertThat(c.isWrapperFor(ScalarDbTables.class)).isTrue();
+      ScalarDbTables tables = c.unwrap(ScalarDbTables.class);
+      assertThat(tables.kind("m1", "s")).isEqualTo(ScalarDbTables.Kind.SCALARDB);
+      assertThat(tables.kind("m1plain", "s")).isEqualTo(ScalarDbTables.Kind.PLAIN);
+      assertThat(tables.kind("m1", "s_tx_metadata")).isEqualTo(ScalarDbTables.Kind.REFUSED);
+      assertThat(tables.kind("m1", "s_scalardb")).isEqualTo(ScalarDbTables.Kind.REFUSED);
+      assertThat(tables.kind("m1", "no_such_table")).isEqualTo(ScalarDbTables.Kind.PLAIN);
     }
   }
 

@@ -9,45 +9,99 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import org.jline.utils.WCWidth;
+import org.jspecify.annotations.Nullable;
 
-/** Prints a result set as psql's aligned table: a centred header, numbers right-aligned. */
+/**
+ * Prints rows as psql does: an aligned table with a centred header and numbers right-aligned, or
+ * with {@code \x} one record per block.
+ */
 final class Printer {
+
+  /** Rows to print: their column labels, which columns are numeric, and the values as text. */
+  static final class Rows {
+    final String[] labels;
+    final boolean[] numeric;
+    final List<String[]> values = new ArrayList<>();
+
+    Rows(String... labels) {
+      this.labels = labels.clone();
+      this.numeric = new boolean[labels.length];
+    }
+
+    /** Adds a row; a null value prints empty, as psql prints NULL. */
+    Rows add(@Nullable String... row) {
+      String[] r = new String[labels.length];
+      for (int c = 0; c < r.length; c++) {
+        r[c] = c < row.length && row[c] != null ? printable(row[c]) : "";
+      }
+      values.add(r);
+      return this;
+    }
+  }
 
   private Printer() {}
 
   /**
-   * Prints every row of a result set, then {@code (n rows)}. The rows are held in memory to size
-   * the columns, as psql does without {@code FETCH_COUNT}.
+   * Reads a result set to its end. The rows are held in memory to size the columns, as psql does
+   * without {@code FETCH_COUNT}.
    *
-   * @param rs the result set, read to its end
-   * @param out where to print
+   * @param rs the result set
+   * @return its rows
    * @throws SQLException if reading the result set fails
    */
-  static void table(ResultSet rs, PrintWriter out) throws SQLException {
+  static Rows read(ResultSet rs) throws SQLException {
     ResultSetMetaData md = rs.getMetaData();
-    int columns = md.getColumnCount();
-    String[] labels = new String[columns];
-    boolean[] numeric = new boolean[columns];
-    int[] widths = new int[columns];
-    for (int c = 0; c < columns; c++) {
+    String[] labels = new String[md.getColumnCount()];
+    for (int c = 0; c < labels.length; c++) {
       labels[c] = printable(md.getColumnLabel(c + 1));
-      numeric[c] = isNumeric(md.getColumnType(c + 1));
-      widths[c] = width(labels[c]);
     }
-    List<String[]> rows = new ArrayList<>();
+    Rows rows = new Rows(labels);
+    for (int c = 0; c < labels.length; c++) {
+      rows.numeric[c] = isNumeric(md.getColumnType(c + 1));
+    }
     while (rs.next()) {
-      String[] row = new String[columns];
-      for (int c = 0; c < columns; c++) {
-        String v = rs.getString(c + 1);
-        row[c] = v == null ? "" : printable(v);
-        widths[c] = Math.max(widths[c], width(row[c]));
+      String[] row = new String[labels.length];
+      for (int c = 0; c < row.length; c++) {
+        row[c] = rs.getString(c + 1);
       }
       rows.add(row);
     }
+    return rows;
+  }
 
+  /**
+   * Prints rows, then {@code (n rows)} unless expanded, as psql does.
+   *
+   * @param rows the rows
+   * @param title a line centred above the table, such as {@code List of relations}, or null
+   * @param expanded whether to print one record per block, psql's {@code \x}
+   * @param footer whether to end with the row count
+   * @param out where to print
+   */
+  static void print(
+      Rows rows, @Nullable String title, boolean expanded, boolean footer, PrintWriter out) {
+    if (expanded) {
+      expanded(rows, title, out);
+      return;
+    }
+    int columns = rows.labels.length;
+    int[] widths = new int[columns];
+    for (int c = 0; c < columns; c++) {
+      widths[c] = width(rows.labels[c]);
+      for (String[] row : rows.values) {
+        widths[c] = Math.max(widths[c], width(row[c]));
+      }
+    }
+    if (title != null) {
+      int total = columns == 0 ? 0 : columns * 3 - 1;
+      for (int w : widths) {
+        total += w;
+      }
+      out.println(stripTrailing(new StringBuilder(centre(title, total))));
+    }
     StringBuilder line = new StringBuilder();
     for (int c = 0; c < columns; c++) {
-      line.append(c == 0 ? " " : " | ").append(centre(labels[c], widths[c]));
+      line.append(c == 0 ? " " : " | ").append(centre(rows.labels[c], widths[c]));
     }
     out.println(stripTrailing(line));
     line.setLength(0);
@@ -55,15 +109,57 @@ final class Printer {
       line.append(c == 0 ? "" : "+").append("-".repeat(widths[c] + 2));
     }
     out.println(line);
-    for (String[] row : rows) {
+    for (String[] row : rows.values) {
       line.setLength(0);
       for (int c = 0; c < columns; c++) {
-        line.append(c == 0 ? " " : " | ").append(pad(row[c], widths[c], numeric[c]));
+        line.append(c == 0 ? " " : " | ").append(pad(row[c], widths[c], rows.numeric[c]));
       }
       out.println(stripTrailing(line));
     }
-    out.println(rows.size() == 1 ? "(1 row)" : "(" + rows.size() + " rows)");
+    if (footer) {
+      out.println(count(rows));
+      out.println();
+    }
+  }
+
+  /** psql's expanded display: {@code -[ RECORD 1 ]---} and a {@code label | value} line each. */
+  private static void expanded(Rows rows, @Nullable String title, PrintWriter out) {
+    if (title != null) {
+      out.println(title);
+    }
+    if (rows.values.isEmpty()) {
+      out.println("(0 rows)");
+      out.println();
+      return;
+    }
+    int labelWidth = 0;
+    for (String label : rows.labels) {
+      labelWidth = Math.max(labelWidth, width(label));
+    }
+    int valueWidth = 0;
+    for (String[] row : rows.values) {
+      for (String v : row) {
+        valueWidth = Math.max(valueWidth, width(v));
+      }
+    }
+    int lineWidth = labelWidth + 3 + valueWidth;
+    for (int r = 0; r < rows.values.size(); r++) {
+      String header = "-[ RECORD " + (r + 1) + " ]";
+      out.println(header + "-".repeat(Math.max(0, lineWidth - header.length())));
+      String[] row = rows.values.get(r);
+      for (int c = 0; c < row.length; c++) {
+        out.println(
+            stripTrailing(
+                new StringBuilder(pad(rows.labels[c], labelWidth, false))
+                    .append(" | ")
+                    .append(row[c])));
+      }
+    }
     out.println();
+  }
+
+  private static String count(Rows rows) {
+    return rows.values.size() == 1 ? "(1 row)" : "(" + rows.values.size() + " rows)";
   }
 
   private static boolean isNumeric(int type) {
@@ -116,12 +212,12 @@ final class Printer {
   }
 
   private static String pad(String s, int width, boolean right) {
-    String fill = " ".repeat(width - width(s));
+    String fill = " ".repeat(Math.max(0, width - width(s)));
     return right ? fill + s : s + fill;
   }
 
   private static String centre(String s, int width) {
-    int fill = width - width(s);
+    int fill = Math.max(0, width - width(s));
     return " ".repeat(fill / 2) + s + " ".repeat(fill - fill / 2);
   }
 

@@ -2,6 +2,7 @@ plugins {
     id("scalardb-native-jdbc.java-conventions")
     id("scalardb-native-jdbc.java11-conventions")
     id("scalardb-native-jdbc.publishing-conventions")
+    `java-test-fixtures`
 }
 
 description =
@@ -36,17 +37,20 @@ dependencies {
     testRuntimeOnly(libs.postgresql)
     testRuntimeOnly(libs.logback.classic)
 
+    // The engine containers (testing.Engines), shared with the shell's integration tests.
     // ScalarDB brings its own copies of the vendor drivers; ojdbc8 duplicates ojdbc11's classes
-    "integrationTestImplementation"(libs.scalardb) {
+    testFixturesApi(libs.scalardb) {
         exclude(group = "com.oracle.database.jdbc", module = "ojdbc8")
     }
-    "integrationTestImplementation"(platform(libs.testcontainers.bom))
-    "integrationTestImplementation"(libs.testcontainers)
-    "integrationTestImplementation"(libs.testcontainers.postgresql)
-    "integrationTestImplementation"(libs.testcontainers.mysql)
-    "integrationTestImplementation"(libs.testcontainers.mariadb)
-    "integrationTestImplementation"(libs.testcontainers.mssqlserver)
-    "integrationTestImplementation"(libs.testcontainers.oracle.free)
+    testFixturesApi(platform(libs.testcontainers.bom))
+    testFixturesApi(libs.testcontainers)
+    testFixturesApi(libs.testcontainers.postgresql)
+    testFixturesApi(libs.testcontainers.mysql)
+    testFixturesApi(libs.testcontainers.mariadb)
+    testFixturesApi(libs.testcontainers.mssqlserver)
+    testFixturesApi(libs.testcontainers.oracle.free)
+    testFixturesCompileOnly(libs.spotbugs.annotations)
+    "integrationTestImplementation"(testFixtures(project))
     // the vendor drivers an application would use, one per engine
     "integrationTestRuntimeOnly"(libs.postgresql)
     "integrationTestRuntimeOnly"(libs.mysql.connector.j)
@@ -56,6 +60,17 @@ dependencies {
     "integrationTestRuntimeOnly"(libs.logback.classic)
     // the pool most applications put in front of a driver; the version ScalarDB itself brings
     "integrationTestImplementation"(libs.hikaricp)
+}
+
+// The test fixtures are for this build's own tests, not a published artifact.
+// The sources variant exists only once the publishing plugin has added the sources jar.
+afterEvaluate {
+    val javaComponent = components["java"] as AdhocComponentWithVariants
+    for (name in listOf("ApiElements", "RuntimeElements", "SourcesElements")) {
+        configurations.findByName("testFixtures$name")?.let {
+            javaComponent.withVariantsFromConfiguration(it) { skip() }
+        }
+    }
 }
 
 // Which engines the integration tests run against: -Dnativejdbc.engines=postgresql,oracle or "all".

@@ -44,7 +44,8 @@ snsql -U alice -h localhost -d shop --engine postgresql -c "select count(*) from
 ```
 
 The zip bundles the PostgreSQL, MariaDB (also used for MySQL), SQL Server and Oracle drivers and needs
-Java 11 or later. `BEGIN`, `COMMIT` and `ROLLBACK` work as in psql; `\?` lists the commands.
+Java 11 or later. `BEGIN`, `COMMIT` and `ROLLBACK` work as in psql, `\dt` marks ScalarDB tables, and
+`\?` lists the commands.
 
 ## Compatibility
 

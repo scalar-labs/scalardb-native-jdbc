@@ -389,7 +389,11 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   anything such an object hands back: a statement's connection, a result set's statement (null for a
   metadata result set), a metadata object's connection. `unwrap` to a vendor interface, such as
   `PGConnection`, returns the vendor's object, as JDBC requires; it is an escape hatch like passthrough,
-  since SQL run on it reaches the database unchecked. Passthrough, in turn, is per connection, off
+  since SQL run on it reaches the database unchecked. `unwrap(ScalarDbTables.class)` returns the
+  connection itself as the driver's one public interface of its own: given a table's stored schema and
+  name it answers plain, ScalarDB, ScalarDB but not set up, or refused (ScalarDB's data, metadata or
+  virtual table), from the catalog statements are routed by, so a tool such as the shell's `\dt` marks
+  ScalarDB tables without repeating section 2's naming rules. Passthrough, in turn, is per connection, off
   again after `setAutoCommit(false)` or a `setClientInfo(Properties)` without the key; a pool does not
   reset client info, so an application that turns it on turns it off before returning the connection.
 - **Errors.** Every error the driver raises itself is a standard JDBC subclass with a fixed SQLSTATE,
@@ -462,7 +466,8 @@ the `scalardb-native-jdbc-<module>` pattern.
   wired into `check`; AssertJ and Mockito. The driver's integration tests are the interleaving matrix on
   Testcontainers images of the five engines, PostgreSQL first, MySQL through both Connector/J and MariaDB
   Connector/J, with a system property to point at an
-  external database instead.
+  external database instead. The engine containers (`testing.Engines`) are the driver's test fixtures,
+  which the shell's integration tests use too; the fixtures are not published.
 - Publishing: the Vanniktech `maven-publish` plugin with explicit coordinates, signing only when a key is
   configured, `publishToMavenCentral()`. No license file during the private preview, so the templates'
   `META-INF/LICENSE` step is left out until one is chosen; publishing then goes to GitHub Packages or to

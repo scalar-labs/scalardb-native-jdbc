@@ -64,8 +64,8 @@ Option 1, planned in `docs/plans/shell.md`. Milestone 1 done 2026-10-11 (the `sh
 ## Acceptance Criteria
 
 - [x] `snsql -U user jdbc:scalardb-native:postgresql://...` connects, prompting for the password.
-- [ ] Multi-line statements, history, aligned output, the meta-commands above (all but the catalog commands, `\passthrough` and completion, which are milestone 2).
-- [ ] Integration test drives the shell against each engine configuration.
+- [x] Multi-line statements, history, aligned output, the meta-commands above, `\passthrough` and completion.
+- [x] Integration test drives the shell against each engine configuration (all but `mysql_lower_case`, which changes nothing in the shell).
 
 ## Work Log
 
@@ -81,6 +81,15 @@ Option 1, planned in `docs/plans/shell.md`. Milestone 1 done 2026-10-11 (the `sh
 
 - `shell` module: `Main`, `Repl`, `StatementSplitter`, `Printer`; unit tests for the splitter and the transaction mapping; `ShellIntegrationTest` on PostgreSQL (plain table: the driver does not write ScalarDB tables yet).
 - Checked by hand on PostgreSQL through a pseudo-terminal: password prompt, prompts, continuation, Ctrl-C cancel, `\conninfo`, history; the zip on JDK 11, 17, 21 and 25.
+
+### 2026-10-13 - Milestone 2
+
+**By:** Claude Code
+
+- Catalog commands (`\d`, `\dt`, `\dv`, `\di`, `\dn`, `\l`) in `CatalogCommands`, ScalarDB tables marked through the driver's new `ScalarDbTables` (decision 4); `\c`, `\x`, `\timing`, `\i`, `\passthrough`, name completion.
+- `ShellIntegrationTest` on every engine with the bundled drivers (MySQL through MariaDB Connector/J), a ScalarDB table imported and set up; Ctrl-C's cancel on each engine.
+- The driver's `testing.Engines` moved to its test fixtures for the shell to share.
+- Found todo 104: the driver refuses PostgreSQL's `SET search_path TO ...`.
 
 ## Resources
 

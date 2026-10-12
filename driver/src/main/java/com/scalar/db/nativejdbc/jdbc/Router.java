@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import com.scalar.db.nativejdbc.ScalarDbTables;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.catalog.Layout;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
@@ -8,6 +9,7 @@ import com.scalar.db.nativejdbc.sql.Outcome;
 import com.scalar.db.nativejdbc.sql.SqlAst;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.SQLSyntaxErrorException;
 import java.time.Instant;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -232,6 +234,32 @@ final class Router {
         catalog.trustedUntil(),
         parameterSources,
         parameters);
+  }
+
+  /**
+   * Classifies a table by its stored names, for {@link ScalarDbTables}: the lookup a statement
+   * naming it, quoted, would make.
+   *
+   * @param vendor the vendor connection, for the session's schemas
+   * @param schema the stored schema name
+   * @param table the stored table name
+   * @return how the driver treats the table
+   * @throws SQLException if a catalog cannot be read
+   */
+  ScalarDbTables.Kind kind(Connection vendor, String schema, String table) throws SQLException {
+    TableInfo info;
+    try {
+      info = catalog.lookup(session.schemas(vendor), engine.quote(schema), engine.quote(table));
+    } catch (SQLSyntaxErrorException e) {
+      if ("42000".equals(e.getSQLState())) {
+        return ScalarDbTables.Kind.REFUSED;
+      }
+      throw e;
+    }
+    if (!info.isScalarDb()) {
+      return ScalarDbTables.Kind.PLAIN;
+    }
+    return info.isSetUp() ? ScalarDbTables.Kind.SCALARDB : ScalarDbTables.Kind.NOT_SET_UP;
   }
 
   /**

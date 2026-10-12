@@ -12,7 +12,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -22,6 +21,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.Callable;
+import org.jline.reader.Candidate;
+import org.jline.reader.Completer;
 import org.jline.reader.EOFError;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
@@ -218,35 +219,39 @@ public final class Main implements Callable<Integer> {
         }
       }
 
-      Connection connection;
+      Repl.Connected connected;
       try {
-        connection = DriverManager.getConnection(target, connect);
+        connected = open(target, connect);
       } catch (SQLException e) {
         err.println("snsql: error: connection failed: " + e.getMessage());
         return EXIT_CONNECTION;
       }
+      // \c: another database on the same server with the same credentials, or another URL
+      String[] current = {target};
+      Repl.Connector connector =
+          next -> {
+            String url =
+                next == null
+                    ? current[0]
+                    : next.startsWith("jdbc:")
+                        ? mysqlThroughMariaDb(next)
+                        : withDatabase(current[0], next);
+            Repl.Connected opened = open(url, connect);
+            current[0] = url;
+            return opened;
+          };
       boolean onErrorStop = isOn(variables.get("ON_ERROR_STOP"));
-      StatementSplitter.Dialect dialect = StatementSplitter.Dialect.of(parsed.subProtocol());
-      String shown = withoutCredentials(target);
-      try {
-        if (actions.isEmpty() && terminal == null) {
-          terminal = terminal();
-        }
-        if (actions.isEmpty() && terminal != null) {
-          return interactive(terminal, connection, dialect, shown);
-        }
-        if (actions.isEmpty()) {
-          // input piped in: a script, as psql reads it
-          actions.add(new String[] {"-f", "-"});
-        }
-        return script(connection, dialect, shown, onErrorStop);
-      } finally {
-        try {
-          connection.close();
-        } catch (SQLException e) {
-          // the session is over either way
-        }
+      if (actions.isEmpty() && terminal == null) {
+        terminal = terminal();
       }
+      if (actions.isEmpty() && terminal != null) {
+        return interactive(terminal, new Repl(connected, terminal.writer(), false, connector));
+      }
+      if (actions.isEmpty()) {
+        // input piped in: a script, as psql reads it
+        actions.add(new String[] {"-f", "-"});
+      }
+      return script(new Repl(connected, out, onErrorStop, connector));
     } catch (SQLException | IOException e) {
       err.println("snsql: error: " + e.getMessage());
       return EXIT_FATAL;
@@ -259,6 +264,43 @@ public final class Main implements Callable<Integer> {
         }
       }
     }
+  }
+
+  private static Repl.Connected open(String url, Properties connect) throws SQLException {
+    NativeJdbcUrl parsed;
+    try {
+      parsed = NativeJdbcUrl.parse(url);
+    } catch (IllegalArgumentException e) {
+      throw new SQLException(e.getMessage(), "08001", e);
+    }
+    return new Repl.Connected(
+        DriverManager.getConnection(url, connect),
+        StatementSplitter.Dialect.of(parsed.subProtocol()),
+        withoutCredentials(url));
+  }
+
+  /**
+   * The URL with another database: the path of a PostgreSQL, MySQL or MariaDB URL, SQL Server's
+   * {@code databaseName}, Oracle's service name or SID.
+   */
+  static String withDatabase(String url, String database) {
+    String lower = url.toLowerCase(Locale.ROOT);
+    if (lower.startsWith(NativeJdbcUrl.PREFIX + "sqlserver:")) {
+      String without = url.replaceAll("(?i);\\s*(databaseName|database)\\s*=[^;]*", "");
+      int semicolon = without.indexOf(';');
+      return semicolon < 0
+          ? without + ";databaseName=" + database
+          : without.substring(0, semicolon)
+              + ";databaseName="
+              + database
+              + without.substring(semicolon);
+    }
+    if (lower.startsWith(NativeJdbcUrl.PREFIX + "oracle:")) {
+      // @//host:port/service, @host:port/service or @host:port:SID
+      return url.replaceFirst("(@(?://)?[^/:?]+(?::\\d+)?)([/:])[^/:?]*", "$1$2" + database);
+    }
+    // //host:port/database?parameters
+    return url.replaceFirst("(//[^/?]*)(/[^?]*)?", "$1/" + database);
   }
 
   /** The system terminal, or null when standard input or output is not one. */
@@ -326,19 +368,11 @@ public final class Main implements Callable<Integer> {
     String lower = url.toLowerCase(Locale.ROOT);
     if (!lower.startsWith(NativeJdbcUrl.PREFIX + "mysql:")
         || lower.contains("permitmysqlscheme")
-        || isPresent("com.mysql.cj.jdbc.Driver")) {
+        || DriverManager.drivers()
+            .anyMatch(d -> d.getClass().getName().equals("com.mysql.cj.jdbc.Driver"))) {
       return url;
     }
     return url + (url.indexOf('?') < 0 ? "?" : "&") + "permitMysqlScheme=true";
-  }
-
-  private static boolean isPresent(String className) {
-    try {
-      Class.forName(className, false, Main.class.getClassLoader());
-      return true;
-    } catch (ClassNotFoundException e) {
-      return false;
-    }
   }
 
   private static boolean accepts(java.sql.Driver driver, String vendorUrl) {
@@ -407,26 +441,25 @@ public final class Main implements Callable<Integer> {
   @SuppressFBWarnings(
       value = "PATH_TRAVERSAL_IN",
       justification = "the user names the script to run, with the user's own permissions")
-  private int script(
-      Connection connection, StatementSplitter.Dialect dialect, String shown, boolean onErrorStop)
-      throws SQLException, IOException {
-    Repl repl = new Repl(connection, dialect, shown, out, onErrorStop);
-    for (String[] action : actions) {
-      boolean goOn;
-      if (action[0].equals("-c")) {
-        goOn = repl.feed(action[1]) && repl.finish();
-      } else if (action[1].equals("-")) {
-        goOn = read(repl, new InputStreamReader(System.in, Charset.defaultCharset()));
-      } else {
-        goOn = read(repl, Files.newBufferedReader(Paths.get(action[1]), StandardCharsets.UTF_8));
+  private int script(Repl repl) throws SQLException, IOException {
+    try {
+      for (String[] action : actions) {
+        boolean goOn;
+        if (action[0].equals("-c")) {
+          goOn = repl.feed(action[1]) && repl.finish();
+        } else if (action[1].equals("-")) {
+          goOn = read(repl, new InputStreamReader(System.in, Charset.defaultCharset()));
+        } else {
+          goOn = read(repl, Files.newBufferedReader(Paths.get(action[1]), StandardCharsets.UTF_8));
+        }
+        if (!goOn) {
+          return EXIT_SCRIPT;
+        }
       }
-      if (!goOn) {
-        repl.close();
-        return EXIT_SCRIPT;
-      }
+      return EXIT_OK;
+    } finally {
+      repl.close();
     }
-    repl.close();
-    return EXIT_OK;
   }
 
   /** Feeds a script line by line; returns whether the session goes on. */
@@ -441,57 +474,77 @@ public final class Main implements Callable<Integer> {
     return repl.finish();
   }
 
-  private static int interactive(
-      Terminal terminal, Connection connection, StatementSplitter.Dialect dialect, String shown)
-      throws SQLException {
+  private static int interactive(Terminal terminal, Repl repl) throws SQLException {
     PrintWriter screen = terminal.writer();
-    Repl repl = new Repl(connection, dialect, shown, screen, false);
     LineReader reader =
         LineReaderBuilder.builder()
             .terminal(terminal)
             .appName("snsql")
             .parser(new SqlParser(repl))
+            .completer(new NameCompleter(repl))
             .variable(
                 LineReader.HISTORY_FILE,
                 Paths.get(System.getProperty("user.home"), ".snsql_history"))
             // `!` is SQL, not history expansion
             .option(LineReader.Option.DISABLE_EVENT_EXPANSION, true)
+            // Oracle stores names in upper case, typed in lower case
+            .option(LineReader.Option.CASE_INSENSITIVE, true)
             .build();
     terminal.handle(Terminal.Signal.INT, signal -> repl.cancel());
-    screen.println(
-        new Version().getVersion()[0]
-            + " ("
-            + connection.getMetaData().getDatabaseProductName()
-            + " "
-            + connection.getMetaData().getDatabaseProductVersion()
-            + ")");
-    screen.println("Type \"\\?\" for help.");
-    screen.println();
-    while (true) {
-      reader.variable(LineReader.SECONDARY_PROMPT_PATTERN, repl.prompt(true).replace("%", "%%"));
-      String line;
-      try {
-        line = reader.readLine(repl.prompt(false));
-      } catch (UserInterruptException e) {
-        continue; // Ctrl-C at the prompt clears the line
-      } catch (EndOfFileException e) {
-        screen.println("\\q");
-        break;
+    try {
+      screen.println(new Version().getVersion()[0] + " (" + repl.product() + ")");
+      screen.println("Type \"\\?\" for help.");
+      screen.println();
+      while (true) {
+        reader.variable(LineReader.SECONDARY_PROMPT_PATTERN, repl.prompt(true).replace("%", "%%"));
+        String line;
+        try {
+          line = reader.readLine(repl.prompt(false).replace("%", "%%"));
+        } catch (UserInterruptException e) {
+          continue; // Ctrl-C at the prompt clears the line
+        } catch (EndOfFileException e) {
+          screen.println("\\q");
+          break;
+        }
+        if (!repl.feed(line)) {
+          break;
+        }
       }
-      if (!repl.feed(line)) {
-        break;
+      return EXIT_OK;
+    } finally {
+      repl.close();
+    }
+  }
+
+  /** Completes the names of the current schema's tables, views and columns, and schemas. */
+  private static final class NameCompleter implements Completer {
+    private final Repl repl;
+
+    NameCompleter(Repl repl) {
+      this.repl = repl;
+    }
+
+    @Override
+    public void complete(LineReader reader, ParsedLine line, List<Candidate> candidates) {
+      for (String name : repl.completions()) {
+        candidates.add(new Candidate(name));
       }
     }
-    repl.close();
-    return EXIT_OK;
   }
 
   /** Accepts a line only once it completes a statement; until then the prompt continues it. */
   private static final class SqlParser implements Parser {
     private final Repl repl;
-    // no escapes and no quotes: words only matter for completion, and `\` starts a meta-command
+    // no escapes and no quotes: words only matter for completion, and `\` starts a meta-command;
+    // a name to complete may follow punctuation as well as a space, as in "t.id" or "(id"
     private final DefaultParser words =
-        new DefaultParser().escapeChars(null).quoteChars(new char[0]);
+        new DefaultParser() {
+          @Override
+          public boolean isDelimiterChar(CharSequence buffer, int pos) {
+            char c = buffer.charAt(pos);
+            return Character.isWhitespace(c) || "(),;.=<>+-*/'\"".indexOf(c) >= 0;
+          }
+        }.escapeChars(null).quoteChars(new char[0]);
 
     SqlParser(Repl repl) {
       this.repl = repl;

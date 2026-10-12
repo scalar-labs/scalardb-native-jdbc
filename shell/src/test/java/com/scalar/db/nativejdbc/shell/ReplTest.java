@@ -3,6 +3,7 @@ package com.scalar.db.nativejdbc.shell;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -11,14 +12,20 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.scalar.db.nativejdbc.NativeJdbcDriver;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.InOrder;
 
 /** The transaction commands the driver refuses as SQL become JDBC calls. */
@@ -173,5 +180,93 @@ class ReplTest {
     assertThat(repl.feed("\\nope")).isTrue();
     assertThat(output.toString()).startsWith("invalid command \\nope");
     assertThat(repl.feed("\\q")).isFalse();
+  }
+
+  @Test
+  void toggles() {
+    repl.feed("\\x");
+    repl.feed("\\x off");
+    repl.feed("\\timing on");
+    repl.feed("\\x maybe");
+
+    assertThat(output.toString())
+        .startsWith(
+            "Expanded display is on.\nExpanded display is off.\nTiming is on.\n"
+                + "\\x: unrecognized value");
+  }
+
+  @Test
+  void timing_followsEachStatement() {
+    repl.feed("\\timing");
+    repl.feed("delete from t;");
+
+    assertThat(output.toString()).containsPattern("DELETE 1\nTime: \\d+\\.\\d{3} ms\n$");
+  }
+
+  @Test
+  void passthrough_setsTheDriversSetting_andIsRefusedInATransaction() throws SQLException {
+    repl.feed("\\passthrough on");
+    verify(connection).setClientInfo(NativeJdbcDriver.PASSTHROUGH, "true");
+    when(connection.getClientInfo(NativeJdbcDriver.PASSTHROUGH)).thenReturn("true");
+    assertThat(repl.prompt(false)).isEqualTo("shop=!> ");
+
+    repl.feed("\\passthrough off");
+    verify(connection).setClientInfo(NativeJdbcDriver.PASSTHROUGH, "false");
+    when(connection.getClientInfo(NativeJdbcDriver.PASSTHROUGH)).thenReturn("false");
+    repl.feed("begin;");
+    output.getBuffer().setLength(0);
+    repl.feed("\\passthrough on");
+
+    verify(connection, times(1)).setClientInfo(eq(NativeJdbcDriver.PASSTHROUGH), eq("true"));
+    assertThat(output.toString()).startsWith("ERROR:  \\passthrough applies in autocommit");
+  }
+
+  @Test
+  void include_runsAFileInTheSession(@TempDir Path dir) throws Exception {
+    Path file = dir.resolve("a.sql");
+    Files.writeString(file, "begin;\ninsert into t values (1);\ncommit", StandardCharsets.UTF_8);
+
+    assertThat(repl.feed("\\i " + file)).isTrue();
+    assertThat(repl.feed("\\i " + dir.resolve("missing.sql"))).isTrue();
+
+    InOrder order = inOrder(connection, statement);
+    order.verify(connection).setAutoCommit(false);
+    order.verify(statement).execute("insert into t values (1)");
+    order.verify(connection).commit();
+    assertThat(output.toString()).endsWith("missing.sql: No such file or directory\n");
+  }
+
+  @Test
+  void connect_replacesTheConnection_onlyOnceTheNewOneIsOpen() throws SQLException {
+    Connection other = mock(Connection.class);
+    DatabaseMetaData md = mock(DatabaseMetaData.class);
+    when(other.getCatalog()).thenReturn("other");
+    when(other.getMetaData()).thenReturn(md);
+    when(md.getUserName()).thenReturn("alice");
+    Repl.Connector connector =
+        target -> {
+          if ("nope".equals(target)) {
+            throw new SQLException("FATAL: database \"nope\" does not exist");
+          }
+          return new Repl.Connected(other, StatementSplitter.Dialect.POSTGRESQL, "url");
+        };
+    Repl r =
+        new Repl(
+            new Repl.Connected(connection, StatementSplitter.Dialect.POSTGRESQL, "url"),
+            new PrintWriter(output, true),
+            false,
+            connector);
+    r.feed("begin;");
+
+    r.feed("\\c nope");
+    assertThat(output.toString()).endsWith("Previous connection kept\n");
+    verify(connection, never()).close();
+
+    r.feed("\\c other");
+    verify(connection).rollback();
+    verify(connection).close();
+    assertThat(output.toString())
+        .endsWith("You are now connected to database \"other\" as user \"alice\".\n");
+    assertThat(r.prompt(false)).isEqualTo("other=> ");
   }
 }

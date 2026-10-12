@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc.jdbc;
 
 import com.scalar.db.nativejdbc.NativeJdbcDriver;
+import com.scalar.db.nativejdbc.ScalarDbTables;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import java.io.InputStream;
@@ -52,9 +53,11 @@ public final class Proxies {
       session.requireReadCommittedSnapshot(vendor);
     }
     session.schemas(vendor); // read now, outside any transaction
+    // ScalarDbTables, reached with unwrap, is the driver's own interface (design section 1)
     return (Connection)
-        proxy(
-            Connection.class,
+        Proxy.newProxyInstance(
+            Proxies.class.getClassLoader(),
+            new Class<?>[] {Connection.class, ScalarDbTables.class},
             new ConnectionHandler(vendor, new Router(engine, catalog, session), session));
   }
 
@@ -144,6 +147,9 @@ public final class Proxies {
     @Override
     @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
       Connection me = (Connection) proxy;
+      if (method.getDeclaringClass() == ScalarDbTables.class) {
+        return router.kind(vendor, (String) args[0], (String) args[1]);
+      }
       switch (method.getName()) {
         case "createStatement":
           return proxy(
