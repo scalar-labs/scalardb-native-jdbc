@@ -651,3 +651,109 @@ What follows for the driver:
    (pgjdbc does after 5 executions by default; `useServerPrepStmts` on Connector/J), and avoid
    inlining values, which defeats every plan cache. That stays a configuration note; not measured
    further here.
+
+## Making the split independent of the in-flight count (2026-10-12)
+
+Two parts of the split grew with the in-flight count (section "Many rows in flight"). Each was given
+the form that should not:
+
+- **The committed check as a per-row probe.** NOT EXISTS is already one on PostgreSQL, Oracle and
+  SQL Server. On MySQL and MariaDB the driver's DISTINCT set reads every in-flight key per
+  execution, and MySQL rewrites a plain NOT EXISTS into a materialized anti-join. New mode
+  `SPLIT_DAJH` (MySQL): NOT EXISTS with `/*+ NO_SEMIJOIN() */`. `SPLIT_DLJ` (the left join on
+  the metadata's primary key) is the per-row form on both.
+- **Before-image indexes for the in-flight copy** (`-Dnativejdbc.bench.beforeIndex=true`): each
+  secondary index of a data table mirrored on the metadata table's before image, in-flight rows
+  only. That is `(before_region) WHERE tx_state IN (1, 2)` on PostgreSQL and SQL Server, and
+  `(tx_state, before_region)` on MySQL, MariaDB and Oracle.
+- **SQL Server only** (`-Dnativejdbc.bench.ssIndex=include`): the in-flight index with the before
+  image as included columns, instead of before-image indexes.
+
+Each run also times a write: a ScalarDB-style prepare (the row in flight, its before image set)
+and commit of one row of `cm`, each in its own transaction. All shapes except pagination, at 100
+and 10k rows in flight. Every mode returned BASE's rows.
+
+Ratios to BASE, medians. The form is SPLIT_DRV on PostgreSQL, Oracle and SQL Server, and SPLIT_DLJ
+(per-row) on MySQL and MariaDB:
+
+| shape | engine | 100: now | 100: before-image | 10k: now | 10k: before-image |
+|---|---|---|---|---|---|
+| non-key filter (100 rows) | PostgreSQL | 1x | 1x | 2.7x | 1.3x |
+|  | Oracle | 1.3x | 1.2x | 3.1x | 1.5x |
+|  | SQL Server | 1.6x | 1.3x | 31.2x | 3.3x |
+|  | MySQL | 1.4x | 1.3x | 12.4x | 1.3x |
+|  | MariaDB | 1.6x | 1.4x | 12.9x | 1.3x |
+| FK filter, ORDER BY, LIMIT 3 | PostgreSQL | 1.1x | 1.1x | 3.2x | 1.1x |
+|  | Oracle | 1.2x | 1.1x | 5.7x | 1.1x |
+|  | SQL Server | 1.3x | 1.2x | 130.6x | 1.2x |
+|  | MySQL | 0.9x | 0.8x | 11.8x | 0.7x |
+|  | MariaDB | 1.3x | 0.8x | 22.6x | 0.6x |
+| key JOIN FK, both ScalarDB | PostgreSQL | 1.1x | 1.3x | 3.2x | 1x |
+|  | Oracle | 1.6x | 1.5x | 6.6x | 1.1x |
+|  | SQL Server | 2.1x | 1.9x | 29x | 2x |
+|  | MySQL | 1.7x | 1.5x | 20.8x | 1.4x |
+|  | MariaDB | 1.6x | 1.6x | 20.4x | 1.4x |
+| IN subquery on non-key | PostgreSQL | 1.8x | 1.7x | 5.4x | 4.7x |
+|  | Oracle | 0.4x | 0.4x | 1.9x | 0.9x |
+|  | SQL Server | 2.4x | 1.8x | 171.8x | 3.2x |
+|  | MySQL | 2.8x | 1.9x | 28.6x | 8.6x |
+|  | MariaDB | 2.2x | 2.8x | 61.9x | 25.9x |
+| 3 tables: key lookup (5 rows) | PostgreSQL | 1.3x | 1.3x | 3.2x | 1.3x |
+|  | Oracle | 1.7x | 1.5x | 6.8x | 1.4x |
+|  | SQL Server | 1.7x | 1.4x | 140.2x | 1.9x |
+|  | MySQL | 2.5x | 2.3x | 20.7x | 2.2x |
+|  | MariaDB | 2.6x | 2.5x | 20.2x | 2.5x |
+| 4 tables: key lookup (25 rows) | PostgreSQL | 17x | 2.1x | 6.7x | 1.8x |
+|  | Oracle | 1.5x | 1.4x | 6x | 1.5x |
+|  | SQL Server | 2x | 2x | 364.9x | 2.2x |
+|  | MySQL | 3.9x | 3.2x | 57.8x | 3.9x |
+|  | MariaDB | 5.6x | 4.7x | 54.1x | 5.1x |
+| many rows: JOIN FK, 300 customers (1.5k rows) | PostgreSQL | 1.5x | 2.4x | 6.7x | 3.2x |
+|  | Oracle | 1.1x | 1.1x | 2x | 1.4x |
+|  | SQL Server | 1.8x | 1.5x | 87x | 2.3x |
+|  | MySQL | 1.9x | 1.6x | 17.4x | 7.6x |
+|  | MariaDB | 2x | 2.5x | 33.2x | 16.8x |
+| composite key: JOIN on the full key (100 rows) | PostgreSQL | 1.6x | 1.4x | 6.3x | 1.5x |
+|  | Oracle | 1.3x | 1.2x | 3.9x | 1.8x |
+|  | SQL Server | 1.7x | 1.3x | 38.8x | 1.3x |
+|  | MySQL | 1.8x | 1.7x | 19.1x | 1.6x |
+|  | MariaDB | 2.5x | 2.6x | 39x | 2.3x |
+| full scan: COUNT(*) of 100k rows | PostgreSQL | 2.3x | 2.3x | 3.4x | 3.7x |
+|  | Oracle | 3.6x | 3.4x | 7.2x | 6.8x |
+|  | SQL Server | 2.1x | 2.1x | 6.6x | 6.4x |
+|  | MySQL | 10.6x | 10.6x | 11.4x | 12.1x |
+|  | MariaDB | 9.6x | 9.5x | 10.9x | 10.9x |
+
+Findings:
+
+- **With both changes, the selective shapes at 10k come back to their 100-row ratios on every
+  engine**: 0.6-3.3x for indexed filters, joins on keys and foreign keys, 3-table key lookups and
+  composite keys; 1.5-5.1x for 4-table key lookups, as at 100. They were 2.7-365x. At 100 rows
+  both changes are neutral or slightly faster.
+- **Writes show no cost from the extra index.** A prepare plus commit of one row took the same,
+  within 8%, with and without before-image indexes on every engine (PostgreSQL 0.87 / 0.87 ms, MySQL
+  2.38 / 2.57, MariaDB 0.98 / 1.03, SQL Server 2.51 / 2.40, Oracle 1.15 / 1.22). The commit's log
+  flush dominates; a write-heavy workload with many indexed columns may still see it.
+- **On SQL Server, including the before image in the in-flight index gets most of the gain**
+  without new indexes: at 10k, 31x to 4.7x on the non-key filter and 131x to 2.6x on the FK
+  filter. Each in-flight copy still reads every in-flight row, but no longer the whole metadata
+  table.
+- **The per-row probe costs more where the query reads many rows.** On MySQL and MariaDB at 100
+  rows in flight, the left join is 10x BASE on a 100k-row count, against 2.1-3.3x for the DISTINCT
+  set. The 15k-row join is 3.4x against 1.3x, and DISTINCT over 100k rows 38x against 11x. Those
+  shapes probe the metadata once per row read; the set is built once.
+- **Still open at 10k**: the IN subquery (MySQL 8.6x, MariaDB 26x, PostgreSQL 4.7x), joins
+  returning many rows on MySQL and MariaDB (7.6x and 17x), and full scans (3.7-12x). These read
+  many in-flight rows by nature, or the in-flight copy is joined on a non-key column. MariaDB's
+  4-table join over one region got worse with the indexes (55x to 199x), a plan choice not
+  investigated.
+
+What follows for the driver:
+
+1. Setup creates before-image indexes mirroring the data tables' secondary indexes, filtered to
+   rows in flight where the engine allows. On SQL Server, the in-flight index also includes the
+   before image.
+2. On MySQL and MariaDB the committed form becomes a choice per statement: the per-row probe where
+   the copy reads few rows, the DISTINCT set where it scans. The statement alone does not tell
+   which; the engine's estimate (`EXPLAIN`) or the presence of an indexed predicate on each table
+   could. Not designed yet.

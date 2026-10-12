@@ -130,6 +130,8 @@ class ReadOverheadBenchmark {
     SPLIT_DLJP,
     /** MySQL: SPLIT_DAJP with NOT EXISTS kept a per-row probe ({@code NO_SEMIJOIN}). */
     SPLIT_DAJN,
+    /** MySQL: SPLIT_DAJ with NOT EXISTS kept a per-row probe ({@code NO_SEMIJOIN}). */
+    SPLIT_DAJH,
     /** SPLIT_DRV with each derived table projecting only the columns the statement references. */
     SPLIT_DRVN
   }
@@ -701,11 +703,14 @@ class ReadOverheadBenchmark {
         report.append('\n');
       }
       report.append("\nStatement length in characters:\n\n").append(header).append(lengths);
+      report.append(writes(c, e));
       String suffix =
           (only.isEmpty() ? "" : "-" + only.replaceAll("\\W+", "_"))
               + (rtt > 0 ? "-rtt" + System.getProperty("nativejdbc.bench.rttMs") : "")
               + (HOT ? "-hot" : "")
               + (FRESH ? "-fresh" : "")
+              + (BEFORE_INDEX ? "-before" : "")
+              + (SS_INDEX.equals("filtered") ? "" : "-ss" + SS_INDEX)
               + (INFLIGHT != 100 ? "-inflight" + INFLIGHT : "");
       Path out = Path.of("build", "bench", "read-overhead-" + e + suffix + ".md");
       Files.createDirectories(Path.of("build", "bench"));
@@ -953,16 +958,18 @@ class ReadOverheadBenchmark {
 
   private static @Nullable String renderRaw(Query q, Mode m, Engine engine) {
     boolean rownum = m == Mode.SPLIT_DRVR;
-    boolean noSemijoin = m == Mode.SPLIT_DAJN;
+    boolean noSemijoin = m == Mode.SPLIT_DAJN || m == Mode.SPLIT_DAJH;
     boolean narrow = m == Mode.SPLIT_DRVN;
     boolean pushed =
         m == Mode.SPLIT_DRVP
             || m == Mode.SPLIT_DAJP
             || m == Mode.SPLIT_DHDP
             || m == Mode.SPLIT_DLJP
-            || noSemijoin
+            || m == Mode.SPLIT_DAJN
             || rownum;
-    if (pushed && q.pushed == null || rownum && engine != Engine.ORACLE) {
+    if (pushed && q.pushed == null
+        || rownum && engine != Engine.ORACLE
+        || m == Mode.SPLIT_DAJH && engine != Engine.MYSQL) {
       return null;
     }
     if (m == Mode.SPLIT_DAJP || noSemijoin) {
@@ -1770,10 +1777,13 @@ class ReadOverheadBenchmark {
     ddl.add("CREATE INDEX " + ix + "w_c01 ON bn.w (c01)");
     ddl.add("CREATE INDEX " + ix + "k_grp ON bn.k (grp)");
     for (String t : List.of("c", "o", "r", "w", "k")) {
-      // -Dnativejdbc.bench.ssIndex=composite or unique: SQL Server's in-flight index
-      String ss = System.getProperty("nativejdbc.bench.ssIndex", "filtered");
+      String ss = SS_INDEX;
       boolean partial =
           engine == Engine.POSTGRESQL || (engine == Engine.SQLSERVER && !ss.equals("composite"));
+      StringBuilder include = new StringBuilder("before_tx_id, before_tx_version");
+      for (String col : Objects.requireNonNull(NON_KEY.get(t))) {
+        include.append(", before_").append(col);
+      }
       ddl.add(
           (engine == Engine.SQLSERVER && ss.equals("unique")
                   ? "CREATE UNIQUE INDEX "
@@ -1784,9 +1794,32 @@ class ReadOverheadBenchmark {
               + t
               + "m "
               + (partial
-                  ? "(" + String.join(", ", key(t)) + ") WHERE tx_state IN (1, 2)"
+                  ? "("
+                      + String.join(", ", key(t))
+                      + ")"
+                      + (engine == Engine.SQLSERVER && ss.equals("include")
+                          ? " INCLUDE (" + include + ")"
+                          : "")
+                      + " WHERE tx_state IN (1, 2)"
                   : "(tx_state, " + String.join(", ", key(t)) + ")"));
       ddl.addAll(views(t));
+    }
+    if (BEFORE_INDEX) {
+      // each secondary index of a data table mirrored on the before image, rows in flight only
+      String[][] mirrored = {{"c", "region"}, {"o", "customer_id"}, {"w", "c01"}, {"k", "grp"}};
+      for (String[] tc : mirrored) {
+        boolean filtered = engine == Engine.POSTGRESQL || engine == Engine.SQLSERVER;
+        ddl.add(
+            "CREATE INDEX "
+                + ix
+                + tc[0]
+                + "m_before ON bn."
+                + tc[0]
+                + "m "
+                + (filtered
+                    ? "(before_" + tc[1] + ") WHERE tx_state IN (1, 2)"
+                    : "(tx_state, before_" + tc[1] + ")"));
+      }
     }
     switch (engine) {
       case POSTGRESQL:
@@ -1822,6 +1855,56 @@ class ReadOverheadBenchmark {
         break;
     }
     e.execute(c, ddl.toArray(new String[0]));
+  }
+
+  // -Dnativejdbc.bench.beforeIndex=true: the data tables' secondary indexes mirrored on the before
+  // image of the metadata tables
+  private static final boolean BEFORE_INDEX = Boolean.getBoolean("nativejdbc.bench.beforeIndex");
+
+  // -Dnativejdbc.bench.ssIndex=composite, unique or include (the before image as included columns):
+  // SQL Server's in-flight index
+  private static final String SS_INDEX = System.getProperty("nativejdbc.bench.ssIndex", "filtered");
+
+  /**
+   * The cost of a write under the metadata's indexes: a ScalarDB-style prepare (the row in flight
+   * with its before image) and commit of one committed row of {@code cm}, each its own transaction.
+   * The rows written are never in flight at any count, and stay committed.
+   */
+  private static String writes(Connection c, Engines e) throws SQLException {
+    List<Double> times = new ArrayList<>();
+    try (PreparedStatement prepare =
+            c.prepareStatement(
+                "UPDATE bn.cm SET tx_id = ?, tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
+                    + " before_tx_version = 1, before_name = ?, before_region = ? WHERE id = ? AND"
+                    + " tx_state = 3");
+        PreparedStatement commit =
+            c.prepareStatement("UPDATE bn.cm SET tx_state = 3 WHERE id = ? AND tx_id = ?")) {
+      for (int i = 0; i < 520; i++) {
+        int id = 10 * (i * 7919 % 10_000) + 4; // scattered, each row once
+        String tx = "b" + i;
+        long t0 = System.nanoTime();
+        prepare.setString(1, tx);
+        prepare.setString(2, "n" + id);
+        prepare.setInt(3, id % 1000);
+        prepare.setInt(4, id);
+        prepare.executeUpdate();
+        commit.setInt(1, id);
+        commit.setString(2, tx);
+        commit.executeUpdate();
+        if (i >= 20) {
+          times.add((System.nanoTime() - t0) / 1e6);
+        }
+      }
+    }
+    Collections.sort(times);
+    double median = times.get(times.size() / 2);
+    double p95 = times.get((int) (times.size() * 0.95));
+    System.out.printf(Locale.ROOT, "BENCH %s | write | %.3f ms%n", e, median);
+    return String.format(
+        Locale.ROOT,
+        "%nWrites: a prepare and a commit of one row of `cm`, median %.2f ms, p95 %.2f ms.%n",
+        median,
+        p95);
   }
 
   /** The value of a column of w for the row with key {@code id}. */

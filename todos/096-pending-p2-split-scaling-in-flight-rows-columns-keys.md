@@ -87,3 +87,14 @@ See Findings.
 - Composite keys cost what single keys do.
 - The measurement supports projecting only referenced columns (second acceptance criterion);
   not implemented yet.
+
+### 2026-10-12 - Independent of the in-flight count: per-row check and before-image indexes
+
+**By:** Claude Code
+- docs/benchmarks/read-overhead.md, "Making the split independent of the in-flight count": with
+  before-image indexes (setup) and a per-row committed check (MySQL, MariaDB), the selective shapes
+  at 10k in flight return to their 100-row ratios on all five engines; no measurable write cost.
+  SQL Server can instead include the before image in its in-flight index for most of the gain.
+- The per-row check loses on scans and large joins at small counts on MySQL and MariaDB (10x vs
+  2.1x on a 100k-row count), so the committed form there needs a per-statement choice; not
+  designed. Open at 10k: IN subquery, joins returning many rows, full scans.
