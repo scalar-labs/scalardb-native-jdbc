@@ -227,7 +227,7 @@ public final class Main implements Callable<Integer> {
       }
       boolean onErrorStop = isOn(variables.get("ON_ERROR_STOP"));
       StatementSplitter.Dialect dialect = StatementSplitter.Dialect.of(parsed.subProtocol());
-      String shown = withoutParameters(target);
+      String shown = withoutCredentials(target);
       try {
         if (actions.isEmpty() && terminal == null) {
           terminal = terminal();
@@ -376,12 +376,16 @@ public final class Main implements Callable<Integer> {
     }
   }
 
-  /** The URL without its parameters, which may hold a password, for {@code \conninfo}. */
-  private static String withoutParameters(String url) {
+  /**
+   * The URL without what may hold a password, for {@code \conninfo}: its parameters, and the
+   * credentials of {@code //user:password@host} and Oracle's {@code thin:user/password@host}.
+   */
+  static String withoutCredentials(String url) {
     int q = url.indexOf('?');
     int semicolon = url.indexOf(';');
     int cut = q < 0 ? semicolon : semicolon < 0 ? q : Math.min(q, semicolon);
-    return cut < 0 ? url : url.substring(0, cut);
+    String shown = cut < 0 ? url : url.substring(0, cut);
+    return shown.replaceFirst("//[^/@]*@", "//").replaceFirst("(?i)thin:[^@]+@", "thin:@");
   }
 
   private static boolean isOn(@Nullable String value) {

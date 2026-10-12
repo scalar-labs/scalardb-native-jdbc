@@ -7,6 +7,7 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import org.jline.utils.WCWidth;
 
 /** Prints a result set as psql's aligned table: a centred header, numbers right-aligned. */
@@ -29,7 +30,7 @@ final class Printer {
     boolean[] numeric = new boolean[columns];
     int[] widths = new int[columns];
     for (int c = 0; c < columns; c++) {
-      labels[c] = md.getColumnLabel(c + 1);
+      labels[c] = printable(md.getColumnLabel(c + 1));
       numeric[c] = isNumeric(md.getColumnType(c + 1));
       widths[c] = width(labels[c]);
     }
@@ -38,7 +39,7 @@ final class Printer {
       String[] row = new String[columns];
       for (int c = 0; c < columns; c++) {
         String v = rs.getString(c + 1);
-        row[c] = v == null ? "" : v;
+        row[c] = v == null ? "" : printable(v);
         widths[c] = Math.max(widths[c], width(row[c]));
       }
       rows.add(row);
@@ -80,6 +81,27 @@ final class Printer {
       default:
         return false;
     }
+  }
+
+  /**
+   * The value with its control characters escaped, {@code \n} or {@code \x1b}: a stored escape
+   * sequence would otherwise reach the terminal, and a newline or tab would break the alignment.
+   */
+  static String printable(String s) {
+    StringBuilder b = new StringBuilder(s.length());
+    for (int i = 0; i < s.length(); i++) {
+      char ch = s.charAt(i);
+      if (ch == '\n') {
+        b.append("\\n");
+      } else if (ch == '\t') {
+        b.append("\\t");
+      } else if (Character.isISOControl(ch)) {
+        b.append(String.format(Locale.ROOT, "\\x%02x", (int) ch));
+      } else {
+        b.append(ch);
+      }
+    }
+    return b.toString();
   }
 
   /** The terminal columns a string takes: two for a wide character such as a kanji. */
