@@ -194,6 +194,29 @@ aggregate and three tables, with rows in flight; every split statement's rows eq
 over the committed image computed through ScalarDB. Acceptance: the benchmark's shapes, run through
 the driver, within the ratios the benchmark recorded for the chosen forms.
 
+### Milestone 3c: outer joins and subqueries in the split
+
+Milestone 3b leaves a ScalarDB table on the nullable side of a LEFT JOIN or in an IN or EXISTS
+subquery on `rc_T`, which costs 376-1495x for the LEFT JOIN and 109-1200x for the IN subquery on MySQL
+and MariaDB (`docs/benchmarks/read-overhead.md`); both are routine ORM output (an optional many-to-one
+fetch join, `IN (SELECT ...)`). Design 4.2, "Which tables are split", gives the rewrites (todo 095).
+
+- **Nullable tables**: three pieces, the inner join with each copy and the unmatched piece over an
+  empty fragment with two `NOT EXISTS`.
+- **Semi-joined tables**: IN and EXISTS as top-level conjuncts, two pieces, the first-match `NOT
+  EXISTS` in the in-flight piece unless the subquery selects the table's key.
+- **In an expression**: NOT IN, NOT EXISTS, and IN or EXISTS elsewhere, written twice inside each
+  piece.
+- **The limit** counts pieces, set from the measurement of todo 095 (32 pieces against `rc_T` and
+  against a partial split).
+
+Tests: each shape with the table's rows committed, in flight with and without a before image, and
+with a matching row in both copies (a non-key IN over a value the committed and the in-flight copy
+both hold); an ON clause and an IN comparison that are UNKNOWN; rows equal to the statement over the
+committed image computed through ScalarDB. Acceptance: the benchmark's LEFT JOIN and IN shapes through
+the driver within their recorded ratios; the non-key IN and the expression forms measured and
+recorded.
+
 ### Milestone 4: writes under READ COMMITTED
 
 Carried over from milestone 3: result stripping and the anchors, for the key read that returns

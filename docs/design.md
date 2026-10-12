@@ -797,17 +797,51 @@ union as a derived table.
     `AVG` as `SUM` and `COUNT`, each with its `GROUP BY`) is computed per copy and combined on top on
     every engine but PostgreSQL, so that no copy streams its rows through the union (full scans
     3-10x down to 1.2-2.5x); any other aggregate is applied on top of the union.
-  - **Which tables are split.** The copies are taken over the ScalarDB tables joined by inner joins
-    in the statement's top-level FROM clause, where a row of the result comes from exactly one row
-    of each table. A ScalarDB table anywhere else, in a subquery, a CTE, a set operation's branch or
-    on the nullable side of an outer join, reads the whole committed image through `rc_T`: splitting
-    it would be wrong, since an outer row whose `IN` or `EXISTS` subquery matches rows in both copies
-    would come out twice, and an outer join would add a NULL-extended row in each copy. Splitting
-    those correctly needs a first-match rule (a semi-join over the in-flight copy only where the
-    committed copy has no match, `NOT EXISTS` with UNKNOWN treated as no match) and, for an outer
-    join, an inner join per copy plus one piece for the rows matching neither copy; the benchmark
-    measured both (an IN over a UNION runs once per outer row on MySQL and MariaDB, 109-1200x), and
-    they are left for after the first version.
+  - **Which tables are split.** The statement is repeated per combination of *pieces* of its ScalarDB
+    table references, each piece reading the table through the fragment of its copy. Four kinds of
+    reference, by where the table stands (todo 095):
+    1. **Inner**: a table joined by an inner join in the top-level FROM clause, a LEFT JOIN's
+       preserved side included. Two pieces, committed and in flight. A row of the result comes from
+       exactly one row of the table, which is in exactly one copy.
+    2. **Nullable**: one table, not a join, on the nullable side of a top-level LEFT JOIN (RIGHT JOIN
+       mirrored), its ON clause naming only it and the tables before it. Three pieces. In the
+       committed and the in-flight piece the LEFT JOIN becomes an inner join with that copy's
+       fragment. The **unmatched piece** joins an empty fragment, `(SELECT <columns> FROM T WHERE
+       1 = 0)`, so every column of the table is NULL with its own type, and adds to the WHERE clause
+       ```sql
+       NOT EXISTS (SELECT 1 FROM <committed fragment> b WHERE <ON clause>)
+       AND NOT EXISTS (SELECT 1 FROM <in-flight fragment> b WHERE <ON clause>)
+       ```
+       The subqueries keep the table's alias, so the ON clause is copied unchanged and its references
+       to the table resolve to the subquery. A preserved row with matches gets one row per matching
+       row, each in exactly one copy; one without matches gets exactly one NULL-extended row; an ON
+       clause that is UNKNOWN is no match both in the join and in `NOT EXISTS`. Predicates after the
+       join see the values of the plain statement, NULLs in the unmatched piece. Measured with one
+       inner table (6 pieces): 1.3-2.5x, against 376-1495x through `rc_T` on MySQL and MariaDB.
+    3. **Semi-joined**: the one ScalarDB table of an `IN (subquery)` or `EXISTS (subquery)` that is a
+       top-level conjunct of the WHERE clause, the subquery a single SELECT naming no other ScalarDB
+       table, without aggregates, GROUP BY, HAVING, a row limit, window functions or a set operation.
+       Two pieces, as for an inner table, so the engine can still drive the plan from the subquery's
+       index. An outer row must come out of exactly one piece: the committed piece keeps the
+       subquery over the committed fragment; the in-flight piece keeps it over the in-flight fragment
+       and adds `NOT EXISTS` of the subquery over the committed fragment, with the IN's comparison
+       as one more conjunct. A row the committed piece returns is not returned again, and an UNKNOWN
+       comparison is no match there as it is in IN. When the subquery selects the table's whole key,
+       each value is in exactly one copy and the `NOT EXISTS` is left out. Measured for the key case:
+       1.7-3.7x, against 109-1200x through the view on MySQL and MariaDB, where an IN over a union
+       runs once per outer row. The `NOT EXISTS` of the non-key case is not measured.
+    4. **In an expression**: `NOT IN`, `NOT EXISTS`, and an IN or EXISTS under OR or NOT or in the
+       select list, over a subquery of the same form. These add no pieces: the subquery is written
+       twice inside every piece, as `x NOT IN (S_c) AND x NOT IN (S_f)`, `NOT EXISTS (S_c) AND NOT
+       EXISTS (S_f)`, `(x IN (S_c) OR x IN (S_f))` or `(EXISTS (S_c) OR EXISTS (S_f))`, `S_c` and
+       `S_f` the subquery over the committed and the in-flight fragment. In three-valued logic each
+       equals the quantifier over the union of the two, De Morgan's laws included, and an outer row
+       is returned once. ANY and SOME follow IN, ALL follows NOT IN. Not measured; an anti-join probes
+       or scans per outer row in the plain statement too.
+
+    Splitting a subquery's table naively, as an inner table, would be wrong: an outer row whose
+    subquery matches rows in both copies would come out twice, and an outer join would add a
+    NULL-extended row in each copy. The rules above exist to prevent that.
   - **Placeholders** that the copies repeat are re-bound in each copy (todo 012), and the statement is
     cached per text (todo 008).
   - **PostgreSQL parallel plans.** The split's estimated cost makes PostgreSQL start parallel workers,
@@ -815,10 +849,15 @@ union as a derived table.
     `max_parallel_workers_per_gather = 0` on its sessions and restores the session's value around a
     split read only when the plain statement's own plan is parallel, a long one; toggling it around
     every statement cost about 1 ms each.
-  - **Not split, served through `rc_T`**: a shape the splitter does not handle yet (a correlated scalar
-    subquery over a ScalarDB table, a recursive CTE, a set operation whose branches name ScalarDB
-    tables), and a statement with more ScalarDB table references than the configured limit (default
-    4, 16 copies), which keeps the split statement bounded; correct, at the costs of section 3.
+  - **Not split, served through `rc_T`**: a ScalarDB table in a shape the four kinds do not cover (a
+    scalar subquery, a subquery naming two ScalarDB tables or holding an aggregate or a row limit, a
+    CTE, a set operation's branch, a nullable side that is itself a join, a FULL JOIN, Oracle's
+    `(+)`), and a statement whose pieces, 2 per inner or semi-joined table and 3 per nullable one,
+    multiply past the configured limit (default 16), which keeps the split statement bounded; correct,
+    at the costs of section 3. Whether a statement past the limit is cheaper whole through `rc_T` or
+    with its first tables split and the rest through `rc_T`, and where the limit belongs (a 5-table
+    join is 32 pieces, two optional many-to-one joins on one table 18), is measured before the limit
+    is fixed (todo 095).
 - **SERIALIZABLE**: the SNAPSHOT form plus a read lock on every row of the first arm, held to commit.
   The second arm is never locked: its rows abort the transaction anyway, and a lock on them would block
   the ScalarDB commit, rollback or recovery that has to settle them. How the lock is taken differs by

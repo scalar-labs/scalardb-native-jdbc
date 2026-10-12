@@ -43,13 +43,17 @@ join split into 32 copies against rc_T, and 4 split plus 1 on rc_T. **Effort:** 
 
 ## Recommended Action
 
+Option 1. The rewrites are designed in docs/design.md 4.2, "Which tables are split", and scheduled as
+milestone 3c of docs/plans/proxy-step.md, after 3b. Still to do before the limit is fixed: the
+5-table measurements.
+
 ## Technical Details
 
 See Findings.
 
 ## Acceptance Criteria
 
-- [ ] The plan schedules (or explicitly defers with numbers) the nullable-side and IN-subquery rewrites.
+- [x] The plan schedules (or explicitly defers with numbers) the nullable-side and IN-subquery rewrites.
 - [ ] The 5-table measurements are recorded.
 
 ## Work Log
@@ -58,6 +62,21 @@ See Findings.
 
 **By:** Claude Code
 - Review of 0238f99..56c44ba (milestone 3b), 2026-10-12: correctness, binding, security, performance and simplicity reviewers.
+
+### 2026-10-13 - Design note
+
+**By:** Claude Code
+- Design 4.2 now splits four kinds of reference:
+  - inner (2 pieces);
+  - nullable (3 pieces: an inner join per copy, plus an unmatched piece over an empty fragment with
+    two `NOT EXISTS`);
+  - semi-joined IN/EXISTS top-level conjuncts (2 pieces, first match by `NOT EXISTS` unless the
+    subquery selects the key);
+  - quantifiers elsewhere (NOT IN, NOT EXISTS, IN/EXISTS under OR or NOT), written twice inside
+    each piece with AND or OR. These are exact in three-valued logic and add no pieces.
+- The limit now counts pieces; its value waits on the 5-table measurement.
+- Plan milestone 3c added.
+- Not measured yet: the non-key first-match `NOT EXISTS`, and the expression forms.
 
 ## Resources
 
