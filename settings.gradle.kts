@@ -5,3 +5,4 @@ pluginManagement {
 rootProject.name = "scalardb-native-jdbc"
 
 include("driver")
+include("shell")

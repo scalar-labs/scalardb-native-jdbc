@@ -35,6 +35,17 @@ The driver has no dependency on ScalarDB and none on the vendor drivers: the app
 its own vendor driver, and the driver finds it through `DriverManager` for the stripped URL. The
 driver requires Java 11 or later.
 
+For a psql-like prompt, use `snsql`, which goes through the driver; psql itself would bypass it. Build
+the zip with `./gradlew :shell:distZip` (it lands in `shell/build/distributions/`), unzip it, and run:
+
+```bash
+snsql -U alice jdbc:scalardb-native:postgresql://localhost:5432/shop
+snsql -U alice -h localhost -d shop --engine postgresql -c "select count(*) from orders"
+```
+
+The zip bundles the PostgreSQL, MariaDB (also used for MySQL), SQL Server and Oracle drivers and needs
+Java 11 or later. `BEGIN`, `COMMIT` and `ROLLBACK` work as in psql; `\?` lists the commands.
+
 ## Compatibility
 
 | Driver version | ScalarDB line | Engines |
@@ -62,6 +73,7 @@ runs under emulation on Apple Silicon.
 | Path | What |
 | --- | --- |
 | `driver/` | the driver, published as `com.scalar-labs:scalardb-native-jdbc` |
+| `shell/` | `snsql`, the psql-like interactive shell, distributed as `scalardb-native-shell-<version>.zip` (`docs/plans/shell.md`) |
 | `tools/` | planned: the setup command and the sweeper, published as `com.scalar-labs:scalardb-native-jdbc-tools`; added with the first tool |
 | `docs/design.md` | the design rules |
 | `build-logic/`, `gradle/libs.versions.toml` | shared Gradle conventions and the dependency versions |

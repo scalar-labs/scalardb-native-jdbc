@@ -279,7 +279,7 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
 
   | Concern | PostgreSQL | MySQL, MariaDB | SQL Server | Oracle |
   |---|---|---|---|---|
-  | Vendor driver, prefix | pgjdbc, `jdbc:postgresql:` | Connector/J `jdbc:mysql:`; MariaDB Connector/J `jdbc:mariadb:` (ScalarDB itself reaches MySQL through the MariaDB driver) | mssql-jdbc, `jdbc:sqlserver:` | ojdbc, `jdbc:oracle:` |
+  | Vendor driver, prefix | pgjdbc, `jdbc:postgresql:` | MySQL: Connector/J, or MariaDB Connector/J with `permitMysqlScheme=true` in the URL, both certified, `jdbc:mysql:` (ScalarDB itself reaches MySQL only through the MariaDB driver); MariaDB: MariaDB Connector/J `jdbc:mariadb:` | mssql-jdbc, `jdbc:sqlserver:` | ojdbc, `jdbc:oracle:` |
   | Statement snapshot at READ COMMITTED | yes | yes | only with `READ_COMMITTED_SNAPSHOT` on, checked at connect | yes |
   | Read lock at SERIALIZABLE (4.2) | `FOR SHARE` inside the first arm's derived table; on an imported table on the base tables, `FOR SHARE OF t` | a separate locking re-read of the first arm's predicate, LEFT JOINed to `T_meta` by primary key, `LOCK IN SHARE MODE` on both engines, since MariaDB rejects `FOR SHARE` and `OF t`; the engine's SERIALIZABLE level is not used | the same separate re-read `WITH (HOLDLOCK)`; the engine's SERIALIZABLE level is not used | no shared row lock: `FOR UPDATE` in a separate statement on the keys read; `FOR UPDATE` is not allowed on a UNION or in an inline view |
   | Insert that may collide | `INSERT ... ON CONFLICT DO NOTHING`, check the row count | catch error 1062; the transaction survives. Not `INSERT IGNORE`, which also downgrades data errors such as a NOT NULL violation to warnings | catch 2627 or 2601; the transaction survives with `XACT_ABORT` off, which the driver requires | catch ORA-00001; statement-level rollback keeps the transaction |
@@ -342,6 +342,7 @@ jdbc:scalardb-native:<vendor sub-protocol>://<vendor URL remainder>[?vendor and 
 
 jdbc:scalardb-native:postgresql://host:5432/db              ->  pgjdbc,              jdbc:postgresql://host:5432/db
 jdbc:scalardb-native:mysql://host:3306/db                   ->  Connector/J,         jdbc:mysql://host:3306/db
+jdbc:scalardb-native:mysql://host:3306/db?permitMysqlScheme=true -> MariaDB Connector/J, jdbc:mysql://host:3306/db?permitMysqlScheme=true
 jdbc:scalardb-native:mariadb://host:3306/db                 ->  MariaDB Connector/J, jdbc:mariadb://host:3306/db
 jdbc:scalardb-native:sqlserver://host:1433;databaseName=db  ->  mssql-jdbc,          jdbc:sqlserver://host:1433;databaseName=db
 jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,               jdbc:oracle:thin:@host:1521/db
@@ -351,6 +352,17 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   which finds the vendor driver through its `ServiceLoader` registration. The sub-protocol token selects
   the per-engine strategy, the way ScalarDB's `RdbEngineFactory` picks an engine by URL prefix. The same
   trick is used by p6spy and the AWS Advanced JDBC Wrapper.
+- **The sub-protocol is the engine, not the library.** A `mysql` URL gets the MySQL rules whichever
+  driver `DriverManager` finds for `jdbc:mysql:`. MySQL is certified through both Connector/J and
+  MariaDB Connector/J, the second because ScalarDB uses it and because its LGPL, unlike Connector/J's
+  GPL with the FOSS exception, lets a non-FOSS distribution such as the shell bundle it. MariaDB
+  Connector/J accepts a `jdbc:mysql:` URL only with `permitMysqlScheme` in the URL itself, read before
+  any connect property, as ScalarDB's `RdbEngineMysql` notes; the key passes through as a vendor
+  property. With both drivers on the classpath, which one serves the URL depends on `DriverManager`'s
+  registration order, so an application keeps one. The library still matters where the drivers differ:
+  the SQLSTATE and exception class around the server's error numbers (1213, 1205), what `getCatalog`
+  and the metadata calls report, and how `Statement.cancel` reaches the server; the MySQL engine
+  configuration runs with each library to certify them.
 - Accepted sub-protocols: `postgresql`, `mysql`, `mariadb`, `sqlserver`, `oracle`, the engines ScalarDB
   itself runs on. Anything else is refused at `connect`, not guessed at. Certification order: PostgreSQL,
   then MySQL and MariaDB together, then SQL Server, then Oracle. At connect the driver sets the session
@@ -415,7 +427,7 @@ exists (`forbidWildcardImports`, doclint with its `missing` group) and by review
 
 ```
 scalardb-native-jdbc/
-  settings.gradle.kts           rootProject.name; pluginManagement { includeBuild("build-logic") }; include driver, tools, samples
+  settings.gradle.kts           rootProject.name; pluginManagement { includeBuild("build-logic") }; include driver, shell, tools, samples
   build.gradle.kts              no source; a repositories block that exists for Dependabot only
   gradle.properties             version=3.19.0-alpha.1-SNAPSHOT; org.gradle.parallel, caching, configuration-cache
   gradle/libs.versions.toml     every version, including those used only as strings, so Dependabot can bump them
@@ -423,6 +435,7 @@ scalardb-native-jdbc/
   build-logic/src/main/kotlin/  scalardb-native-jdbc.{base,java,java11,publishing,license-report}-conventions
   config/spotbugs/exclude.xml
   driver/                       the published driver: com.scalar-labs:scalardb-native-jdbc, package com.scalar.db.nativejdbc
+  shell/                        the snsql interactive shell: com.scalar-labs:scalardb-native-shell, a zip with bin/snsql and lib/; docs/plans/shell.md
   tools/                        setup command and stuck-row check: com.scalar-labs:scalardb-native-jdbc-tools; no ScalarDB dependency; added with the first tool
   samples/                      crud-jdbc, crud-spring-data-jdbc, crud-jpa, crud-mybatis: the ORM acceptance suite (4.6)
   docs/design.md                this document
@@ -447,7 +460,8 @@ the `scalardb-native-jdbc-<module>` pattern.
   `config/spotbugs/exclude.xml`.
 - Test suites through `testing.suites`: JUnit Jupiter `test`, and an `integrationTest` `JvmTestSuite`
   wired into `check`; AssertJ and Mockito. The driver's integration tests are the interleaving matrix on
-  Testcontainers images of the five engines, PostgreSQL first, with a system property to point at an
+  Testcontainers images of the five engines, PostgreSQL first, MySQL through both Connector/J and MariaDB
+  Connector/J, with a system property to point at an
   external database instead.
 - Publishing: the Vanniktech `maven-publish` plugin with explicit coordinates, signing only when a key is
   configured, `publishToMavenCentral()`. No license file during the private preview, so the templates'
@@ -480,7 +494,7 @@ tasks.named<JavaCompile>("compileJava") {
 
 `driver` applies it, so records, switch expressions and pattern matching are unavailable in the driver's
 main sources, while its tests use whatever the toolchain offers. `tools` applies it too, since it is a
-command-line tool that should run wherever the driver does. The `samples` are Spring Boot 3 on Java 17
+command-line tool that should run wherever the driver does, and so does `shell`. The `samples` are Spring Boot 3 on Java 17
 and Spring Boot 4 on Java 21, each with its own `release`.
 
 **Dependencies**, all from the catalog:
@@ -488,6 +502,7 @@ and Spring Boot 4 on Java 21, each with its own `release`.
 | Module | Runtime | Compile-only | Test |
 |---|---|---|---|
 | `driver` | `jsqlparser`, `slf4j-api`. **No ScalarDB dependency.** | the five vendor JDBC drivers, which the application supplies | `scalardb` (newest 3.19 patch), Testcontainers, the vendor drivers, JUnit, AssertJ, Mockito, `logback-classic` |
+| `shell` | the driver, `jline`, `picocli`, `slf4j-nop`; in the distribution zip also pgjdbc, MariaDB Connector/J (for MySQL as well), mssql-jdbc and ojdbc11, at the versions the integration tests run, with their licence files. Not Connector/J, whose GPL the FOSS exception does not lift for a non-FOSS distribution; a user who wants it adds it to `lib/` | | Testcontainers, the vendor drivers, JUnit, AssertJ |
 | `tools` | the driver, `picocli`, `slf4j-api`, `logback-classic`. **No ScalarDB dependency**: settling rows is ScalarDB's (section 6) | | as above |
 | `samples` | Spring Boot and the ORM of each sample; the driver | | the sample's own tests, against the driver and real ScalarDB transactions |
 
