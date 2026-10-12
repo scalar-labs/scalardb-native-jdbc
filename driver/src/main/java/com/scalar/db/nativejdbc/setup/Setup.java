@@ -337,12 +337,22 @@ public final class Setup {
         }
         return true;
       case MYSQL:
-        execute(
-            "ANALYZE TABLE "
-                + name(t.namespace(), metadataTable(t))
-                + " UPDATE HISTOGRAM ON "
-                + txState
-                + " WITH 16 BUCKETS");
+        try (Statement st = connection.createStatement();
+            ResultSet rs =
+                st.executeQuery(
+                    "ANALYZE TABLE "
+                        + name(t.namespace(), metadataTable(t))
+                        + " UPDATE HISTOGRAM ON "
+                        + txState
+                        + " WITH 16 BUCKETS")) {
+          // a failure comes back as a row, not an exception
+          while (rs.next()) {
+            if (rs.getString("Msg_type").equalsIgnoreCase("error")) {
+              throw new SQLException(
+                  "the histogram on " + txState + " was not created: " + rs.getString("Msg_text"));
+            }
+          }
+        }
         return true;
       default:
         return false;

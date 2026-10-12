@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "092"
 tags: [code-review, correctness, split-read]
@@ -49,10 +49,19 @@ See Findings.
 
 ## Acceptance Criteria
 
-- [ ] SplitTest: a quoted alias with two spaces keeps its label.
-- [ ] The SQL Server label case is checked by an integration assertion on `getColumnLabel`.
+- [x] SplitTest: a quoted alias with two spaces keeps its label.
+- [x] ~~The SQL Server label case is checked by an integration assertion~~: not reproduced (`X`
+      both ways), dropped.
 
 ## Work Log
+
+### 2026-10-12 - Fixed
+
+**By:** Claude Code
+- The head is built from its non-empty parts; the double-space replace is gone. SplitTest and the
+  probe: `"a  b"` keeps its label on all five engines.
+- Not changed: the SQL Server label case (not reproduced) and ResultSetMetaData table names (rc_T has
+  the same property).
 
 ### 2026-10-12 - Found in review
 

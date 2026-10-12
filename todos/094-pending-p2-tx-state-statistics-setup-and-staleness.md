@@ -62,9 +62,15 @@ See Findings.
 
 - [ ] Measured: gather with 0 rows in flight, then put 100 in flight, rerun the Oracle suite; same after
       the auto job. MySQL: gather with 10% in flight, commit all, rerun.
-- [ ] Setup fails or warns when MySQL reports a histogram error.
+- [x] Setup fails or warns when MySQL reports a histogram error.
 
 ## Work Log
+
+### 2026-10-12 - MySQL error rows read
+
+**By:** Claude Code
+- `gatherHistogram` reads ANALYZE's result rows and fails the table's setup on `Msg_type = Error`.
+  Open: the cost on large tables and staleness.
 
 ### 2026-10-12 - Found in review
 

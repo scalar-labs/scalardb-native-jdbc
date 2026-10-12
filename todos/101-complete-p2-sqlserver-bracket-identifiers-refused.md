@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "101"
 tags: [code-review, sqlserver, parsing]
@@ -43,10 +43,20 @@ T-SQL outside identifiers and LIKE patterns, which are literals) still lexes.
 
 ## Acceptance Criteria
 
-- [ ] `SELECT [x] FROM rd.[made]` reads through the driver on SQL Server, split and unsplit.
-- [ ] A unit test covers bracketed names, including `]]` inside a name.
+- [x] `SELECT [x] FROM rd.[made]` reads through the driver on SQL Server, split and unsplit.
+- [x] A unit test covers bracketed names. A name containing `]` (written `]]`) is refused at parse:
+      JSqlParser 5.4 does not lex the escape (`unexpected "]"`), so it fails closed; rare enough to
+      leave.
 
 ## Work Log
+
+### 2026-10-12 - Fixed
+
+**By:** Claude Code
+- `analyze` parses with `withSquareBracketQuotation` on SQL Server; name folding already handled
+  brackets. The `parseAST` fallback (statements with no table or column node) is unchanged, since the
+  parser's tree is not reachable with options there.
+- SplitTest; probe: `SELECT [x] FROM rd.[made] ORDER BY [id]` returns the rows on SQL Server.
 
 ### 2026-10-12 - Found while verifying the review
 

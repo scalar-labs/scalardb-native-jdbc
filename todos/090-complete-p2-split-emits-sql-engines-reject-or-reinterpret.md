@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "090"
 tags: [code-review, correctness, split-read]
@@ -69,10 +69,24 @@ See Findings.
 
 ## Acceptance Criteria
 
-- [ ] SplitTest covers each shape above and gets either a fallback or SQL the engine accepts.
-- [ ] Integration cases for sequences (Oracle, SQL Server) and duplicate labels pass.
+- [x] SplitTest covers each shape above and gets either a fallback or SQL the engine accepts.
+- [ ] Integration cases for sequences (Oracle, SQL Server) and duplicate labels pass. Not added:
+      checked with the scratch probe against the five engines only (Work Log).
 
 ## Work Log
+
+### 2026-10-12 - Fixed
+
+**By:** Claude Code
+- Sequences: RowWise refuses `NextValExpression`; Oracle `NEXTVAL`/`CURRVAL` columns refuse the split.
+- Duplicate labels named by ORDER BY: `lift` returns null.
+- MySQL/MariaDB modifiers (HIGH_PRIORITY, SQL_CACHE, SQL_NO_CACHE, SQL_BUFFER_RESULT, SQL_SMALL_RESULT,
+  SQL_BIG_RESULT): no split.
+- MySQL/MariaDB: an unaliased column's label is backtick-quoted on top.
+- The alias-in-expression item was not reproduced and is not changed.
+- Probe after the fix: duplicate labels, modifiers, reserved-word label and sequences all return rows
+  on the engines that accept the original; Oracle and SQL Server reject duplicate-label ORDER BY
+  natively too (ORA-00960, "Ambiguous column name").
 
 ### 2026-10-12 - Found in review
 

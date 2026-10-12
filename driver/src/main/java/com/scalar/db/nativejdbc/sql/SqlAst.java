@@ -27,10 +27,12 @@ import net.sf.jsqlparser.expression.JsonAggregateFunction;
 import net.sf.jsqlparser.expression.KeepExpression;
 import net.sf.jsqlparser.expression.LongValue;
 import net.sf.jsqlparser.expression.MySQLGroupConcat;
+import net.sf.jsqlparser.expression.NextValExpression;
 import net.sf.jsqlparser.expression.UserVariable;
 import net.sf.jsqlparser.expression.VariableAssignment;
 import net.sf.jsqlparser.expression.XMLSerializeExpr;
 import net.sf.jsqlparser.parser.ASTNodeAccess;
+import net.sf.jsqlparser.parser.CCJSqlParser;
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.parser.Node;
@@ -242,7 +244,9 @@ public final class SqlAst {
     Statement stmt;
     try {
       // parseStatements, not parse: the latter silently keeps only the first of "a; b"
-      Statements statements = CCJSqlParserUtil.parseStatements(sql);
+      Statements statements =
+          CCJSqlParserUtil.parseStatements(
+              sql, p -> p.withSquareBracketQuotation(engine == Engine.SQLSERVER));
       if (statements.size() != 1) {
         return Outcome.refused(
             statements.isEmpty()
@@ -780,7 +784,7 @@ public final class SqlAst {
    *     renamed table, or when the result does not parse; in each case nothing has been rewritten
    */
   public @Nullable String joinTokens(@Nullable Naming naming) {
-    if (root.jjtGetFirstToken() == null) {
+    if (root.jjtGetFirstToken() == null || hasMisreadHashComment()) {
       return null;
     }
     Map<Token, String> from = new IdentityHashMap<>();
@@ -1084,8 +1088,10 @@ public final class SqlAst {
       prev = image;
     }
 
+    /** The text; one that ends in a line comment ends with the newline that closes it. */
     String text() {
-      return out.toString().strip();
+      String text = out.toString().strip();
+      return openLineComment ? text + "\n" : text;
     }
   }
 
@@ -1227,8 +1233,25 @@ public final class SqlAst {
       return List.of();
     }
     for (ColumnRef c : columnRefs) {
-      if (engine == Engine.ORACLE && c.name().equalsIgnoreCase("rownum")) {
-        return List.of(); // numbered per copy
+      if (engine == Engine.ORACLE
+          && (c.name().equalsIgnoreCase("rownum")
+              || c.name().equalsIgnoreCase("nextval")
+              || c.name().equalsIgnoreCase("currval"))) {
+        return List.of(); // numbered per copy; a sequence is not allowed in a UNION
+      }
+    }
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      if (engine == Engine.ORACLE
+          && t.image.equals("(")
+          && t.next != null
+          && t.next.image.equals("+")
+          && t.next.next != null
+          && t.next.next.image.equals(")")) {
+        return List.of(); // (+): an outer join whose nullable side the FROM clause does not show
+      }
+      if ((engine == Engine.MYSQL || engine == Engine.MARIADB)
+          && MYSQL_SELECT_MODIFIERS.contains(t.image.toUpperCase(Locale.ROOT))) {
+        return List.of(); // not allowed in a SELECT of a UNION
       }
     }
     Set<Object> split = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -1251,6 +1274,15 @@ public final class SqlAst {
     }
     return List.copyOf(out);
   }
+
+  private static final Set<String> MYSQL_SELECT_MODIFIERS =
+      Set.of(
+          "HIGH_PRIORITY",
+          "SQL_CACHE",
+          "SQL_NO_CACHE",
+          "SQL_BUFFER_RESULT",
+          "SQL_SMALL_RESULT",
+          "SQL_BIG_RESULT");
 
   /**
    * Whether an expression computes one value from one row: no aggregate, window function, unknown
@@ -1319,6 +1351,12 @@ public final class SqlAst {
     }
 
     @Override
+    public <S> Void visit(NextValExpression e, S context) {
+      rowWise = false; // a sequence is not allowed in a UNION
+      return null;
+    }
+
+    @Override
     public <S> Void visit(ParenthesedSelect select, S context) {
       return null;
     }
@@ -1375,7 +1413,10 @@ public final class SqlAst {
    */
   public @Nullable SplitText emitSplit(List<Naming> copies, Map<TableRef, List<String>> columns) {
     Token start = root.jjtGetFirstToken();
-    if (start == null || copies.isEmpty() || !(statement instanceof PlainSelect)) {
+    if (start == null
+        || copies.isEmpty()
+        || !(statement instanceof PlainSelect)
+        || hasMisreadHashComment()) {
       return null;
     }
     Map<Token, Integer> placeholders = new IdentityHashMap<>();
@@ -1420,9 +1461,7 @@ public final class SqlAst {
         texts.add(e.text());
       }
       // the copies differ only in the derived tables the naming gives
-      return parses(texts.get(0))
-          ? new SplitText(String.join(" UNION ALL ", texts), sources)
-          : null;
+      return parses(texts.get(0)) ? checked(String.join(" UNION ALL ", texts), sources) : null;
     }
     Lift lift = lift(s, columns);
     if (lift == null) {
@@ -1460,14 +1499,38 @@ public final class SqlAst {
     if (lift.bodyEnd.next != null) {
       tail.tokens(lift.bodyEnd.next, null);
     }
+    String prefixText = prefix.text();
     String head =
-        String.join(" ", "SELECT", prefix.text(), String.join(", ", lift.outer)).replace("  ", " ")
+        "SELECT "
+            + (prefixText.isEmpty() ? "" : prefixText + " ")
+            + String.join(", ", lift.outer)
             + " FROM (";
     String end = (") v " + tail.text()).strip();
     if (!parses(head + texts.get(0) + end)) {
       return null;
     }
-    return new SplitText(head + String.join(" UNION ALL ", texts) + end, sources);
+    return checked(head + String.join(" UNION ALL ", texts) + end, sources);
+  }
+
+  /**
+   * The split read, if its text holds exactly the placeholders it was emitted with, which a comment
+   * swallowing a copy would break, and no more than the engine takes.
+   */
+  private @Nullable SplitText checked(String sql, List<Integer> sources) {
+    // SQL Server takes 2100 parameters; the others' protocols 65535
+    int max = engine == Engine.SQLSERVER ? 2100 : 65535;
+    if (sources.size() > max) {
+      return null;
+    }
+    CCJSqlParser lexer =
+        CCJSqlParserUtil.newParser(sql).withSquareBracketQuotation(engine == Engine.SQLSERVER);
+    int placeholders = 0;
+    for (Token t = lexer.getNextToken(); t.kind != 0; t = lexer.getNextToken()) {
+      if (t.image.equals("?")) {
+        placeholders++;
+      }
+    }
+    return placeholders == sources.size() ? new SplitText(sql, sources) : null;
   }
 
   /** Tokens to emit, from {@code first} to {@code last} when first is not null, then text. */
@@ -1601,6 +1664,12 @@ public final class SqlAst {
         label = alias.getName();
       } else if (e instanceof Column) {
         label = ((Column) e).getColumnName();
+        if ((engine == Engine.MYSQL || engine == Engine.MARIADB)
+            && !label.startsWith("`")
+            && !label.startsWith("\"")) {
+          // a reserved word may follow a qualifier unquoted, but not AS
+          label = engine.quote(label);
+        }
       } else {
         return null; // the engine's label for an expression differs by engine
       }
@@ -1618,11 +1687,14 @@ public final class SqlAst {
         }
         if (e instanceof Column && ((Column) e).getTable() == null) {
           String name = key(engine, ((Column) e).getColumnName());
-          boolean isLabel = false;
+          int matches = 0;
           for (String l : labels) {
-            isLabel |= key(engine, l).equals(name);
+            matches += key(engine, l).equals(name) ? 1 : 0;
           }
-          if (isLabel) {
+          if (matches > 1) {
+            return null; // ambiguous on top, where the copies' items are distinct columns
+          }
+          if (matches == 1) {
             continue; // names a column on top
           }
         }
@@ -1645,6 +1717,23 @@ public final class SqlAst {
   private boolean sameAlias(Table q, TableRef r) {
     return q.getSchemaName() == null
         && key(engine, q.getName()).equals(key(engine, Objects.requireNonNull(r.alias())));
+  }
+
+  /**
+   * Whether the statement has a {@code #}, which starts a comment on MySQL and MariaDB but which
+   * the parser reads as an operator: re-emitted, the comment's text loses the newline that ends it
+   * and comments out what follows it.
+   */
+  private boolean hasMisreadHashComment() {
+    if (engine != Engine.MYSQL && engine != Engine.MARIADB) {
+      return false;
+    }
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      if (t.image.equals("#")) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** The token just before {@code target}, searching from {@code first}; null if none. */

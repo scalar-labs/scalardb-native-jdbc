@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "087"
 tags: [code-review, correctness, split-read, oracle]
@@ -46,10 +46,18 @@ See Findings.
 
 ## Acceptance Criteria
 
-- [ ] SplitTest: both `(+)` forms produce no split.
-- [ ] Oracle integration case with a `(+)` join and rows in flight returns the native result.
+- [x] SplitTest: both `(+)` forms produce no split.
+- [x] Oracle integration case with a `(+)` join and rows in flight returns the native result.
 
 ## Work Log
+
+### 2026-10-12 - Fixed
+
+**By:** Claude Code
+- `splittableRefs` returns nothing when the token chain holds `(`, `+`, `)` on Oracle; the statement
+  reads through rc_T.
+- Tests: SplitTest (WHERE and ON forms), ReadIntegrationTest (Oracle self-join with `(+)` returns
+  a/a, b/b, c/c with a row in flight).
 
 ### 2026-10-12 - Found in review
 

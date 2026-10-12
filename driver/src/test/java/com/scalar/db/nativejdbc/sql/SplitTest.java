@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.nativejdbc.engine.Engine;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -79,6 +80,51 @@ class SplitTest {
     assertThat(SqlAst.parse(sql).map(SqlAst::splittableRefs).orElse(List.of())).isEmpty();
   }
 
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        // an old-style outer join: b is a nullable side
+        "SELECT a.x, b.y FROM a, b WHERE a.id = b.aid(+)",
+        "SELECT a.x FROM a JOIN b ON a.id = b.aid (+)",
+        // a sequence is not allowed in a UNION
+        "SELECT s.NEXTVAL, x FROM a",
+        "SELECT s.CURRVAL, x FROM a"
+      })
+  void splittableRefs_areNone_forOracleShapes(String sql) {
+    assertThat(SqlAst.parse(sql, Engine.ORACLE).orElseThrow().splittableRefs()).isEmpty();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "SELECT HIGH_PRIORITY x FROM a",
+        "SELECT SQL_NO_CACHE x FROM a",
+        "SELECT SQL_BUFFER_RESULT x FROM a"
+      })
+  void splittableRefs_areNone_forMySqlModifiersAUnionRefuses(String sql) {
+    assertThat(SqlAst.parse(sql, Engine.MYSQL).orElseThrow().splittableRefs()).isEmpty();
+    assertThat(SqlAst.parse(sql, Engine.MARIADB).orElseThrow().splittableRefs()).isEmpty();
+  }
+
+  @Test
+  void splittableRefs_areNone_forASequenceOnSqlServer() {
+    SqlAst ast = SqlAst.parse("SELECT NEXT VALUE FOR s, x FROM a", Engine.SQLSERVER).orElseThrow();
+    assertThat(ast.splittableRefs()).isEmpty();
+  }
+
+  @Test
+  void bracketQuotedNames_parseOnSqlServer() {
+    SqlAst ast =
+        SqlAst.parse("SELECT [x] FROM rd.[made] WHERE [id] = ?", Engine.SQLSERVER).orElseThrow();
+    assertThat(ast.splittableRefs()).hasSize(1);
+    SqlAst.SplitText split =
+        ast.emitSplit(List.of(r -> "(select * from t0)", r -> "(select * from t1)"), Map.of());
+    assertThat(Objects.requireNonNull(split).sql())
+        .isEqualTo(
+            "SELECT [x] FROM (select * from t0) [made] WHERE [id] = ? UNION ALL SELECT [x] FROM"
+                + " (select * from t1) [made] WHERE [id] = ?");
+  }
+
   @Test
   void splittableRefs_areNone_forOraclesRownum() {
     SqlAst ast = SqlAst.parse("SELECT x FROM a WHERE ROWNUM <= 3", Engine.ORACLE).orElseThrow();
@@ -95,6 +141,29 @@ class SplitTest {
                 + " where a.k = ? and b.z > ? UNION ALL select a.x, b.y from (select * from a1) a"
                 + " join (select * from b1) b on a.id = b.aid where a.k = ? and b.z > ?");
     assertThat(split.parameterSources()).containsExactly(1, 2, 1, 2);
+  }
+
+  @Test
+  void emitSplit_endsALineComment_beforeTheNextCopy() {
+    SqlAst ast = parse("select x from a where id = ? -- note");
+    SqlAst.SplitText split = split(ast, Map.of());
+    assertThat(split.sql())
+        .isEqualTo(
+            "select x from (select * from a0) a where id = ? -- note\n"
+                + " UNION ALL select x from (select * from a1) a where id = ? -- note\n");
+    assertThat(split.parameterSources()).containsExactly(1, 1);
+    // MySQL's # comment, which the parser reads as an operator: nothing is re-emitted
+    SqlAst my =
+        SqlAst.parse("select x from a where id = 1 # c\nand y = 2", Engine.MYSQL).orElseThrow();
+    assertThat(twoCopies(my, Map.of())).isNull();
+    assertThat(my.joinTokens(r -> "rc_" + r.name())).isNull();
+    // before the first item of a statement lifted on top: in every copy, closed
+    SqlAst top = parse("select -- note\n a.x from a order by a.x");
+    assertThat(split(top, Map.of()).sql())
+        .isEqualTo(
+            "SELECT v.c1 AS x FROM (SELECT -- note\na.x AS c1, a.x AS s1 from (select * from a0) a"
+                + " UNION ALL SELECT -- note\na.x AS c1, a.x AS s1 from (select * from a1) a) v"
+                + " order by v.s1");
   }
 
   @Test
@@ -150,9 +219,31 @@ class SplitTest {
     assertThat(twoCopies(ast, Map.of(ast.tableRefs().get(0), List.of("id")))).isNull();
   }
 
+  @Test
+  void emitSplit_keepsLabelsAsWritten() {
+    SqlAst ast = parse("select a.x as \"a  b\" from a order by 1");
+    assertThat(split(ast, Map.of()).sql()).startsWith("SELECT v.c1 AS \"a  b\" FROM (");
+    // a reserved word may follow a qualifier on MySQL, but not AS
+    SqlAst my =
+        SqlAst.parse("SELECT t.rank FROM a t ORDER BY t.id LIMIT 5", Engine.MYSQL).orElseThrow();
+    assertThat(split(my, Map.of()).sql()).startsWith("SELECT v.c1 AS `rank` FROM (");
+  }
+
+  @Test
+  void emitSplit_returnsNull_whenThePlaceholdersExceedTheEnginesLimit() {
+    // two copies: 1050 placeholders emit 2100, SQL Server's limit
+    String in = "SELECT x FROM a WHERE id IN (" + String.join(",", Collections.nCopies(1050, "?"));
+    assertThat(twoCopies(SqlAst.parse(in + ")", Engine.SQLSERVER).orElseThrow(), Map.of()))
+        .isNotNull();
+    assertThat(twoCopies(SqlAst.parse(in + ",?)", Engine.SQLSERVER).orElseThrow(), Map.of()))
+        .isNull();
+  }
+
   @ParameterizedTest
   @ValueSource(
       strings = {
+        // on top the two items are distinct columns, so the name is ambiguous
+        "select x, x from a order by x",
         // the engines label an unaliased expression differently
         "select a.x + 1 from a order by 1",
         // on top, DISTINCT may sort only by what it selects

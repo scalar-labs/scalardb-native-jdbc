@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "086"
 tags: [code-review, correctness, split-read]
@@ -55,12 +55,28 @@ See Findings.
 
 ## Acceptance Criteria
 
-- [ ] SplitTest cases with a trailing `--` comment and a trailing `#` comment (MySQL), with and without
+- [x] SplitTest cases with a trailing `--` comment and a trailing `#` comment (MySQL), with and without
       placeholders, emit every copy.
-- [ ] The emitted text is parsed whole and its placeholder count checked before use.
-- [ ] An integration case with a trailing comment returns before images of in-flight rows.
+- [x] The emitted text is parsed whole and its placeholder count checked before use.
+- [x] An integration case with a trailing comment returns before images of in-flight rows.
 
 ## Work Log
+
+### 2026-10-12 - Fixed
+
+**By:** Claude Code
+- `Emitter.text()` keeps the newline that closes a trailing line comment, so `UNION ALL` starts a new
+  line; a comment before the first select item, emitted in every copy, is closed the same way.
+- `checked()` lexes the whole emitted text and falls back unless its `?` count equals the parameter
+  mapping, so a swallowed copy can no longer reach the engine.
+- Found while fixing: on MySQL and MariaDB the parser reads `#` as an operator, so `WHERE id = 1 # c\n
+  AND y = 2` parsed, and both the split and the rc_T rewrite re-emitted it on one line, commenting out
+  `AND y = 2` (more rows; todo 034's "fails closed" held only where `#` does not parse). Now a statement
+  with a `#` token is not rewritten on those engines (`hasMisreadHashComment`): refused with 0AN01 when
+  it needs a rewrite, passed through unchanged when it does not.
+- Tests: SplitTest (`--` with a placeholder, `#`, a comment before the first item), ReadIntegrationTest
+  (trailing comment with and without a placeholder, all engines). Probe: all five engines now return
+  a, b, c and b.
 
 ### 2026-10-12 - Found in review
 

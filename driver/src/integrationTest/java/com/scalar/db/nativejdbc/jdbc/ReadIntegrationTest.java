@@ -51,7 +51,11 @@ class ReadIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   @SuppressFBWarnings(
-      value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
+      value = {
+        "SQL_INJECTION_JDBC",
+        "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
+        "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"
+      },
       justification = "fixture DDL and queries written in the test sources")
   void reads_seeTheCommittedImage_whileScalarDbHoldsRowsPrepared(Engines e) throws Exception {
     Engine engine = e.engine();
@@ -178,6 +182,35 @@ class ReadIntegrationTest {
                         + " = i.id ORDER BY i.id"))
             .containsExactly("a/a", "b/b", "c/c");
         splitReads(c, made, mid, mx);
+        // a trailing line comment ends every copy, not only the first
+        assertThat(rows(c, "SELECT " + mx + " FROM " + made + " -- note"))
+            .containsExactlyInAnyOrder("a", "b", "c");
+        try (PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT " + mx + " FROM " + made + " WHERE " + mid + " = ? -- note")) {
+          ps.setInt(1, 2);
+          assertThat(rows(ps)).containsExactly("b");
+        }
+        if (engine == Engine.ORACLE) {
+          // an old-style outer join reads its nullable side whole
+          assertThat(
+                  rows(
+                      c,
+                      "SELECT a."
+                          + mx
+                          + ", b."
+                          + mx
+                          + " FROM "
+                          + made
+                          + " a, "
+                          + made
+                          + " b WHERE a."
+                          + mid
+                          + " = b."
+                          + mid
+                          + "(+)"))
+              .containsExactlyInAnyOrder("a/a", "b/b", "c/c");
+        }
       }
       try (Connection vendor = e.open()) {
         // the reads above ran split, not through the read views
