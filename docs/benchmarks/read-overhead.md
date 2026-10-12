@@ -561,3 +561,93 @@ What would fix it (not done here):
    the DISTINCT set stays.
 3. Liveness first: the in-flight count stays small only if stuck rows are recovered (todo 084) and
    reported (todo 085).
+
+## Wide tables and composite keys (2026-10-12)
+
+Two tables shaped like real ScalarDB tables, 100k rows each, 100 rows in flight:
+
+- `w`: 49 non-key columns (`c01`, indexed, then `c02` to `c49`).
+- `k`: keyed on `(pid, cid)`, 10 rows per partition, with an indexed `grp`.
+
+Shapes: on `w`, a key lookup, an indexed filter, and joins of 2 and 4 copies of `w` on the key, each
+reading 1 or 2 columns per table; on `k`, a full-key lookup, a partition scan, and a join on the full
+key. New mode and setting:
+
+- `SPLIT_DRVN`: the driver form with each derived table projecting only the key and the columns the
+  statement references, instead of every column.
+- `-Dnativejdbc.bench.fresh=true`: every execution is a new statement with the values inline, so
+  every engine parses and plans it again. This is the cost of a statement no cache holds.
+
+Every mode returned BASE's rows. Medians in ms (ratio to BASE):
+
+| shape | engine | BASE | all columns | referenced only | fresh: BASE | fresh: all | fresh: referenced |
+|---|---|---|---|---|---|---|---|
+| wide: key lookup, 2 of 50 columns | PostgreSQL | 0.47 | 0.43 (0.9x) | 0.41 (0.9x) | 0.53 | 0.79 (1.5x) | 0.61 (1.2x) |
+|  | MySQL | 0.57 | 0.71 (1.3x) | 0.58 (1x) | 0.65 | 0.77 (1.2x) | 0.62 (1x) |
+|  | MariaDB | 0.46 | 0.63 (1.4x) | 0.52 (1.1x) | 0.47 | 0.61 (1.3x) | 0.52 (1.1x) |
+|  | SQL Server | 0.67 | 0.72 (1.1x) | 0.62 (0.9x) | 1.70 | 5.59 (3.3x) | 4.59 (2.7x) |
+|  | Oracle | 0.52 | 0.51 (1x) | 0.46 (0.9x) | 1.25 | 2.92 (2.3x) | 2.27 (1.8x) |
+| wide: indexed filter, 1 of 50 columns (100 rows) | PostgreSQL | 0.51 | 0.49 (1x) | 0.48 (0.9x) | 0.53 | 0.91 (1.7x) | 0.73 (1.4x) |
+|  | MySQL | 0.70 | 0.96 (1.4x) | 0.96 (1.4x) | 0.70 | 1.00 (1.4x) | 0.88 (1.3x) |
+|  | MariaDB | 0.59 | 0.98 (1.7x) | 0.89 (1.5x) | 0.60 | 0.89 (1.5x) | 0.86 (1.4x) |
+|  | SQL Server | 0.88 | 1.23 (1.4x) | 1.10 (1.2x) | 2.80 | 9.21 (3.3x) | 8.41 (3x) |
+|  | Oracle | 1.73 | 2.23 (1.3x) | 2.12 (1.2x) | 2.37 | 5.29 (2.2x) | 4.55 (1.9x) |
+| wide: 2 tables JOIN on key (100 rows) | PostgreSQL | 0.57 | 1.04 (1.8x) | 1.04 (1.8x) | 0.73 | 3.48 (4.8x) | 2.47 (3.4x) |
+|  | MySQL | 0.78 | 1.95 (2.5x) | 1.74 (2.2x) | 0.86 | 2.58 (3x) | 2.14 (2.5x) |
+|  | MariaDB | 0.69 | 1.78 (2.6x) | 1.46 (2.1x) | 0.75 | 2.34 (3.1x) | 1.56 (2.1x) |
+|  | SQL Server | 1.05 | 1.94 (1.9x) | 1.95 (1.9x) | 4.24 | 28.90 (6.8x) | 24.77 (5.8x) |
+|  | Oracle | 1.71 | 2.47 (1.4x) | 2.34 (1.4x) | 2.57 | 17.34 (6.7x) | 12.09 (4.7x) |
+| wide: 4 tables JOIN on key, key lookup | PostgreSQL | 0.41 | 0.87 (2.1x) | 0.83 (2x) | 0.56 | 21.81 (39.2x) | 15.16 (27.3x) |
+|  | MySQL | 0.46 | 5.89 (12.9x) | 2.31 (5.1x) | 0.47 | 7.39 (15.9x) | 2.93 (6.3x) |
+|  | MariaDB | 0.44 | 5.52 (12.7x) | 2.44 (5.6x) | 0.45 | 6.30 (14.1x) | 2.52 (5.6x) |
+|  | SQL Server | 0.56 | 0.87 (1.5x) | 0.76 (1.4x) | 3.50 | 142.10 (40.6x) | 111.06 (31.8x) |
+|  | Oracle | 0.39 | 0.48 (1.2x) | 0.49 (1.2x) | 1.55 | 188.59 (121.9x) | 55.23 (35.7x) |
+| composite key: full-key lookup | PostgreSQL | 0.39 | 0.45 (1.2x) | 0.45 (1.2x) | 0.43 | 0.62 (1.4x) | 0.64 (1.5x) |
+|  | MySQL | 0.47 | 0.55 (1.2x) | 0.54 (1.2x) | 0.43 | 0.59 (1.4x) | 0.60 (1.4x) |
+|  | MariaDB | 0.33 | 0.53 (1.6x) | 0.52 (1.6x) | 0.43 | 0.52 (1.2x) | 0.52 (1.2x) |
+|  | SQL Server | 0.60 | 0.57 (1x) | 0.58 (1x) | 1.55 | 5.06 (3.3x) | 5.04 (3.2x) |
+|  | Oracle | 0.40 | 0.40 (1x) | 0.39 (1x) | 0.99 | 2.33 (2.4x) | 2.22 (2.2x) |
+| composite key: partition scan (10 rows) | PostgreSQL | 0.40 | 0.40 (1x) | 0.39 (1x) | 0.47 | 0.57 (1.2x) | 0.54 (1.2x) |
+|  | MySQL | 0.44 | 0.54 (1.2x) | 0.59 (1.4x) | 0.46 | 0.73 (1.6x) | 0.73 (1.6x) |
+|  | MariaDB | 0.42 | 0.54 (1.3x) | 0.55 (1.3x) | 0.42 | 0.56 (1.3x) | 0.56 (1.3x) |
+|  | SQL Server | 0.55 | 0.64 (1.2x) | 0.66 (1.2x) | 1.60 | 7.69 (4.8x) | 7.74 (4.8x) |
+|  | Oracle | 0.81 | 0.91 (1.1x) | 0.86 (1.1x) | 1.40 | 3.42 (2.4x) | 3.36 (2.4x) |
+| composite key: JOIN on the full key (100 rows) | PostgreSQL | 0.62 | 0.97 (1.6x) | 0.98 (1.6x) | 0.63 | 2.34 (3.7x) | 2.45 (3.9x) |
+|  | MySQL | 0.56 | 1.36 (2.4x) | 1.38 (2.5x) | 0.88 | 1.82 (2.1x) | 2.02 (2.3x) |
+|  | MariaDB | 0.57 | 1.53 (2.7x) | 1.53 (2.7x) | 0.61 | 1.54 (2.5x) | 1.40 (2.3x) |
+|  | SQL Server | 0.81 | 1.61 (2x) | 1.60 (2x) | 3.74 | 25.34 (6.8x) | 25.19 (6.7x) |
+|  | Oracle | 1.82 | 2.55 (1.4x) | 2.49 (1.4x) | 2.57 | 13.72 (5.3x) | 13.81 (5.4x) |
+
+Statement length in characters (the same on every engine):
+
+| shape | BASE | all columns | referenced only |
+|---|---|---|---|
+| wide: key lookup | 62 | 2,158 | 466 |
+| wide: 2 tables JOIN | 100 | 8,525 | 1,685 |
+| wide: 4 tables JOIN | 187 | 67,893 | 12,597 |
+| composite key: JOIN | 121 | 2,073 | 1,929 |
+
+Findings:
+
+- **Width costs nothing once the plan is cached.** On PostgreSQL, SQL Server and Oracle a
+  prepared statement reuses its plan, and the all-columns form is as fast as the narrow one.
+- **Width costs every execution on MySQL and MariaDB.** Connector/J and the MariaDB driver prepare
+  on the client by default, so the server parses each execution: the 4-table join takes 5.9 ms with
+  every column and 2.3 ms with the referenced ones. Fresh and prepared timings are alike there.
+- **Width costs every parse elsewhere.** For a fresh 4-table join the all-columns form takes 189 ms
+  on Oracle (55 ms narrow), 142 ms on SQL Server (111 ms) and 22 ms on PostgreSQL (15 ms). The
+  2^n copies dominate even when narrow: a fresh split is 1.2-7x BASE for 1-2 tables, and 27-36x
+  for 4 on PostgreSQL, SQL Server and Oracle.
+- **Composite keys cost what single keys do**: 1.0-1.6x for lookups and partition scans, 1.4-2.7x
+  for the join, prepared. Key equality over two columns and the DISTINCT set over two columns
+  plan as over one.
+
+What follows for the driver:
+
+1. Project only the key and the referenced columns in each fragment (todo 096), keeping every column
+   under `*`. It more than halves MySQL and MariaDB on the 4-table wide join, and cuts parse time
+   on every engine.
+2. Keep plans cached: the driver should prepare on the server where the vendor driver allows it
+   (pgjdbc does after 5 executions by default; `useServerPrepStmts` on Connector/J), and avoid
+   inlining values, which defeats every plan cache. That stays a configuration note; not measured
+   further here.

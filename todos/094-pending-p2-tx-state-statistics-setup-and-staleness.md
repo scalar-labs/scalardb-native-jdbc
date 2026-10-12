@@ -81,3 +81,12 @@ See Findings.
 
 - Commits 7503c10, ca8046d, 56c44ba; docs/design.md, docs/plans/proxy-step.md milestone 3b,
   docs/benchmarks/read-overhead.md.
+
+### 2026-10-12 - Unstable PostgreSQL plan for a split IN subquery
+
+**By:** Claude Code
+- "IN subquery on non-key", SPLIT_DRV on PostgreSQL at 100 rows in flight, same code, fresh
+  container each run: 1.3x, 1.4x, 4.6x and 5.3x of BASE (0.9 ms). SPLIT_DHD gave 1.1x in one run
+  and 4.7-5.0x in others. Likely the random sample of `ANALYZE` choosing between two plans; not
+  investigated. Capture both plans (`-Dnativejdbc.bench.explain='^IN subquery'`) when this todo is
+  worked.

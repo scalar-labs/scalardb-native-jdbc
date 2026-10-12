@@ -35,8 +35,10 @@ import org.junit.jupiter.params.provider.MethodSource;
  *
  * <p>Two ScalarDB-style tables, {@code c} (customers, 100k rows) and {@code o} (orders, 500k rows,
  * five per customer), each with a metadata table holding 100 rows in flight whose before image
- * equals the current values, so every rewrite must return the rows of the plain query. The
- * rewrites, through the vendor driver directly so only the SQL is measured:
+ * equals the current values, so every rewrite must return the rows of the plain query. Two more for
+ * the shapes of real tables: {@code w} (100k rows, 49 non-key columns) and {@code k} (100k rows
+ * keyed on {@code (pid, cid)}), their rows in flight at {@code c}'s ids. The rewrites, through the
+ * vendor driver directly so only the SQL is measured:
  *
  * <ul>
  *   <li>BASE: the query on the data tables, ignoring the metadata; the target.
@@ -127,7 +129,9 @@ class ReadOverheadBenchmark {
     /** SPLIT_DRVP with the left join on the metadata as the committed form on every engine. */
     SPLIT_DLJP,
     /** MySQL: SPLIT_DAJP with NOT EXISTS kept a per-row probe ({@code NO_SEMIJOIN}). */
-    SPLIT_DAJN
+    SPLIT_DAJN,
+    /** SPLIT_DRV with each derived table projecting only the columns the statement references. */
+    SPLIT_DRVN
   }
 
   enum Param {
@@ -137,10 +141,26 @@ class ReadOverheadBenchmark {
     /** Regions below 3, 30 or 300: 300, 3k or 30k customers. */
     SPAN3,
     SPAN30,
-    SPAN300
+    SPAN300,
+    /** The composite key of the customer's row: customer / 10 and customer % 10. */
+    PART,
+    CLUSTER
   }
 
-  private static final Map<String, String> TABLE = Map.of("C", "c", "O", "o", "R", "r");
+  private static final Map<String, String> TABLE =
+      Map.of("C", "c", "O", "o", "R", "r", "X", "w", "K", "k");
+
+  /** The 49 non-key columns of the wide table w: c01 (id mod 1000, indexed), then id + n. */
+  private static final List<String> WIDE = wide();
+
+  private static List<String> wide() {
+    List<String> cols = new ArrayList<>();
+    for (int i = 1; i < 50; i++) {
+      cols.add(String.format(Locale.ROOT, "c%02d", i));
+    }
+    return cols;
+  }
+
   private static final Map<String, List<String>> NON_KEY =
       Map.of(
           "c",
@@ -148,7 +168,34 @@ class ReadOverheadBenchmark {
           "o",
           List.of("customer_id", "total"),
           "r",
-          List.of("label"));
+          List.of("label"),
+          "w",
+          WIDE,
+          "k",
+          List.of("grp", "val"));
+
+  /** The key columns of a table: k has a partition and a clustering key, the others id. */
+  private static List<String> key(String t) {
+    return t.equals("k") ? List.of("pid", "cid") : List.of("id");
+  }
+
+  /** The key columns of table t under alias x, comma-separated. */
+  private static String keyList(String t, String x) {
+    List<String> cols = new ArrayList<>();
+    for (String k : key(t)) {
+      cols.add(x + "." + k);
+    }
+    return String.join(", ", cols);
+  }
+
+  /** Aliases x and y of table t on the same key. */
+  private static String keyEq(String t, String x, String y) {
+    List<String> conds = new ArrayList<>();
+    for (String k : key(t)) {
+      conds.add(x + "." + k + " = " + y + "." + k);
+    }
+    return String.join(" AND ", conds);
+  }
 
   /** One query shape: its natural text, and for the split modes the text repeated per arm. */
   static final class Query {
@@ -467,7 +514,62 @@ class ReadOverheadBenchmark {
                   "SELECT {a.region} AS region FROM {C:a} WHERE {W:a}",
                   "SELECT DISTINCT v.region FROM ({ARMS}) v",
                   List.of("a"))
-              .pushed("SELECT DISTINCT {a.region} AS region FROM {C:a} WHERE {W:a}"));
+              .pushed("SELECT DISTINCT {a.region} AS region FROM {C:a} WHERE {W:a}"),
+          // {X:x}: the 50-column table w; {K:x}: the table k keyed on (pid, cid)
+          new Query(
+              "wide: key lookup, 2 of 50 columns",
+              "SELECT a.id, {a.c02}, {a.c03} FROM {X:a} WHERE {W:a} AND a.id = ?",
+              null,
+              null,
+              List.of("a"),
+              Param.CUSTOMER),
+          new Query(
+              "wide: indexed filter, 1 of 50 columns (100 rows)",
+              "SELECT a.id, {a.c02} FROM {X:a} WHERE {W:a} AND {a.c01} = ?",
+              null,
+              null,
+              List.of("a"),
+              Param.REGION),
+          new Query(
+              "wide: 2 tables JOIN on key (100 rows)",
+              "SELECT a.id, {a.c02}, {b.c03} FROM {X:a} JOIN {X:b} ON b.id = a.id"
+                  + " WHERE {W:a} AND {W:b} AND {a.c01} = ?",
+              null,
+              null,
+              List.of("a", "b"),
+              Param.REGION),
+          new Query(
+              "wide: 4 tables JOIN on key, key lookup",
+              "SELECT a.id, {a.c02}, {b.c03}, {e.c04}, {f.c05} FROM {X:a} JOIN {X:b} ON b.id = a.id"
+                  + " JOIN {X:e} ON e.id = a.id JOIN {X:f} ON f.id = a.id"
+                  + " WHERE {W:a} AND {W:b} AND {W:e} AND {W:f} AND a.id = ?",
+              null,
+              null,
+              List.of("a", "b", "e", "f"),
+              Param.CUSTOMER),
+          new Query(
+              "composite key: full-key lookup",
+              "SELECT a.pid, a.cid, {a.val} FROM {K:a} WHERE {W:a} AND a.pid = ? AND a.cid = ?",
+              null,
+              null,
+              List.of("a"),
+              Param.PART,
+              Param.CLUSTER),
+          new Query(
+              "composite key: partition scan (10 rows)",
+              "SELECT a.cid, {a.val} FROM {K:a} WHERE {W:a} AND a.pid = ?",
+              null,
+              null,
+              List.of("a"),
+              Param.PART),
+          new Query(
+              "composite key: JOIN on the full key (100 rows)",
+              "SELECT a.pid, a.cid, {b.val} FROM {K:a} JOIN {K:b} ON b.pid = a.pid AND b.cid ="
+                  + " a.cid WHERE {W:a} AND {W:b} AND {a.grp} = ?",
+              null,
+              null,
+              List.of("a", "b"),
+              Param.REGION));
 
   static List<Engines> engines() {
     return Engines.selected();
@@ -522,6 +624,7 @@ class ReadOverheadBenchmark {
         report.append("---|");
       }
       report.append('\n');
+      String header = report.substring(report.indexOf("| query |"));
       String explain = System.getProperty("nativejdbc.bench.explain", "");
       if (!explain.isEmpty()) {
         StringBuilder plans = new StringBuilder();
@@ -547,6 +650,7 @@ class ReadOverheadBenchmark {
         return;
       }
       String only = System.getProperty("nativejdbc.bench.only", "");
+      StringBuilder lengths = new StringBuilder();
       for (Query q : QUERIES) {
         if (!Pattern.compile(only).matcher(q.name).find()) {
           continue;
@@ -561,6 +665,12 @@ class ReadOverheadBenchmark {
             sqls.put(m, sql);
           }
         }
+        lengths.append("| ").append(q.name).append(" |");
+        for (Mode m : modes) {
+          String sql = sqls.get(m);
+          lengths.append(sql == null ? " -" : " " + sql.length()).append(" |");
+        }
+        lengths.append('\n');
         Map<Mode, Result> results =
             proxy == null ? sequential(c, e, q, sqls) : interleaved(c, e, q, sqls);
         for (Mode m : modes) {
@@ -590,10 +700,12 @@ class ReadOverheadBenchmark {
         }
         report.append('\n');
       }
+      report.append("\nStatement length in characters:\n\n").append(header).append(lengths);
       String suffix =
           (only.isEmpty() ? "" : "-" + only.replaceAll("\\W+", "_"))
               + (rtt > 0 ? "-rtt" + System.getProperty("nativejdbc.bench.rttMs") : "")
               + (HOT ? "-hot" : "")
+              + (FRESH ? "-fresh" : "")
               + (INFLIGHT != 100 ? "-inflight" + INFLIGHT : "");
       Path out = Path.of("build", "bench", "read-overhead-" + e + suffix + ".md");
       Files.createDirectories(Path.of("build", "bench"));
@@ -635,7 +747,7 @@ class ReadOverheadBenchmark {
         try {
           PreparedStatement ps = c.prepareStatement(m.getValue());
           statements.put(m.getKey(), ps);
-          rows.put(m.getKey(), timed(c, e, q, m.getKey(), ps, 4242, 7, null));
+          rows.put(m.getKey(), timed(c, e, q, m.getKey(), m.getValue(), ps, 4242, 7, null));
           times.put(m.getKey(), new ArrayList<>());
         } catch (SQLException ex) {
           statements.remove(m.getKey());
@@ -664,6 +776,7 @@ class ReadOverheadBenchmark {
               e,
               q,
               m,
+              Objects.requireNonNull(sqls.get(m)),
               Objects.requireNonNull(statements.get(m)),
               customer,
               region,
@@ -706,6 +819,7 @@ class ReadOverheadBenchmark {
       Engines e,
       Query q,
       Mode m,
+      String sql,
       PreparedStatement ps,
       int customer,
       int region,
@@ -714,7 +828,7 @@ class ReadOverheadBenchmark {
     noParallel(c, e.engine(), q, m, true);
     try {
       long t0 = System.nanoTime();
-      List<String> rows = run(ps, placeholders(ps), q.params, customer, region);
+      List<String> rows = run(c, sql, ps, placeholders(ps), q.params, customer, region);
       if (times != null) {
         times.add((System.nanoTime() - t0) / 1e6);
       }
@@ -779,24 +893,8 @@ class ReadOverheadBenchmark {
   /** Whether the plain query's plan, for the parameters of the first run, is parallel. */
   private static boolean basePlanIsParallel(Connection c, String sql, Param[] params)
       throws SQLException {
-    StringBuilder bound = new StringBuilder();
-    int n = 0;
-    for (int i = 0; i < sql.length(); i++) {
-      char ch = sql.charAt(i);
-      if (ch != '?') {
-        bound.append(ch);
-        continue;
-      }
-      Param p = params[n++ % params.length];
-      bound.append(
-          p == Param.NAME
-              ? "'n4242'"
-              : p.name().startsWith("SPAN")
-                  ? p.name().substring(4)
-                  : p == Param.CUSTOMER ? "4242" : "7");
-    }
     try (java.sql.Statement st = c.createStatement();
-        ResultSet rs = st.executeQuery("EXPLAIN " + bound)) {
+        ResultSet rs = st.executeQuery("EXPLAIN " + inline(sql, params, 4242, 7))) {
       while (rs.next()) {
         if (rs.getString(1).contains("Gather")) {
           return true;
@@ -808,7 +906,7 @@ class ReadOverheadBenchmark {
 
   // ---- rendering
 
-  private static final Pattern FROM = Pattern.compile("\\{([COR]):(\\w+)(?:/([AB]))?\\}");
+  private static final Pattern FROM = Pattern.compile("\\{([CORXK]):(\\w+)(?:/([AB]))?\\}");
   private static final Pattern WHERE = Pattern.compile("\\{W:(\\w+)(?:/([AB]))?\\}");
   private static final Pattern COLUMN = Pattern.compile("\\{(\\w+)\\.(\\w+)(?:/([AB]))?\\}");
 
@@ -856,6 +954,7 @@ class ReadOverheadBenchmark {
   private static @Nullable String renderRaw(Query q, Mode m, Engine engine) {
     boolean rownum = m == Mode.SPLIT_DRVR;
     boolean noSemijoin = m == Mode.SPLIT_DAJN;
+    boolean narrow = m == Mode.SPLIT_DRVN;
     boolean pushed =
         m == Mode.SPLIT_DRVP
             || m == Mode.SPLIT_DAJP
@@ -872,7 +971,7 @@ class ReadOverheadBenchmark {
       m = Mode.SPLIT_DLJ;
     } else if (m == Mode.SPLIT_DHDP) {
       m = Mode.SPLIT_DHD;
-    } else if (m == Mode.SPLIT_DRV || pushed) {
+    } else if (m == Mode.SPLIT_DRV || pushed || narrow) {
       m = driverMode(engine, q.splitAliases.size());
     }
     if (m == Mode.SPLIT_LT || m == Mode.SPLIT_LH) {
@@ -905,7 +1004,7 @@ class ReadOverheadBenchmark {
               ? Objects.requireNonNull(q.pushed)
               : partial && q.partialInner != null ? q.partialInner : q.split;
       String copy =
-          derived ? renderDerived(template, armMode, arm) : render(template, armMode, arm);
+          derived ? renderDerived(template, armMode, arm, narrow) : render(template, armMode, arm);
       // a copy with its own ORDER BY and limit is a derived table: UNION ALL takes it on every
       // engine
       if (noSemijoin) {
@@ -954,9 +1053,11 @@ class ReadOverheadBenchmark {
 
   /**
    * A template with each table replaced by a derived table of its copy's rows, named by the table's
-   * alias and exposing the table's own column names, and nothing else in the statement changed.
+   * alias and exposing the table's own column names, and nothing else in the statement changed;
+   * {@code narrow}: only the key and the columns the template references.
    */
-  private static String renderDerived(String template, Mode m, Map<String, Character> arms) {
+  private static String renderDerived(
+      String template, Mode m, Map<String, Character> arms, boolean narrow) {
     Map<String, String> tables = new LinkedHashMap<>();
     Matcher f = FROM.matcher(template);
     while (f.find()) {
@@ -970,8 +1071,12 @@ class ReadOverheadBenchmark {
               String x = g.group(2);
               String t = Objects.requireNonNull(tables.get(x));
               Character arm = arm(arms, x, g.group(3));
-              StringBuilder cols = new StringBuilder(x + ".id");
+              StringBuilder cols = new StringBuilder(keyList(t, x));
               for (String col : Objects.requireNonNull(NON_KEY.get(t))) {
+                String ref = "{" + x + "." + col;
+                if (narrow && !template.contains(ref + "}") && !template.contains(ref + "/")) {
+                  continue;
+                }
                 cols.append(", ").append(column(x, col, m, arm)).append(" AS ").append(col);
               }
               return "(SELECT "
@@ -1178,24 +1283,25 @@ class ReadOverheadBenchmark {
 
   private static String from(String t, String x, Mode m, @Nullable Character arm) {
     if (split(m) && arm != null) {
+      String meta = String.format("bn.%sm %sm ON %s", t, x, keyEq(t, x + "m", x));
+      String set =
+          String.format(
+              "SELECT %s FROM bn.%sm %sq WHERE %sq.tx_state IN (1, 2)",
+              keyList(t, x + "q"), t, x, x);
       if (arm == 'B') {
-        return String.format("(bn.%s %s JOIN bn.%sm %sm ON %sm.id = %s.id)", t, x, t, x, x, x);
+        return String.format("(bn.%s %s JOIN %s)", t, x, meta);
       }
       switch (m) {
         case SPLIT_LJ:
-          return String.format(
-              "(bn.%s %s LEFT JOIN bn.%sm %sm ON %sm.id = %s.id)", t, x, t, x, x, x);
+          return String.format("(bn.%s %s LEFT JOIN %s)", t, x, meta);
         case SPLIT_HJ:
           return String.format(
-              "(bn.%s %s LEFT JOIN (SELECT %sq.id FROM bn.%sm %sq WHERE %sq.tx_state IN (1, 2))"
-                  + " %sf ON %sf.id = %s.id)",
-              t, x, x, t, x, x, x, x, x);
+              "(bn.%s %s LEFT JOIN (%s) %sf ON %s)", t, x, set, x, keyEq(t, x + "f", x));
         case SPLIT_HD:
         case SPLIT_PH:
           return String.format(
-              "(bn.%s %s LEFT JOIN (SELECT DISTINCT %sq.id FROM bn.%sm %sq WHERE %sq.tx_state IN (1, 2))"
-                  + " %sf ON %sf.id = %s.id)",
-              t, x, x, t, x, x, x, x, x);
+              "(bn.%s %s LEFT JOIN (%s) %sf ON %s)",
+              t, x, set.replace("SELECT ", "SELECT DISTINCT "), x, keyEq(t, x + "f", x));
         default:
           return "bn." + t + " " + x;
       }
@@ -1228,16 +1334,16 @@ class ReadOverheadBenchmark {
         return String.format("COALESCE(%sm.tx_state, 3) = 3", x);
       case SPLIT_NI:
         return String.format(
-            "%s.id NOT IN (SELECT %sq.id FROM bn.%sm %sq WHERE %sq.tx_state IN (1, 2))",
-            x, x, t, x, x);
+            "(%s) NOT IN (SELECT %s FROM bn.%sm %sq WHERE %sq.tx_state IN (1, 2))",
+            keyList(t, x), keyList(t, x + "q"), t, x, x);
       case SPLIT_HJ:
       case SPLIT_HD:
       case SPLIT_PH:
-        return x + "f.id IS NULL";
+        return x + "f." + key(t).get(0) + " IS NULL";
       default:
         return String.format(
-            "NOT EXISTS (SELECT 1 FROM bn.%sm %sq WHERE %sq.id = %s.id AND %sq.tx_state IN (1, 2))",
-            t, x, x, x, x);
+            "NOT EXISTS (SELECT 1 FROM bn.%sm %sq WHERE %s AND %sq.tx_state IN (1, 2))",
+            t, x, keyEq(t, x + "q", x), x);
     }
   }
 
@@ -1264,10 +1370,10 @@ class ReadOverheadBenchmark {
       int placeholders = ps.getParameterMetaData().getParameterCount();
       Random random = new Random(42);
       List<String> first =
-          run(ps, placeholders, params, 4242, 7); // a customer and region in flight
+          run(c, sql, ps, placeholders, params, 4242, 7); // a customer and region in flight
       long warmUntil = System.nanoTime() + 2_000_000_000L;
       for (int i = 0; i < 20 && System.nanoTime() < warmUntil; i++) {
-        run(ps, placeholders, params, customer(random), region(random));
+        run(c, sql, ps, placeholders, params, customer(random), region(random));
       }
       List<Double> times = new ArrayList<>();
       long requestsBefore = proxy == null ? 0 : proxy.requests.get();
@@ -1276,7 +1382,7 @@ class ReadOverheadBenchmark {
         int customer = customer(random);
         int region = region(random);
         long t0 = System.nanoTime();
-        run(ps, placeholders, params, customer, region);
+        run(c, sql, ps, placeholders, params, customer, region);
         times.add((System.nanoTime() - t0) / 1e6);
       }
       if (proxy != null) {
@@ -1310,29 +1416,87 @@ class ReadOverheadBenchmark {
     return HOT ? 7 : random.nextInt(1000);
   }
 
-  private static List<String> run(
+  // -Dnativejdbc.bench.fresh=true: each execution a new statement with the values inline, so that
+  // every engine parses and plans it again
+  private static final boolean FRESH = Boolean.getBoolean("nativejdbc.bench.fresh");
+
+  /** The value of parameter p for a customer and a region. */
+  private static Object arg(Param p, int customer, int region) {
+    switch (p) {
+      case NAME:
+        return "n" + customer;
+      case CUSTOMER:
+        return customer;
+      case REGION:
+        return region;
+      case PART:
+        return customer / 10;
+      case CLUSTER:
+        return customer % 10;
+      default:
+        return Integer.parseInt(p.name().substring(4));
+    }
+  }
+
+  private static void bind(
       PreparedStatement ps, int placeholders, Param[] params, int customer, int region)
       throws SQLException {
     for (int i = 0; i < placeholders; i++) {
-      Param p = params[i % params.length];
-      if (p == Param.NAME) {
-        ps.setString(i + 1, "n" + customer);
-      } else if (p.name().startsWith("SPAN")) {
-        ps.setInt(i + 1, Integer.parseInt(p.name().substring(4)));
+      Object v = arg(params[i % params.length], customer, region);
+      if (v instanceof String) {
+        ps.setString(i + 1, (String) v);
       } else {
-        ps.setInt(i + 1, p == Param.CUSTOMER ? customer : region);
+        ps.setInt(i + 1, (Integer) v);
       }
     }
-    List<String> rows = new ArrayList<>();
-    try (ResultSet rs = ps.executeQuery()) {
-      int n = rs.getMetaData().getColumnCount();
-      while (rs.next()) {
-        String[] row = new String[n];
-        for (int i = 0; i < n; i++) {
-          row[i] = rs.getString(i + 1);
-        }
-        rows.add(Arrays.toString(row));
+  }
+
+  /** The statement with each parameter replaced by its value. */
+  private static String inline(String sql, Param[] params, int customer, int region) {
+    StringBuilder bound = new StringBuilder();
+    int n = 0;
+    for (int i = 0; i < sql.length(); i++) {
+      char ch = sql.charAt(i);
+      if (ch != '?') {
+        bound.append(ch);
+        continue;
       }
+      Object v = arg(params[n++ % params.length], customer, region);
+      bound.append(v instanceof String ? "'" + v + "'" : v);
+    }
+    return bound.toString();
+  }
+
+  private static List<String> run(
+      Connection c,
+      String sql,
+      PreparedStatement ps,
+      int placeholders,
+      Param[] params,
+      int customer,
+      int region)
+      throws SQLException {
+    if (FRESH) {
+      try (java.sql.Statement st = c.createStatement();
+          ResultSet rs = st.executeQuery(inline(sql, params, customer, region))) {
+        return rows(rs);
+      }
+    }
+    bind(ps, placeholders, params, customer, region);
+    try (ResultSet rs = ps.executeQuery()) {
+      return rows(rs);
+    }
+  }
+
+  private static List<String> rows(ResultSet rs) throws SQLException {
+    List<String> rows = new ArrayList<>();
+    int n = rs.getMetaData().getColumnCount();
+    while (rs.next()) {
+      String[] row = new String[n];
+      for (int i = 0; i < n; i++) {
+        row[i] = rs.getString(i + 1);
+      }
+      rows.add(Arrays.toString(row));
     }
     Collections.sort(rows);
     return rows;
@@ -1378,15 +1542,7 @@ class ReadOverheadBenchmark {
     }
     StringBuilder out = new StringBuilder();
     try (PreparedStatement ps = c.prepareStatement(prefix + sql)) {
-      int placeholders = ps.getParameterMetaData().getParameterCount();
-      for (int i = 0; i < placeholders; i++) {
-        Param p = params[i % params.length];
-        if (p == Param.NAME) {
-          ps.setString(i + 1, "n4242");
-        } else {
-          ps.setInt(i + 1, value(p));
-        }
-      }
+      bind(ps, ps.getParameterMetaData().getParameterCount(), params, HOT ? 4007 : 4242, 7);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           out.append(rs.getString(1)).append('\n');
@@ -1396,12 +1552,6 @@ class ReadOverheadBenchmark {
     return out.toString();
   }
 
-  private static int value(Param p) {
-    return p.name().startsWith("SPAN")
-        ? Integer.parseInt(p.name().substring(4))
-        : p == Param.CUSTOMER ? (HOT ? 4007 : 4242) : 7;
-  }
-
   /** The executed plan with actual rows and executions per operator. */
   private static String sqlServerPlan(Connection c, String sql, Param[] params)
       throws SQLException {
@@ -1409,10 +1559,7 @@ class ReadOverheadBenchmark {
     try (java.sql.Statement st = c.createStatement()) {
       st.execute("SET STATISTICS PROFILE ON");
       try (PreparedStatement ps = c.prepareStatement(sql)) {
-        int placeholders = ps.getParameterMetaData().getParameterCount();
-        for (int i = 0; i < placeholders; i++) {
-          ps.setInt(i + 1, value(params[i % params.length]));
-        }
+        bind(ps, ps.getParameterMetaData().getParameterCount(), params, HOT ? 4007 : 4242, 7);
         boolean isResult = ps.execute();
         while (true) {
           if (isResult) {
@@ -1460,7 +1607,22 @@ class ReadOverheadBenchmark {
         "CREATE TABLE bn.o (id " + in + " PRIMARY KEY, customer_id " + in + ", total " + in + ")");
     ddl.add("CREATE TABLE bn.r (id " + in + " PRIMARY KEY, label VARCHAR(20))");
     ddl.add("CREATE TABLE bn.p (id " + in + " PRIMARY KEY, cid " + in + ", region " + in + ")");
-    for (String t : List.of("c", "o", "r")) {
+    StringBuilder wide = new StringBuilder("CREATE TABLE bn.w (id " + in + " PRIMARY KEY");
+    for (String col : WIDE) {
+      wide.append(", ").append(col).append(' ').append(in);
+    }
+    ddl.add(wide + ")");
+    ddl.add(
+        "CREATE TABLE bn.k (pid "
+            + in
+            + ", cid "
+            + in
+            + ", grp "
+            + in
+            + ", val "
+            + in
+            + ", PRIMARY KEY (pid, cid))");
+    for (String t : List.of("c", "o", "r", "w", "k")) {
       StringBuilder cols = new StringBuilder();
       for (String col : NON_KEY.get(t)) {
         cols.append(", before_")
@@ -1470,9 +1632,11 @@ class ReadOverheadBenchmark {
       ddl.add(
           "CREATE TABLE bn."
               + t
-              + "m (id "
+              + "m ("
+              + String.join(" " + in + ", ", key(t))
+              + " "
               + in
-              + " PRIMARY KEY, tx_id "
+              + ", tx_id "
               + vc
               + ", tx_state "
               + in
@@ -1483,7 +1647,9 @@ class ReadOverheadBenchmark {
               + ", before_tx_version "
               + in
               + cols
-              + ")");
+              + ", PRIMARY KEY ("
+              + String.join(", ", key(t))
+              + "))");
     }
     String ids5 = "d1.n + 10 * d2.n + 100 * d3.n + 1000 * d4.n + 10000 * d5.n";
     String digits5 = "bn.d d1, bn.d d2, bn.d d3, bn.d d4, bn.d d5";
@@ -1515,6 +1681,37 @@ class ReadOverheadBenchmark {
         "INSERT INTO bn.cm (id, tx_id, tx_state, tx_version) SELECT id, 'seed', 3, 1 FROM bn.c");
     ddl.add(
         "INSERT INTO bn.om (id, tx_id, tx_state, tx_version) SELECT id, 'seed', 3, 1 FROM bn.o");
+    StringBuilder wideCols = new StringBuilder("id");
+    StringBuilder wideValues = new StringBuilder("x.id");
+    StringBuilder wideBefore = new StringBuilder();
+    for (String col : WIDE) {
+      String v = wideValue(col, "x.id");
+      wideCols.append(", ").append(col);
+      wideValues.append(", ").append(v);
+      wideBefore.append(", before_").append(col).append(" = ").append(wideValue(col, "id"));
+    }
+    ddl.add(
+        "INSERT INTO bn.w ("
+            + wideCols
+            + ") SELECT "
+            + wideValues
+            + " FROM (SELECT "
+            + ids5
+            + " AS id FROM "
+            + digits5
+            + ") x");
+    ddl.add(
+        "INSERT INTO bn.k (pid, cid, grp, val) SELECT FLOOR(x.id / 10), x.id - 10 * FLOOR(x.id /"
+            + " 10), x.id - 1000 * FLOOR(x.id / 1000), x.id + 1 FROM (SELECT "
+            + ids5
+            + " AS id FROM "
+            + digits5
+            + ") x");
+    ddl.add(
+        "INSERT INTO bn.wm (id, tx_id, tx_state, tx_version) SELECT id, 'seed', 3, 1 FROM bn.w");
+    ddl.add(
+        "INSERT INTO bn.km (pid, cid, tx_id, tx_state, tx_version) SELECT pid, cid, 'seed', 3, 1"
+            + " FROM bn.k");
     // INFLIGHT rows in flight per table (at most half of c), their before image equal to the
     // current values; the rows in flight at 100 stay in flight at any larger count
     int perC = Math.max(2, 100_000 / INFLIGHT);
@@ -1537,10 +1734,42 @@ class ReadOverheadBenchmark {
             + perO
             + ") = "
             + 3 % perO);
+    // w and k: the rows of c's ids in flight, k's rows numbered 10 * pid + cid
+    ddl.add(
+        "UPDATE bn.wm SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
+            + " before_tx_version = 1"
+            + wideBefore
+            + " WHERE id - "
+            + perC
+            + " * FLOOR(id / "
+            + perC
+            + ") = "
+            + 7 % perC);
+    String kid = "(10 * pid + cid)";
+    ddl.add(
+        "UPDATE bn.km SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
+            + " before_tx_version = 1, before_grp = "
+            + kid
+            + " - 1000 * FLOOR("
+            + kid
+            + " / 1000), before_val = "
+            + kid
+            + " + 1 WHERE "
+            + kid
+            + " - "
+            + perC
+            + " * FLOOR("
+            + kid
+            + " / "
+            + perC
+            + ") = "
+            + 7 % perC);
     String ix = engine == Engine.ORACLE ? "bn." : "";
     ddl.add("CREATE INDEX " + ix + "c_region ON bn.c (region)");
     ddl.add("CREATE INDEX " + ix + "o_customer ON bn.o (customer_id)");
-    for (String t : List.of("c", "o", "r")) {
+    ddl.add("CREATE INDEX " + ix + "w_c01 ON bn.w (c01)");
+    ddl.add("CREATE INDEX " + ix + "k_grp ON bn.k (grp)");
+    for (String t : List.of("c", "o", "r", "w", "k")) {
       // -Dnativejdbc.bench.ssIndex=composite or unique: SQL Server's in-flight index
       String ss = System.getProperty("nativejdbc.bench.ssIndex", "filtered");
       boolean partial =
@@ -1554,7 +1783,9 @@ class ReadOverheadBenchmark {
               + "m_inflight ON bn."
               + t
               + "m "
-              + (partial ? "(id) WHERE tx_state IN (1, 2)" : "(tx_state, id)"));
+              + (partial
+                  ? "(" + String.join(", ", key(t)) + ") WHERE tx_state IN (1, 2)"
+                  : "(tx_state, " + String.join(", ", key(t)) + ")"));
       ddl.addAll(views(t));
     }
     switch (engine) {
@@ -1562,22 +1793,26 @@ class ReadOverheadBenchmark {
         ddl.add("ANALYZE");
         break;
       case MYSQL:
-        ddl.add("ANALYZE TABLE bn.c, bn.cm, bn.o, bn.om, bn.r, bn.rm, bn.p");
+        ddl.add(
+            "ANALYZE TABLE bn.c, bn.cm, bn.o, bn.om, bn.r, bn.rm, bn.p, bn.w, bn.wm, bn.k, bn.km");
         // without a histogram MySQL takes tx_state IN (1, 2) for the whole table in a subquery
-        ddl.add("ANALYZE TABLE bn.cm, bn.om, bn.rm UPDATE HISTOGRAM ON tx_state WITH 16 BUCKETS");
+        ddl.add(
+            "ANALYZE TABLE bn.cm, bn.om, bn.rm, bn.wm, bn.km UPDATE HISTOGRAM ON tx_state WITH 16"
+                + " BUCKETS");
         break;
       case MARIADB:
-        ddl.add("ANALYZE TABLE bn.c, bn.cm, bn.o, bn.om, bn.r, bn.rm, bn.p");
+        ddl.add(
+            "ANALYZE TABLE bn.c, bn.cm, bn.o, bn.om, bn.r, bn.rm, bn.p, bn.w, bn.wm, bn.k, bn.km");
         break;
       case SQLSERVER:
-        for (String t : List.of("c", "cm", "o", "om", "r", "rm", "p")) {
+        for (String t : List.of("c", "cm", "o", "om", "r", "rm", "p", "w", "wm", "k", "km")) {
           ddl.add("UPDATE STATISTICS bn." + t + " WITH FULLSCAN");
         }
         break;
       case ORACLE:
         ddl.add("BEGIN DBMS_STATS.GATHER_SCHEMA_STATS('BN'); END;");
         // without a histogram Oracle takes tx_state IN (1, 2) for half the table and scans it
-        for (String t : List.of("CM", "OM", "RM")) {
+        for (String t : List.of("CM", "OM", "RM", "WM", "KM")) {
           ddl.add(
               "BEGIN DBMS_STATS.GATHER_TABLE_STATS('BN', '"
                   + t
@@ -1589,11 +1824,18 @@ class ReadOverheadBenchmark {
     e.execute(c, ddl.toArray(new String[0]));
   }
 
+  /** The value of a column of w for the row with key {@code id}. */
+  private static String wideValue(String col, String id) {
+    return col.equals("c01")
+        ? id + " - 1000 * FLOOR(" + id + " / 1000)"
+        : id + " + " + Integer.parseInt(col.substring(1));
+  }
+
   private static List<String> views(String t) {
     List<String> nonKey = NON_KEY.get(t);
-    String raw = "x.id";
-    String before = "x.id";
-    String cased = "x.id";
+    String raw = keyList(t, "x");
+    String before = raw;
+    String cased = raw;
     for (String col : nonKey) {
       raw += ", x." + col;
       before += ", xm.before_" + col + " AS " + col;
@@ -1612,7 +1854,9 @@ class ReadOverheadBenchmark {
             + t
             + " x JOIN bn."
             + t
-            + "m xm ON xm.id = x.id WHERE xm.tx_state IN (1, 2) AND (xm.before_tx_id IS NOT NULL"
+            + "m xm ON "
+            + keyEq(t, "xm", "x")
+            + " WHERE xm.tx_state IN (1, 2) AND (xm.before_tx_id IS NOT NULL"
             + " OR xm.before_tx_version IS NOT NULL)";
     return List.of(
         "CREATE VIEW bn.rc_"
@@ -1623,7 +1867,9 @@ class ReadOverheadBenchmark {
             + t
             + " x LEFT JOIN bn."
             + t
-            + "m xm ON xm.id = x.id WHERE COALESCE(xm.tx_state, 3) = 3"
+            + "m xm ON "
+            + keyEq(t, "xm", "x")
+            + " WHERE COALESCE(xm.tx_state, 3) = 3"
             + inFlight,
         "CREATE VIEW bn.rca_"
             + t
@@ -1634,7 +1880,9 @@ class ReadOverheadBenchmark {
             + " x WHERE NOT EXISTS"
             + " (SELECT 1 FROM bn."
             + t
-            + "m xq WHERE xq.id = x.id AND xq.tx_state IN (1, 2))"
+            + "m xq WHERE "
+            + keyEq(t, "xq", "x")
+            + " AND xq.tx_state IN (1, 2))"
             + inFlight,
         "CREATE VIEW bn.rcj_"
             + t
@@ -1644,7 +1892,9 @@ class ReadOverheadBenchmark {
             + t
             + " x LEFT JOIN bn."
             + t
-            + "m xm ON xm.id = x.id WHERE COALESCE(xm.tx_state, 3) = 3 OR (xm.tx_state IN (1,"
+            + "m xm ON "
+            + keyEq(t, "xm", "x")
+            + " WHERE COALESCE(xm.tx_state, 3) = 3 OR (xm.tx_state IN (1,"
             + " 2) AND (xm.before_tx_id IS NOT NULL OR xm.before_tx_version IS NOT NULL))");
   }
 }

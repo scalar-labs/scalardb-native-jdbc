@@ -48,7 +48,7 @@ See Findings.
 
 ## Acceptance Criteria
 
-- [ ] Results recorded in docs/benchmarks/read-overhead.md.
+- [x] Results recorded in docs/benchmarks/read-overhead.md.
 - [ ] Fragments project only referenced columns unless `*` is used, if the measurement supports it.
 
 ## Work Log
@@ -75,3 +75,15 @@ See Findings.
 - Candidate fixes recorded there (before-image indexes from setup; NOT EXISTS on MySQL and MariaDB
   once the in-flight count is large); not implemented. Parts 2 (wide tables) and 3 (composite keys)
   next.
+
+### 2026-10-12 - Parts 2 and 3: wide tables and composite keys measured
+
+**By:** Claude Code
+- docs/benchmarks/read-overhead.md, "Wide tables and composite keys": a 50-column table and a
+  `(pid, cid)` key, the driver form against `SPLIT_DRVN` (referenced columns only), prepared and
+  fresh (`-Dnativejdbc.bench.fresh=true`). Every mode returned BASE's rows.
+- Width matters on MySQL and MariaDB on every execution (client-side prepare: 4-table join 5.9 ms
+  vs 2.3 ms narrow) and on every fresh parse elsewhere (Oracle 189 vs 55 ms); not with a cached plan.
+- Composite keys cost what single keys do.
+- The measurement supports projecting only referenced columns (second acceptance criterion);
+  not implemented yet.
