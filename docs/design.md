@@ -108,7 +108,10 @@ anywhere, because the driver never reads it.
 - Reads of the two-table views need **statement-level snapshot semantics**. PostgreSQL, MySQL and Oracle
   give one snapshot per statement at READ COMMITTED. SQL Server does not unless the database option
   `READ_COMMITTED_SNAPSHOT` is on, which the driver checks at connect and refuses without; a locking read
-  there can pair a new `T` row with an old `T_meta` row and leak an after image. ScalarDB applies the same
+  there can pair a new `T` row with an old `T_meta` row and leak an after image. A SQL Server connection
+  then stays in the database it was opened in, for which the catalog and this check hold: `USE` or
+  `setCatalog` naming another database is refused with `0AN01`, and a switch made under the passthrough
+  setting stops the next statement until the connection is back. ScalarDB applies the same
   rule to itself: its JDBC adapter requires at least REPEATABLE READ, SERIALIZABLE on Oracle, for
   consistent virtual-table reads (`getMinimumIsolationLevelForConsistentVirtualTableRead`).
 - On an imported table a row of `T` may have no metadata row, or one whose metadata is all NULL; a created

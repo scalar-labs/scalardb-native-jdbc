@@ -37,6 +37,7 @@ import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.parser.Node;
 import net.sf.jsqlparser.parser.ParseException;
+import net.sf.jsqlparser.parser.StringProvider;
 import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
@@ -306,7 +307,7 @@ public final class SqlAst {
     for (AllTableColumns a : walker.allTableColumns) {
       columns.add(new ColumnRef(null, a));
     }
-    Node root = rootOf(stmt, walker.tables, walker.columns, sql);
+    Node root = rootOf(stmt, walker.tables, walker.columns, sql, engine == Engine.SQLSERVER);
     if (root == null) {
       return Outcome.refused("the statement's tokens cannot be located");
     }
@@ -608,7 +609,11 @@ public final class SqlAst {
    * text supplies the token chain.
    */
   private static @Nullable Node rootOf(
-      Statement stmt, List<Table> tables, List<Column> columns, String sql) {
+      Statement stmt,
+      List<Table> tables,
+      List<Column> columns,
+      String sql,
+      boolean squareBrackets) {
     Node n = null;
     for (Table t : tables) {
       n = t.getASTNode();
@@ -629,9 +634,25 @@ public final class SqlAst {
       return n;
     }
     try {
-      return CCJSqlParserUtil.parseAST(sql);
+      TreeParser parser = new TreeParser(sql);
+      parser.withSquareBracketQuotation(squareBrackets);
+      parser.Statement();
+      return parser.tree();
     } catch (Exception e) {
       return null;
+    }
+  }
+
+  /**
+   * The parser with its syntax tree reachable: {@code CCJSqlParserUtil.parseAST} takes no options.
+   */
+  private static final class TreeParser extends CCJSqlParser {
+    TreeParser(String sql) {
+      super(new StringProvider(sql));
+    }
+
+    Node tree() {
+      return jjtree.rootNode();
     }
   }
 
@@ -755,6 +776,18 @@ public final class SqlAst {
    */
   public boolean hasLockingOrIntoClause() {
     return lockingOrInto;
+  }
+
+  /**
+   * The database a {@code USE} statement switches to, unquoted, or {@code null} for any other
+   * statement.
+   *
+   * @return the database
+   */
+  public @Nullable String useTarget() {
+    return statement instanceof UseStatement
+        ? unquoted(((UseStatement) statement).getName().strip())
+        : null;
   }
 
   /** The root of the parser's syntax tree. */

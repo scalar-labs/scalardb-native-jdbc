@@ -48,6 +48,9 @@ public final class Proxies {
     // starts at READ COMMITTED, the driver's default level (design section 1)
     vendor.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
     Session session = new Session(engine);
+    if (engine == Engine.SQLSERVER) {
+      session.requireReadCommittedSnapshot(vendor);
+    }
     session.schemas(vendor); // read now, outside any transaction
     return (Connection)
         proxy(
@@ -169,8 +172,22 @@ public final class Proxies {
             router.setIsolation((Integer) args[0]);
             return r;
           }
-        case "setSchema":
         case "setCatalog":
+          {
+            String database = session.database();
+            if (database != null && !database.equals(args[0])) {
+              throw Errors.unsupported(
+                  "the connection stays in database "
+                      + database
+                      + ", where it was opened; open a connection to "
+                      + args[0]
+                      + " instead");
+            }
+            Object r = forward(vendor, method, args);
+            session.changed(vendor);
+            return r;
+          }
+        case "setSchema":
           {
             Object r = forward(vendor, method, args);
             session.changed(vendor);

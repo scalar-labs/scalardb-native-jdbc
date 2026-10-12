@@ -125,6 +125,16 @@ final class Router {
     }
     SqlAst ast = parsed.get();
     SqlAst.Kind kind = ast.kind();
+    String database = session.database();
+    String target = ast.useTarget();
+    if (database != null && target != null && !database.equals(target)) {
+      throw Errors.unsupported(
+          "the connection stays in database "
+              + database
+              + ", where it was opened; open a connection to "
+              + target
+              + " instead");
+    }
     List<String> schemas = session.schemas(vendor);
     IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb = new IdentityHashMap<>();
     for (SqlAst.TableRef ref : ast.tableRefs()) {

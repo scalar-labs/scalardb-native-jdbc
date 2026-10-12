@@ -78,6 +78,8 @@ public enum Engines {
               DriverManager.getConnection(c.getJdbcUrl(), c.getUsername(), c.getPassword());
           Statement st = conn.createStatement()) {
         st.execute("CREATE DATABASE appdb");
+        // the driver refuses a database without it (design section 1)
+        st.execute("ALTER DATABASE appdb SET READ_COMMITTED_SNAPSHOT ON");
       }
       return c.getJdbcUrl() + ";databaseName=appdb";
     }

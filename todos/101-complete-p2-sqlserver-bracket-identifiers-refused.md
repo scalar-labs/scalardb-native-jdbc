@@ -54,8 +54,9 @@ T-SQL outside identifiers and LIKE patterns, which are literals) still lexes.
 
 **By:** Claude Code
 - `analyze` parses with `withSquareBracketQuotation` on SQL Server; name folding already handled
-  brackets. The `parseAST` fallback (statements with no table or column node) is unchanged, since the
-  parser's tree is not reachable with options there.
+  brackets. The `parseAST` fallback (statements with no table or column node) was left unchanged at
+  first, which broke `USE [appdb]`; fixed with todo 088 by a parser subclass (`TreeParser`) that sets
+  the option and reaches the syntax tree.
 - SplitTest; probe: `SELECT [x] FROM rd.[made] ORDER BY [id]` returns the rows on SQL Server.
 
 ### 2026-10-12 - Found while verifying the review
