@@ -648,11 +648,19 @@ base tables (4.2, locking clauses).
 **Indexes.** The reads of 4.2 are a UNION ALL of two arms. The first arm uses the user's own index on
 `T(x)`. The second arm needs only one index per table over the in-flight rows: on PostgreSQL a partial
 index, `CREATE INDEX ON T_meta (<pk>) WHERE tx_state IN (1, 2)`, and a filtered index of the same shape on SQL
-Server; on MySQL, MariaDB and Oracle, which have no partial indexes, a plain index on `(tx_state, <pk>)`. At any instant there are very few in-flight rows, so scanning them all
-and filtering `P_before` in SQL is cheap for any predicate, with no `before_*` index per column. ScalarDB
-creates a `before_x` index whenever `x` is one of its secondary indexes, unless eventually consistent
-index reads are enabled; if those stay, make them partial, on PostgreSQL and SQL Server, with
-`WHERE before_x IS NOT NULL`, which keeps them small since `before_*` is NULL on every state 3 row.
+Server; on MySQL, MariaDB and Oracle, which have no partial indexes, a plain index on `(tx_state, <pk>)`. With few rows in flight, scanning them all and filtering `P_before`
+in SQL is cheap for any predicate. The cost grows with the in-flight count, though (at 10k rows in
+flight, 3-6x on PostgreSQL and Oracle, up to 365x on SQL Server, which scans the metadata table), unless
+an index on the before image serves `P_before`. ScalarDB already creates one: a `before_x` index
+whenever `x` is one of its secondary indexes, unless eventually consistent index reads are enabled.
+Since `before_*` is NULL on every row not in flight, its plain index holds what a filtered one would,
+and with it the selective reads return to their cost at 100 rows in flight
+(docs/benchmarks/read-overhead.md). The driver creates no `before_*` index. The setup reports each
+index of the data table that has no `before_*` counterpart (a multi-column index, or one created
+outside ScalarDB, as on imported tables), and tables without before-image indexes because eventually
+consistent index reads are on, with the DDL to add each; it creates them only on an explicit option,
+and then owns and drops them (todo 102). Primary-key access needs none: the key bounds the metadata
+lookup.
 Not on `tx_state`: ScalarDB's own before-index lookups carry no state predicate, so a `tx_state` partial
 index would be unusable for them. The OR form across the join,
 `x = ? OR before_x = ?`, cannot use either index on PostgreSQL or MySQL, because neither pushes a
@@ -776,7 +784,10 @@ union as a derived table.
   - **How a committed table excludes its rows in flight**, per engine: `NOT EXISTS (SELECT 1 FROM
     T_meta q WHERE q.<pk> = t.<pk> AND q.tx_state IN (1, 2))` on PostgreSQL and Oracle; on MySQL and
     MariaDB a left join to `(SELECT DISTINCT <pk> FROM T_meta WHERE tx_state IN (1, 2))` with the key
-    NULL, which makes them build the in-flight keys once instead of probing the metadata per row; on
+    NULL, which makes them build the in-flight keys once instead of probing the metadata per row (the
+    set grows with the in-flight count: from about 1,000 rows in flight a per-row left join on
+    `T_meta`'s key is faster for a table the statement reaches through its key or an indexed column,
+    to be chosen per table, todo 103); on
     SQL Server `NOT EXISTS` in the all-committed copy of a statement over one or two ScalarDB tables
     and the DISTINCT set over three or more, and in the copies with a table in flight a left join on
     `T_meta`'s key with `COALESCE(tx_state, 3) = 3`, since SQL Server otherwise plans those copies as

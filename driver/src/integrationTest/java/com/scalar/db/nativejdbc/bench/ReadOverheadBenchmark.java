@@ -709,7 +709,9 @@ class ReadOverheadBenchmark {
               + (rtt > 0 ? "-rtt" + System.getProperty("nativejdbc.bench.rttMs") : "")
               + (HOT ? "-hot" : "")
               + (FRESH ? "-fresh" : "")
-              + (BEFORE_INDEX ? "-before" : "")
+              + (BEFORE_INDEX.isEmpty()
+                  ? ""
+                  : BEFORE_INDEX.equals("plain") ? "-beforeplain" : "-before")
               + (SS_INDEX.equals("filtered") ? "" : "-ss" + SS_INDEX)
               + (INFLIGHT != 100 ? "-inflight" + INFLIGHT : "");
       Path out = Path.of("build", "bench", "read-overhead-" + e + suffix + ".md");
@@ -1804,10 +1806,12 @@ class ReadOverheadBenchmark {
                   : "(tx_state, " + String.join(", ", key(t)) + ")"));
       ddl.addAll(views(t));
     }
-    if (BEFORE_INDEX) {
-      // each secondary index of a data table mirrored on the before image, rows in flight only
+    if (!BEFORE_INDEX.isEmpty()) {
+      // each secondary index of a data table mirrored on the before image: "plain" as ScalarDB
+      // creates it, otherwise restricted to rows in flight
       String[][] mirrored = {{"c", "region"}, {"o", "customer_id"}, {"w", "c01"}, {"k", "grp"}};
       for (String[] tc : mirrored) {
+        boolean plain = BEFORE_INDEX.equals("plain");
         boolean filtered = engine == Engine.POSTGRESQL || engine == Engine.SQLSERVER;
         ddl.add(
             "CREATE INDEX "
@@ -1816,9 +1820,11 @@ class ReadOverheadBenchmark {
                 + "m_before ON bn."
                 + tc[0]
                 + "m "
-                + (filtered
-                    ? "(before_" + tc[1] + ") WHERE tx_state IN (1, 2)"
-                    : "(tx_state, before_" + tc[1] + ")"));
+                + (plain
+                    ? "(before_" + tc[1] + ")"
+                    : filtered
+                        ? "(before_" + tc[1] + ") WHERE tx_state IN (1, 2)"
+                        : "(tx_state, before_" + tc[1] + ")"));
       }
     }
     switch (engine) {
@@ -1857,9 +1863,13 @@ class ReadOverheadBenchmark {
     e.execute(c, ddl.toArray(new String[0]));
   }
 
-  // -Dnativejdbc.bench.beforeIndex=true: the data tables' secondary indexes mirrored on the before
-  // image of the metadata tables
-  private static final boolean BEFORE_INDEX = Boolean.getBoolean("nativejdbc.bench.beforeIndex");
+  // -Dnativejdbc.bench.beforeIndex=true or plain: the data tables' secondary indexes mirrored on
+  // the before image of the metadata tables, restricted to rows in flight or (plain) as ScalarDB
+  // creates them
+  private static final String BEFORE_INDEX =
+      System.getProperty("nativejdbc.bench.beforeIndex", "false").equals("false")
+          ? ""
+          : System.getProperty("nativejdbc.bench.beforeIndex");
 
   // -Dnativejdbc.bench.ssIndex=composite, unique or include (the before image as included columns):
   // SQL Server's in-flight index
@@ -1867,8 +1877,9 @@ class ReadOverheadBenchmark {
 
   /**
    * The cost of a write under the metadata's indexes: a ScalarDB-style prepare (the row in flight
-   * with its before image) and commit of one committed row of {@code cm}, each its own transaction.
-   * The rows written are never in flight at any count, and stay committed.
+   * with its before image) and commit (the before image cleared, as ScalarDB does) of one committed
+   * row of {@code cm}, each its own transaction. The rows written are never in flight at any count,
+   * and stay committed.
    */
   private static String writes(Connection c, Engines e) throws SQLException {
     List<Double> times = new ArrayList<>();
@@ -1878,7 +1889,9 @@ class ReadOverheadBenchmark {
                     + " before_tx_version = 1, before_name = ?, before_region = ? WHERE id = ? AND"
                     + " tx_state = 3");
         PreparedStatement commit =
-            c.prepareStatement("UPDATE bn.cm SET tx_state = 3 WHERE id = ? AND tx_id = ?")) {
+            c.prepareStatement(
+                "UPDATE bn.cm SET tx_state = 3, before_tx_id = NULL, before_tx_version = NULL,"
+                    + " before_name = NULL, before_region = NULL WHERE id = ? AND tx_id = ?")) {
       for (int i = 0; i < 520; i++) {
         int id = 10 * (i * 7919 % 10_000) + 4; // scattered, each row once
         String tx = "b" + i;

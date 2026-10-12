@@ -98,3 +98,10 @@ See Findings.
 - The per-row check loses on scans and large joins at small counts on MySQL and MariaDB (10x vs
   2.1x on a 100k-row count), so the committed form there needs a per-statement choice; not
   designed. Open at 10k: IN subquery, joins returning many rows, full scans.
+
+### 2026-10-12 - ScalarDB's index shape and the MySQL/MariaDB threshold
+
+**By:** Claude Code
+- ScalarDB's own plain `before_x` indexes serve the in-flight copy like the filtered ones; the
+  driver creates none, the setup reports gaps (todo 102). MySQL and MariaDB: the per-row committed
+  check wins from about 1k rows in flight on selective shapes, the set on scans (todo 103).

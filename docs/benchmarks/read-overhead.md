@@ -748,12 +748,70 @@ Findings:
   4-table join over one region got worse with the indexes (55x to 199x), a plan choice not
   investigated.
 
+The next section replaces the conclusions first drawn here.
+
+## ScalarDB's own before-image indexes, and where the per-row check pays (2026-10-12)
+
+ScalarDB already creates a `before_x` index for every column `x` with a ScalarDB secondary index,
+unless index-eventually-consistent reads are enabled (`ConsensusCommitUtils
+.buildTransactionTableMetadata`, `ConsensusCommitAdmin.createIndex`, v3.19.1). Its commit and
+rollback set every `before_*` column to NULL, so only in-flight rows carry a value. Its index is
+plain, `(before_x)`, with no state filter. The benchmark's `-Dnativejdbc.bench.beforeIndex=plain`
+builds that shape, and its write now clears the before image at commit as ScalarDB does.
+
+**ScalarDB's index serves the in-flight copy like the filtered one.** At 10k rows in flight, driver
+form (per-row on MySQL and MariaDB), ratio to BASE without / with the filtered index / with ScalarDB's
+plain index:
+
+| shape | PostgreSQL | Oracle | SQL Server | MySQL | MariaDB |
+|---|---|---|---|---|---|
+| non-key filter | 2.7 / 1.3 / 1.3 | 3.1 / 1.5 / 1.5 | 31 / 3.3 / 3.1 | 12 / 1.3 / 1.5 | 13 / 1.3 / 1.4 |
+| FK filter, LIMIT 3 | 3.2 / 1.1 / 1.0 | 5.7 / 1.1 / 1.1 | 131 / 1.2 / 0.9 | 12 / 0.7 / 0.7 | 23 / 0.6 / 0.8 |
+| key JOIN FK | 3.2 / 1.0 / 1.2 | 6.6 / 1.1 / 1.2 | 29 / 2.0 / 1.5 | 21 / 1.4 / 1.5 | 20 / 1.4 / 1.5 |
+| 4 tables, key lookup | 6.7 / 1.8 / 1.8 | 6.0 / 1.5 / 1.6 | 365 / 2.2 / 1.5 | 58 / 3.9 / 3.2 | 54 / 5.1 / 4.9 |
+| 3 tables, one region | 20 / 5.7 / 27 | 2.0 / 1.0 / 0.6 | 158 / 3.5 / 3.8 | 26 / 11 / 6.9 | 46 / 17 / 4.1 |
+| JOIN FK, 300 customers | 6.7 / 3.2 / 3.1 | 2.0 / 1.4 / 1.3 | 87 / 2.3 / 31 | 17 / 7.6 / 5.8 | 33 / 17 / 11 |
+| composite key JOIN | 6.3 / 1.5 / 3.2 | 3.9 / 1.8 / 1.8 | 39 / 1.3 / 2.1 | 19 / 1.6 / 1.7 | 39 / 2.3 / 2.2 |
+
+Writes (prepare and commit of one row) took the same with either index: PostgreSQL 0.86 ms, MySQL
+2.50, MariaDB 0.93, SQL Server 2.61, Oracle 1.20. Every mode returned BASE's rows.
+
+The plain index matches the filtered one on single-table and key shapes. On some joins over many
+rows PostgreSQL and SQL Server chose worse plans with it (PostgreSQL 3 tables over one region 27x
+against 5.7x; SQL Server's join of 300 customers 31x against 2.3x). On MySQL and MariaDB it did
+better than the filtered one there. Not investigated; part of todo 094 (plan stability).
+
+**On MySQL and MariaDB the per-row check pays from about 1,000 rows in flight.** DISTINCT set / per-row
+(left join), ratio to BASE, ScalarDB's plain index present:
+
+| shape | engine | 100 | 1k | 3k | 10k |
+|---|---|---|---|---|---|
+| key lookup | MySQL | 1.0 / 0.8 | 1.6 / 0.8 | 3.6 / 0.8 | 7.9 / 0.8 |
+| | MariaDB | 1.0 / 1.0 | 1.3 / 1.0 | 2.0 / 1.0 | 4.2 / 1.0 |
+| key JOIN FK | MySQL | 1.6 / 1.3 | 3.3 / 1.4 | 6.9 / 1.3 | 23 / 1.5 |
+| | MariaDB | 1.6 / 1.4 | 2.4 / 1.7 | 4.4 / 1.7 | 9.4 / 1.5 |
+| 4 tables, key lookup | MySQL | 4.3 / 3.5 | 5.9 / 3.2 | 10.5 / 3.3 | 26 / 3.2 |
+| | MariaDB | 5.5 / 4.7 | 5.9 / 4.6 | 8.2 / 4.6 | 17 / 4.9 |
+| JOIN FK, 3k customers | MySQL | 1.4 / 3.8 | 3.1 / 4.2 | 4.3 / 4.5 | 7.8 / 6.2 |
+| | MariaDB | 2.1 / 4.2 | 2.7 / 4.6 | 3.4 / 4.9 | 6.4 / 7.0 |
+| full scan: COUNT(*) | MySQL | 2.0 / 10.5 | 5.4 / 10.9 | 6.4 / 11.3 | 8.5 / 12.3 |
+| | MariaDB | 3.3 / 9.6 | 3.5 / 9.7 | 4.1 / 10.2 | 5.1 / 11.0 |
+
+- Where a table is reached through its key or an indexed column, the per-row check is as fast as the
+  set at 100 rows, and faster from 1k on; it stays flat while the set grows with the count.
+- Where a table is scanned (full scans, DISTINCT over a whole table), the set wins at every count
+  measured, 1.4-5x: the per-row check probes the metadata once per row read. Joins reading
+  thousands of rows lean the same way up to 3k and turn at 10k.
+
 What follows for the driver:
 
-1. Setup creates before-image indexes mirroring the data tables' secondary indexes, filtered to
-   rows in flight where the engine allows. On SQL Server, the in-flight index also includes the
-   before image.
-2. On MySQL and MariaDB the committed form becomes a choice per statement: the per-row probe where
-   the copy reads few rows, the DISTINCT set where it scans. The statement alone does not tell
-   which; the engine's estimate (`EXPLAIN`) or the presence of an indexed predicate on each table
-   could. Not designed yet.
+1. **No before-image indexes from the driver.** ScalarDB's own serve the in-flight copy. The setup
+   reports what they do not cover: a data-table index with no `before_*` counterpart (a
+   multi-column index, or one created outside ScalarDB, as on imported tables), and a table whose
+   before-image indexes are missing because index-eventually-consistent reads are on. It prints the
+   DDL to add each one, and creates it only on an explicit option (todo 102).
+2. **On MySQL and MariaDB, choose the committed check per table in each copy** (todo 103): the
+   per-row check where the statement reaches the table through its key or an indexed column and
+   the table has more than a few hundred rows in flight; the DISTINCT set otherwise. The count is
+   read through the in-flight index and cached briefly.
+3. Primary-key access needs nothing on any engine.
