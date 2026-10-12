@@ -62,3 +62,16 @@ See Findings.
 
 - Commits 7503c10, ca8046d, 56c44ba; docs/design.md, docs/plans/proxy-step.md milestone 3b,
   docs/benchmarks/read-overhead.md.
+
+### 2026-10-12 - Part 1: rows in flight measured
+
+**By:** Claude Code
+- 100, 10k and 100k rows in flight per table, all five engines, the driver form against NOT EXISTS,
+  the DISTINCT set, MX and MH: docs/benchmarks/read-overhead.md, "Many rows in flight". Every mode
+  returned BASE's rows.
+- The in-flight copies read every in-flight row (no index on `before_*`; SQL Server scans the whole
+  metadata table), and the DISTINCT set is built in full per execution. At 10k: 3-6x on PostgreSQL
+  and Oracle, 5-107x on MySQL and MariaDB, 32-375x on SQL Server for selective shapes.
+- Candidate fixes recorded there (before-image indexes from setup; NOT EXISTS on MySQL and MariaDB
+  once the in-flight count is large); not implemented. Parts 2 (wide tables) and 3 (composite keys)
+  next.

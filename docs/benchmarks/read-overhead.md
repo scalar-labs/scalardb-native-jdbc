@@ -472,3 +472,92 @@ Findings:
   1.2x on PostgreSQL but 3-18x elsewhere.
 - **DISTINCT inside each copy helps only on Oracle**; on MySQL and MariaDB a DISTINCT over a split
   table stays 14-23x whatever the form (not resolved here).
+
+## Many rows in flight (2026-10-12)
+
+Every run so far held 100 rows in flight per table. Stuck rows (todo 085) or a large ScalarDB batch
+can leave far more. The same shapes were run with 100, 10,000 and 100,000 rows in flight per
+table (`-Dnativejdbc.bench.inflight=N`): 10k is 10% of `c` and 2% of `o`; 100k is 50% of `c` (the
+cap) and 20% of `o`. The first 100 stay in flight at every count, so the hot customer and region
+keep theirs. Every mode returned BASE's rows at every count.
+
+Ratios to BASE, medians. The driver form is SPLIT_DRV: NOT EXISTS on PostgreSQL and Oracle, the
+DISTINCT set on MySQL and MariaDB, MX on SQL Server (MH from three tables).
+
+| shape | engine | driver form: 100 / 10k / 100k | NOT EXISTS: 100 / 10k / 100k |
+|---|---|---|---|
+| key lookup | PostgreSQL | 0.9x / 0.9x / 0.9x | same |
+|  | MySQL | 1.1x / 10.3x / 38.3x | 0.9x / 1.1x / 0.9x |
+|  | MariaDB | 1.2x / 4.8x / 18.6x | 1.1x / 1.2x / 1.1x |
+|  | SQL Server | 1x / 1.1x / 1x | 1x / 1x / 1x |
+|  | Oracle | 0.9x / 0.8x / 1x | same |
+| non-key filter (100 rows) | PostgreSQL | 0.9x / 2.6x / 13.3x | same |
+|  | MySQL | 1.2x / 21x / 71x | 1.4x / 13x / 26.9x |
+|  | MariaDB | 1.4x / 16.8x / 164.6x | 1.8x / 13.4x / 145.2x |
+|  | SQL Server | 1.4x / 34.6x / 31.2x | 1.5x / 34.4x / 31.1x |
+|  | Oracle | 1.3x / 2.8x / 4x | same |
+| FK filter, ORDER BY, LIMIT 3 | PostgreSQL | 1x / 2.6x / 19.2x | same |
+|  | MySQL | 1.4x / 24x / 274.6x | 1.3x / 16.5x / 160.9x |
+|  | MariaDB | 1.4x / 20.8x / 158.1x | 1.4x / 16.8x / 122.4x |
+|  | SQL Server | 1.4x / 125.8x / 121x | 1.4x / 125.5x / 121.1x |
+|  | Oracle | 1.3x / 5.8x / 15.5x | same |
+| key JOIN FK, both ScalarDB | PostgreSQL | 1.2x / 3x / 22x | same |
+|  | MySQL | 1.9x / 49.3x / 367x | 1.8x / 20.7x / 134.6x |
+|  | MariaDB | 1.9x / 26.7x / 237.8x | 1.6x / 17x / 131.7x |
+|  | SQL Server | 2x / 31.8x / 34.4x | 2x / 32x / 34.6x |
+|  | Oracle | 1.5x / 6x / 16.9x | same |
+| many rows: JOIN FK, 3k customers (15k rows) | PostgreSQL | 0.9x / 1.5x / 2x | same |
+|  | MySQL | 1.3x / 9.8x / 54.8x | 16.6x / 19.9x / 38.3x |
+|  | MariaDB | 2x / 9.8x / 54.4x | 4.7x / 10.7x / 47.1x |
+|  | SQL Server | 1.5x / 18.2x / 9.4x | 2.1x / 16.1x / 8.7x |
+|  | Oracle | 1.2x / 1.3x / 2.4x | same |
+| 4 tables: key lookup (25 rows) | PostgreSQL | 14.7x / 6.1x / 407.6x | same |
+|  | MySQL | 4.9x / 107.3x / 1735.1x | 4.3x / 50.4x / 881.7x |
+|  | MariaDB | 5.9x / 78.4x / 506.1x | 5.1x / 51.3x / 317.5x |
+|  | SQL Server | 2.2x / 375.2x / 232.5x | 5.3x / 371.7x / 143.7x |
+|  | Oracle | 1.5x / 5.3x / 17.7x | same |
+| full scan: COUNT(*) of 100k rows | PostgreSQL | 2.3x / 3.4x / 4.7x | same |
+|  | MySQL | 2.1x / 8.5x / 14.7x | 4.3x / 6.2x / 10.5x |
+|  | MariaDB | 3.3x / 5x / 13.8x | 11.7x / 12.7x / 20.4x |
+|  | SQL Server | 2.1x / 6.4x / 7.5x | 2.1x / 6.4x / 7.5x |
+|  | Oracle | 3.6x / 7.4x / 17.5x | same |
+
+Where the time goes (plans at 10k, `-Dnativejdbc.bench.explain`):
+
+- **Each in-flight copy reads every in-flight row of its table.** Its filter is on `before_*`, which
+  no index covers. PostgreSQL reads all 10k in-flight rows through the partial in-flight index and
+  drops 9,900 of them on `before_region`. SQL Server scans the whole metadata table (500k rows for
+  `o`), because its filtered index holds only the key; that is the 120x on "FK filter" at both 10k
+  and 100k. A key lookup stays flat on every engine, because the key bounds the metadata row.
+- **The DISTINCT set is built in full on every execution.** MySQL materializes all 10k in-flight
+  keys before probing one (5.8 ms for a key lookup), so the driver's MySQL and MariaDB form grows
+  with the in-flight count even when the query touches one row. NOT EXISTS stays at 0.9-1.2x for
+  key lookups at 100k.
+- The committed check itself (NOT EXISTS) stays cheap at any count where the query is selective.
+
+Findings:
+
+- **At 100 rows in flight nothing changes** from the earlier sections.
+- **At 10k the selective shapes cost 3-6x on PostgreSQL and Oracle, 5-107x on MySQL and MariaDB,
+  and 32-375x on SQL Server** (key lookups aside), all from the in-flight copies, and on MySQL and
+  MariaDB also from the DISTINCT set. BASE takes about 0.5 ms; the worst case is a 4-table key
+  lookup on SQL Server at 260 ms.
+- **At 100k (half of `c`) the split is far from BASE everywhere**: 4-18x on Oracle, 13-37x on
+  PostgreSQL (408x for the 4-table key lookup), up to 1,735x for a 4-table key lookup on MySQL.
+- **On MySQL and MariaDB neither form wins everywhere.** At 100 rows the DISTINCT set is 2-35x
+  better on joins returning many rows and on the IN subquery (the reason it is the driver's form).
+  From 10k NOT EXISTS is 1.2-2.4x better on selective shapes and flat on key lookups, but not
+  better on joins returning many rows.
+
+What would fix it (not done here):
+
+1. An index on the before image in each metadata table, mirroring each secondary index of the data
+   table, restricted to rows in flight where the engine has partial or filtered indexes (PostgreSQL,
+   SQL Server), otherwise led by `tx_state`. The in-flight copy could then seek, as the committed
+   copy does. On SQL Server, also covering the before columns would end the scan of the metadata
+   table. This is setup work, with a write cost on every ScalarDB prepare.
+2. On MySQL and MariaDB, choose NOT EXISTS over the DISTINCT set once a table's in-flight count is
+   large (from the statistics the setup already gathers, or a cheap count). Below a few hundred rows
+   the DISTINCT set stays.
+3. Liveness first: the in-flight count stays small only if stuck rows are recovered (todo 084) and
+   reported (todo 085).
