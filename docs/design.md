@@ -793,9 +793,13 @@ union as a derived table.
     T_meta q WHERE q.<pk> = t.<pk> AND q.tx_state IN (1, 2))` on PostgreSQL and Oracle; on MySQL and
     MariaDB a left join to `(SELECT DISTINCT <pk> FROM T_meta WHERE tx_state IN (1, 2))` with the key
     NULL, which makes them build the in-flight keys once instead of probing the metadata per row (the
-    set grows with the in-flight count: from about 1,000 rows in flight a per-row left join on
-    `T_meta`'s key is faster for a table the statement reaches through its key or an indexed column,
-    to be chosen per table, todo 103); on
+    set grows with the in-flight count, so a table the statement reaches through its key or a
+    ScalarDB-indexed column, by =, a range or IN with a list in a top-level conjunct of the WHERE or
+    an ON clause, takes the per-row left join on `T_meta`'s key instead once it has more than 500
+    rows in flight, which measured flat while the set grew 1.6-23x from 1,000 rows; the count is
+    read through the in-flight index, capped at 501, and kept for a second per connection, and a
+    prepared statement whose form the count changes is prepared again with its settings and
+    parameters replayed, so pooled statements follow the count, todo 103); on
     SQL Server `NOT EXISTS` in the all-committed copy of a statement over one or two ScalarDB tables
     and the DISTINCT set over three or more, and in the copies with a table in flight a left join on
     `T_meta`'s key with `COALESCE(tx_state, 3) = 3`, since SQL Server otherwise plans those copies as

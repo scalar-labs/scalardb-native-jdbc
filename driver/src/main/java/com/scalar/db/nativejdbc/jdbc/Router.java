@@ -7,13 +7,22 @@ import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.Outcome;
 import com.scalar.db.nativejdbc.sql.SqlAst;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLSyntaxErrorException;
+import java.sql.Statement;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import org.jspecify.annotations.Nullable;
@@ -52,6 +61,21 @@ final class Router {
     /** The number of placeholders the application binds. */
     final int parameters;
 
+    /**
+     * When the route depends on in-flight counts, the {@link System#nanoTime} after which they are
+     * read again; 0 when it does not.
+     */
+    final long recheckAt;
+
+    /**
+     * Whether this route differs from the one it replaces only in how a committed copy excludes its
+     * rows in flight, which the counts decide: either text returns the same rows.
+     */
+    final boolean countsOnly;
+
+    /** The positions, among the statement's split references, of those checked row by row. */
+    final List<Integer> perRow;
+
     private Route(
         String source,
         String sql,
@@ -63,7 +87,13 @@ final class Router {
         long catalogGeneration,
         Instant trustedUntil,
         @Nullable List<Integer> parameterSources,
-        int parameters) {
+        int parameters,
+        long recheckAt,
+        boolean countsOnly,
+        List<Integer> perRow) {
+      this.perRow = List.copyOf(perRow);
+      this.recheckAt = recheckAt;
+      this.countsOnly = countsOnly;
       this.trustedUntil = trustedUntil;
       this.parameterSources = parameterSources;
       this.parameters = parameters;
@@ -78,9 +108,23 @@ final class Router {
     }
   }
 
+  /**
+   * Above this many rows in flight, MySQL and MariaDB exclude a table's rows in flight row by row
+   * where the statement reaches the table through an index; the DISTINCT set of the in-flight keys
+   * that they build otherwise grows with the count (design 4.2, todo 103).
+   */
+  static final int PER_ROW_ABOVE = 500;
+
+  /** How long an in-flight count is used before it is read again. */
+  private static final long COUNT_TTL_NANOS = 1_000_000_000L;
+
   private final Engine engine;
   private final Catalog catalog;
   private final Session session;
+  // per metadata table: the in-flight count, capped above PER_ROW_ABOVE, and when it was read
+  private final Map<String, long[]> inflight = new HashMap<>();
+  // while set, read() takes these per-row choices instead of reading counts
+  private @Nullable List<Integer> forcedPerRow;
   private boolean passthrough;
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
 
@@ -149,7 +193,7 @@ final class Router {
       }
     }
     if (!scalarDb.isEmpty()) {
-      return read(sql, ast, scalarDb);
+      return read(vendor, sql, ast, scalarDb);
     }
     boolean changesSession = kind != SqlAst.Kind.SELECT && kind != SqlAst.Kind.DML;
     boolean changesNames = kind == SqlAst.Kind.DDL || kind == SqlAst.Kind.TRUNCATE;
@@ -161,7 +205,11 @@ final class Router {
    * tables' indexes; where it does not apply, every ScalarDB table renamed to its read view, which
    * shows each row's committed image (design sections 3 and 4.2).
    */
-  private Route read(String sql, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
+  private Route read(
+      Connection vendor,
+      String sql,
+      SqlAst ast,
+      IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
       throws SQLException {
     Set<String> names = new TreeSet<>();
     for (TableInfo t : scalarDb.values()) {
@@ -202,10 +250,44 @@ final class Router {
       }
       views.put(e.getKey(), engine.quote(t.namespace()) + "." + engine.quote(t.readView(engine)));
     }
-    SqlAst.SplitText split = SplitRead.emit(engine, ast, scalarDb, views);
+    Set<SqlAst.TableRef> perRow = Collections.newSetFromMap(new IdentityHashMap<>());
+    List<Integer> chosen = new ArrayList<>();
+    long recheckAt = 0;
+    if (engine == Engine.MYSQL || engine == Engine.MARIADB) {
+      List<SqlAst.TableRef> refs = ast.splittableRefs();
+      for (int i = 0; i < refs.size(); i++) {
+        SqlAst.TableRef r = refs.get(i);
+        TableInfo t = scalarDb.get(r);
+        if (t == null || !ast.reachedThrough(r, leadingColumns(t))) {
+          continue;
+        }
+        boolean many;
+        if (forcedPerRow != null) {
+          many = forcedPerRow.contains(i);
+        } else {
+          long[] count = inflightCount(vendor, t);
+          long due = count[1] + COUNT_TTL_NANOS;
+          recheckAt = recheckAt == 0 || due - recheckAt < 0 ? due : recheckAt;
+          many = count[0] > PER_ROW_ABOVE;
+        }
+        if (many) {
+          perRow.add(r);
+          chosen.add(i);
+        }
+      }
+    }
+    SqlAst.SplitText split = SplitRead.emit(engine, ast, scalarDb, views, perRow);
     if (split != null) {
       return route(
-          sql, split.sql(), false, false, false, split.parameterSources(), ast.parameterCount());
+          sql,
+          split.sql(),
+          false,
+          false,
+          false,
+          split.parameterSources(),
+          ast.parameterCount(),
+          recheckAt,
+          chosen);
     }
     String rewritten = ast.joinTokens(views::get);
     if (rewritten == null) {
@@ -222,6 +304,28 @@ final class Router {
       boolean passthrough,
       @Nullable List<Integer> parameterSources,
       int parameters) {
+    return route(
+        source,
+        sql,
+        changesSession,
+        changesNames,
+        passthrough,
+        parameterSources,
+        parameters,
+        0,
+        List.of());
+  }
+
+  private Route route(
+      String source,
+      String sql,
+      boolean changesSession,
+      boolean changesNames,
+      boolean passthrough,
+      @Nullable List<Integer> parameterSources,
+      int parameters,
+      long recheckAt,
+      List<Integer> perRow) {
     return new Route(
         source,
         sql,
@@ -233,7 +337,57 @@ final class Router {
         catalog.generation(),
         catalog.trustedUntil(),
         parameterSources,
-        parameters);
+        parameters,
+        recheckAt,
+        false,
+        perRow);
+  }
+
+  /** The lower-cased columns that lead an index of the table: its key's first, and the indexed. */
+  private static Set<String> leadingColumns(TableInfo t) {
+    Set<String> out = new HashSet<>();
+    out.add(t.keyColumns().get(0).toLowerCase(Locale.ROOT));
+    for (String c : t.indexedColumns()) {
+      out.add(c.toLowerCase(Locale.ROOT));
+    }
+    return out;
+  }
+
+  /**
+   * The table's rows in flight, counted through the in-flight index up to {@link #PER_ROW_ABOVE} +
+   * 1, and when they were counted; read again once a count is older than {@link #COUNT_TTL_NANOS}.
+   * The count only chooses a plan, so one that is a second old costs time, never rows.
+   */
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "names from ScalarDB's catalog, quoted by the engine's rules")
+  private long[] inflightCount(Connection vendor, TableInfo t) throws SQLException {
+    String meta =
+        engine.quote(t.namespace())
+            + "."
+            + engine.quote(Objects.requireNonNull(t.metadataTable(), "metadata table"));
+    long now = System.nanoTime();
+    long[] cached = inflight.get(meta);
+    if (cached != null && now - cached[1] < COUNT_TTL_NANOS) {
+      return cached;
+    }
+    long count;
+    try (Statement st = vendor.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM "
+                    + meta
+                    + " WHERE "
+                    + engine.quote("tx_state")
+                    + " IN (1, 2) LIMIT "
+                    + (PER_ROW_ABOVE + 1)
+                    + ") x")) {
+      rs.next();
+      count = rs.getLong(1);
+    }
+    long[] fresh = {count, now};
+    inflight.put(meta, fresh);
+    return fresh;
   }
 
   /**
@@ -280,7 +434,39 @@ final class Router {
             && prepared.passthrough == passthrough
             && prepared.isolation == isolation
             && (!prepared.passthrough || vendor.getAutoCommit());
-    return unchanged ? prepared : route(vendor, prepared.source);
+    if (unchanged && (prepared.recheckAt == 0 || System.nanoTime() - prepared.recheckAt < 0)) {
+      return prepared;
+    }
+    Route now = route(vendor, prepared.source);
+    if (now.sql.equals(prepared.sql) || now.perRow.equals(prepared.perRow)) {
+      return now;
+    }
+    // the per-row choices moved: is that all that moved?
+    Route same;
+    forcedPerRow = prepared.perRow;
+    try {
+      same = route(vendor, prepared.source);
+    } finally {
+      forcedPerRow = null;
+    }
+    if (!same.sql.equals(prepared.sql)) {
+      return now;
+    }
+    return new Route(
+        now.source,
+        now.sql,
+        now.changesSession,
+        now.changesNames,
+        now.passthrough,
+        now.isolation,
+        now.sessionGeneration,
+        now.catalogGeneration,
+        now.trustedUntil,
+        now.parameterSources,
+        now.parameters,
+        now.recheckAt,
+        true,
+        now.perRow);
   }
 
   /**

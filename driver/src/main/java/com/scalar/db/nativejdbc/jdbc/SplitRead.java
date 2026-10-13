@@ -34,7 +34,10 @@ final class SplitRead {
      * MariaDB, which also materializes a derived table holding {@code NOT EXISTS}.
      */
     DISTINCT_SET,
-    /** A left join on the metadata table's key, for SQL Server's copies with a table in flight. */
+    /**
+     * A left join on the metadata table's key: SQL Server's copies with a table in flight, and on
+     * MySQL and MariaDB a table reached through an index with many rows in flight.
+     */
     LEFT_JOIN
   }
 
@@ -47,13 +50,16 @@ final class SplitRead {
    * @param ast the statement
    * @param scalarDb its ScalarDB table references, each with its table
    * @param views the read view of each ScalarDB reference, already quoted, for those not split
+   * @param perRow the references whose committed copies exclude their rows in flight row by row, on
+   *     MySQL and MariaDB
    * @return the split read, or {@code null} to read through the views
    */
   static SqlAst.@Nullable SplitText emit(
       Engine engine,
       SqlAst ast,
       Map<SqlAst.TableRef, TableInfo> scalarDb,
-      Map<SqlAst.TableRef, String> views) {
+      Map<SqlAst.TableRef, String> views,
+      Set<SqlAst.TableRef> perRow) {
     List<SqlAst.TableRef> split = new ArrayList<>();
     for (SqlAst.TableRef r : ast.splittableRefs()) {
       if (scalarDb.containsKey(r)) {
@@ -79,7 +85,11 @@ final class SplitRead {
             r,
             inFlight
                 ? inFlight(engine, t, cols)
-                : committed(engine, t, cols, check(engine, split.size(), bits)));
+                : committed(
+                    engine,
+                    t,
+                    cols,
+                    perRow.contains(r) ? Check.LEFT_JOIN : check(engine, split.size(), bits)));
       }
       copies.add(naming::get);
     }

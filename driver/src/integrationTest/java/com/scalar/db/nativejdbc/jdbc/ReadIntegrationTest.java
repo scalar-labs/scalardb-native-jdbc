@@ -260,6 +260,43 @@ class ReadIntegrationTest {
           .containsExactly("a", "b2", "d");
       assertThat(rows(c, "SELECT x FROM rd.imp ORDER BY id")).containsExactly("A", "b", "c");
     }
+
+    // many rows in flight: on MySQL and MariaDB a statement prepared before them is prepared again
+    // in the per-row form once its count is a second old, its parameter and settings replayed
+    String byKey = "SELECT " + mx + " FROM " + made + " WHERE " + mid + " = ?";
+    try (Connection c = e.openDriver();
+        PreparedStatement ps = c.prepareStatement(byKey);
+        TwoPhaseCommitTransactionManager tm = scalarDb.getTwoPhaseCommitTransactionManager()) {
+      ps.setFetchSize(7);
+      ps.setInt(1, 2);
+      assertThat(rows(ps)).containsExactly("b2");
+      String before = ps.toString();
+      TwoPhaseCommitTransaction tx = tm.begin();
+      for (int i = 0; i <= Router.PER_ROW_ABOVE; i++) {
+        tx.insert(
+            Insert.newBuilder()
+                .namespace(rd)
+                .table("made")
+                .partitionKey(Key.ofInt("id", 1000 + i))
+                .textValue("x", "n")
+                .build());
+      }
+      tx.prepare();
+      try {
+        Thread.sleep(1100);
+        assertThat(rows(ps)).containsExactly("b2");
+        assertThat(ps.getFetchSize()).isEqualTo(7);
+        boolean perRow = engine == Engine.MYSQL || engine == Engine.MARIADB;
+        assertThat(ps.toString().equals(before)).isEqualTo(!perRow);
+        try (Connection vendor = e.open()) {
+          String sql = new Router(engine, catalog, new Session(engine)).route(vendor, byKey).sql;
+          assertThat(sql.contains("COALESCE")).isEqualTo(perRow);
+        }
+      } finally {
+        tx.rollback();
+      }
+    }
+    assertSettled(e, catalog, rd, madeTable);
   }
 
   /**

@@ -422,7 +422,17 @@ public final class Catalog implements AutoCloseable {
       @Nullable String schema, List<String> sessionSchemas, String table) {
     String ns = schema != null ? schema : sessionSchemas.isEmpty() ? "" : sessionSchemas.get(0);
     return new TableInfo(
-        ns, table, Layout.PLAIN, table, null, null, List.of(), List.of(), List.of(), true);
+        ns,
+        table,
+        Layout.PLAIN,
+        table,
+        null,
+        null,
+        List.of(),
+        List.of(),
+        List.of(),
+        List.of(),
+        true);
   }
 
   /**
@@ -612,6 +622,8 @@ public final class Catalog implements AutoCloseable {
                     + engine.quote("column_name")
                     + ", "
                     + engine.quote("key_type")
+                    + ", "
+                    + engine.quote("indexed")
                     + " FROM "
                     + quoted("metadata")
                     + " ORDER BY "
@@ -622,7 +634,7 @@ public final class Catalog implements AutoCloseable {
       while (rs.next()) {
         metadata
             .computeIfAbsent(rs.getString(1), k -> new ArrayList<>())
-            .add(new MetadataColumn(rs.getString(2), rs.getString(3)));
+            .add(new MetadataColumn(rs.getString(2), rs.getString(3), rs.getBoolean(4)));
       }
     } catch (SQLException e) {
       if (!engine.isMissingTable(e)) {
@@ -721,10 +733,12 @@ public final class Catalog implements AutoCloseable {
   static final class MetadataColumn {
     final String name;
     final @Nullable String keyType;
+    final boolean indexed;
 
-    MetadataColumn(String name, @Nullable String keyType) {
+    MetadataColumn(String name, @Nullable String keyType, boolean indexed) {
       this.name = name;
       this.keyType = keyType;
+      this.indexed = indexed;
     }
   }
 
@@ -802,6 +816,7 @@ public final class Catalog implements AutoCloseable {
             columns.partitionKey,
             columns.clusteringKey,
             columns.dataColumns,
+            columns.indexed,
             setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
       v = byLeft.get(k);
@@ -825,6 +840,7 @@ public final class Catalog implements AutoCloseable {
             columns.partitionKey,
             columns.clusteringKey,
             columns.dataColumns,
+            columns.indexed,
             setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
       v = byRight.get(k);
@@ -851,6 +867,7 @@ public final class Catalog implements AutoCloseable {
             columns.partitionKey,
             columns.clusteringKey,
             columns.dataColumns,
+            columns.indexed,
             true);
       }
       return new TableInfo(
@@ -860,6 +877,7 @@ public final class Catalog implements AutoCloseable {
           q.table(),
           null,
           null,
+          List.of(),
           List.of(),
           List.of(),
           List.of(),
@@ -889,6 +907,9 @@ public final class Catalog implements AutoCloseable {
       Set<String> names = new LinkedHashSet<>();
       for (MetadataColumn col : metadata.getOrDefault(key(fullTableName), List.of())) {
         names.add(col.name);
+        if (col.indexed) {
+          out.indexed.add(col.name);
+        }
         if (col.keyType != null) {
           String kt = col.keyType.toUpperCase(Locale.ROOT);
           if (kt.equals("PARTITION")) {
@@ -919,6 +940,7 @@ public final class Catalog implements AutoCloseable {
     final List<String> partitionKey = new ArrayList<>();
     final List<String> clusteringKey = new ArrayList<>();
     final List<String> dataColumns = new ArrayList<>();
+    final List<String> indexed = new ArrayList<>();
     boolean transactional;
   }
 

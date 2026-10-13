@@ -39,7 +39,7 @@ Simpler; scans lose 1.4-2x above the threshold.
 
 ## Acceptance Criteria
 
-- [ ] The emitted form follows the rule; unit tests for the access-path classification.
+- [x] The emitted form follows the rule; unit tests for the access-path classification.
 - [ ] Benchmark at 100 and 10k rows in flight: no selective shape worse than either fixed form by more
       than 20%.
 
@@ -49,3 +49,23 @@ Simpler; scans lose 1.4-2x above the threshold.
 
 **By:** Claude Code
 - From the 096 threshold sweep (100, 1k, 3k, 10k rows in flight).
+
+### 2026-10-13 - Implemented
+
+**By:** Claude Code
+- How the form is chosen:
+  - `SqlAst.reachedThrough` classifies the access path: =, a range, or IN with a list on the first
+    key column or a ScalarDB-indexed column, in a top-level conjunct of WHERE or ON.
+  - `TableInfo.indexedColumns` comes from the `indexed` column of ScalarDB's metadata.
+  - `Router` reads the count through the in-flight index, capped at 501 and cached for 1 s per
+    connection.
+- How the change reaches statements:
+  - A route records its per-row choices and when to recheck them.
+  - `Router.current` marks a new route `countsOnly` when re-emitting with the old choices
+    reproduces the old text.
+  - `Proxies` prepares a split read again with its prepare arguments, settings and parameters
+    replayed. Under a pending batch it keeps the old text, which returns the same rows.
+- Test: `ReadIntegrationTest` holds 501 rows in flight, and a statement prepared before them is
+  re-prepared on MySQL and MariaDB.
+- Open: the second acceptance item, from the driver-level benchmark.
+

@@ -33,6 +33,13 @@ import net.sf.jsqlparser.expression.NextValExpression;
 import net.sf.jsqlparser.expression.UserVariable;
 import net.sf.jsqlparser.expression.VariableAssignment;
 import net.sf.jsqlparser.expression.XMLSerializeExpr;
+import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
+import net.sf.jsqlparser.expression.operators.relational.Between;
+import net.sf.jsqlparser.expression.operators.relational.ComparisonOperator;
+import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
+import net.sf.jsqlparser.expression.operators.relational.InExpression;
+import net.sf.jsqlparser.expression.operators.relational.NotEqualsTo;
+import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.parser.ASTNodeAccess;
 import net.sf.jsqlparser.parser.CCJSqlParser;
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
@@ -1346,6 +1353,95 @@ public final class SqlAst {
       out.add(lowerUnquoted(c.name()));
     }
     return out;
+  }
+
+  /**
+   * Returns whether the statement reaches {@code r} through one of {@code leading}, columns that
+   * lead an index: a top-level conjunct of the WHERE clause or of a join's ON clause compares such
+   * a column of {@code r}, by =, &lt;, &gt;, &lt;=, &gt;=, BETWEEN or IN with a list, with an
+   * expression that reads no column of {@code r}. A column of {@code r} is one qualified by it, or
+   * an unqualified one when it is the only table of the FROM clause. An approximation that only
+   * chooses a plan: a wrong answer costs time, never rows (todo 103).
+   *
+   * @param r a reference of {@link #splittableRefs()}
+   * @param leading the lower-cased names of the columns that lead an index of its table
+   * @return whether an index on such a column can reach the table's rows
+   */
+  public boolean reachedThrough(TableRef r, Set<String> leading) {
+    if (!(statement instanceof PlainSelect)) {
+      return false;
+    }
+    PlainSelect s = (PlainSelect) statement;
+    boolean only = s.getJoins() == null || s.getJoins().isEmpty();
+    String self = lowerUnquoted(r.hasAlias() ? Objects.requireNonNull(r.alias()) : r.name());
+    List<Expression> conjuncts = new ArrayList<>();
+    conjuncts(s.getWhere(), conjuncts);
+    if (s.getJoins() != null) {
+      for (Join j : s.getJoins()) {
+        if (j.getOnExpressions() != null) {
+          for (Expression on : j.getOnExpressions()) {
+            conjuncts(on, conjuncts);
+          }
+        }
+      }
+    }
+    for (Expression e : conjuncts) {
+      List<Expression[]> sides = new ArrayList<>(); // a column, then the expressions it meets
+      if (e instanceof ComparisonOperator && !(e instanceof NotEqualsTo)) {
+        ComparisonOperator c = (ComparisonOperator) e;
+        sides.add(new Expression[] {c.getLeftExpression(), c.getRightExpression()});
+        sides.add(new Expression[] {c.getRightExpression(), c.getLeftExpression()});
+      } else if (e instanceof Between && !((Between) e).isNot()) {
+        Between b = (Between) e;
+        sides.add(
+            new Expression[] {
+              b.getLeftExpression(), b.getBetweenExpressionStart(), b.getBetweenExpressionEnd()
+            });
+      } else if (e instanceof InExpression
+          && !((InExpression) e).isNot()
+          && ((InExpression) e).getRightExpression() instanceof ExpressionList) {
+        InExpression in = (InExpression) e;
+        sides.add(new Expression[] {in.getLeftExpression(), in.getRightExpression()});
+      }
+      for (Expression[] side : sides) {
+        if (side[0] instanceof Column
+            && ofTable((Column) side[0], self, only)
+            && leading.contains(lowerUnquoted(((Column) side[0]).getColumnName()))) {
+          boolean readsSelf = false;
+          for (int i = 1; i < side.length && !readsSelf; i++) {
+            Node n = side[i].getASTNode();
+            if (n == null) {
+              readsSelf = true; // not located: assume the worst
+              break;
+            }
+            for (Object v : valuesUnder(n)) {
+              readsSelf |= v instanceof Column && ofTable((Column) v, self, only);
+            }
+          }
+          if (!readsSelf) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  private static boolean ofTable(Column c, String self, boolean only) {
+    Table q = c.getTable();
+    return (q == null || q.getName() == null) ? only : lowerUnquoted(q.getName()).equals(self);
+  }
+
+  private static void conjuncts(@Nullable Expression e, List<Expression> out) {
+    if (e instanceof AndExpression) {
+      conjuncts(((AndExpression) e).getLeftExpression(), out);
+      conjuncts(((AndExpression) e).getRightExpression(), out);
+    } else if (e instanceof ParenthesedExpressionList
+        && ((ParenthesedExpressionList<?>) e).size() == 1) {
+      conjuncts(((ParenthesedExpressionList<?>) e).get(0), out);
+    } else if (e != null) {
+      out.add(e);
+    }
   }
 
   private static String lowerUnquoted(String name) {

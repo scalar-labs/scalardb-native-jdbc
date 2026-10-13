@@ -255,6 +255,33 @@ class SplitTest {
     assertThat(read("select x from a join b using (id)", 0)).isNull();
   }
 
+  private static boolean reached(String sql, int ref, String... leading) {
+    SqlAst ast = parse(sql);
+    return ast.reachedThrough(ast.tableRefs().get(ref), java.util.Set.of(leading));
+  }
+
+  @Test
+  void reachedThrough_aComparisonOnALeadingColumn_withNothingOfTheTable() {
+    assertThat(reached("select * from c where id = ?", 0, "id")).isTrue();
+    assertThat(reached("select * from c where region between 1 and ? and x > 0", 0, "region"))
+        .isTrue();
+    assertThat(reached("select * from c where id in (1, 2)", 0, "id")).isTrue();
+    assertThat(reached("select * from c where (x > 0 and (id = ?))", 0, "id")).isTrue();
+    // through a join from another table, either side
+    String join = "select * from c join o on o.cid = c.id where c.id = ?";
+    assertThat(reached(join, 0, "id")).isTrue();
+    assertThat(reached(join, 1, "cid")).isTrue();
+    assertThat(reached(join, 1, "id")).isFalse();
+    // not a comparison the index serves, or under OR, or against the table itself
+    assertThat(reached("select * from c where id <> ?", 0, "id")).isFalse();
+    assertThat(reached("select * from c where id = ? or x = 1", 0, "id")).isFalse();
+    assertThat(reached("select * from c where id = c.x + 1", 0, "id")).isFalse();
+    assertThat(reached("select * from c where id not in (1, 2)", 0, "id")).isFalse();
+    assertThat(reached("select * from c where name = ?", 0, "id")).isFalse();
+    // an unqualified column of a join could belong to either table
+    assertThat(reached("select * from c join o on o.cid = c.k where id = 1", 0, "id")).isFalse();
+  }
+
   @Test
   void splittableRefs_includeGroupingStatements() {
     assertThat(splittable("select count(*) from a")).containsExactly("a");

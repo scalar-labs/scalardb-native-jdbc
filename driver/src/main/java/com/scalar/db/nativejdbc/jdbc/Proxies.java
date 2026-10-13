@@ -17,7 +17,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import org.jspecify.annotations.Nullable;
@@ -83,7 +85,7 @@ public final class Proxies {
 
   /** The methods of Object and java.sql.Wrapper, the same for every proxy; the rest is handle's. */
   private abstract static class Handler implements InvocationHandler {
-    final Object target;
+    Object target; // a prepared statement's is replaced when it is prepared again
 
     Handler(Object target) {
       this.target = target;
@@ -161,9 +163,13 @@ public final class Proxies {
             Router.Route route = route((String) args[0]);
             Object[] routed = args.clone();
             routed[0] = route.sql;
-            return proxy(
-                method.getReturnType(),
-                new StatementHandler((Statement) created(vendor, method, routed), me, this, route));
+            StatementHandler h =
+                new StatementHandler((Statement) created(vendor, method, routed), me, this, route);
+            if (method.getName().equals("prepareStatement")) {
+              h.preparedWith = method;
+              h.preparedArgs = args.clone();
+            }
+            return proxy(method.getReturnType(), h);
           }
         case "getMetaData":
           return proxy(
@@ -257,13 +263,31 @@ public final class Proxies {
     }
   }
 
+  /** A recorded call, replayed on a statement prepared again. */
+  private static final class Call {
+    final Method method;
+    final Object[] args;
+
+    Call(Method method, Object[] args) {
+      this.method = method;
+      this.args = args.clone();
+    }
+  }
+
   private static final class StatementHandler extends Handler {
-    final Statement vendor;
+    Statement vendor;
     final Connection connection;
     final ConnectionHandler owner;
     Router.@Nullable Route prepared;
     // the routes of the statements added with addBatch(String), applied when the batch runs
     final List<Router.Route> batched = new ArrayList<>();
+    // for a prepared split read, what it takes to prepare it again when the in-flight counts change
+    // its form (todo 103): how it was prepared, its settings, its bound parameters
+    @Nullable Method preparedWith;
+    Object @Nullable [] preparedArgs;
+    final Map<String, Call> settings = new LinkedHashMap<>();
+    final Map<Integer, Call> parameters = new LinkedHashMap<>();
+    boolean batchPending;
 
     StatementHandler(
         Statement vendor,
@@ -285,7 +309,22 @@ public final class Proxies {
       }
       if (name.equals("clearBatch")) {
         batched.clear();
+        batchPending = false;
         return forward(vendor, method, args);
+      }
+      if (name.equals("clearParameters")) {
+        parameters.clear();
+        return forward(vendor, method, args);
+      }
+      if (name.equals("addBatch") && (args == null || args.length == 0)) {
+        batchPending = true;
+        return forward(vendor, method, args);
+      }
+      if ((name.startsWith("set") && args != null && args.length == 1)
+          || name.equals("closeOnCompletion")) {
+        Object r = forward(vendor, method, args);
+        settings.put(name, new Call(method, args == null ? new Object[0] : args));
+        return r;
       }
       Router.Route split = prepared;
       if (split != null && split.parameterSources != null) {
@@ -294,6 +333,7 @@ public final class Proxies {
             && args.length >= 2
             && args[0] instanceof Integer) {
           bind(split, method, args);
+          parameters.put((Integer) args[0], new Call(method, args));
           return null;
         }
         if (name.equals("getParameterMetaData")) {
@@ -323,9 +363,17 @@ public final class Proxies {
       } else if (prepared != null && name.startsWith("execute")) {
         Router.Route route = owner.current(prepared);
         if (!route.sql.equals(prepared.sql)) {
-          // the vendor statement holds the old text
-          throw Errors.unsupported(
-              "the statement now routes differently from when it was prepared; prepare it again");
+          if (!route.countsOnly) {
+            // the vendor statement holds the old text
+            throw Errors.unsupported(
+                "the statement now routes differently from when it was prepared; prepare it"
+                    + " again");
+          }
+          if (canPrepareAgain(prepared, route)) {
+            prepareAgain(route);
+          } else {
+            route = prepared; // the old form returns the same rows
+          }
         }
         prepared = route;
         ran.add(route);
@@ -338,8 +386,11 @@ public final class Proxies {
           for (Router.Route entry : entries) {
             Router.Route now = owner.current(entry);
             if (!now.sql.equals(entry.sql)) {
-              throw Errors.unsupported(
-                  "a batched statement now routes differently from when it was added");
+              if (!now.countsOnly) {
+                throw Errors.unsupported(
+                    "a batched statement now routes differently from when it was added");
+              }
+              now = entry; // the text the batch holds returns the same rows
             }
             ran.add(now);
           }
@@ -347,6 +398,9 @@ public final class Proxies {
           vendor.clearBatch();
           throw e;
         }
+      }
+      if (name.startsWith("execute") && name.endsWith("Batch")) {
+        batchPending = false;
       }
       Object result;
       try {
@@ -359,6 +413,46 @@ public final class Proxies {
       return result instanceof ResultSet
           ? proxy(ResultSet.class, new ChildHandler(result, connection, (Statement) proxy))
           : result;
+    }
+
+    /**
+     * Whether a prepared split read can be prepared again for a route that differs only in its
+     * committed check: the same placeholders, and no batch the vendor statement already holds.
+     */
+    private boolean canPrepareAgain(Router.Route old, Router.Route now) {
+      return preparedWith != null
+          && !batchPending
+          && old.parameterSources != null
+          && old.parameterSources.equals(now.parameterSources);
+    }
+
+    /**
+     * Prepares the statement again with the route's text, replays its settings and parameters, and
+     * closes the old vendor statement. An application that unwrapped the old one keeps a closed
+     * statement.
+     */
+    private void prepareAgain(Router.Route route) throws Throwable {
+      Object[] args = Objects.requireNonNull(preparedArgs).clone();
+      args[0] = route.sql;
+      Statement fresh =
+          (Statement) created(owner.vendor, Objects.requireNonNull(preparedWith), args);
+      Statement old = vendor;
+      try {
+        for (Call c : settings.values()) {
+          forward(fresh, c.method, c.args);
+        }
+        vendor = fresh;
+        target = fresh;
+        for (Call c : parameters.values()) {
+          bind(route, c.method, c.args);
+        }
+      } catch (Throwable t) {
+        vendor = old;
+        target = old;
+        fresh.close();
+        throw t;
+      }
+      old.close();
     }
 
     /** Binds a value to every placeholder of a split read that takes it. */

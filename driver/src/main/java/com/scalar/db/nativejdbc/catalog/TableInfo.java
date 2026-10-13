@@ -17,6 +17,7 @@ public final class TableInfo {
   private final List<String> partitionKey;
   private final List<String> clusteringKey;
   private final List<String> dataColumns;
+  private final List<String> indexedColumns;
   private final boolean setUp;
 
   TableInfo(
@@ -29,6 +30,7 @@ public final class TableInfo {
       List<String> partitionKey,
       List<String> clusteringKey,
       List<String> dataColumns,
+      List<String> indexedColumns,
       boolean setUp) {
     this.namespace = namespace;
     this.table = table;
@@ -39,6 +41,7 @@ public final class TableInfo {
     this.partitionKey = List.copyOf(partitionKey);
     this.clusteringKey = List.copyOf(clusteringKey);
     this.dataColumns = List.copyOf(dataColumns);
+    this.indexedColumns = List.copyOf(indexedColumns);
     this.setUp = setUp;
   }
 
@@ -178,6 +181,15 @@ public final class TableInfo {
    */
   public List<String> dataColumns() {
     return dataColumns;
+  }
+
+  /**
+   * Returns the columns with a ScalarDB secondary index, in ordinal order.
+   *
+   * @return the indexed columns
+   */
+  public List<String> indexedColumns() {
+    return indexedColumns;
   }
 
   /**
