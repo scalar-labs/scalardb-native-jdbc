@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "114"
 tags: [code-review, quality]
@@ -50,7 +50,7 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 ## Acceptance Criteria
 
-- [ ] Same tests pass; the listed duplication is gone.
+- [x] Same tests pass; the listed duplication is gone (one item kept, see the work log).
 
 ## Work Log
 
@@ -65,3 +65,23 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 - Commits a772e20, 48f523a, 785e126, cdbc969, 2892bad, 59c9309, d719647; docs/design.md 4.2;
   docs/benchmarks/read-overhead.md, "Through the driver".
+
+### 2026-10-14 - Done
+
+**By:** Claude Code
+- Router: `Route.with(...)` replaces the three hand copies; one `route(...)` helper; the per-row
+  choices to force are a parameter of `decide`, not a field; `current` skips the second routing pass
+  when only the in-flight recheck was due, since only the counts can then have moved.
+- Proxies: the statement handler reads its vendor statement from `target` (`vendor()`), no second
+  field; settings and parameters are recorded only for a route that depends on the in-flight
+  counts (`recheckAt != 0`), the only kind prepared again.
+- SqlAst: `opening`/`bodyEnd` shared by `lift` and `liftGrouped`; `joinTokens` and
+  `joinTokensNumbered` share `joined`; GROUP BY keys come in order from a `LinkedHashMap`; `bareName`
+  for the three function-name normalisations; `exposedName()` for the exposed name; the redundant
+  guard before `copyLimit` removed; `Grouping` takes the check's lists. The `reachedThrough` item
+  went with todo 112.
+- Benchmark: `Result.of` computes the median and p95 once; `statistics(...)` builds the per-table
+  statement, used by `importForDriver` and `load` on SQL Server; the metadata copy and statistics
+  share one catalog loop.
+- Kept: the benchmark's static `driver` connection and `on()`. Passing the connection instead adds a
+  parameter to four methods, which is not simpler.

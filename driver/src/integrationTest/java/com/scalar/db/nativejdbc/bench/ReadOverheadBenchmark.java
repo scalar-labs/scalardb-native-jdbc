@@ -827,14 +827,8 @@ class ReadOverheadBenchmark {
     }
     Map<Mode, Result> results = new LinkedHashMap<>();
     for (Map.Entry<Mode, List<Double>> m : times.entrySet()) {
-      List<Double> t = m.getValue();
-      Collections.sort(t);
       results.put(
-          m.getKey(),
-          new Result(
-              t.get(t.size() / 2),
-              t.get((int) Math.min(t.size() - 1, t.size() * 0.95)),
-              Objects.requireNonNull(rows.get(m.getKey()))));
+          m.getKey(), Result.of(m.getValue(), Objects.requireNonNull(rows.get(m.getKey()))));
     }
     return results;
   }
@@ -919,8 +913,7 @@ class ReadOverheadBenchmark {
         times.add((System.nanoTime() - t0) / 1e3);
       }
     }
-    Collections.sort(times);
-    return times.get(times.size() / 2);
+    return Result.of(times, List.of()).median;
   }
 
   // the driver's connection, for DRIVER; one per test run
@@ -977,8 +970,14 @@ class ReadOverheadBenchmark {
     }
     catalog.invalidate();
     try (Connection c = e.open()) {
+      // statistics on the filled metadata tables and the indexed data tables, as load() gathers
+      // them for the benchmark's own; the setup adds the tx_state histograms
+      List<String> stats = new ArrayList<>();
       for (String t : tables) {
         TableInfo info = catalog.lookup(List.of(), ns, e.storedTable(t));
+        stats.add(statistics(engine, info.namespace(), info.dataTable()));
+        stats.add(
+            statistics(engine, info.namespace(), Objects.requireNonNull(info.metadataTable())));
         List<String> cols = new ArrayList<>(key(t));
         cols.addAll(
             List.of("tx_id", "tx_state", "tx_version", "before_tx_id", "before_tx_version"));
@@ -1009,36 +1008,6 @@ class ReadOverheadBenchmark {
                 + t
                 + "m");
       }
-      // statistics on the filled metadata tables and the indexed data tables, as load() gathers
-      // them for the benchmark's own; the setup adds the tx_state histograms
-      List<String> stats = new ArrayList<>();
-      for (String t : tables) {
-        TableInfo info = catalog.lookup(List.of(), ns, e.storedTable(t));
-        for (String name :
-            List.of(info.dataTable(), Objects.requireNonNull(info.metadataTable()))) {
-          String q = engine.quote(info.namespace()) + "." + engine.quote(name);
-          switch (engine) {
-            case POSTGRESQL:
-              stats.add("ANALYZE " + q);
-              break;
-            case MYSQL:
-            case MARIADB:
-              stats.add("ANALYZE TABLE " + q);
-              break;
-            case SQLSERVER:
-              stats.add("UPDATE STATISTICS " + q + " WITH FULLSCAN");
-              break;
-            case ORACLE:
-              stats.add(
-                  "BEGIN DBMS_STATS.GATHER_TABLE_STATS('\""
-                      + info.namespace()
-                      + "\"', '\""
-                      + name
-                      + "\"'); END;");
-              break;
-          }
-        }
-      }
       e.execute(c, stats.toArray(new String[0]));
       List<Setup.Result> results =
           Setup.run(catalog, c, i -> i.namespace().equals(ns), Duration.ofMinutes(30), List.of());
@@ -1048,6 +1017,27 @@ class ReadOverheadBenchmark {
         }
       }
     }
+  }
+
+  /** The statement that gathers one table's statistics on the engine. */
+  private static String statistics(Engine engine, String schema, String table) {
+    String q = engine.quote(schema) + "." + engine.quote(table);
+    switch (engine) {
+      case POSTGRESQL:
+        return "ANALYZE " + q;
+      case MYSQL:
+      case MARIADB:
+        return "ANALYZE TABLE " + q;
+      case SQLSERVER:
+        return "UPDATE STATISTICS " + q + " WITH FULLSCAN";
+      case ORACLE:
+        return "BEGIN DBMS_STATS.GATHER_TABLE_STATS('\""
+            + schema
+            + "\"', '\""
+            + table
+            + "\"'); END;";
+    }
+    throw new IllegalArgumentException(engine.name());
   }
 
   /** -Dnativejdbc.bench.modes=BASE,SPLIT_AJ: the modes to run; BASE always runs first. */
@@ -1572,6 +1562,15 @@ class ReadOverheadBenchmark {
     final double p95;
     final List<String> rows;
 
+    /** The median and 95th percentile of {@code times}, which this sorts. */
+    static Result of(List<Double> times, List<String> rows) {
+      Collections.sort(times);
+      return new Result(
+          times.get(times.size() / 2),
+          times.get((int) Math.min(times.size() - 1, times.size() * 0.95)),
+          rows);
+    }
+
     Result(double median, double p95, List<String> rows) {
       this.median = median;
       this.p95 = p95;
@@ -1605,11 +1604,7 @@ class ReadOverheadBenchmark {
             "BENCH requests per execution %.2f%n",
             (proxy.requests.get() - requestsBefore) / (double) times.size());
       }
-      Collections.sort(times);
-      return new Result(
-          times.get(times.size() / 2),
-          times.get((int) Math.min(times.size() - 1, times.size() * 0.95)),
-          first);
+      return Result.of(times, first);
     }
   }
 
@@ -2050,7 +2045,7 @@ class ReadOverheadBenchmark {
         break;
       case SQLSERVER:
         for (String t : List.of("c", "cm", "o", "om", "r", "rm", "p", "w", "wm", "k", "km")) {
-          ddl.add("UPDATE STATISTICS bn." + t + " WITH FULLSCAN");
+          ddl.add(statistics(engine, "bn", t));
         }
         break;
       case ORACLE:

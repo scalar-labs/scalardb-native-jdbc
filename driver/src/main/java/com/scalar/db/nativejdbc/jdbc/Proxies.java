@@ -173,7 +173,8 @@ public final class Proxies {
             routed[0] = route.sql;
             StatementHandler h =
                 new StatementHandler((Statement) created(vendor, method, routed), me, this, route);
-            if (method.getName().equals("prepareStatement")) {
+            // only a route that depends on the in-flight counts is ever prepared again
+            if (method.getName().equals("prepareStatement") && route.recheckAt != 0) {
               h.preparedWith = method;
               h.preparedArgs = args.clone();
             }
@@ -287,7 +288,6 @@ public final class Proxies {
   }
 
   private static final class StatementHandler extends Handler {
-    volatile Statement vendor;
     final Connection connection;
     final ConnectionHandler owner;
     Router.@Nullable Route prepared;
@@ -308,13 +308,17 @@ public final class Proxies {
       unwrapped = true;
     }
 
+    /** The vendor statement: replaced when the statement is prepared again. */
+    Statement vendor() {
+      return (Statement) target;
+    }
+
     StatementHandler(
         Statement vendor,
         Connection connection,
         ConnectionHandler owner,
         Router.@Nullable Route prepared) {
       super(vendor);
-      this.vendor = vendor;
       this.connection = connection;
       this.owner = owner;
       this.prepared = prepared;
@@ -329,19 +333,19 @@ public final class Proxies {
       if (name.equals("clearBatch")) {
         batched.clear();
         batchPending = false;
-        return forward(vendor, method, args);
+        return forward(vendor(), method, args);
       }
       if (name.equals("clearParameters")) {
         parameters.clear();
-        return forward(vendor, method, args);
+        return forward(vendor(), method, args);
       }
       if (name.equals("addBatch") && (args == null || args.length == 0)) {
         batchPending = true;
-        return forward(vendor, method, args);
+        return forward(vendor(), method, args);
       }
       if ((name.startsWith("set") && args != null && args.length == 1)
           || name.equals("closeOnCompletion")) {
-        Object r = forward(vendor, method, args);
+        Object r = forward(vendor(), method, args);
         if (preparedWith != null) {
           settings.remove(name); // replayed in the order of the last calls (todo 111)
           settings.put(name, new Call(method, args == null ? new Object[0] : args));
@@ -360,7 +364,8 @@ public final class Proxies {
         }
         if (name.equals("getParameterMetaData")) {
           return proxy(
-              ParameterMetaData.class, new ParameterHandler(created(vendor, method, args), split));
+              ParameterMetaData.class,
+              new ParameterHandler(created(vendor(), method, args), split));
         }
       }
       boolean takesSql = args != null && args.length > 0 && args[0] instanceof String;
@@ -372,7 +377,7 @@ public final class Proxies {
               "a statement that changes the session or what names resolve to cannot be batched;"
                   + " run it on its own");
         }
-        Object result = forward(vendor, method, withSql(args, route));
+        Object result = forward(vendor(), method, withSql(args, route));
         batched.add(route);
         return result;
       }
@@ -418,7 +423,7 @@ public final class Proxies {
             ran.add(now);
           }
         } catch (SQLException e) {
-          vendor.clearBatch();
+          vendor().clearBatch();
           throw e;
         }
       }
@@ -428,7 +433,7 @@ public final class Proxies {
       owner.router.beforeRun(owner.vendor, ran);
       Object result;
       try {
-        result = forward(vendor, method, routed);
+        result = forward(vendor(), method, routed);
       } finally {
         for (Router.Route route : ran) {
           owner.ran(route);
@@ -447,7 +452,7 @@ public final class Proxies {
       // not a closed statement, which must keep failing, nor one the application holds unwrapped
       return preparedWith != null
           && !unwrapped
-          && !vendor.isClosed()
+          && !vendor().isClosed()
           && !batchPending
           && old.parameterSources != null
           && old.parameterSources.equals(now.parameterSources);
@@ -463,18 +468,16 @@ public final class Proxies {
       args[0] = route.sql;
       Statement fresh =
           (Statement) created(owner.vendor, Objects.requireNonNull(preparedWith), args);
-      Statement old = vendor;
+      Statement old = vendor();
       try {
         for (Call c : settings.values()) {
           forward(fresh, c.method, c.args);
         }
-        vendor = fresh;
         target = fresh;
         for (Call c : parameters.values()) {
           bind(route, c.method, c.args);
         }
       } catch (Throwable t) {
-        vendor = old;
         target = old;
         try {
           fresh.close();
@@ -502,7 +505,7 @@ public final class Proxies {
         if (sources.get(i) == index) {
           Object[] at = args.clone();
           at[0] = i + 1;
-          forward(vendor, method, at);
+          forward(vendor(), method, at);
         }
       }
     }

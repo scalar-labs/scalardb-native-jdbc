@@ -125,6 +125,32 @@ final class Router {
       this.sessionGeneration = sessionGeneration;
       this.catalogGeneration = catalogGeneration;
     }
+
+    /** This route with another statement text and what goes with it. */
+    Route with(
+        String sql,
+        @Nullable List<Integer> parameterSources,
+        List<Integer> perRow,
+        boolean countsOnly,
+        boolean parallel) {
+      return new Route(
+          source,
+          sql,
+          changesSession,
+          changesNames,
+          passthrough,
+          isolation,
+          sessionGeneration,
+          catalogGeneration,
+          trustedUntil,
+          parameterSources,
+          parameters,
+          recheckAt,
+          countsOnly,
+          perRow,
+          parallel,
+          plansParallel);
+    }
   }
 
   /**
@@ -151,8 +177,6 @@ final class Router {
   private final Map<String, long[]> inflight = new HashMap<>();
   // per data table: the lower-cased first column of its primary key, in the database's order
   private final Map<String, String> keyLead = new HashMap<>();
-  // while set, read() takes these per-row choices instead of reading counts
-  private @Nullable List<Integer> forcedPerRow;
   // PostgreSQL's max_parallel_workers_per_gather: the session's own value (-1 until read), and
   // whether the driver's 0 is in effect (null when not known, after a rollback or a SET of it),
   // and whether a statement in the open transaction set it, which the transaction's end may undo
@@ -213,19 +237,23 @@ final class Router {
    */
   Route route(Connection vendor, String sql) throws SQLException {
     Route cached = routes.get(sql);
-    Route r = cached == null ? decide(vendor, sql) : current(vendor, cached);
+    Route r = cached == null ? decide(vendor, sql, null) : current(vendor, cached);
     routes.put(sql, r);
     return r;
   }
 
-  /** Routes a statement from its text, as {@link #route}. */
-  private Route decide(Connection vendor, String sql) throws SQLException {
+  /**
+   * Routes a statement from its text, as {@link #route}; with {@code forcedPerRow}, the per-row
+   * choices of a split read are those instead of the counts'.
+   */
+  private Route decide(Connection vendor, String sql, @Nullable List<Integer> forcedPerRow)
+      throws SQLException {
     if (passthrough) {
       if (!vendor.getAutoCommit()) {
         throw Errors.unsupported("the passthrough setting applies in autocommit mode only");
       }
       // anything may run here, so assume it changed the session and the names
-      return route(sql, sql, true, true, true, null, 0, true);
+      return route(sql, sql, true, true, true, null, 0, 0, List.of(), true);
     }
     Outcome<SqlAst> parsed =
         SqlAst.analyze(sql, engine, session.doubleQuotesQuoteIdentifiers(vendor));
@@ -256,13 +284,22 @@ final class Router {
       }
     }
     if (!scalarDb.isEmpty()) {
-      return read(vendor, sql, ast, scalarDb);
+      return read(vendor, sql, ast, scalarDb, forcedPerRow);
     }
     boolean changesSession = kind != SqlAst.Kind.SELECT && kind != SqlAst.Kind.DML;
     boolean changesNames = kind == SqlAst.Kind.DDL || kind == SqlAst.Kind.TRUNCATE;
     boolean plansParallel = kind != SqlAst.Kind.DML && kind != SqlAst.Kind.SESSION;
     return route(
-        sql, sql, changesSession, changesNames, false, null, ast.parameterCount(), plansParallel);
+        sql,
+        sql,
+        changesSession,
+        changesNames,
+        false,
+        null,
+        ast.parameterCount(),
+        0,
+        List.of(),
+        plansParallel);
   }
 
   /**
@@ -274,7 +311,8 @@ final class Router {
       Connection vendor,
       String sql,
       SqlAst ast,
-      IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
+      IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb,
+      @Nullable List<Integer> forcedPerRow)
       throws SQLException {
     Set<String> names = new TreeSet<>();
     for (TableInfo t : scalarDb.values()) {
@@ -370,52 +408,15 @@ final class Router {
               chosen,
               true);
       return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
-          ? new Route(
-              r.source,
-              r.sql,
-              r.changesSession,
-              r.changesNames,
-              r.passthrough,
-              r.isolation,
-              r.sessionGeneration,
-              r.catalogGeneration,
-              r.trustedUntil,
-              r.parameterSources,
-              r.parameters,
-              r.recheckAt,
-              r.countsOnly,
-              r.perRow,
-              true,
-              true)
+          ? r.with(r.sql, r.parameterSources, r.perRow, false, true)
           : r;
     }
     String rewritten = ast.joinTokens(views::get);
     if (rewritten == null) {
       throw Errors.unsupported("the statement cannot be rewritten onto the read views" + tables);
     }
-    return route(sql, rewritten, false, false, false, null, ast.parameterCount(), true);
-  }
-
-  private Route route(
-      String source,
-      String sql,
-      boolean changesSession,
-      boolean changesNames,
-      boolean passthrough,
-      @Nullable List<Integer> parameterSources,
-      int parameters,
-      boolean plansParallel) {
     return route(
-        source,
-        sql,
-        changesSession,
-        changesNames,
-        passthrough,
-        parameterSources,
-        parameters,
-        0,
-        List.of(),
-        plansParallel);
+        sql, rewritten, false, false, false, null, ast.parameterCount(), 0, List.of(), true);
   }
 
   private Route route(
@@ -692,23 +693,7 @@ final class Router {
    * @return the kept text with the new route's recheck time
    */
   static Route keepText(Route kept, Route now) {
-    return new Route(
-        kept.source,
-        kept.sql,
-        kept.changesSession,
-        kept.changesNames,
-        kept.passthrough,
-        now.isolation,
-        now.sessionGeneration,
-        now.catalogGeneration,
-        now.trustedUntil,
-        kept.parameterSources,
-        kept.parameters,
-        now.recheckAt,
-        false,
-        kept.perRow,
-        kept.parallel,
-        kept.plansParallel);
+    return now.with(kept.sql, kept.parameterSources, kept.perRow, false, kept.parallel);
   }
 
   /**
@@ -763,38 +748,15 @@ final class Router {
     if (unchanged && (prepared.recheckAt == 0 || System.nanoTime() - prepared.recheckAt < 0)) {
       return prepared;
     }
-    Route now = decide(vendor, prepared.source);
+    Route now = decide(vendor, prepared.source, null);
     if (now.sql.equals(prepared.sql) || now.perRow.equals(prepared.perRow)) {
       return now;
     }
-    // the per-row choices moved: is that all that moved?
-    Route same;
-    forcedPerRow = prepared.perRow;
-    try {
-      same = decide(vendor, prepared.source);
-    } finally {
-      forcedPerRow = null;
-    }
-    if (!same.sql.equals(prepared.sql)) {
+    // the per-row choices moved: is that all that moved? It is when only the counts were due
+    if (!unchanged && !decide(vendor, prepared.source, prepared.perRow).sql.equals(prepared.sql)) {
       return now;
     }
-    return new Route(
-        now.source,
-        now.sql,
-        now.changesSession,
-        now.changesNames,
-        now.passthrough,
-        now.isolation,
-        now.sessionGeneration,
-        now.catalogGeneration,
-        now.trustedUntil,
-        now.parameterSources,
-        now.parameters,
-        now.recheckAt,
-        true,
-        now.perRow,
-        now.parallel,
-        now.plansParallel);
+    return now.with(now.sql, now.parameterSources, now.perRow, true, now.parallel);
   }
 
   /**

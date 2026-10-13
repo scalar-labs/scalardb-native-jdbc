@@ -849,6 +849,25 @@ public final class SqlAst {
    *     renamed table, or when the result does not parse; in each case nothing has been rewritten
    */
   public @Nullable String joinTokens(@Nullable Naming naming) {
+    String joined = joined(naming, false);
+    return joined != null && parses(joined) ? joined : null;
+  }
+
+  /**
+   * Returns the statement with the references {@code naming} names replaced, as {@link
+   * #joinTokens(Naming)} does, and its placeholders numbered {@code $1, $2, ...}, as PostgreSQL's
+   * {@code EXPLAIN (GENERIC_PLAN)} takes them. Not parsed again: the parser does not read {@code
+   * $n}.
+   *
+   * @param naming what to replace
+   * @return the statement, or {@code null} when it cannot be rewritten
+   */
+  public @Nullable String joinTokensNumbered(Naming naming) {
+    return joined(naming, true);
+  }
+
+  /** The tokens joined with the references {@code naming} names replaced; not parsed again. */
+  private @Nullable String joined(@Nullable Naming naming, boolean numbered) {
     if (root.jjtGetFirstToken() == null || hasMisreadHashComment()) {
       return null;
     }
@@ -862,40 +881,17 @@ public final class SqlAst {
         return null;
       }
     }
-    Emitter emitter = new Emitter(from, to, Map.of(), new ArrayList<>());
-    emitter.tokens(root.jjtGetFirstToken(), null);
-    String joined = emitter.text();
-    return parses(joined) ? joined : null;
-  }
-
-  /**
-   * Returns the statement with the references {@code naming} names replaced, as {@link
-   * #joinTokens(Naming)} does, and its placeholders numbered {@code $1, $2, ...}, as PostgreSQL's
-   * {@code EXPLAIN (GENERIC_PLAN)} takes them. Not parsed again: the parser does not read {@code
-   * $n}.
-   *
-   * @param naming what to replace
-   * @return the statement, or {@code null} when it cannot be rewritten
-   */
-  public @Nullable String joinTokensNumbered(Naming naming) {
-    if (root.jjtGetFirstToken() == null || hasMisreadHashComment()) {
-      return null;
-    }
-    Map<Token, String> from = new IdentityHashMap<>();
-    Map<Token, Token> to = new IdentityHashMap<>();
-    Rewrite plan = planRewrite(naming, false);
-    if (plan.unrepresentable || lockTargetIsRenamed(plan) || !collectReplacements(plan, from, to)) {
-      return null;
-    }
-    int n = 0;
-    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
-      if (t.image.equals("?")) {
-        from.put(t, "$" + ++n);
-        to.put(t, t);
+    if (numbered) {
+      int n = 0;
+      for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+        if (t.image.equals("?")) {
+          from.put(t, "$" + ++n);
+          to.put(t, t);
+        }
       }
-    }
-    if (n != parameterCount) {
-      return null;
+      if (n != parameterCount) {
+        return null;
+      }
     }
     Emitter emitter = new Emitter(from, to, Map.of(), new ArrayList<>());
     emitter.tokens(root.jjtGetFirstToken(), null);
@@ -1397,7 +1393,7 @@ public final class SqlAst {
         }
       }
     }
-    String self = lowerUnquoted(r.hasAlias() ? Objects.requireNonNull(r.alias()) : r.name());
+    String self = r.exposedName();
     Set<String> out = new HashSet<>();
     for (ColumnRef c : columnRefs) {
       Table q = c.qualifierNode();
@@ -1586,9 +1582,7 @@ public final class SqlAst {
 
     @Override
     public <S> Void visit(Function function, S context) {
-      List<String> parts = functionNameParts(function);
-      String name =
-          parts.size() == 1 ? unquoted(parts.get(0).strip()).toLowerCase(Locale.ROOT) : "";
+      String name = bareName(function);
       if (aggregates && AGGREGATES.contains(name)) {
         if (depth > 0
             || function.getKeep() != null
@@ -1727,10 +1721,10 @@ public final class SqlAst {
   /** A grouping statement's aggregates and columns, as the split reads it. */
   private static final class Grouping {
     final List<Column> groupBy = new ArrayList<>();
-    final List<Function> aggregates = new ArrayList<>();
+    List<Function> aggregates = List.of();
     // outside the aggregates, each a GROUP BY column, and inside them
     final List<Column> outside = new ArrayList<>();
-    final List<Column> inside = new ArrayList<>();
+    List<Column> inside = List.of();
     // the aggregates computed per copy and combined on top, rather than applied on top
     boolean perCopy;
   }
@@ -1808,11 +1802,11 @@ public final class SqlAst {
         return null; // on top a column must be grouped, or an ORDER BY name an item
       }
     }
-    g.aggregates.addAll(check.found);
-    g.inside.addAll(check.inside);
+    g.aggregates = check.found;
+    g.inside = check.inside;
     g.perCopy = engine != Engine.POSTGRESQL;
     for (Function f : g.aggregates) {
-      String name = unquoted(functionNameParts(f).get(0).strip()).toLowerCase(Locale.ROOT);
+      String name = bareName(f);
       // ponytail: SQL Server's AVG of a decimal rounds to a scale SUM / COUNT does not, so AVG is
       // applied on top there; decompose it per type if it matters
       if (f.isDistinct() || (name.equals("avg") && engine == Engine.SQLSERVER)) {
@@ -1972,7 +1966,7 @@ public final class SqlAst {
       }
       lift.outer.get(i).emit(top);
     }
-    CopyLimit limit = grouping == null ? copyLimit(s) : null;
+    CopyLimit limit = copyLimit(s); // none for a grouped statement
     if (limit != null && (lift.copyOrder.isEmpty() || lift.copyOrder.contains(null))) {
       limit = null;
     }
@@ -2120,16 +2114,20 @@ public final class SqlAst {
     }
   }
 
-  private @Nullable Lift lift(PlainSelect s, Map<TableRef, List<String>> columns) {
+  /** The node a copy's body ends with: the WHERE clause, the last join or the FROM item. */
+  private static @Nullable Node bodyEnd(PlainSelect s) {
+    return s.getWhere() != null
+        ? s.getWhere().getASTNode()
+        : s.getJoins() != null && !s.getJoins().isEmpty()
+            ? s.getJoins().get(s.getJoins().size() - 1).getASTNode()
+            : s.getFromItem().getASTNode();
+  }
+
+  /** A lift's token positions: the select list, and the body up to {@code bodyEndNode}. */
+  private @Nullable Lift opening(PlainSelect s, @Nullable Node bodyEndNode) {
     List<SelectItem<?>> items = s.getSelectItems();
     Node firstNode = items.get(0).getASTNode();
     Node lastNode = items.get(items.size() - 1).getASTNode();
-    Node bodyEndNode =
-        s.getWhere() != null
-            ? s.getWhere().getASTNode()
-            : s.getJoins() != null && !s.getJoins().isEmpty()
-                ? s.getJoins().get(s.getJoins().size() - 1).getASTNode()
-                : s.getFromItem().getASTNode();
     if (firstNode == null || lastNode == null || bodyEndNode == null) {
       return null;
     }
@@ -2139,8 +2137,15 @@ public final class SqlAst {
     if (firstItem == null || lastItem == null || lastItem.next == null || bodyEnd == null) {
       return null;
     }
-    Lift lift =
-        new Lift(firstItem, before(root.jjtGetFirstToken(), firstItem), lastItem.next, bodyEnd);
+    return new Lift(firstItem, before(root.jjtGetFirstToken(), firstItem), lastItem.next, bodyEnd);
+  }
+
+  private @Nullable Lift lift(PlainSelect s, Map<TableRef, List<String>> columns) {
+    List<SelectItem<?>> items = s.getSelectItems();
+    Lift lift = opening(s, bodyEnd(s));
+    if (lift == null) {
+      return null;
+    }
     // the FROM clause's tables in order, for a *
     List<TableRef> fromRefs = new ArrayList<>();
     boolean merged = false; // NATURAL or USING: * shows the joined columns once
@@ -2415,28 +2420,16 @@ public final class SqlAst {
    */
   private @Nullable Lift liftGrouped(PlainSelect s, Grouping g) {
     List<SelectItem<?>> items = s.getSelectItems();
-    Node firstNode = items.get(0).getASTNode();
-    Node lastNode = items.get(items.size() - 1).getASTNode();
-    Node bodyEndNode =
-        g.perCopy && !g.groupBy.isEmpty()
-            ? g.groupBy.get(g.groupBy.size() - 1).getASTNode()
-            : s.getWhere() != null
-                ? s.getWhere().getASTNode()
-                : s.getJoins() != null && !s.getJoins().isEmpty()
-                    ? s.getJoins().get(s.getJoins().size() - 1).getASTNode()
-                    : s.getFromItem().getASTNode();
-    if (firstNode == null || lastNode == null || bodyEndNode == null) {
-      return null;
-    }
-    Token firstItem = firstNode.jjtGetFirstToken();
-    Token lastItem = lastNode.jjtGetLastToken();
-    Token bodyEnd = bodyEndNode.jjtGetLastToken();
-    if (firstItem == null || lastItem == null || lastItem.next == null || bodyEnd == null) {
-      return null;
-    }
     Lift lift =
-        new Lift(firstItem, before(root.jjtGetFirstToken(), firstItem), lastItem.next, bodyEnd);
-    Map<String, String> generated = new HashMap<>(); // column key to its column on top
+        opening(
+            s,
+            g.perCopy && !g.groupBy.isEmpty()
+                ? g.groupBy.get(g.groupBy.size() - 1).getASTNode()
+                : bodyEnd(s));
+    if (lift == null) {
+      return null;
+    }
+    Map<String, String> generated = new LinkedHashMap<>(); // column key to its column on top
     List<Column> selected = new ArrayList<>(g.groupBy);
     if (!g.perCopy) {
       selected.addAll(g.outside);
@@ -2459,10 +2452,7 @@ public final class SqlAst {
     List<Column> replaced = new ArrayList<>(g.outside);
     if (g.perCopy) {
       if (!g.groupBy.isEmpty()) {
-        List<String> keys = new ArrayList<>(new LinkedHashSet<>(generated.values()));
-        Collections.sort(
-            keys, (a, b) -> Integer.parseInt(a.substring(1)) - Integer.parseInt(b.substring(1)));
-        lift.tailLead = "GROUP BY v." + String.join(", v.", keys);
+        lift.tailLead = "GROUP BY v." + String.join(", v.", generated.values());
       }
       int n = 0;
       for (Function f : g.aggregates) {
@@ -2472,7 +2462,7 @@ public final class SqlAst {
         if (first == null || last == null) {
           return null;
         }
-        String name = unquoted(functionNameParts(f).get(0).strip()).toLowerCase(Locale.ROOT);
+        String name = bareName(f);
         String a = "a" + ++n;
         String combined;
         if (name.equals("avg")) {
@@ -2996,6 +2986,12 @@ public final class SqlAst {
   static @Nullable Set<Object> valuesUnder(Expression expression) {
     Node n = expression.getASTNode();
     return n == null ? null : valuesUnder(n);
+  }
+
+  /** A function's name, lower-cased and unquoted; empty when it is qualified. */
+  private static String bareName(Function f) {
+    List<String> parts = functionNameParts(f);
+    return parts.size() == 1 ? unquoted(parts.get(0).strip()).toLowerCase(Locale.ROOT) : "";
   }
 
   /**
