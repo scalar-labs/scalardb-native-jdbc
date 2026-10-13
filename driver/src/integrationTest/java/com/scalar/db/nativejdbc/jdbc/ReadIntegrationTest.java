@@ -72,6 +72,26 @@ class ReadIntegrationTest {
           "INSERT INTO rd.imp VALUES (2, 'b')",
           "INSERT INTO rd.imp VALUES (3, 'c')");
     }
+    // the created table's names are lower case, which Oracle reads only quoted
+    String madeTable = engine == Engine.ORACLE ? "\"made\"" : "made";
+    String made = "rd." + madeTable;
+    String mid = engine == Engine.ORACLE ? "\"id\"" : "id";
+    String mx = engine == Engine.ORACLE ? "\"x\"" : "x";
+    try (Connection c = e.open()) {
+      // a plain table holding made's committed image while rows are in flight, to compare with
+      e.execute(
+          c,
+          "CREATE TABLE rd.pl ("
+              + mid
+              + " "
+              + e.intType()
+              + " PRIMARY KEY, "
+              + mx
+              + " VARCHAR(10))",
+          "INSERT INTO rd.pl VALUES (1, 'a')",
+          "INSERT INTO rd.pl VALUES (2, 'b')",
+          "INSERT INTO rd.pl VALUES (3, 'c')");
+    }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true); // the commit state of every transaction
@@ -108,12 +128,7 @@ class ReadIntegrationTest {
           Setup.run(catalog, c, t -> t.namespace().equals(rd), Duration.ofMinutes(1), List.of());
       assertThat(results).allMatch(Setup.Result::succeeded, "succeeded");
     }
-    // the created table's names are lower case, which Oracle reads only quoted
-    String madeTable = engine == Engine.ORACLE ? "\"made\"" : "made";
-    String made = "rd." + madeTable;
     assertSettled(e, catalog, rd, madeTable);
-    String mid = engine == Engine.ORACLE ? "\"id\"" : "id";
-    String mx = engine == Engine.ORACLE ? "\"x\"" : "x";
     String limit2 =
         engine == Engine.SQLSERVER || engine == Engine.ORACLE
             ? " OFFSET 0 ROWS FETCH NEXT 2 ROWS ONLY"
@@ -182,6 +197,9 @@ class ReadIntegrationTest {
                         + " = i.id ORDER BY i.id"))
             .containsExactly("a/a", "b/b", "c/c");
         splitReads(c, made, mid, mx);
+        try (Connection vendor = e.open()) {
+          groupedReads(c, vendor, made, mid, mx);
+        }
         // a trailing line comment ends every copy, not only the first
         assertThat(rows(c, "SELECT " + mx + " FROM " + made + " -- note"))
             .containsExactlyInAnyOrder("a", "b", "c");
@@ -221,6 +239,9 @@ class ReadIntegrationTest {
             .contains("UNION ALL")
             .doesNotContainIgnoringCase("rc_");
         assertThat(router.route(vendor, join + " ORDER BY i.x").sql).contains("UNION ALL");
+        assertThat(router.route(vendor, "SELECT COUNT(*) FROM " + made).sql)
+            .contains("UNION ALL")
+            .doesNotContainIgnoringCase("rc_");
         // a subquery's table is read through its view
         assertThat(
                 router.route(
@@ -303,6 +324,58 @@ class ReadIntegrationTest {
           .isInstanceOf(SQLException.class)
           .extracting(t -> ((SQLException) t).getSQLState())
           .isEqualTo("07009");
+    }
+  }
+
+  /**
+   * Grouping reads while {@code made} has rows in flight: the rows and labels of the same statement
+   * over {@code pl}, a plain table holding {@code made}'s committed image.
+   */
+  @SuppressFBWarnings(
+      value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
+      justification = "test queries written in the test sources")
+  private static void groupedReads(
+      Connection c, Connection vendor, String made, String mid, String mx) throws SQLException {
+    String[][] statements = {
+      {"SELECT COUNT(*) FROM {T}"},
+      {"SELECT count( * ) + 1, Max(m.{ID}) * 2 FROM {T} m"},
+      {"SELECT count( m.{X} ), MAX(m.{X}), MIN(m.{ID}) AS lo, AVG(m.{ID}), SUM(m.{ID}) FROM {T} m"},
+      {"SELECT m.{X}, COUNT(*) AS n FROM {T} m GROUP BY m.{X} ORDER BY m.{X}"},
+      {"SELECT COUNT(DISTINCT m.{X}) FROM {T} m"},
+      {"SELECT COUNT(*), MAX(m.{X}) FROM {T} m WHERE m.{ID} > 10"},
+      {
+        "SELECT a.{X}, COUNT(*) FROM {T} a JOIN {T} b ON a.{ID} <= b.{ID} GROUP BY a.{X} ORDER BY a.{X}"
+      },
+      {
+        "SELECT m.{X}, SUM(m.{ID}) FROM {T} m WHERE m.{ID} < ? GROUP BY m.{X} HAVING COUNT(*) > ?"
+            + " ORDER BY 2 DESC",
+        "3",
+        "0"
+      },
+    };
+    for (String[] st : statements) {
+      String sql = st[0].replace("{X}", mx).replace("{ID}", mid);
+      List<String> expected = new ArrayList<>();
+      List<String> actual = new ArrayList<>();
+      for (int side = 0; side < 2; side++) {
+        Connection conn = side == 0 ? vendor : c;
+        List<String> out = side == 0 ? expected : actual;
+        try (PreparedStatement ps =
+            conn.prepareStatement(sql.replace("{T}", side == 0 ? "rd.pl" : made))) {
+          for (int i = 1; i < st.length; i++) {
+            ps.setInt(i, Integer.parseInt(st[i]));
+          }
+          try (ResultSet rs = ps.executeQuery()) {
+            List<String> labels = new ArrayList<>();
+            for (int i = 1; i <= rs.getMetaData().getColumnCount(); i++) {
+              labels.add(rs.getMetaData().getColumnLabel(i));
+            }
+            out.add(String.join("|", labels));
+            out.addAll(rows(rs));
+          }
+        }
+      }
+      assertThat(actual).as(sql).isEqualTo(expected);
     }
   }
 

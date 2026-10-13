@@ -183,11 +183,12 @@ re-binding.
 Done (2026-10-11): the fragment emitter, the re-binding (`setX` to every copy's placeholder, the
 application's count and descriptions from `getParameterMetaData`, a stream refused since each value is
 read more than once), the splitter for statements without GROUP BY or aggregates (the select list's
-functions must be known row-wise ones), and the histogram. On `rc_T` for now: WITH clauses, GROUP BY
-and aggregates (per-copy aggregates next), window functions, an unaliased expression in the select
+functions must be known row-wise ones), and the histogram. On `rc_T` for now: WITH clauses, window
+functions, an unaliased expression in the select
 list of a statement with ORDER BY, a limit or DISTINCT (its label differs by engine), and `*` over a
-plain table or subquery under ORDER BY. Not done: the per-copy aggregates, PostgreSQL's parallel
-plans, the statement cache. Open: todo 082, an Oracle read that returned no rows in two runs.
+plain table or subquery under ORDER BY. Done (2026-10-13): GROUP BY over columns and COUNT, SUM,
+MIN, MAX and AVG, per copy and combined on top except on PostgreSQL (design 4.2), with the labels
+the engines give. Not done: PostgreSQL's parallel plans, the statement cache. Open: todo 082, an Oracle read that returned no rows in two runs.
 
 Tests: the cases of milestone 3 on every engine, each also with a join, an IN subquery, a LEFT JOIN, an
 aggregate and three tables, with rows in flight; every split statement's rows equal to the same query

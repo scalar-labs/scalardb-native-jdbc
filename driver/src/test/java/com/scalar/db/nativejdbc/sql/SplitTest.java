@@ -64,9 +64,13 @@ class SplitTest {
       strings = {
         "select * from a right join b on a.id = b.aid",
         "select * from a full join b on a.id = b.aid",
-        "select count(*) from a",
-        "select max(x) from a",
-        "select x from a group by x",
+        "select string_agg(x, ',') from a",
+        "select x from a group by upper(x)",
+        "select x, y from a group by x",
+        "select (select max(y) from b) from a group by x",
+        "select count(*) over () from a",
+        "select max(count(*)) from a",
+        "select * from a group by x",
         "select x, row_number() over (order by x) from a",
         "select my_fn(x) from a",
         "select s.upper(x) from a",
@@ -227,6 +231,69 @@ class SplitTest {
     SqlAst my =
         SqlAst.parse("SELECT t.rank FROM a t ORDER BY t.id LIMIT 5", Engine.MYSQL).orElseThrow();
     assertThat(split(my, Map.of()).sql()).startsWith("SELECT v.c1 AS `rank` FROM (");
+  }
+
+  @Test
+  void splittableRefs_includeGroupingStatements() {
+    assertThat(splittable("select count(*) from a")).containsExactly("a");
+    assertThat(splittable("select a.x, max(b.y) from a join b on a.id = b.aid group by a.x"))
+        .containsExactly("a", "b");
+    assertThat(splittable("select x from a group by x having count(*) > ? order by count(*)"))
+        .containsExactly("a");
+  }
+
+  @Test
+  void emitSplit_appliesTheAggregatesOnTop_onPostgreSql() {
+    SqlAst ast =
+        parse(
+            "select a.x, count(*), sum(a.y) as s from a where a.k = ? group by a.x"
+                + " having max(a.y) > ? order by 2 desc");
+    SqlAst.SplitText split = split(ast, Map.of());
+    assertThat(split.sql())
+        .isEqualTo(
+            "SELECT v.c1 AS x, count(*), sum(v.c2) as s FROM (SELECT a.x AS c1, a.y AS c2 from"
+                + " (select * from a0) a where a.k = ? UNION ALL SELECT a.x AS c1, a.y AS c2 from"
+                + " (select * from a1) a where a.k = ?) v group by v.c1 having max(v.c2) > ?"
+                + " order by 2 desc");
+    assertThat(split.parameterSources()).containsExactly(1, 1, 2);
+    // nothing but a count: each copy still yields its rows
+    assertThat(split(parse("select count(*) from a"), Map.of()).sql())
+        .isEqualTo(
+            "SELECT count(*) FROM (SELECT 1 AS c1 from (select * from a0) a UNION ALL SELECT 1"
+                + " AS c1 from (select * from a1) a) v");
+  }
+
+  @Test
+  void emitSplit_combinesPartialAggregates_onTheOtherEngines() {
+    SqlAst ast =
+        SqlAst.parse(
+                "SELECT a.x, COUNT(*), AVG(a.y) AS m FROM a WHERE a.k = ? GROUP BY a.x"
+                    + " HAVING MIN(a.y) > ? ORDER BY a.x",
+                Engine.MYSQL)
+            .orElseThrow();
+    SqlAst.SplitText split = split(ast, Map.of());
+    assertThat(split.sql())
+        .isEqualTo(
+            "SELECT v.g1 AS `x`, CAST(SUM(v.a1) AS SIGNED) AS `COUNT(*)`, SUM(v.a2) /"
+                + " NULLIF(SUM(v.a3), 0) AS m FROM (SELECT a.x AS g1, COUNT(*) AS a1, SUM(a.y)"
+                + " AS a2, COUNT(a.y) AS a3, MIN(a.y) AS a4 FROM (select * from a0) a WHERE a.k ="
+                + " ? GROUP BY a.x UNION ALL SELECT a.x AS g1, COUNT(*) AS a1, SUM(a.y) AS a2,"
+                + " COUNT(a.y) AS a3, MIN(a.y) AS a4 FROM (select * from a1) a WHERE a.k = ?"
+                + " GROUP BY a.x) v GROUP BY v.g1 HAVING MIN(v.a4) > ? ORDER BY v.g1");
+    assertThat(split.parameterSources()).containsExactly(1, 1, 2);
+    // the label is the expression as written
+    SqlAst oracle = SqlAst.parse("SELECT count( a.y ) FROM a", Engine.ORACLE).orElseThrow();
+    assertThat(split(oracle, Map.of()).sql()).startsWith("SELECT SUM(v.a1) AS \"COUNT(A.Y)\" FROM");
+    SqlAst my = SqlAst.parse("SELECT count( a.y ) FROM a", Engine.MARIADB).orElseThrow();
+    assertThat(split(my, Map.of()).sql())
+        .startsWith("SELECT CAST(SUM(v.a1) AS SIGNED) AS `count( a.y )` FROM");
+    // DISTINCT does not decompose: on top
+    SqlAst distinct =
+        SqlAst.parse("SELECT COUNT(DISTINCT a.y) AS n FROM a", Engine.SQLSERVER).orElseThrow();
+    assertThat(split(distinct, Map.of()).sql())
+        .isEqualTo(
+            "SELECT COUNT(DISTINCT v.c1) AS n FROM (SELECT a.y AS c1 FROM (select * from a0) a"
+                + " UNION ALL SELECT a.y AS c1 FROM (select * from a1) a) v");
   }
 
   @Test

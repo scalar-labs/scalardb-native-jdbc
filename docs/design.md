@@ -801,7 +801,16 @@ union as a derived table.
     copies as a derived table. A whole-query aggregate that decomposes (`COUNT`, `SUM`, `MIN`, `MAX`,
     `AVG` as `SUM` and `COUNT`, each with its `GROUP BY`) is computed per copy and combined on top on
     every engine but PostgreSQL, so that no copy streams its rows through the union (full scans
-    3-10x down to 1.2-2.5x); any other aggregate is applied on top of the union.
+    3-10x down to 1.2-2.5x); any other aggregate is applied on top of the union. Per copy, each copy
+    groups by the GROUP BY columns and selects one partial result per aggregate, and the statement
+    on top groups again and combines them: COUNT as SUM (cast back to BIGINT on MySQL and MariaDB),
+    SUM, MIN and MAX as themselves, AVG as SUM over COUNT. A DISTINCT aggregate, and AVG on SQL
+    Server, whose AVG of a decimal rounds differently from SUM over COUNT, are applied on top. The
+    split takes GROUP BY over columns only, with every column outside an aggregate grouped, and
+    COUNT, SUM, MIN, MAX and AVG; anything else stays on `rc_T`. An unaliased item keeps the label
+    the engine gives the original: PostgreSQL names a function call by the function, SQL Server
+    names no expression, and MySQL, MariaDB and Oracle name it by its text, which the item on top
+    takes as its alias.
   - **Which tables are split.** The statement is repeated per combination of *pieces* of its ScalarDB
     table references, each piece reading the table through the fragment of its copy. Four kinds of
     reference, by where the table stands (todo 095):

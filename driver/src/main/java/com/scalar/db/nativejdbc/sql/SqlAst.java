@@ -6,6 +6,8 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -53,6 +55,7 @@ import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.merge.Merge;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
+import net.sf.jsqlparser.statement.select.GroupByElement;
 import net.sf.jsqlparser.statement.select.Join;
 import net.sf.jsqlparser.statement.select.OrderByElement;
 import net.sf.jsqlparser.statement.select.ParenthesedSelect;
@@ -1213,9 +1216,10 @@ public final class SqlAst {
    * Returns the table references a split read may take copies over: those of the statement's
    * top-level FROM clause that are joined by inner joins, a LEFT JOIN's preserved side included,
    * where each row of the result comes from exactly one row of each. Empty unless the statement is
-   * a single SELECT of a shape the split handles: no WITH clause or set operation, no GROUP BY,
-   * HAVING, aggregate or window function, no RIGHT or FULL join, no row numbering, and only {@code
-   * ?} placeholders. ORDER BY, a row limit and DISTINCT are applied on top of the copies.
+   * a single SELECT of a shape the split handles: no WITH clause or set operation, no window
+   * function, no RIGHT or FULL join, no row numbering, and only {@code ?} placeholders; GROUP BY
+   * only over columns, and only the aggregates COUNT, SUM, MIN, MAX and AVG. ORDER BY, a row limit,
+   * DISTINCT and the aggregates are applied on top of the copies.
    *
    * @return the references, in the order of the FROM clause
    */
@@ -1227,8 +1231,6 @@ public final class SqlAst {
     boolean unsupportedClause =
         s.getFromItem() == null
             || (s.getWithItemsList() != null && !s.getWithItemsList().isEmpty())
-            || s.getGroupBy() != null
-            || s.getHaving() != null
             || s.getQualify() != null
             || s.getPreWhere() != null
             || s.getOracleHierarchical() != null
@@ -1247,23 +1249,18 @@ public final class SqlAst {
     if (unsupportedClause) {
       return List.of();
     }
-    List<Expression> rowWise = new ArrayList<>();
-    for (SelectItem<?> item : s.getSelectItems()) {
-      rowWise.add(item.getExpression());
-    }
-    if (s.getOrderByElements() != null) {
-      for (OrderByElement o : s.getOrderByElements()) {
-        rowWise.add(o.getExpression());
+    if (isGrouped(s)) {
+      if (grouping(s) == null) {
+        return List.of();
       }
-    }
-    RowWise check = new RowWise();
-    for (Expression e : rowWise) {
-      if (e != null) {
+    } else {
+      RowWise check = new RowWise(false);
+      for (Expression e : selectAndOrderBy(s)) {
         e.accept(check, null);
       }
-    }
-    if (!check.rowWise) {
-      return List.of();
+      if (!check.rowWise) {
+        return List.of();
+      }
     }
     for (ColumnRef c : columnRefs) {
       if (engine == Engine.ORACLE
@@ -1317,22 +1314,63 @@ public final class SqlAst {
           "SQL_SMALL_RESULT",
           "SQL_BIG_RESULT");
 
+  /** The aggregates a split read computes per copy or applies on top of the copies. */
+  private static final Set<String> AGGREGATES = Set.of("count", "sum", "min", "max", "avg");
+
   /**
    * Whether an expression computes one value from one row: no aggregate, window function, unknown
-   * function or session variable. A subquery is its own scope and is not looked into.
+   * function or session variable. A subquery is its own scope and is not looked into. With
+   * aggregates allowed, the plain aggregates of {@link #AGGREGATES} pass, not nested, and the
+   * visitor collects them and the columns outside and inside them; a subquery then fails, since on
+   * top of the copies its columns would no longer resolve.
    */
-  private static final class RowWise extends ExpressionVisitorAdapter<Void> {
+  private static class RowWise extends ExpressionVisitorAdapter<Void> {
     boolean rowWise = true;
+    final boolean aggregates;
+    final List<Function> found = new ArrayList<>();
+    final List<Column> outside = new ArrayList<>();
+    final List<Column> inside = new ArrayList<>();
+    private int depth;
+
+    RowWise(boolean aggregates) {
+      this.aggregates = aggregates;
+    }
 
     @Override
     public <S> Void visit(Function function, S context) {
       List<String> parts = functionNameParts(function);
-      if (parts.size() != 1
-          || !ROW_FUNCTIONS.contains(unquoted(parts.get(0).strip()).toLowerCase(Locale.ROOT))) {
+      String name =
+          parts.size() == 1 ? unquoted(parts.get(0).strip()).toLowerCase(Locale.ROOT) : "";
+      if (aggregates && AGGREGATES.contains(name)) {
+        if (depth > 0
+            || function.getKeep() != null
+            || function.getOrderByElements() != null
+            || function.getHavingClause() != null
+            || function.getNullHandling() != null
+            || function.getLimit() != null
+            || function.isUnique()) {
+          rowWise = false;
+          return null;
+        }
+        found.add(function);
+        depth++;
+        super.visit(function, context);
+        depth--;
+        return null;
+      }
+      if (!ROW_FUNCTIONS.contains(name)) {
         rowWise = false;
         return null;
       }
       return super.visit(function, context);
+    }
+
+    @Override
+    public <S> Void visit(Column column, S context) {
+      if (aggregates) {
+        (depth > 0 ? inside : outside).add(column);
+      }
+      return null;
     }
 
     @Override
@@ -1391,13 +1429,157 @@ public final class SqlAst {
 
     @Override
     public <S> Void visit(ParenthesedSelect select, S context) {
+      rowWise &= !aggregates;
       return null;
     }
 
     @Override
     public <S> Void visit(Select select, S context) {
+      rowWise &= !aggregates;
       return null;
     }
+  }
+
+  private static List<Expression> selectAndOrderBy(PlainSelect s) {
+    List<Expression> out = new ArrayList<>();
+    for (SelectItem<?> item : s.getSelectItems()) {
+      if (item.getExpression() != null) {
+        out.add(item.getExpression());
+      }
+    }
+    if (s.getOrderByElements() != null) {
+      for (OrderByElement o : s.getOrderByElements()) {
+        out.add(o.getExpression());
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Whether the statement groups: GROUP BY, HAVING, or an aggregate in its select list or ORDER BY.
+   */
+  private static boolean isGrouped(PlainSelect s) {
+    if (s.getGroupBy() != null || s.getHaving() != null) {
+      return true;
+    }
+    RowWise check = new RowWise(true);
+    for (Expression e : selectAndOrderBy(s)) {
+      e.accept(check, null);
+    }
+    return !check.found.isEmpty();
+  }
+
+  /** A grouping statement's aggregates and columns, as the split reads it. */
+  private static final class Grouping {
+    final List<Column> groupBy = new ArrayList<>();
+    final List<Function> aggregates = new ArrayList<>();
+    // outside the aggregates, each a GROUP BY column, and inside them
+    final List<Column> outside = new ArrayList<>();
+    final List<Column> inside = new ArrayList<>();
+    // the aggregates computed per copy and combined on top, rather than applied on top
+    boolean perCopy;
+  }
+
+  /**
+   * Reads a grouping statement for the split, or returns null when the split cannot take it: a
+   * GROUP BY item that is not a column, a column outside the aggregates that is not a GROUP BY
+   * column, a subquery, a {@code *}, or an aggregate other than the plain ones. The aggregates are
+   * computed per copy and combined on top when every one decomposes, except on PostgreSQL, where
+   * the aggregate over the union measured as fast (design 4.2).
+   */
+  private @Nullable Grouping grouping(PlainSelect s) {
+    RowWise check = new RowWise(true);
+    Set<String> labels = new HashSet<>();
+    for (SelectItem<?> item : s.getSelectItems()) {
+      Expression e = item.getExpression();
+      if (e == null || e instanceof AllColumns || e instanceof AllTableColumns) {
+        return null;
+      }
+      e.accept(check, null);
+      if (item.getAlias() != null) {
+        labels.add(key(engine, item.getAlias().getName()));
+      } else if (e instanceof Column) {
+        labels.add(key(engine, ((Column) e).getColumnName()));
+      }
+    }
+    if (s.getHaving() != null) {
+      s.getHaving().accept(check, null);
+    }
+    int beforeOrderBy = check.outside.size();
+    if (s.getOrderByElements() != null) {
+      for (OrderByElement o : s.getOrderByElements()) {
+        o.getExpression().accept(check, null);
+      }
+    }
+    if (!check.rowWise) {
+      return null;
+    }
+    Grouping g = new Grouping();
+    Set<String> groupKeys = new HashSet<>();
+    GroupByElement gb = s.getGroupBy();
+    if (gb != null) {
+      if ((gb.getGroupingSets() != null && !gb.getGroupingSets().isEmpty())
+          || gb.isMysqlWithRollup()
+          || gb.hasGroupBySortDirections()
+          || gb.getGroupByExpressionList() == null) {
+        return null;
+      }
+      for (Expression e : gb.getGroupByExpressionList()) {
+        if (!(e instanceof Column)) {
+          return null;
+        }
+        Column c = (Column) e;
+        if (c.getTable() == null
+            && labels.contains(key(engine, c.getColumnName()))
+            && !isUnaliasedItem(s, c)) {
+          return null; // an item's alias, which only MySQL groups by
+        }
+        g.groupBy.add(c);
+        groupKeys.add(columnKey(c));
+      }
+    }
+    for (int i = 0; i < check.outside.size(); i++) {
+      Column c = check.outside.get(i);
+      if (groupKeys.contains(columnKey(c))) {
+        g.outside.add(c);
+      } else if (i < beforeOrderBy
+          || c.getTable() != null
+          || !labels.contains(key(engine, c.getColumnName()))) {
+        return null; // on top a column must be grouped, or an ORDER BY name an item
+      }
+    }
+    g.aggregates.addAll(check.found);
+    g.inside.addAll(check.inside);
+    g.perCopy = engine != Engine.POSTGRESQL;
+    for (Function f : g.aggregates) {
+      String name = unquoted(functionNameParts(f).get(0).strip()).toLowerCase(Locale.ROOT);
+      // ponytail: SQL Server's AVG of a decimal rounds to a scale SUM / COUNT does not, so AVG is
+      // applied on top there; decompose it per type if it matters
+      if (f.isDistinct() || (name.equals("avg") && engine == Engine.SQLSERVER)) {
+        g.perCopy = false;
+      }
+    }
+    return g;
+  }
+
+  /** Whether {@code c} is, by name, an unaliased column item of the select list. */
+  private boolean isUnaliasedItem(PlainSelect s, Column c) {
+    for (SelectItem<?> item : s.getSelectItems()) {
+      if (item.getAlias() == null
+          && item.getExpression() instanceof Column
+          && columnKey((Column) item.getExpression()).equals(columnKey(c))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** A column's identity on top of the copies: its qualifier and name, as the engine compares. */
+  private String columnKey(Column c) {
+    Table t = c.getTable();
+    return (t == null || t.getName() == null ? "" : key(engine, t.getName()))
+        + "."
+        + key(engine, c.getColumnName());
   }
 
   /** A split read's text, and the statement's placeholder each of its placeholders takes. */
@@ -1478,8 +1660,16 @@ public final class SqlAst {
       tos.add(to);
     }
     PlainSelect s = (PlainSelect) statement;
+    Grouping grouping = null;
+    if (isGrouped(s)) {
+      grouping = grouping(s);
+      if (grouping == null) {
+        return null;
+      }
+    }
     boolean onTop =
-        s.getDistinct() != null
+        grouping != null
+            || s.getDistinct() != null
             || s.getTop() != null
             || s.getLimit() != null
             || s.getOffset() != null
@@ -1496,16 +1686,28 @@ public final class SqlAst {
       // the copies differ only in the derived tables the naming gives
       return parses(texts.get(0)) ? checked(String.join(" UNION ALL ", texts), sources) : null;
     }
-    Lift lift = lift(s, columns);
+    Lift lift = grouping != null ? liftGrouped(s, grouping) : lift(s, columns);
     if (lift == null) {
       return null;
     }
+    // emitted in the order of the text, so that the placeholders' sources follow it
     Emitter prefix = new Emitter(froms.get(0), tos.get(0), placeholders, sources);
     if (start.next != lift.firstItem) {
       if (lift.beforeFirstItem == null) {
         return null;
       }
       prefix.tokens(start.next, lift.beforeFirstItem);
+    }
+    Map<Token, String> topFrom = new IdentityHashMap<>(froms.get(0));
+    Map<Token, Token> topTo = new IdentityHashMap<>(tos.get(0));
+    topFrom.putAll(lift.tailFrom);
+    topTo.putAll(lift.tailTo);
+    Emitter top = new Emitter(topFrom, topTo, placeholders, sources);
+    for (int i = 0; i < lift.outer.size(); i++) {
+      if (i > 0) {
+        top.text(",");
+      }
+      lift.outer.get(i).emit(top);
     }
     List<String> texts = new ArrayList<>();
     for (int c = 0; c < copies.size(); c++) {
@@ -1515,29 +1717,21 @@ public final class SqlAst {
         if (i > 0) {
           e.text(",");
         }
-        Piece p = lift.inner.get(i);
-        if (p.first != null) {
-          e.tokens(p.first, p.last);
-        }
-        e.text(p.text);
+        lift.inner.get(i).emit(e);
       }
       e.tokens(lift.bodyStart, lift.bodyEnd);
       texts.add(e.text());
     }
-    Map<Token, String> tailFrom = new IdentityHashMap<>(froms.get(0));
-    Map<Token, Token> tailTo = new IdentityHashMap<>(tos.get(0));
-    tailFrom.putAll(lift.tailFrom);
-    tailTo.putAll(lift.tailTo);
-    Emitter tail = new Emitter(tailFrom, tailTo, placeholders, sources);
+    Emitter tail = new Emitter(topFrom, topTo, placeholders, sources);
+    if (!lift.tailLead.isEmpty()) {
+      tail.text(lift.tailLead);
+    }
     if (lift.bodyEnd.next != null) {
       tail.tokens(lift.bodyEnd.next, null);
     }
     String prefixText = prefix.text();
     String head =
-        "SELECT "
-            + (prefixText.isEmpty() ? "" : prefixText + " ")
-            + String.join(", ", lift.outer)
-            + " FROM (";
+        "SELECT " + (prefixText.isEmpty() ? "" : prefixText + " ") + top.text() + " FROM (";
     String end = (") v " + tail.text()).strip();
     if (!parses(head + texts.get(0) + end)) {
       return null;
@@ -1566,16 +1760,45 @@ public final class SqlAst {
     return placeholders == sources.size() ? new SplitText(sql, sources) : null;
   }
 
-  /** Tokens to emit, from {@code first} to {@code last} when first is not null, then text. */
+  /**
+   * Tokens to emit, from {@code first} to {@code last} when first is not null, inside {@code
+   * wrap(...)} when wrap is not null, then text.
+   */
   private static final class Piece {
+    final @Nullable String wrap;
     final @Nullable Token first;
     final @Nullable Token last;
     final String text;
 
-    Piece(@Nullable Token first, @Nullable Token last, String text) {
+    Piece(@Nullable String wrap, @Nullable Token first, @Nullable Token last, String text) {
+      this.wrap = wrap;
       this.first = first;
       this.last = last;
       this.text = text;
+    }
+
+    Piece(@Nullable Token first, @Nullable Token last, String text) {
+      this(null, first, last, text);
+    }
+
+    Piece(String text) {
+      this(null, null, null, text);
+    }
+
+    void emit(Emitter e) {
+      if (wrap != null) {
+        e.text(wrap);
+        e.text("(");
+      }
+      if (first != null) {
+        e.tokens(first, last);
+      }
+      if (wrap != null) {
+        e.text(")");
+      }
+      if (!text.isEmpty()) {
+        e.text(text);
+      }
     }
   }
 
@@ -1586,9 +1809,12 @@ public final class SqlAst {
     final Token bodyStart;
     final Token bodyEnd;
     final List<Piece> inner = new ArrayList<>();
-    final List<String> outer = new ArrayList<>();
+    final List<Piece> outer = new ArrayList<>();
+    // replacements in the select list on top and in the tail
     final Map<Token, String> tailFrom = new IdentityHashMap<>();
     final Map<Token, Token> tailTo = new IdentityHashMap<>();
+    // emitted on top before the tail's tokens
+    String tailLead = "";
 
     Lift(Token firstItem, @Nullable Token beforeFirstItem, Token bodyStart, Token bodyEnd) {
       this.firstItem = firstItem;
@@ -1666,7 +1892,7 @@ public final class SqlAst {
             String name = engine.quote(col);
             String generated = "c" + (lift.outer.size() + 1);
             lift.inner.add(new Piece(null, null, qualifier + "." + name + " " + "AS " + generated));
-            lift.outer.add("v." + generated + " AS " + name);
+            lift.outer.add(new Piece("v." + generated + " AS " + name));
             labels.add(col);
           }
         }
@@ -1696,19 +1922,13 @@ public final class SqlAst {
         }
         label = alias.getName();
       } else if (e instanceof Column) {
-        label = ((Column) e).getColumnName();
-        if ((engine == Engine.MYSQL || engine == Engine.MARIADB)
-            && !label.startsWith("`")
-            && !label.startsWith("\"")) {
-          // a reserved word may follow a qualifier unquoted, but not AS
-          label = engine.quote(label);
-        }
+        label = columnLabel((Column) e);
       } else {
         return null; // the engine's label for an expression differs by engine
       }
       String generated = "c" + (lift.outer.size() + 1);
       lift.inner.add(new Piece(first, end, "AS " + generated));
-      lift.outer.add("v." + generated + " AS " + label);
+      lift.outer.add(new Piece("v." + generated + " AS " + label));
       labels.add(label);
     }
     if (s.getOrderByElements() != null) {
@@ -1745,6 +1965,244 @@ public final class SqlAst {
       }
     }
     return lift;
+  }
+
+  /** A column item's label on top; a reserved word may follow a qualifier on MySQL, but not AS. */
+  private String columnLabel(Column c) {
+    String label = c.getColumnName();
+    if ((engine == Engine.MYSQL || engine == Engine.MARIADB)
+        && !label.startsWith("`")
+        && !label.startsWith("\"")) {
+      label = engine.quote(label);
+    }
+    return label;
+  }
+
+  /**
+   * How a grouping statement goes on top of its copies. Per copy, each copy selects its GROUP BY
+   * columns and a partial result per aggregate, which the statement on top groups again and
+   * combines: COUNT as SUM, AVG as SUM over COUNT, the others as themselves. Otherwise each copy
+   * selects the columns the statement on top uses, and the GROUP BY, HAVING and aggregates all
+   * apply on top. Either way the select list on top is the statement's own, its columns and
+   * aggregates replaced, with an unaliased item's label kept as the engine would give it.
+   */
+  private @Nullable Lift liftGrouped(PlainSelect s, Grouping g) {
+    List<SelectItem<?>> items = s.getSelectItems();
+    Node firstNode = items.get(0).getASTNode();
+    Node lastNode = items.get(items.size() - 1).getASTNode();
+    Node bodyEndNode =
+        g.perCopy && !g.groupBy.isEmpty()
+            ? g.groupBy.get(g.groupBy.size() - 1).getASTNode()
+            : s.getWhere() != null
+                ? s.getWhere().getASTNode()
+                : s.getJoins() != null && !s.getJoins().isEmpty()
+                    ? s.getJoins().get(s.getJoins().size() - 1).getASTNode()
+                    : s.getFromItem().getASTNode();
+    if (firstNode == null || lastNode == null || bodyEndNode == null) {
+      return null;
+    }
+    Token firstItem = firstNode.jjtGetFirstToken();
+    Token lastItem = lastNode.jjtGetLastToken();
+    Token bodyEnd = bodyEndNode.jjtGetLastToken();
+    if (firstItem == null || lastItem == null || lastItem.next == null || bodyEnd == null) {
+      return null;
+    }
+    Lift lift =
+        new Lift(firstItem, before(root.jjtGetFirstToken(), firstItem), lastItem.next, bodyEnd);
+    Map<String, String> generated = new HashMap<>(); // column key to its column on top
+    List<Column> selected = new ArrayList<>(g.groupBy);
+    if (!g.perCopy) {
+      selected.addAll(g.outside);
+      selected.addAll(g.inside);
+    }
+    String prefix = g.perCopy ? "g" : "c";
+    for (Column c : selected) {
+      String k = columnKey(c);
+      if (generated.containsKey(k)) {
+        continue;
+      }
+      Node n = c.getASTNode();
+      if (n == null || n.jjtGetFirstToken() == null || n.jjtGetLastToken() == null) {
+        return null;
+      }
+      String name = prefix + (generated.size() + 1);
+      lift.inner.add(new Piece(n.jjtGetFirstToken(), n.jjtGetLastToken(), "AS " + name));
+      generated.put(k, name);
+    }
+    List<Column> replaced = new ArrayList<>(g.outside);
+    if (g.perCopy) {
+      if (!g.groupBy.isEmpty()) {
+        List<String> keys = new ArrayList<>(new LinkedHashSet<>(generated.values()));
+        Collections.sort(
+            keys, (a, b) -> Integer.parseInt(a.substring(1)) - Integer.parseInt(b.substring(1)));
+        lift.tailLead = "GROUP BY v." + String.join(", v.", keys);
+      }
+      int n = 0;
+      for (Function f : g.aggregates) {
+        Node fn = f.getASTNode();
+        Token first = fn == null ? null : fn.jjtGetFirstToken();
+        Token last = fn == null ? null : fn.jjtGetLastToken();
+        if (first == null || last == null) {
+          return null;
+        }
+        String name = unquoted(functionNameParts(f).get(0).strip()).toLowerCase(Locale.ROOT);
+        String a = "a" + ++n;
+        String combined;
+        if (name.equals("avg")) {
+          Token open = first.next;
+          Token argLast = before(first, last);
+          if (open == null || !open.image.equals("(") || open.next == null || argLast == open) {
+            return null;
+          }
+          String b = "a" + ++n;
+          lift.inner.add(new Piece("SUM", open.next, argLast, "AS " + a));
+          lift.inner.add(new Piece("COUNT", open.next, argLast, "AS " + b));
+          combined = "SUM(v." + a + ") / NULLIF(SUM(v." + b + "), 0)";
+        } else {
+          lift.inner.add(new Piece(first, last, "AS " + a));
+          combined =
+              (name.equals("count") ? "SUM" : name.toUpperCase(Locale.ROOT)) + "(v." + a + ")";
+          if (name.equals("count") && (engine == Engine.MYSQL || engine == Engine.MARIADB)) {
+            combined =
+                "CAST(" + combined + " AS SIGNED)"; // SUM would make COUNT's BIGINT a DECIMAL
+          }
+        }
+        lift.tailFrom.put(first, combined);
+        lift.tailTo.put(first, last);
+      }
+    } else {
+      if (generated.isEmpty()) {
+        lift.inner.add(new Piece("1 AS c1"));
+      }
+      replaced.addAll(g.groupBy);
+      replaced.addAll(g.inside);
+    }
+    for (Column c : replaced) {
+      Node n = c.getASTNode();
+      if (n == null || n.jjtGetFirstToken() == null || n.jjtGetLastToken() == null) {
+        return null;
+      }
+      lift.tailFrom.put(n.jjtGetFirstToken(), "v." + generated.get(columnKey(c)));
+      lift.tailTo.put(n.jjtGetFirstToken(), n.jjtGetLastToken());
+    }
+    for (SelectItem<?> item : items) {
+      Node n = item.getASTNode();
+      Token first = n == null ? null : n.jjtGetFirstToken();
+      Token last = n == null ? null : n.jjtGetLastToken();
+      if (first == null || last == null) {
+        return null;
+      }
+      Expression e = item.getExpression();
+      String label = "";
+      if (item.getAlias() != null) {
+        if (item.getAlias().getAliasColumns() != null) {
+          return null;
+        }
+      } else if (e instanceof Column) {
+        label = columnLabel((Column) e);
+      } else if (replacesWithin(lift, first, last)) {
+        label = expressionLabel(e, first, last);
+        if (label == null) {
+          return null;
+        }
+      }
+      lift.outer.add(new Piece(first, last, label.isEmpty() ? "" : "AS " + label));
+    }
+    return lift;
+  }
+
+  private static boolean replacesWithin(Lift lift, Token first, Token last) {
+    for (Token t = first; t != null; t = t.next) {
+      if (lift.tailFrom.containsKey(t)) {
+        return true;
+      }
+      if (t == last) {
+        break;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The alias that gives a rewritten unaliased expression the label the engine gives the original,
+   * empty when the engine's label survives the rewrite, or null when it cannot be given: SQL Server
+   * labels no expression, PostgreSQL labels a function call by its name, and MySQL, MariaDB and
+   * Oracle by the expression's text.
+   */
+  private @Nullable String expressionLabel(Expression e, Token first, Token last) {
+    switch (engine) {
+      case SQLSERVER:
+        return "";
+      case POSTGRESQL:
+        return e instanceof Function ? "" : null;
+      case MYSQL:
+      case MARIADB:
+        {
+          String text = sourceText(first, last);
+          return text == null || text.length() > 64 ? null : engine.quote(text);
+        }
+      case ORACLE:
+        {
+          String text = sourceText(first, last);
+          if (text == null) {
+            return null;
+          }
+          String label = oracleLabel(text);
+          // a quoted identifier has no quoted spelling: Oracle refuses " inside one
+          return label.length() > 128 || label.indexOf('"') >= 0 ? null : engine.quote(label);
+        }
+    }
+    throw new AssertionError(engine);
+  }
+
+  /**
+   * Oracle's label for an unaliased expression: its text upper-cased, blanks removed, outside
+   * quotes.
+   */
+  private static String oracleLabel(String text) {
+    StringBuilder out = new StringBuilder();
+    char quote = 0;
+    for (int i = 0; i < text.length(); i++) {
+      char ch = text.charAt(i);
+      if (quote != 0) {
+        out.append(ch);
+        if (ch == quote) {
+          quote = 0;
+        }
+      } else if (ch == '\'' || ch == '"') {
+        quote = ch;
+        out.append(ch);
+      } else if (!Character.isWhitespace(ch)) {
+        out.append(Character.toUpperCase(ch));
+      }
+    }
+    return out.toString();
+  }
+
+  /** The statement's text from {@code first} to {@code last}, or null when it cannot be located. */
+  private @Nullable String sourceText(Token first, Token last) {
+    if (source.indexOf('\t') >= 0) {
+      return null; // the parser counts a tab as more than one column
+    }
+    List<Integer> lineStarts = new ArrayList<>();
+    lineStarts.add(0);
+    for (int i = 0; i < source.length(); i++) {
+      char ch = source.charAt(i);
+      if (ch == '\n'
+          || (ch == '\r' && (i + 1 == source.length() || source.charAt(i + 1) != '\n'))) {
+        lineStarts.add(i + 1);
+      }
+    }
+    if (first.beginLine < 1 || last.endLine > lineStarts.size() || first.beginLine > last.endLine) {
+      return null;
+    }
+    int b = lineStarts.get(first.beginLine - 1) + first.beginColumn - 1;
+    int e = lineStarts.get(last.endLine - 1) + last.endColumn;
+    if (b < 0 || e > source.length() || b >= e) {
+      return null;
+    }
+    String text = source.substring(b, e);
+    return text.startsWith(first.image) && text.endsWith(last.image) ? text : null;
   }
 
   private boolean sameAlias(Table q, TableRef r) {
