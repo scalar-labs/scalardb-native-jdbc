@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -84,6 +85,12 @@ final class Router {
      */
     final boolean parallel;
 
+    /**
+     * Whether PostgreSQL may run the statement with parallel workers, which it never does for a
+     * write or a session statement: only such a statement needs the session's own workers setting.
+     */
+    final boolean plansParallel;
+
     private Route(
         String source,
         String sql,
@@ -99,8 +106,10 @@ final class Router {
         long recheckAt,
         boolean countsOnly,
         List<Integer> perRow,
-        boolean parallel) {
+        boolean parallel,
+        boolean plansParallel) {
       this.parallel = parallel;
+      this.plansParallel = plansParallel;
       this.perRow = List.copyOf(perRow);
       this.recheckAt = recheckAt;
       this.countsOnly = countsOnly;
@@ -145,9 +154,11 @@ final class Router {
   // while set, read() takes these per-row choices instead of reading counts
   private @Nullable List<Integer> forcedPerRow;
   // PostgreSQL's max_parallel_workers_per_gather: the session's own value (-1 until read), and
-  // whether the driver's 0 is in effect (null when not known, after a rollback or a SET)
+  // whether the driver's 0 is in effect (null when not known, after a rollback or a SET of it),
+  // and whether a statement in the open transaction set it, which the transaction's end may undo
   private long sessionWorkers = -1;
   private @Nullable Boolean workersOff;
+  private boolean workersSetInTransaction;
   // per statement text: whether the plain statement's plan is parallel; bounded, least recently
   // used first out
   private final Map<String, Boolean> parallelPlain =
@@ -214,7 +225,7 @@ final class Router {
         throw Errors.unsupported("the passthrough setting applies in autocommit mode only");
       }
       // anything may run here, so assume it changed the session and the names
-      return route(sql, sql, true, true, true, null, 0);
+      return route(sql, sql, true, true, true, null, 0, true);
     }
     Outcome<SqlAst> parsed =
         SqlAst.analyze(sql, engine, session.doubleQuotesQuoteIdentifiers(vendor));
@@ -249,7 +260,9 @@ final class Router {
     }
     boolean changesSession = kind != SqlAst.Kind.SELECT && kind != SqlAst.Kind.DML;
     boolean changesNames = kind == SqlAst.Kind.DDL || kind == SqlAst.Kind.TRUNCATE;
-    return route(sql, sql, changesSession, changesNames, false, null, ast.parameterCount());
+    boolean plansParallel = kind != SqlAst.Kind.DML && kind != SqlAst.Kind.SESSION;
+    return route(
+        sql, sql, changesSession, changesNames, false, null, ast.parameterCount(), plansParallel);
   }
 
   /**
@@ -354,7 +367,8 @@ final class Router {
               split.parameterSources(),
               ast.parameterCount(),
               recheckAt,
-              chosen);
+              chosen,
+              true);
       return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
           ? new Route(
               r.source,
@@ -371,6 +385,7 @@ final class Router {
               r.recheckAt,
               r.countsOnly,
               r.perRow,
+              true,
               true)
           : r;
     }
@@ -378,7 +393,7 @@ final class Router {
     if (rewritten == null) {
       throw Errors.unsupported("the statement cannot be rewritten onto the read views" + tables);
     }
-    return route(sql, rewritten, false, false, false, null, ast.parameterCount());
+    return route(sql, rewritten, false, false, false, null, ast.parameterCount(), true);
   }
 
   private Route route(
@@ -388,7 +403,8 @@ final class Router {
       boolean changesNames,
       boolean passthrough,
       @Nullable List<Integer> parameterSources,
-      int parameters) {
+      int parameters,
+      boolean plansParallel) {
     return route(
         source,
         sql,
@@ -398,7 +414,8 @@ final class Router {
         parameterSources,
         parameters,
         0,
-        List.of());
+        List.of(),
+        plansParallel);
   }
 
   private Route route(
@@ -410,7 +427,8 @@ final class Router {
       @Nullable List<Integer> parameterSources,
       int parameters,
       long recheckAt,
-      List<Integer> perRow) {
+      List<Integer> perRow,
+      boolean plansParallel) {
     return new Route(
         source,
         sql,
@@ -426,7 +444,8 @@ final class Router {
         recheckAt,
         false,
         perRow,
-        false);
+        false,
+        plansParallel);
   }
 
   /**
@@ -596,8 +615,16 @@ final class Router {
       return;
     }
     boolean off = false;
+    boolean on = false;
     for (Route r : routes) {
-      off |= r.parameterSources != null && !r.parallel; // a short split read
+      if (r.parameterSources != null && !r.parallel) {
+        off = true; // a short split read
+      } else {
+        on |= r.plansParallel;
+      }
+    }
+    if (!off && !on) {
+      return; // writes and session statements: the setting does not matter (todo 107)
     }
     if (workersOff == null) {
       long shown;
@@ -609,7 +636,8 @@ final class Router {
       if (shown != 0 || sessionWorkers <= 0) {
         sessionWorkers = shown;
       }
-      // a 0 with a known session value is the driver's own, which a rollback kept
+      // a 0 with a known session value is the driver's own: only a statement that sets it, which
+      // forgets the value, or a transaction's end after one, changes the session's
       workersOff = shown == 0;
     }
     if (off && !workersOff) {
@@ -630,9 +658,29 @@ final class Router {
     }
   }
 
+  /**
+   * Whether a statement may set the workers: it names the setting, as {@code SET} and {@code
+   * set_config} do, or resets every setting.
+   */
+  private static boolean setsWorkers(String sql) {
+    String lower = sql.toLowerCase(Locale.ROOT);
+    return lower.contains("max_parallel_workers_per_gather") || RESETS_ALL.matcher(lower).find();
+  }
+
+  private static final Pattern RESETS_ALL = Pattern.compile("\\b(reset|discard)\\s+all\\b");
+
   /** After a rollback, which undoes a SET made in the transaction. */
   void rolledBack() {
     workersOff = null;
+  }
+
+  /** At commit or rollback: a SET of the workers in the transaction may have been undone. */
+  void transactionEnded() {
+    if (workersSetInTransaction) {
+      sessionWorkers = -1;
+      workersOff = null;
+      workersSetInTransaction = false;
+    }
   }
 
   /**
@@ -659,7 +707,8 @@ final class Router {
         now.recheckAt,
         false,
         kept.perRow,
-        kept.parallel);
+        kept.parallel,
+        kept.plansParallel);
   }
 
   /**
@@ -667,15 +716,20 @@ final class Router {
    * naming it, quoted, would make.
    *
    * @param vendor the vendor connection, for the session's schemas
-   * @param schema the stored schema name
+   * @param schema the stored schema name, or null for the table the session's schemas find
    * @param table the stored table name
    * @return how the driver treats the table
    * @throws SQLException if a catalog cannot be read
    */
-  ScalarDbTables.Kind kind(Connection vendor, String schema, String table) throws SQLException {
+  ScalarDbTables.Kind kind(Connection vendor, @Nullable String schema, String table)
+      throws SQLException {
     TableInfo info;
     try {
-      info = catalog.lookup(session.schemas(vendor), engine.quote(schema), engine.quote(table));
+      info =
+          catalog.lookup(
+              session.schemas(vendor),
+              schema == null ? null : engine.quote(schema),
+              engine.quote(table));
     } catch (SQLSyntaxErrorException e) {
       if ("42000".equals(e.getSQLState())) {
         return ScalarDbTables.Kind.REFUSED;
@@ -739,7 +793,8 @@ final class Router {
         now.recheckAt,
         true,
         now.perRow,
-        now.parallel);
+        now.parallel,
+        now.plansParallel);
   }
 
   /**
@@ -748,8 +803,15 @@ final class Router {
    */
   void ran(Connection vendor, Route route) {
     if (route.changesSession) {
-      sessionWorkers = -1; // the statement may have set it
-      workersOff = null;
+      if (engine == Engine.POSTGRESQL && setsWorkers(route.source)) {
+        sessionWorkers = -1;
+        workersOff = null;
+        try {
+          workersSetInTransaction |= !vendor.getAutoCommit();
+        } catch (SQLException e) {
+          workersSetInTransaction = true; // unknown: the transaction's end, if any, forgets too
+        }
+      }
       session.changed(vendor);
     }
     if (route.changesNames) {

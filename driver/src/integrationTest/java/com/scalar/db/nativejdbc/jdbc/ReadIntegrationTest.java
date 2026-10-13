@@ -283,6 +283,23 @@ class ReadIntegrationTest {
           assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("0");
           router.beforeRun(vendor, List.of(plain));
           assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("3");
+          // another session statement neither needs the setting nor loses the session's value,
+          // which a split read's 0 once replaced for good (todo 107)
+          router.beforeRun(vendor, List.of(router.route(vendor, join)));
+          Router.Route setPath = router.route(vendor, "SET search_path = public");
+          router.beforeRun(vendor, List.of(setPath));
+          e.execute(vendor, "SET search_path = public");
+          router.ran(vendor, setPath);
+          assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("0");
+          router.beforeRun(vendor, List.of(plain));
+          assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("3");
+          // one that sets it is the session's new value
+          Router.Route setWorkers = router.route(vendor, "SET max_parallel_workers_per_gather = 2");
+          e.execute(vendor, "SET max_parallel_workers_per_gather = 2");
+          router.ran(vendor, setWorkers);
+          router.beforeRun(vendor, List.of(router.route(vendor, join)));
+          router.beforeRun(vendor, List.of(plain));
+          assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("2");
         }
         // a subquery's table is read through its view
         assertThat(

@@ -133,6 +133,9 @@ class RoutingIntegrationTest {
       assertThat(tables.kind("m1", "s_tx_metadata")).isEqualTo(ScalarDbTables.Kind.REFUSED);
       assertThat(tables.kind("m1", "s_scalardb")).isEqualTo(ScalarDbTables.Kind.REFUSED);
       assertThat(tables.kind("m1", "no_such_table")).isEqualTo(ScalarDbTables.Kind.PLAIN);
+      // no schema: the session's, as for an unqualified name (todo 115)
+      c.setSchema("m1");
+      assertThat(tables.kind(null, "s")).isEqualTo(ScalarDbTables.Kind.SCALARDB);
     }
   }
 

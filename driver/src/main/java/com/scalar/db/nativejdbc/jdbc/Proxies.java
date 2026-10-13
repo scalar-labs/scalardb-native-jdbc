@@ -217,6 +217,7 @@ public final class Proxies {
           {
             Object r = forward(vendor, method, args);
             session.transactionEnded();
+            router.transactionEnded();
             return r;
           }
         case "rollback":
@@ -225,6 +226,7 @@ public final class Proxies {
             router.rolledBack();
             if (args == null || args.length == 0) {
               session.transactionEnded();
+              router.transactionEnded();
             } else {
               session.rolledBackToSavepoint(); // the transaction goes on
             }
@@ -243,6 +245,7 @@ public final class Proxies {
             Object r = forward(vendor, method, args);
             if (wasInTransaction && on) {
               session.transactionEnded();
+              router.transactionEnded();
             }
             return r;
           }

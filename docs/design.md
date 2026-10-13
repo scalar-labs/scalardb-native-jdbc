@@ -881,10 +881,14 @@ union as a derived table.
     cached per text (todo 008).
   - **PostgreSQL parallel plans.** The split's estimated cost makes PostgreSQL start parallel workers,
     about 10 ms, for statements that take 1 ms (12-28x). The driver runs split reads with
-    `max_parallel_workers_per_gather = 0` and every other statement with the session's own value,
-    read once and again after a statement that may set it; the setting changes only when the next
-    statement needs the other value, since toggling it around every statement cost about 1 ms each,
-    and a rollback, which undoes a SET in its transaction, makes it read the setting again. A split
+    `max_parallel_workers_per_gather = 0` and every other read with the session's own value, read
+    once and again after a statement that names the setting or resets every setting, and at the end
+    of a transaction that held one (todo 107); writes and session statements, which PostgreSQL
+    never runs in parallel, leave it as it is. The setting changes only when the next statement
+    needs the other value, since toggling it around every statement cost about 1 ms each, and a
+    rollback, which undoes a SET in its transaction, makes it read the setting again. Behind a
+    transaction-mode pooler such as PgBouncer the session-level SET reaches other clients; the
+    driver assumes it owns its session. A split
     read whose plain statement, over the data tables, PostgreSQL plans as parallel, a long one, keeps
     the session's value: asked once per statement text with `EXPLAIN (GENERIC_PLAN)`, which plans
     without the parameter values; before PostgreSQL 16 the answer is no.

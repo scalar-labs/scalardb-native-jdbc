@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc;
 
 import java.sql.SQLException;
+import org.jspecify.annotations.Nullable;
 
 /**
  * What the driver makes of a table, for tools that list tables, such as {@code snsql}'s {@code
@@ -32,10 +33,11 @@ public interface ScalarDbTables {
    * Classifies a table by its stored name, as {@link java.sql.DatabaseMetaData#getTables} reports
    * it.
    *
-   * @param schema the schema; on MySQL and MariaDB, the database
+   * @param schema the schema; on MySQL and MariaDB, the database; null for the table an unqualified
+   *     name finds through the session's schemas, as in a statement
    * @param table the table
    * @return how the driver treats the table
    * @throws SQLException if a catalog cannot be read
    */
-  Kind kind(String schema, String table) throws SQLException;
+  Kind kind(@Nullable String schema, String table) throws SQLException;
 }
