@@ -37,9 +37,13 @@ import net.sf.jsqlparser.expression.XMLSerializeExpr;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.relational.Between;
 import net.sf.jsqlparser.expression.operators.relational.ComparisonOperator;
+import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
+import net.sf.jsqlparser.expression.operators.relational.GreaterThan;
+import net.sf.jsqlparser.expression.operators.relational.GreaterThanEquals;
 import net.sf.jsqlparser.expression.operators.relational.InExpression;
-import net.sf.jsqlparser.expression.operators.relational.NotEqualsTo;
+import net.sf.jsqlparser.expression.operators.relational.MinorThan;
+import net.sf.jsqlparser.expression.operators.relational.MinorThanEquals;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.parser.ASTNodeAccess;
 import net.sf.jsqlparser.parser.CCJSqlParser;
@@ -1397,24 +1401,33 @@ public final class SqlAst {
   }
 
   /**
-   * Returns whether the statement reaches {@code r} through one of {@code leading}, columns that
-   * lead an index: a top-level conjunct of the WHERE clause or of a join's ON clause compares such
-   * a column of {@code r}, by =, &lt;, &gt;, &lt;=, &gt;=, BETWEEN or IN with a list, with an
-   * expression that reads no column of {@code r}. A column of {@code r} is one qualified by it, or
-   * an unqualified one when it is the only table of the FROM clause. An approximation that only
-   * chooses a plan: a wrong answer costs time, never rows (todo 103).
+   * Returns the references the statement reaches through a column that leads one of their indexes,
+   * as far as the statement shows: a top-level conjunct of the WHERE clause or of a join's ON
+   * clause compares such a column, by = or IN with a list, or with {@code ranges} also by {@code <,
+   * <=, >, >=} or BETWEEN, with expressions whose columns all belong to references already reached,
+   * or to tables not in {@code leading}, such as plain tables. A range may read much of a table, so
+   * the caller asks for ranges separately (todo 112). A column of a reference is one qualified by
+   * it, or an unqualified one when it is the only table of the FROM clause; another unqualified
+   * column could be anyone's. An approximation that only chooses a plan: a wrong answer costs time,
+   * never rows (todos 103, 112).
    *
-   * @param r a reference of {@link #splittableRefs()}
-   * @param leading the lower-cased names of the columns that lead an index of its table
-   * @return whether an index on such a column can reach the table's rows
+   * @param leading for references of {@link #splittableRefs()}, the lower-cased names of the
+   *     columns that lead an index of their tables
+   * @param ranges whether a range reaches a reference too
+   * @return the references reached
    */
-  public boolean reachedThrough(TableRef r, Set<String> leading) {
+  public Set<TableRef> reachedByIndex(Map<TableRef, Set<String>> leading, boolean ranges) {
+    Set<TableRef> reached = Collections.newSetFromMap(new IdentityHashMap<>());
     if (!(statement instanceof PlainSelect)) {
-      return false;
+      return reached;
     }
     PlainSelect s = (PlainSelect) statement;
     boolean only = s.getJoins() == null || s.getJoins().isEmpty();
-    String self = lowerUnquoted(r.hasAlias() ? Objects.requireNonNull(r.alias()) : r.name());
+    Map<String, TableRef> byName = new HashMap<>();
+    for (TableRef r : leading.keySet()) {
+      byName.put(r.exposedName(), r);
+    }
+    List<Expression[]> sides = new ArrayList<>(); // a column, then the expressions it meets
     List<Expression> conjuncts = new ArrayList<>();
     conjuncts(s.getWhere(), conjuncts);
     if (s.getJoins() != null) {
@@ -1427,12 +1440,16 @@ public final class SqlAst {
       }
     }
     for (Expression e : conjuncts) {
-      List<Expression[]> sides = new ArrayList<>(); // a column, then the expressions it meets
-      if (e instanceof ComparisonOperator && !(e instanceof NotEqualsTo)) {
+      if (e instanceof EqualsTo
+          || (ranges
+              && (e instanceof GreaterThan
+                  || e instanceof GreaterThanEquals
+                  || e instanceof MinorThan
+                  || e instanceof MinorThanEquals))) {
         ComparisonOperator c = (ComparisonOperator) e;
         sides.add(new Expression[] {c.getLeftExpression(), c.getRightExpression()});
         sides.add(new Expression[] {c.getRightExpression(), c.getLeftExpression()});
-      } else if (e instanceof Between && !((Between) e).isNot()) {
+      } else if (ranges && e instanceof Between && !((Between) e).isNot()) {
         Between b = (Between) e;
         sides.add(
             new Expression[] {
@@ -1444,33 +1461,57 @@ public final class SqlAst {
         InExpression in = (InExpression) e;
         sides.add(new Expression[] {in.getLeftExpression(), in.getRightExpression()});
       }
+    }
+    boolean grew = true;
+    while (grew) {
+      grew = false;
       for (Expression[] side : sides) {
-        if (side[0] instanceof Column
-            && ofTable((Column) side[0], self, only)
-            && leading.contains(lowerUnquoted(((Column) side[0]).getColumnName()))) {
-          boolean readsSelf = false;
-          for (int i = 1; i < side.length && !readsSelf; i++) {
-            Node n = side[i].getASTNode();
-            if (n == null) {
-              readsSelf = true; // not located: assume the worst
-              break;
-            }
-            for (Object v : valuesUnder(n)) {
-              readsSelf |= v instanceof Column && ofTable((Column) v, self, only);
+        if (!(side[0] instanceof Column)) {
+          continue;
+        }
+        Column col = (Column) side[0];
+        TableRef r = owner(col, byName, only);
+        if (r == null
+            || reached.contains(r)
+            || !Objects.requireNonNull(leading.get(r))
+                .contains(lowerUnquoted(col.getColumnName()))) {
+          continue;
+        }
+        boolean fromReached = true;
+        for (int i = 1; i < side.length && fromReached; i++) {
+          Node n = side[i].getASTNode();
+          if (n == null) {
+            fromReached = false; // not located: assume the worst
+            break;
+          }
+          for (Object v : valuesUnder(n)) {
+            if (v instanceof Column) {
+              Column other = (Column) v;
+              TableRef o = owner(other, byName, only);
+              boolean unknown = other.getTable() == null && !only;
+              fromReached &= !unknown && o != r && (o == null || reached.contains(o));
             }
           }
-          if (!readsSelf) {
-            return true;
-          }
+        }
+        if (fromReached) {
+          reached.add(r);
+          grew = true;
         }
       }
     }
-    return false;
+    return reached;
   }
 
-  private static boolean ofTable(Column c, String self, boolean only) {
+  /**
+   * The reference of {@code byName} a column belongs to: by its qualifier, or the only table of the
+   * FROM clause for an unqualified one; null for another table's column or an unqualified one.
+   */
+  private static @Nullable TableRef owner(Column c, Map<String, TableRef> byName, boolean only) {
     Table q = c.getTable();
-    return (q == null || q.getName() == null) ? only : lowerUnquoted(q.getName()).equals(self);
+    if (q == null || q.getName() == null) {
+      return only && byName.size() == 1 ? byName.values().iterator().next() : null;
+    }
+    return byName.get(lowerUnquoted(q.getName()));
   }
 
   private static void conjuncts(@Nullable Expression e, List<Expression> out) {
@@ -2316,6 +2357,21 @@ public final class SqlAst {
     return statement instanceof PlainSelect && copyLimit((PlainSelect) statement) != null;
   }
 
+  /**
+   * Returns whether each copy stops after at most {@code rows} rows: a literal limit within it, or
+   * a count placeholder, taken as a page.
+   *
+   * @param rows the most rows
+   * @return whether the copies stop that early
+   */
+  public boolean limitsEachCopyTo(long rows) {
+    if (!(statement instanceof PlainSelect)) {
+      return false;
+    }
+    CopyLimit l = copyLimit((PlainSelect) statement);
+    return l != null && (l.placeholder != null || l.rows <= rows);
+  }
+
   /** A column item's label on top; a reserved word may follow a qualifier on MySQL, but not AS. */
   private String columnLabel(Column c) {
     String label = c.getColumnName();
@@ -2647,6 +2703,11 @@ public final class SqlAst {
      */
     public String fullyQualifiedName() {
       return node.getFullyQualifiedName();
+    }
+
+    /** The name the statement refers to it by, lower-cased: its alias, or else its name. */
+    String exposedName() {
+      return lowerUnquoted(hasAlias() ? Objects.requireNonNull(alias()) : name());
     }
 
     /**

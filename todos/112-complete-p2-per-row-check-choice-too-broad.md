@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "112"
 tags: [code-review, performance, mysql, mariadb]
@@ -40,13 +40,18 @@ favour it only for selective access.
 
 ## Recommended Action
 
+Done differently from Option 1, after measuring it: equality and IN lists per-row above 500,
+ranges above 5,000, hysteresis at half, per-copy row limits forced per-row only up to 1,000 rows.
+Counts stay per connection (cheap through the in-flight index; revisit with the statement cache,
+todo 008).
+
 ## Technical Details
 
 See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 ## Acceptance Criteria
 
-- [ ] Benchmark at 100, 1k and 10k in flight: no shape worse than the better fixed form by more than
+- [x] Benchmark at 100, 1k and 10k in flight: no shape worse than the better fixed form by more than
       20%.
 
 ## Work Log
@@ -62,3 +67,29 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 - Commits a772e20, 48f523a, 785e126, cdbc969, 2892bad, 59c9309, d719647; docs/design.md 4.2;
   docs/benchmarks/read-overhead.md, "Through the driver".
+
+### 2026-10-13 - Fixed
+
+**By:** Claude Code
+- `SqlAst.reachedByIndex(leading, ranges)` replaces `reachedThrough`: a fixpoint over = and IN-list
+  conjuncts (and with `ranges`, comparisons and BETWEEN) of WHERE and ON, from constants, plain
+  tables or references already reached. `Router` asks twice and applies 500 or 5,000 rows in flight,
+  each with hysteresis at half; the count cap is 5,001. `SplitRead` forces per-row under a limit
+  only when offset + n is at most 1,000.
+- Found while measuring: ScalarDB's `importTable` records every primary-key column as a partition
+  key in `getPrimaryKeys` order, which JDBC sorts by column name, so `(pid, cid)` became
+  `(cid, pid)` and `WHERE pid = ?` was never reached. `Router` now takes the key's first column
+  from `DatabaseMetaData.getPrimaryKeys` (KEY_SEQ 1), once per table and connection.
+  ScalarDB itself always uses the whole key, so nothing to raise upstream.
+- Benchmark, MySQL and MariaDB, 100 / 1k / 10k in flight, DRIVER against SPLIT_DRV (set) and
+  SPLIT_DLJ (per-row):
+  - composite partition scan at 10k: MySQL 15.5x -> 1.4x, MariaDB 6.4x -> 1.3x;
+  - JOIN FK 300 customers at 10k: MySQL 15.8x -> 9.6x, MariaDB 15.8x -> 8.5x;
+  - JOIN FK 3k customers at 1k: matches the set (was 3.8x vs 2.9x);
+  - regressed: MariaDB JOIN FK 30k customers (150k rows) at 10k, 2.1x -> 3.9x: a range that wide
+    loses row by row even at 10k. Telling it from the 300-customer range needs a row estimate
+    (todo 094).
+- 25 cells remain more than 20% worse than the better fixed form (27 before): LEFT JOIN and IN
+  subquery (milestone 3c, todo 095; "LEFT JOIN, ScalarDB on both sides" is 900-2,000x, the
+  nullable side read whole), plain table JOIN on non-key (todo 116), and single-digit-ms
+  cells at 100 in flight within run-to-run noise.

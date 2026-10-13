@@ -793,11 +793,14 @@ union as a derived table.
     T_meta q WHERE q.<pk> = t.<pk> AND q.tx_state IN (1, 2))` on PostgreSQL and Oracle; on MySQL and
     MariaDB a left join to `(SELECT DISTINCT <pk> FROM T_meta WHERE tx_state IN (1, 2))` with the key
     NULL, which makes them build the in-flight keys once instead of probing the metadata per row (the
-    set grows with the in-flight count, so a table the statement reaches through its key or a
-    ScalarDB-indexed column, by =, a range or IN with a list in a top-level conjunct of the WHERE or
-    an ON clause, takes the per-row left join on `T_meta`'s key instead once it has more than 500
-    rows in flight, which measured flat while the set grew 1.6-23x from 1,000 rows; the count is
-    read through the in-flight index, capped at 501, and kept for a second per connection, and a
+    set grows with the in-flight count, so a table the statement reaches through the first column
+    of its primary key, in the database's order, or a ScalarDB-indexed column, by = or IN with a
+    list in a top-level conjunct of the WHERE or an ON clause, from constants or tables already
+    reached, takes the per-row left join on `T_meta`'s key instead once it has more than 500 rows in
+    flight, which measured flat while the set grew 1.6-23x from 1,000 rows; a table reached only
+    through a range, which may read thousands of rows, once it has more than 5,000; either goes back
+    to the set below half its threshold (todo 112); the count is read through the in-flight index,
+    capped at 5,001, and kept for a second per connection, and a
     prepared statement whose form the count changes is prepared again with its settings and
     parameters replayed, so pooled statements follow the count, todo 103); on
     SQL Server `NOT EXISTS` in the all-committed copy of a statement over one or two ScalarDB tables
@@ -810,8 +813,8 @@ union as a derived table.
     500k rows 36-365x down to 1.1-1.5x): `LIMIT` inside the copy on PostgreSQL, MySQL and MariaDB,
     `WHERE ROWNUM <=` around the ordered copy on Oracle, whose `FETCH FIRST` numbers the whole
     copy, and nothing on SQL Server, whose plan already stops early over the union. On MySQL every
-    committed table of such a statement uses the per-row left join, since the DISTINCT set and
-    NOT EXISTS are built whole before the first row. Only for a literal offset and count, or a
+    committed table of such a statement uses the per-row left join when offset + n is at most
+    1,000, since the DISTINCT set and NOT EXISTS are built whole before the first row. Only for a literal offset and count, or a
     count placeholder without offset, and not under DISTINCT or an aggregate. A whole-query aggregate that decomposes (`COUNT`, `SUM`, `MIN`, `MAX`,
     `AVG` as `SUM` and `COUNT`, each with its `GROUP BY`) is computed per copy and combined on top on
     every engine but PostgreSQL, so that no copy streams its rows through the union (full scans

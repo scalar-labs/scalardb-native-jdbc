@@ -285,31 +285,64 @@ class SplitTest {
     assertThat(read("select x from a join b using (id)", 0)).isNull();
   }
 
-  private static boolean reached(String sql, int ref, String... leading) {
+  /** The references reached by equality, each table but p leading with id and k. */
+  private static List<String> reached(String sql) {
+    return reached(sql, false);
+  }
+
+  /** The references reached, by equality or with {@code ranges} also by a range. */
+  private static List<String> reached(String sql, boolean ranges) {
     SqlAst ast = parse(sql);
-    return ast.reachedThrough(ast.tableRefs().get(ref), java.util.Set.of(leading));
+    java.util.IdentityHashMap<SqlAst.TableRef, java.util.Set<String>> leading =
+        new java.util.IdentityHashMap<>();
+    for (SqlAst.TableRef r : ast.splittableRefs()) {
+      if (!r.name().equals("p")) { // p is a plain table
+        leading.put(r, java.util.Set.of("id", "k"));
+      }
+    }
+    List<String> out = new ArrayList<>();
+    for (SqlAst.TableRef r : ast.splittableRefs()) {
+      if (ast.reachedByIndex(leading, ranges).contains(r)) {
+        out.add(r.hasAlias() ? r.alias() : r.name());
+      }
+    }
+    return out;
   }
 
   @Test
-  void reachedThrough_aComparisonOnALeadingColumn_withNothingOfTheTable() {
-    assertThat(reached("select * from c where id = ?", 0, "id")).isTrue();
-    assertThat(reached("select * from c where region between 1 and ? and x > 0", 0, "region"))
-        .isTrue();
-    assertThat(reached("select * from c where id in (1, 2)", 0, "id")).isTrue();
-    assertThat(reached("select * from c where (x > 0 and (id = ?))", 0, "id")).isTrue();
-    // through a join from another table, either side
-    String join = "select * from c join o on o.cid = c.id where c.id = ?";
-    assertThat(reached(join, 0, "id")).isTrue();
-    assertThat(reached(join, 1, "cid")).isTrue();
-    assertThat(reached(join, 1, "id")).isFalse();
-    // not a comparison the index serves, or under OR, or against the table itself
-    assertThat(reached("select * from c where id <> ?", 0, "id")).isFalse();
-    assertThat(reached("select * from c where id = ? or x = 1", 0, "id")).isFalse();
-    assertThat(reached("select * from c where id = c.x + 1", 0, "id")).isFalse();
-    assertThat(reached("select * from c where id not in (1, 2)", 0, "id")).isFalse();
-    assertThat(reached("select * from c where name = ?", 0, "id")).isFalse();
+  void reachedByIndex_onALeadingColumn_fromConstantsOrReachedTables() {
+    assertThat(reached("select * from c where id = ?")).containsExactly("c");
+    assertThat(reached("select * from c where id in (1, 2) and x > 0")).containsExactly("c");
+    // a join reaches a table from one already reached, in any order
+    assertThat(reached("select * from c join o on o.k = c.id where c.id = ?"))
+        .containsExactly("c", "o");
+    assertThat(reached("select * from o join c on o.k = c.id where c.id = ?"))
+        .containsExactly("o", "c");
+    // from a plain table, which leading does not list
+    assertThat(reached("select * from p join c on c.k = p.v")).containsExactly("c");
+    // not a range, not from an unreached table, not under OR, not against itself
+    assertThat(reached("select * from c where id > ?")).isEmpty();
+    assertThat(reached("select * from c join o on o.k = c.id where c.x = 1")).isEmpty();
+    assertThat(reached("select * from c where id = ? or x = 1")).isEmpty();
+    assertThat(reached("select * from c where id = c.x + 1")).isEmpty();
+    assertThat(reached("select * from c where name = ?")).isEmpty();
     // an unqualified column of a join could belong to either table
-    assertThat(reached("select * from c join o on o.cid = c.k where id = 1", 0, "id")).isFalse();
+    assertThat(reached("select * from c join o on o.k = c.id where id = 1")).isEmpty();
+    // ranges when asked for, and the tables reached from them
+    assertThat(reached("select * from c where id > ?", true)).containsExactly("c");
+    assertThat(reached("select * from c join o on o.k = c.id where c.id between 1 and 9", true))
+        .containsExactly("c", "o");
+    assertThat(reached("select * from c where id between 1 and c.x", true)).isEmpty();
+    assertThat(reached("select * from c where id <> 1", true)).isEmpty();
+  }
+
+  @Test
+  void limitsEachCopyTo_aPage() {
+    assertThat(parse("select a.x from a order by a.x limit 20 offset 100").limitsEachCopyTo(1000))
+        .isTrue();
+    assertThat(parse("select a.x from a order by a.x limit 20 offset 10000").limitsEachCopyTo(1000))
+        .isFalse();
+    assertThat(parse("select a.x from a order by a.x limit ?").limitsEachCopyTo(1000)).isTrue();
   }
 
   @Test

@@ -125,14 +125,23 @@ final class Router {
    */
   static final int PER_ROW_ABOVE = 500;
 
+  /**
+   * The same for a table reached only through a range, which may read thousands of its rows: row by
+   * row, each costs a lookup, so the set stays cheaper up to a few thousand in flight (todo 112).
+   */
+  static final int PER_ROW_ABOVE_IN_RANGES = 5000;
+
   /** How long an in-flight count is used before it is read again. */
   private static final long COUNT_TTL_NANOS = 1_000_000_000L;
 
   private final Engine engine;
   private final Catalog catalog;
   private final Session session;
-  // per metadata table: the in-flight count, capped above PER_ROW_ABOVE, and when it was read
+  // per metadata table: the in-flight count, capped above PER_ROW_ABOVE_IN_RANGES, when it was
+  // read, and which per-row choices were last made: 1 by equality, 2 in ranges
   private final Map<String, long[]> inflight = new HashMap<>();
+  // per data table: the lower-cased first column of its primary key, in the database's order
+  private final Map<String, String> keyLead = new HashMap<>();
   // while set, read() takes these per-row choices instead of reading counts
   private @Nullable List<Integer> forcedPerRow;
   // PostgreSQL's max_parallel_workers_per_gather: the session's own value (-1 until read), and
@@ -278,10 +287,19 @@ final class Router {
     long recheckAt = 0;
     if (engine == Engine.MYSQL || engine == Engine.MARIADB) {
       List<SqlAst.TableRef> refs = ast.splittableRefs();
+      IdentityHashMap<SqlAst.TableRef, Set<String>> leading = new IdentityHashMap<>();
+      for (SqlAst.TableRef r : refs) {
+        TableInfo t = scalarDb.get(r);
+        if (t != null) {
+          leading.put(r, leadingColumns(vendor, t));
+        }
+      }
+      Set<SqlAst.TableRef> byEquality = ast.reachedByIndex(leading, false);
+      Set<SqlAst.TableRef> reached = ast.reachedByIndex(leading, true);
       for (int i = 0; i < refs.size(); i++) {
         SqlAst.TableRef r = refs.get(i);
         TableInfo t = scalarDb.get(r);
-        if (t == null || !ast.reachedThrough(r, leadingColumns(t))) {
+        if (t == null || !reached.contains(r)) {
           continue;
         }
         boolean many;
@@ -291,7 +309,12 @@ final class Router {
           long[] count = inflightCount(vendor, t);
           long due = count[1] + COUNT_TTL_NANOS;
           recheckAt = recheckAt == 0 || due - recheckAt < 0 ? due : recheckAt;
-          many = count[0] > PER_ROW_ABOVE;
+          long bit = byEquality.contains(r) ? 1 : 2;
+          long above = bit == 1 ? PER_ROW_ABOVE : PER_ROW_ABOVE_IN_RANGES;
+          // back to the set only well below the threshold, so that a count near it does not flip
+          // the statement's form, and prepare it again, every second
+          many = count[0] > ((count[2] & bit) != 0 ? above / 2 : above);
+          count[2] = many ? count[2] | bit : count[2] & ~bit;
         }
         if (many) {
           perRow.add(r);
@@ -456,9 +479,9 @@ final class Router {
   }
 
   /** The lower-cased columns that lead an index of the table: its key's first, and the indexed. */
-  private static Set<String> leadingColumns(TableInfo t) {
+  private Set<String> leadingColumns(Connection vendor, TableInfo t) {
     Set<String> out = new HashSet<>();
-    out.add(t.keyColumns().get(0).toLowerCase(Locale.ROOT));
+    out.add(keyLead(vendor, t));
     for (String c : t.indexedColumns()) {
       out.add(c.toLowerCase(Locale.ROOT));
     }
@@ -466,9 +489,40 @@ final class Router {
   }
 
   /**
-   * The table's rows in flight, counted through the in-flight index up to {@link #PER_ROW_ABOVE} +
-   * 1, and when they were counted; read again once a count is older than {@link #COUNT_TTL_NANOS}.
-   * The count only chooses a plan, so one that is a second old costs time, never rows.
+   * The first column of the table's primary key as the database orders it. ScalarDB records an
+   * imported table's key in the order of {@code getPrimaryKeys}, which is by column name, so its
+   * catalog can name a column that leads no index; the catalog's first serves when the database
+   * cannot answer.
+   */
+  private String keyLead(Connection vendor, TableInfo t) {
+    String table = t.namespace() + "." + t.dataTable();
+    String lead = keyLead.get(table);
+    if (lead != null) {
+      return lead;
+    }
+    try (ResultSet rs =
+        vendor.getMetaData().getPrimaryKeys(t.namespace(), t.namespace(), t.dataTable())) {
+      while (rs.next()) {
+        if (rs.getInt("KEY_SEQ") == 1) {
+          lead = rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT);
+        }
+      }
+    } catch (SQLException e) {
+      // as with the count, a streaming result open on the connection: ask again next time
+      return t.keyColumns().get(0).toLowerCase(Locale.ROOT);
+    }
+    if (lead == null) {
+      lead = t.keyColumns().get(0).toLowerCase(Locale.ROOT);
+    }
+    keyLead.put(table, lead);
+    return lead;
+  }
+
+  /**
+   * The table's rows in flight, counted through the in-flight index up to {@link
+   * #PER_ROW_ABOVE_IN_RANGES} + 1, and when they were counted; read again once a count is older
+   * than {@link #COUNT_TTL_NANOS}. The count only chooses a plan, so one that is a second old costs
+   * time, never rows.
    */
   @SuppressFBWarnings(
       value = "SQL_INJECTION_JDBC",
@@ -494,14 +548,14 @@ final class Router {
                     + " WHERE "
                     + engine.quote("tx_state")
                     + " IN (1, 2) LIMIT "
-                    + (PER_ROW_ABOVE + 1)
+                    + (PER_ROW_ABOVE_IN_RANGES + 1)
                     + ") x")) {
       rs.next();
       count = rs.getLong(1);
     } catch (SQLException e) {
       count = cached == null ? 0 : cached[0];
     }
-    long[] fresh = {count, now};
+    long[] fresh = {count, now, cached == null ? 0 : cached[2]};
     inflight.put(meta, fresh);
     return fresh;
   }

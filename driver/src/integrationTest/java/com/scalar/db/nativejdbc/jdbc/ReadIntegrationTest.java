@@ -2,6 +2,7 @@ package com.scalar.db.nativejdbc.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.scalar.db.api.Delete;
 import com.scalar.db.api.DistributedTransaction;
@@ -338,6 +339,60 @@ class ReadIntegrationTest {
       }
     }
     assertSettled(e, catalog, rd, madeTable);
+  }
+
+  /**
+   * ScalarDB records an imported table's key by column name, here (cid, pid), while the table's own
+   * key, and so its index, leads with pid: a read by pid with many rows in flight takes the per-row
+   * check.
+   */
+  @ParameterizedTest
+  @MethodSource("engines")
+  void perRowCheck_followsTheDatabasesKeyOrder(Engines e) throws Exception {
+    Engine engine = e.engine();
+    assumeTrue(engine == Engine.MYSQL || engine == Engine.MARIADB, "the per-row check is MySQL's");
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          e.createSchema("rk"),
+          "CREATE TABLE rk.kc (pid INT, cid INT, val INT, PRIMARY KEY (pid, cid))");
+    }
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace("rk", true);
+      admin.importTable("rk", "kc", DECOUPLED, Map.of());
+    }
+    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    TableInfo kc = catalog.lookup(List.of(), "rk", "kc");
+    assertThat(kc.keyColumns()).containsExactly("cid", "pid");
+    try (Connection c = e.open()) {
+      List<Setup.Result> results =
+          Setup.run(catalog, c, t -> t.namespace().equals("rk"), Duration.ofMinutes(1), List.of());
+      assertThat(results).allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    try (TwoPhaseCommitTransactionManager tm = scalarDb.getTwoPhaseCommitTransactionManager()) {
+      TwoPhaseCommitTransaction tx = tm.begin();
+      for (int i = 0; i <= Router.PER_ROW_ABOVE; i++) {
+        tx.insert(
+            Insert.newBuilder()
+                .namespace("rk")
+                .table(Objects.requireNonNull(kc.virtualTable()))
+                .partitionKey(Key.of("cid", 0, "pid", i))
+                .intValue("val", i)
+                .build());
+      }
+      tx.prepare();
+      try (Connection vendor = e.open()) {
+        String sql =
+            new Router(engine, catalog, new Session(engine))
+                .route(vendor, "SELECT val FROM rk.kc WHERE pid = ?")
+                .sql;
+        assertThat(sql).contains("COALESCE");
+      } finally {
+        tx.rollback();
+      }
+    }
   }
 
   /**

@@ -75,7 +75,8 @@ final class SplitRead {
     }
     // MySQL builds the DISTINCT set, and NOT EXISTS's anti-join, whole before the first row, so
     // a copy that stops after a few rows has to check its rows one by one (todo 089)
-    boolean rowByRowUnderLimit = engine == Engine.MYSQL && ast.limitsEachCopy();
+    // when it reads up to a thousand rows; past that, row by row loses to the set (todo 112)
+    boolean rowByRowUnderLimit = engine == Engine.MYSQL && ast.limitsEachCopyTo(1000);
     List<SqlAst.Naming> copies = new ArrayList<>();
     for (int bits = 0; bits < 1 << split.size(); bits++) {
       Map<SqlAst.TableRef, String> naming = new IdentityHashMap<>(views);
