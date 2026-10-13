@@ -849,6 +849,40 @@ public final class SqlAst {
   }
 
   /**
+   * Returns the statement with the references {@code naming} names replaced, as {@link
+   * #joinTokens(Naming)} does, and its placeholders numbered {@code $1, $2, ...}, as PostgreSQL's
+   * {@code EXPLAIN (GENERIC_PLAN)} takes them. Not parsed again: the parser does not read {@code
+   * $n}.
+   *
+   * @param naming what to replace
+   * @return the statement, or {@code null} when it cannot be rewritten
+   */
+  public @Nullable String joinTokensNumbered(Naming naming) {
+    if (root.jjtGetFirstToken() == null || hasMisreadHashComment()) {
+      return null;
+    }
+    Map<Token, String> from = new IdentityHashMap<>();
+    Map<Token, Token> to = new IdentityHashMap<>();
+    Rewrite plan = planRewrite(naming, false);
+    if (plan.unrepresentable || lockTargetIsRenamed(plan) || !collectReplacements(plan, from, to)) {
+      return null;
+    }
+    int n = 0;
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      if (t.image.equals("?")) {
+        from.put(t, "$" + ++n);
+        to.put(t, t);
+      }
+    }
+    if (n != parameterCount) {
+      return null;
+    }
+    Emitter emitter = new Emitter(from, to, Map.of(), new ArrayList<>());
+    emitter.tokens(root.jjtGetFirstToken(), null);
+    return emitter.text();
+  }
+
+  /**
    * Whether the parser reads {@code sql}: two tokens may only have fused into one if it does not. A
    * replacement on SQL Server is bracket-quoted (Engine.quote), which quotes a name whatever
    * QUOTED_IDENTIFIER says.

@@ -877,9 +877,10 @@ union as a derived table.
     `max_parallel_workers_per_gather = 0` and every other statement with the session's own value,
     read once and again after a statement that may set it; the setting changes only when the next
     statement needs the other value, since toggling it around every statement cost about 1 ms each,
-    and a rollback, which undoes a SET in its transaction, makes it read the setting again. Not yet:
-    keeping the session's value for a split read whose plain statement's own plan is parallel, a long
-    one, which needs that plan with the bound values; until then such reads run without workers.
+    and a rollback, which undoes a SET in its transaction, makes it read the setting again. A split
+    read whose plain statement, over the data tables, PostgreSQL plans as parallel, a long one, keeps
+    the session's value: asked once per statement text with `EXPLAIN (GENERIC_PLAN)`, which plans
+    without the parameter values; before PostgreSQL 16 the answer is no.
   - **Not split, served through `rc_T`**: a ScalarDB table in a shape the four kinds do not cover (a
     scalar subquery, a subquery naming two ScalarDB tables or holding an aggregate or a row limit, a
     CTE, a set operation's branch, a nullable side that is itself a join, a FULL JOIN, Oracle's

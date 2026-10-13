@@ -19,6 +19,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -76,6 +77,12 @@ final class Router {
     /** The positions, among the statement's split references, of those checked row by row. */
     final List<Integer> perRow;
 
+    /**
+     * On PostgreSQL, whether a split read keeps the session's parallel workers: its plain
+     * statement's own plan is parallel, a long one.
+     */
+    final boolean parallel;
+
     private Route(
         String source,
         String sql,
@@ -90,7 +97,9 @@ final class Router {
         int parameters,
         long recheckAt,
         boolean countsOnly,
-        List<Integer> perRow) {
+        List<Integer> perRow,
+        boolean parallel) {
+      this.parallel = parallel;
       this.perRow = List.copyOf(perRow);
       this.recheckAt = recheckAt;
       this.countsOnly = countsOnly;
@@ -129,6 +138,15 @@ final class Router {
   // whether the driver's 0 is in effect (null when not known, after a rollback or a SET)
   private long sessionWorkers = -1;
   private @Nullable Boolean workersOff;
+  // per statement text: whether the plain statement's plan is parallel; bounded, least recently
+  // used first out
+  private final Map<String, Boolean> parallelPlain =
+      new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+          return size() > 256;
+        }
+      };
   private boolean passthrough;
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
 
@@ -282,16 +300,35 @@ final class Router {
     }
     SqlAst.SplitText split = SplitRead.emit(engine, ast, scalarDb, views, perRow);
     if (split != null) {
-      return route(
-          sql,
-          split.sql(),
-          false,
-          false,
-          false,
-          split.parameterSources(),
-          ast.parameterCount(),
-          recheckAt,
-          chosen);
+      Route r =
+          route(
+              sql,
+              split.sql(),
+              false,
+              false,
+              false,
+              split.parameterSources(),
+              ast.parameterCount(),
+              recheckAt,
+              chosen);
+      return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
+          ? new Route(
+              r.source,
+              r.sql,
+              r.changesSession,
+              r.changesNames,
+              r.passthrough,
+              r.isolation,
+              r.sessionGeneration,
+              r.catalogGeneration,
+              r.trustedUntil,
+              r.parameterSources,
+              r.parameters,
+              r.recheckAt,
+              r.countsOnly,
+              r.perRow,
+              true)
+          : r;
     }
     String rewritten = ast.joinTokens(views::get);
     if (rewritten == null) {
@@ -344,7 +381,52 @@ final class Router {
         parameters,
         recheckAt,
         false,
-        perRow);
+        perRow,
+        false);
+  }
+
+  /**
+   * Whether PostgreSQL plans the statement itself, over the data tables, as parallel: a long read,
+   * whose split read then keeps the session's workers (design 4.2). Asked once per statement text
+   * with {@code EXPLAIN (GENERIC_PLAN)}, which plans without the values; before PostgreSQL 16, or
+   * when the plan cannot be made, the answer is no.
+   */
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "the application's own statement, its tables renamed to quoted data tables")
+  private boolean plainPlanIsParallel(
+      Connection vendor,
+      String sql,
+      SqlAst ast,
+      IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
+      throws SQLException {
+    Boolean known = parallelPlain.get(sql);
+    if (known != null) {
+      return known;
+    }
+    boolean parallel = false;
+    if (vendor.getMetaData().getDatabaseMajorVersion() >= 16) {
+      String plain =
+          ast.joinTokensNumbered(
+              ref -> {
+                TableInfo t = scalarDb.get(ref);
+                return t == null
+                    ? null
+                    : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
+              });
+      if (plain != null) {
+        try (Statement st = vendor.createStatement();
+            ResultSet rs = st.executeQuery("EXPLAIN (GENERIC_PLAN, FORMAT JSON) " + plain)) {
+          parallel = rs.next() && rs.getString(1).contains("\"Node Type\": \"Gather");
+        } catch (SQLException e) {
+          if (!vendor.getAutoCommit()) {
+            throw e; // the transaction is aborted now; let the application see why
+          }
+        }
+      }
+    }
+    parallelPlain.put(sql, parallel);
+    return parallel;
   }
 
   /** The lower-cased columns that lead an index of the table: its key's first, and the indexed. */
@@ -397,23 +479,21 @@ final class Router {
   /**
    * Before routed statements run, on PostgreSQL: a split read runs with {@code
    * max_parallel_workers_per_gather = 0}, since its estimated cost makes PostgreSQL start workers
-   * (about 10 ms) for statements that take 1 ms; every other statement runs with the session's own
-   * value. The setting changes only when the next statement needs the other one (design 4.2).
+   * (about 10 ms) for statements that take 1 ms, unless its plain statement's own plan is parallel;
+   * every other statement runs with the session's own value. The setting changes only when the next
+   * statement needs the other one (design 4.2).
    *
    * @param vendor the vendor connection
    * @param routes the routes about to run
    * @throws SQLException if the setting cannot be read or set
    */
-  // ponytail: a split read never runs parallel, long analytic reads of ScalarDB tables included;
-  // restore the session's value for those whose plain plan is parallel (EXPLAIN with the bound
-  // values, design 4.2) when they matter
   void beforeRun(Connection vendor, List<Route> routes) throws SQLException {
     if (engine != Engine.POSTGRESQL || routes.isEmpty()) {
       return;
     }
     boolean off = false;
     for (Route r : routes) {
-      off |= r.parameterSources != null; // a split read
+      off |= r.parameterSources != null && !r.parallel; // a short split read
     }
     if (workersOff == null) {
       long shown;
@@ -527,7 +607,8 @@ final class Router {
         now.parameters,
         now.recheckAt,
         true,
-        now.perRow);
+        now.perRow,
+        now.parallel);
   }
 
   /**
