@@ -801,7 +801,8 @@ union as a derived table.
     of its primary key, in the database's order, or a ScalarDB-indexed column, by = or IN with a
     list in a top-level conjunct of the WHERE or an ON clause, from constants or tables already
     reached, takes the per-row left join on `T_meta`'s key instead once it has more than 500 rows in
-    flight, which measured flat while the set grew 1.6-23x from 1,000 rows; a table reached only
+    flight, which measured flat for tables reached through their key while the set grew 1.6-23x
+    from 1,000 rows (todo 113); a table reached only
     through a range, which may read thousands of rows, once it has more than 5,000; either goes back
     to the set below half its threshold (todo 112); the count is read through the in-flight index,
     capped at 5,001, and kept for a second per connection, and a

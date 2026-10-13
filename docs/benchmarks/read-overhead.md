@@ -874,16 +874,18 @@ Ratios to BASE, medians, `SPLIT_DRV / DRIVER`:
 | wide: 4 tables JOIN on key, key lookup | 2.1 / 1.9 | 53.4 / 3.8 | 25.9 / 4.6 | 1.8 / 1.5 | 1.3 / 1.3 |
 
 - **Selective shapes match the hand-written form at 100 rows in flight** on every engine, within
-  about 20%.
+  about 20%, except the IN subquery, which the driver reads through `rc_T` (3c): 1.6x against 0.4x
+  on Oracle, 3.2x against 2.2x on MariaDB, 2.7x against 2.2x on SQL Server.
 - **At 10,000 rows in flight, MySQL and MariaDB are far better through the driver.** The per-row
   check on tables reached through an index takes key lookups from 9.2x to 0.9x, key joins from 21x
   to 1.6x and four tables from 31x to 4.4x.
-- **Pagination is close to the plain query** on PostgreSQL, MariaDB, SQL Server and Oracle. MySQL
-  is 1.7x at 100 rows in flight and 35x at 10,000.
+- **Pagination is close to the plain query** on PostgreSQL, SQL Server and Oracle at both counts,
+  and on MariaDB at 100 rows in flight; MariaDB is 5.9x at 10,000. MySQL is 1.7x at 100 rows in
+  flight and 35x at 10,000.
 - **Still open:**
   - a ScalarDB table on the nullable side of a LEFT JOIN, 790-1800x on MySQL and MariaDB,
     which milestone 3c splits;
-  - the IN subquery on PostgreSQL, 1.9-3.1x, also 3c;
+  - the IN subquery on every engine (PostgreSQL 1.9-3.1x; see above for the others), also 3c;
   - a paginated join at 10,000 rows in flight, 46-334x on every engine but MariaDB, where the
     hand-written form is as bad;
   - PostgreSQL's SUM of 500k rows at 100 rows in flight, 2.7x against 1.3x.
@@ -891,8 +893,11 @@ Ratios to BASE, medians, `SPLIT_DRV / DRIVER`:
   on MySQL.
 
 **What routing costs**, `prepareStatement` through the vendor driver against through the driver,
-median µs. None of the vendor drivers contacts the server at prepare, so the difference is the
-driver's parse and rewrite, with nothing cached (todo 098):
+median µs, before the route cache. None of the vendor drivers contacts the server at prepare, so
+the difference is the driver's parse and rewrite. Not quite nothing was cached: the driver's own
+server calls, PostgreSQL's plan check and the MySQL/MariaDB in-flight count, were cached for most
+of the 1,300 repetitions, so a statement seen for the first time also pays a round trip that the
+table does not show (todo 098):
 
 | shape | PostgreSQL | MySQL | MariaDB | SQL Server | Oracle |
 |---|---|---|---|---|---|

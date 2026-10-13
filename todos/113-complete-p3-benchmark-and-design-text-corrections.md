@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "113"
 tags: [code-review, documentation]
@@ -54,3 +54,12 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 - Commits a772e20, 48f523a, 785e126, cdbc969, 2892bad, 59c9309, d719647; docs/design.md 4.2;
   docs/benchmarks/read-overhead.md, "Through the driver".
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- docs/benchmarks/read-overhead.md "Through the driver": the 20% claim excludes the IN subquery with
+  its numbers; the open list names the IN subquery on every engine; pagination on MariaDB holds at
+  100 in flight only (5.9x at 10k); the routing-cost table says which server calls were cached and
+  that a first-seen statement pays a round trip more.
+- docs/design.md 4.2: "measured flat" is for tables reached through their key.
