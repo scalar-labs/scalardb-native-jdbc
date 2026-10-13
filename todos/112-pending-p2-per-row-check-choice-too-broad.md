@@ -24,6 +24,8 @@ favour it only for selective access.
   `ORDER BY ... LIMIT` (`SplitRead.java:78`). That includes an unindexed ORDER BY and large
   offsets, where each copy reads everything.
 - **No hysteresis.** A count near 500 flips the form, and re-prepares, at most once a second.
+- **Limit mismatch (from todo 108).** `limitsEachCopy()` can say yes while `emitSplit` drops the
+  limit. MySQL then uses the per-row check with no per-copy limit.
 - **Counts per connection.** N pooled connections send N COUNT queries per table per second.
 
 ## Proposed Solutions

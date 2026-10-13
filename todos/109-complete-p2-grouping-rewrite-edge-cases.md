@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "109"
 tags: [code-review, correctness]
@@ -46,7 +46,7 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 ## Acceptance Criteria
 
-- [ ] Unit tests for each shape, and integration rows equal to the plain query on every engine.
+- [x] Unit tests for each shape, and integration rows equal to the plain query on every engine.
 
 ## Work Log
 
@@ -69,6 +69,14 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
   - the label of `SUM(CASE WHEN m.x = ? ...)` on MySQL and MariaDB is the text with `?`, where
     the plain statement shows `'a'`.
 - **Not tested:** the schema in `columnKey`.
+
+### 2026-10-13 - Fixed
+
+**By:** Claude Code
+- An ORDER BY element names an item on top only when it is that bare name.
+- `t.*` inside an aggregate reads through the view.
+- A forced label that holds a placeholder reads through the view.
+- `columnKey` includes the schema.
 
 ## Resources
 

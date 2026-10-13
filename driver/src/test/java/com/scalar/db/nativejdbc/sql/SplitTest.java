@@ -313,6 +313,34 @@ class SplitTest {
   }
 
   @Test
+  void reviewFindings_fallBackOrReadEnough() {
+    // 108: a count beyond a long limits no copy
+    assertThat(
+            SqlAst.parse(
+                    "SELECT a.x FROM a ORDER BY a.x LIMIT 5, 18446744073709551615", Engine.MYSQL)
+                .orElseThrow()
+                .limitsEachCopy())
+        .isFalse();
+    assertThat(
+            parse("select a.x from a order by a.x limit 9223372036854775807 offset 1")
+                .limitsEachCopy())
+        .isFalse();
+    // 109: an item's name inside an ORDER BY expression, t.* inside an aggregate
+    assertThat(splittable("select t.x, count(*) from t group by t.x order by lower(x)")).isEmpty();
+    assertThat(splittable("select t.x, count(*) from t group by t.x order by x"))
+        .containsExactly("t");
+    assertThat(splittable("select count(t.*) from t")).isEmpty();
+    // 109: a forced label holding a placeholder reads through the view
+    SqlAst my =
+        SqlAst.parse("SELECT SUM(CASE WHEN a.x = ? THEN 1 ELSE 0 END) FROM a", Engine.MYSQL)
+            .orElseThrow();
+    assertThat(twoCopies(my, Map.of())).isNull();
+    // 110: a whole-row reference reads every column; a doubled quote is one
+    assertThat(read("select t from t where id = 1", 0)).isNull();
+    assertThat(read("select \"a\"\"b\" from t", 0)).containsExactly("a\"b");
+  }
+
+  @Test
   void splittableRefs_includeGroupingStatements() {
     assertThat(splittable("select count(*) from a")).containsExactly("a");
     assertThat(splittable("select a.x, max(b.y) from a join b on a.id = b.aid group by a.x"))

@@ -85,7 +85,8 @@ public final class Proxies {
 
   /** The methods of Object and java.sql.Wrapper, the same for every proxy; the rest is handle's. */
   private abstract static class Handler implements InvocationHandler {
-    Object target; // a prepared statement's is replaced when it is prepared again
+    // a prepared statement's is replaced when it is prepared again; read by cancel() on any thread
+    volatile Object target;
 
     Handler(Object target) {
       this.target = target;
@@ -106,7 +107,11 @@ public final class Proxies {
         case "unwrap":
           {
             Class<?> iface = (Class<?>) args[0];
-            return iface.isInstance(proxy) ? proxy : forward(target, method, args);
+            if (iface.isInstance(proxy)) {
+              return proxy;
+            }
+            handedOut();
+            return forward(target, method, args);
           }
         case "isWrapperFor":
           {
@@ -120,6 +125,9 @@ public final class Proxies {
 
     abstract @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args)
         throws Throwable;
+
+    /** The application now holds the vendor object itself. */
+    void handedOut() {}
   }
 
   private static final class ConnectionHandler extends Handler {
@@ -276,7 +284,7 @@ public final class Proxies {
   }
 
   private static final class StatementHandler extends Handler {
-    Statement vendor;
+    volatile Statement vendor;
     final Connection connection;
     final ConnectionHandler owner;
     Router.@Nullable Route prepared;
@@ -288,7 +296,14 @@ public final class Proxies {
     Object @Nullable [] preparedArgs;
     final Map<String, Call> settings = new LinkedHashMap<>();
     final Map<Integer, Call> parameters = new LinkedHashMap<>();
-    boolean batchPending;
+    // the statement's state, like its vendor statement, may be read from another thread
+    volatile boolean batchPending;
+    volatile boolean unwrapped;
+
+    @Override
+    void handedOut() {
+      unwrapped = true;
+    }
 
     StatementHandler(
         Statement vendor,
@@ -324,7 +339,10 @@ public final class Proxies {
       if ((name.startsWith("set") && args != null && args.length == 1)
           || name.equals("closeOnCompletion")) {
         Object r = forward(vendor, method, args);
-        settings.put(name, new Call(method, args == null ? new Object[0] : args));
+        if (preparedWith != null) {
+          settings.remove(name); // replayed in the order of the last calls (todo 111)
+          settings.put(name, new Call(method, args == null ? new Object[0] : args));
+        }
         return r;
       }
       Router.Route split = prepared;
@@ -373,7 +391,8 @@ public final class Proxies {
           if (canPrepareAgain(prepared, route)) {
             prepareAgain(route);
           } else {
-            route = prepared; // the old form returns the same rows
+            // the old form returns the same rows; checked again after the new route's interval
+            route = Router.keepText(prepared, route);
           }
         }
         prepared = route;
@@ -421,8 +440,11 @@ public final class Proxies {
      * Whether a prepared split read can be prepared again for a route that differs only in its
      * committed check: the same placeholders, and no batch the vendor statement already holds.
      */
-    private boolean canPrepareAgain(Router.Route old, Router.Route now) {
+    private boolean canPrepareAgain(Router.Route old, Router.Route now) throws SQLException {
+      // not a closed statement, which must keep failing, nor one the application holds unwrapped
       return preparedWith != null
+          && !unwrapped
+          && !vendor.isClosed()
           && !batchPending
           && old.parameterSources != null
           && old.parameterSources.equals(now.parameterSources);
@@ -451,7 +473,11 @@ public final class Proxies {
       } catch (Throwable t) {
         vendor = old;
         target = old;
-        fresh.close();
+        try {
+          fresh.close();
+        } catch (SQLException e) {
+          t.addSuppressed(e);
+        }
         throw t;
       }
       old.close();

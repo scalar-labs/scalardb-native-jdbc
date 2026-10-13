@@ -2,6 +2,7 @@ package com.scalar.db.nativejdbc.sql;
 
 import com.scalar.db.nativejdbc.engine.Engine;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.math.BigInteger;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -1386,7 +1387,11 @@ public final class SqlAst {
       if (c.isAllColumnsOfTable()) {
         return null;
       }
-      out.add(lowerUnquoted(c.name()));
+      String name = lowerUnquoted(c.name());
+      if (q == null && name.equals(self)) {
+        return null; // PostgreSQL reads an unqualified table name as its whole row (todo 110)
+      }
+      out.add(name);
     }
     return out;
   }
@@ -1480,8 +1485,15 @@ public final class SqlAst {
     }
   }
 
+  /** A name as the engine stores it, lower-cased: quotes removed, a doubled quote made single. */
   private static String lowerUnquoted(String name) {
-    return unquoted(name.strip()).toLowerCase(Locale.ROOT);
+    String stripped = name.strip();
+    String bare = unquoted(stripped);
+    if (bare.length() < stripped.length()) {
+      String close = stripped.substring(stripped.length() - 1);
+      bare = bare.replace(close + close, close);
+    }
+    return bare.toLowerCase(Locale.ROOT);
   }
 
   private static final Set<String> MYSQL_SELECT_MODIFIERS =
@@ -1549,6 +1561,13 @@ public final class SqlAst {
       if (aggregates) {
         (depth > 0 ? inside : outside).add(column);
       }
+      return null;
+    }
+
+    @Override
+    public <S> Void visit(AllTableColumns allTableColumns, S context) {
+      // COUNT(t.*): on top of the copies t no longer resolves (todo 109)
+      rowWise &= !aggregates;
       return null;
     }
 
@@ -1685,9 +1704,13 @@ public final class SqlAst {
       s.getHaving().accept(check, null);
     }
     int beforeOrderBy = check.outside.size();
+    // an ORDER BY element that is a bare name may name an item on top; inside an expression,
+    // PostgreSQL, Oracle and SQL Server do not resolve item names (todo 109)
+    Set<Object> bareOrderBy = Collections.newSetFromMap(new IdentityHashMap<>());
     if (s.getOrderByElements() != null) {
       for (OrderByElement o : s.getOrderByElements()) {
         o.getExpression().accept(check, null);
+        bareOrderBy.add(o.getExpression());
       }
     }
     if (!check.rowWise) {
@@ -1723,6 +1746,7 @@ public final class SqlAst {
         g.outside.add(c);
       } else if (i < beforeOrderBy
           || c.getTable() != null
+          || !bareOrderBy.contains(c)
           || !labels.contains(key(engine, c.getColumnName()))) {
         return null; // on top a column must be grouped, or an ORDER BY name an item
       }
@@ -1756,7 +1780,10 @@ public final class SqlAst {
   /** A column's identity on top of the copies: its qualifier and name, as the engine compares. */
   private String columnKey(Column c) {
     Table t = c.getTable();
-    return (t == null || t.getName() == null ? "" : key(engine, t.getName()))
+    String schema = t == null || t.getSchemaName() == null ? "" : key(engine, t.getSchemaName());
+    return schema
+        + "."
+        + (t == null || t.getName() == null ? "" : key(engine, t.getName()))
         + "."
         + key(engine, c.getColumnName());
   }
@@ -2240,17 +2267,19 @@ public final class SqlAst {
       }
       offset = s.getOffset().getOffset();
     }
-    long skipped = 0;
+    BigInteger skipped = BigInteger.ZERO;
     if (offset != null) {
       if (!(offset instanceof LongValue)) {
         return null;
       }
-      skipped = ((LongValue) offset).getValue();
+      skipped = ((LongValue) offset).getBigIntegerValue();
     }
     if (count instanceof LongValue) {
-      return new CopyLimit(null, skipped + ((LongValue) count).getValue());
+      // a count beyond a long, such as MySQL's 18446744073709551615 for "to the end", stops nothing
+      BigInteger rows = skipped.add(((LongValue) count).getBigIntegerValue());
+      return rows.bitLength() < 64 ? new CopyLimit(null, rows.longValue()) : null;
     }
-    if (count instanceof JdbcParameter && skipped == 0) {
+    if (count instanceof JdbcParameter && skipped.signum() == 0) {
       Node n = count.getASTNode();
       Token t = n == null ? null : n.jjtGetFirstToken();
       return t == null || !t.image.equals("?") ? null : new CopyLimit(t, 0);
@@ -2450,6 +2479,16 @@ public final class SqlAst {
    * Oracle by the expression's text.
    */
   private @Nullable String expressionLabel(Expression e, Token first, Token last) {
+    if (engine != Engine.SQLSERVER && engine != Engine.POSTGRESQL) {
+      for (Token t = first; t != null; t = t.next) {
+        if (t.image.equals("?")) {
+          return null; // the engine labels the text with the value bound in its place (todo 109)
+        }
+        if (t == last) {
+          break;
+        }
+      }
+    }
     switch (engine) {
       case SQLSERVER:
         return "";

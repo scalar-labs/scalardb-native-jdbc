@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "111"
 tags: [code-review, correctness, jdbc]
@@ -56,7 +56,7 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 ## Acceptance Criteria
 
-- [ ] Tests for close-then-execute, replay order, unwrap-then-recount, and a refused re-prepare not
+- [x] Tests for close-then-execute, replay order, unwrap-then-recount, and a refused re-prepare not
       re-routing every execute.
 
 ## Work Log
@@ -78,6 +78,23 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
   - `setLargeMaxRows(100); setMaxRows(5); setLargeMaxRows(7)` came back as 5;
   - on MySQL, an unwrapped vendor statement was closed.
 - **Not tested:** the old `getParameterMetaData` object, `cancel()` visibility, the masked error.
+
+### 2026-10-13 - Fixed
+
+**By:** Claude Code
+- No re-prepare for a closed statement, or for one whose vendor statement the application
+  unwrapped. Both keep their text, so the vendor reports a closed statement as closed.
+- Settings are replayed in the order of their last calls, and recorded only for prepared
+  statements.
+- The statement fields are volatile.
+- A failure to close the new statement is attached as suppressed.
+- A refused re-prepare keeps its text with the new route's recheck time (`Router.keepText`), so it
+  is not routed twice on every execute.
+- Not done:
+  - a `getParameterMetaData` object taken before a re-prepare still refers to the old statement;
+    added to todo 100;
+  - parameters are still recorded for every split read on every engine, which is needed because a
+    later re-route can make a statement count-dependent.
 
 ## Resources
 

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "106"
 tags: [code-review, correctness, postgresql, mysql]
@@ -56,10 +56,10 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 ## Acceptance Criteria
 
-- [ ] In a transaction on PostgreSQL 16, `SELECT ... WHERE ? IS NULL OR id = ?` over a ScalarDB table
+- [x] In a transaction on PostgreSQL 16, `SELECT ... WHERE ? IS NULL OR id = ?` over a ScalarDB table
       prepares and runs, and the transaction's earlier insert commits.
-- [ ] After a failed statement in a transaction, `execute("ROLLBACK")` works.
-- [ ] A failed probe is cached.
+- [x] After a failed statement in a transaction, `execute("ROLLBACK")` works.
+- [x] A failed probe is cached.
 
 ## Work Log
 
@@ -81,6 +81,15 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
   table failed with "Streaming result set ... is still active".
 - **Not reproduced: SET/SHOW before an SQL `ROLLBACK`.** After a failed statement in a
   transaction, `execute("ROLLBACK")` worked.
+
+### 2026-10-13 - Fixed
+
+**By:** Claude Code
+- The EXPLAIN check runs under a savepoint inside a transaction (`Router.explainsParallel`). Any
+  failure counts as "not parallel" and is cached.
+- The MySQL/MariaDB count falls back to the last count, or 0, when it cannot be read.
+- The SQL `ROLLBACK` part did not reproduce.
+- `ReviewFindingsIntegrationTest` passes on all six configurations.
 
 ## Resources
 

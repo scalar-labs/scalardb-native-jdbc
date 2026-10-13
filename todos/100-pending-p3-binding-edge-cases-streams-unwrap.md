@@ -53,3 +53,10 @@ See Findings.
 
 - Commits 7503c10, ca8046d, 56c44ba; docs/design.md, docs/plans/proxy-step.md milestone 3b,
   docs/benchmarks/read-overhead.md.
+
+### 2026-10-13 - From todo 111
+
+**By:** Claude Code
+- A `getParameterMetaData` object taken before a transparent re-prepare still refers to the old,
+  closed vendor statement.
+

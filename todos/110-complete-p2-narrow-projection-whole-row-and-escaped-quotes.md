@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "110"
 tags: [code-review, correctness, postgresql]
@@ -40,8 +40,8 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 ## Acceptance Criteria
 
-- [ ] `SELECT t FROM t` through the driver equals the plain query on PostgreSQL.
-- [ ] A column named `a"b` reads correctly.
+- [x] `SELECT t FROM t` through the driver equals the plain query on PostgreSQL.
+- [x] A column named `a"b` reads correctly.
 
 ## Work Log
 
@@ -60,6 +60,12 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 - **Confirmed:** `SELECT m FROM made m WHERE m.id = 1` returned `(1)` instead of `(1,a)` on
   PostgreSQL.
 - **Not tested:** doubled quotes.
+
+### 2026-10-13 - Fixed
+
+**By:** Claude Code
+- An unqualified name equal to the table's name or alias reads every column.
+- Doubled quotes are unescaped when names are matched.
 
 ## Resources
 

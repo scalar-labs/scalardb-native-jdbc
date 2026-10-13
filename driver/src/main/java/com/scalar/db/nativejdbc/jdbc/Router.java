@@ -12,6 +12,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLSyntaxErrorException;
+import java.sql.Savepoint;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -391,9 +392,6 @@ final class Router {
    * with {@code EXPLAIN (GENERIC_PLAN)}, which plans without the values; before PostgreSQL 16, or
    * when the plan cannot be made, the answer is no.
    */
-  @SuppressFBWarnings(
-      value = "SQL_INJECTION_JDBC",
-      justification = "the application's own statement, its tables renamed to quoted data tables")
   private boolean plainPlanIsParallel(
       Connection vendor,
       String sql,
@@ -415,18 +413,46 @@ final class Router {
                     : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
               });
       if (plain != null) {
-        try (Statement st = vendor.createStatement();
-            ResultSet rs = st.executeQuery("EXPLAIN (GENERIC_PLAN, FORMAT JSON) " + plain)) {
-          parallel = rs.next() && rs.getString(1).contains("\"Node Type\": \"Gather");
-        } catch (SQLException e) {
-          if (!vendor.getAutoCommit()) {
-            throw e; // the transaction is aborted now; let the application see why
-          }
-        }
+        parallel = explainsParallel(vendor, plain);
       }
     }
     parallelPlain.put(sql, parallel);
     return parallel;
+  }
+
+  /**
+   * Runs the EXPLAIN; any failure, such as a parameter whose type a generic plan cannot infer (todo
+   * 106), means no. Inside a transaction it runs under a savepoint, since a failed statement would
+   * abort the application's transaction.
+   */
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "the application's own statement, its tables renamed to quoted data tables")
+  private static boolean explainsParallel(Connection vendor, String plain) {
+    Savepoint sp = null;
+    try {
+      if (!vendor.getAutoCommit()) {
+        sp = vendor.setSavepoint();
+      }
+      boolean parallel;
+      try (Statement st = vendor.createStatement();
+          ResultSet rs = st.executeQuery("EXPLAIN (GENERIC_PLAN, FORMAT JSON) " + plain)) {
+        parallel = rs.next() && rs.getString(1).contains("\"Node Type\": \"Gather");
+      }
+      if (sp != null) {
+        vendor.releaseSavepoint(sp);
+      }
+      return parallel;
+    } catch (SQLException e) {
+      if (sp != null) {
+        try {
+          vendor.rollback(sp);
+        } catch (SQLException ignored) {
+          // the application's next statement reports the connection's state
+        }
+      }
+      return false;
+    }
   }
 
   /** The lower-cased columns that lead an index of the table: its key's first, and the indexed. */
@@ -458,6 +484,8 @@ final class Router {
       return cached;
     }
     long count;
+    // the count only chooses a plan: when it cannot be read, as with a streaming result open on
+    // the connection (todo 106), the last one, or none, will do
     try (Statement st = vendor.createStatement();
         ResultSet rs =
             st.executeQuery(
@@ -470,6 +498,8 @@ final class Router {
                     + ") x")) {
       rs.next();
       count = rs.getLong(1);
+    } catch (SQLException e) {
+      count = cached == null ? 0 : cached[0];
     }
     long[] fresh = {count, now};
     inflight.put(meta, fresh);
@@ -529,6 +559,33 @@ final class Router {
   /** After a rollback, which undoes a SET made in the transaction. */
   void rolledBack() {
     workersOff = null;
+  }
+
+  /**
+   * The route a prepared statement keeps when it cannot be prepared again for a route that differs
+   * only in its committed checks: its own text, checked again when the new route is.
+   *
+   * @param kept the route the statement was prepared with
+   * @param now the route it would take now
+   * @return the kept text with the new route's recheck time
+   */
+  static Route keepText(Route kept, Route now) {
+    return new Route(
+        kept.source,
+        kept.sql,
+        kept.changesSession,
+        kept.changesNames,
+        kept.passthrough,
+        now.isolation,
+        now.sessionGeneration,
+        now.catalogGeneration,
+        now.trustedUntil,
+        kept.parameterSources,
+        kept.parameters,
+        now.recheckAt,
+        false,
+        kept.perRow,
+        kept.parallel);
   }
 
   /**

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "108"
 tags: [code-review, correctness]
@@ -40,7 +40,7 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 ## Acceptance Criteria
 
-- [ ] `LIMIT 5, 18446744073709551615` and `FETCH NEXT 9223372036854775807 ROWS` return the plain
+- [x] `LIMIT 5, 18446744073709551615` and `FETCH NEXT 9223372036854775807 ROWS` return the plain
       query's rows on every engine.
 
 ## Work Log
@@ -61,6 +61,13 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
   - PostgreSQL: "LIMIT must not be negative";
   - MySQL and MariaDB: `NumberFormatException`;
   - Oracle: an empty result instead of two rows, with no error.
+
+### 2026-10-13 - Fixed
+
+**By:** Claude Code
+- `copyLimit` reads the literals as `BigInteger`. A sum that does not fit a `long` means no per-copy
+  limit.
+- The mismatch between `limitsEachCopy` and `emitSplit` (performance only) moves to todo 112.
 
 ## Resources
 
