@@ -61,8 +61,10 @@ The read algorithm the measurements lead to (sections below, in the order they w
    Server, MySQL and MariaDB. With a 1 ms round trip to the database, short queries come within
    1.0-1.8x, three tables 0.6-2.2x, four tables 0.8-3.4x; full scans and large results keep their
    local ratios. Below 1.0x is Oracle choosing a better plan for the split than for the plain query.
-7. **Not measured:** the driver's own cost per statement, parsing and rewriting (about 0.3 ms
-   without a cache, todo 008), and joins of five or more ScalarDB tables (32 copies and up).
+7. **Through the driver** (last section): the driver's own SQL matches or beats the hand-written
+   forms; routing a statement costs 0.3-2.6 ms before it reaches the server, so the statement
+   cache (todo 008) is needed. Not measured: joins of five or more ScalarDB tables (32 copies
+   and up).
 
 ## Ratios to BASE, indexed shapes (run with the statistics and IN fixes)
 
@@ -815,3 +817,91 @@ What follows for the driver:
    the table has more than a few hundred rows in flight; the DISTINCT set otherwise. The count is
    read through the in-flight index and cached briefly.
 3. Primary-key access needs nothing on any engine.
+
+## Through the driver (2026-10-13)
+
+New mode `DRIVER`: BASE's statement run through the driver. The benchmark's tables are imported
+into ScalarDB, decoupled. ScalarDB indexes are created on the indexed columns, through each table's
+virtual table, so that ScalarDB also indexes the before image (todo 102). The benchmark's metadata
+rows are copied into ScalarDB's metadata tables, statistics are gathered, and the driver's setup
+is run. The driver connection keeps the default catalog TTL; the tests' 0 reloads the catalog on
+every execution, which first measured as 4-5 ms per statement. Run with
+`-Dnativejdbc.bench.modes=SPLIT_DRV,DRIVER -Dnativejdbc.bench.beforeIndex=plain`, at 100 and at
+10,000 rows in flight. `SPLIT_DRV` is the hand-written form of the previous sections. Every mode
+returned BASE's rows.
+
+The driver now adds what the earlier sections only measured:
+- per-copy aggregates;
+- referenced columns only (todo 096);
+- the per-table committed check on MySQL and MariaDB (todo 103);
+- the limit in each copy (todo 089);
+- PostgreSQL split reads without parallel workers unless the plain plan is parallel.
+
+Ratios to BASE, medians, `SPLIT_DRV / DRIVER`:
+
+100 rows in flight:
+
+| shape | PostgreSQL | MySQL | MariaDB | SQL Server | Oracle |
+|---|---|---|---|---|---|
+| key lookup | 0.8 / 1 | 1.1 / 1.1 | 1 / 1.1 | 1.1 / 1.2 | 1 / 1.1 |
+| non-key filter (100 rows) | 1.3 / 0.9 | 1.2 / 1.2 | 1.3 / 1.4 | 1.3 / 1.2 | 1.2 / 1.4 |
+| FK filter, ORDER BY, LIMIT 3 | 0.9 / 1 | 0.8 / 0.7 | 0.7 / 0.7 | 1 / 0.9 | 1.3 / 1.3 |
+| key JOIN FK, both ScalarDB | 1.1 / 1.2 | 1.6 / 1.4 | 1.4 / 1.6 | 1.6 / 1.5 | 1.7 / 1.7 |
+| IN subquery on non-key | 1.3 / 1.9 | 1.3 / 1.3 | 2.2 / 3.2 | 2.2 / 2.7 | 0.4 / 1.6 |
+| LEFT JOIN, ScalarDB on both sides | 1.2 / 1.3 | 2.1 / 1846.7 | 2.1 / 788.3 | 2 / 1.1 | 1.6 / 1.3 |
+| full scan: SUM of 500k rows | 1.3 / 2.7 | 2 / 1.6 | 3.1 / 2.2 | 1.2 / 1.2 | 2.9 / 1.6 |
+| 3 tables: key lookup (5 rows) | 1.3 / 1.4 | 2.5 / 2.4 | 2.4 / 2.6 | 1.6 / 1.8 | 1.6 / 1.5 |
+| 4 tables: key lookup (25 rows) | 2 / 2.1 | 4.1 / 4 | 5.2 / 4.8 | 1.9 / 1.6 | 1.6 / 1.6 |
+| page: ORDER BY key DESC, 20 rows of 500k | 45.6 / 1.1 | 233.4 / 1.7 | 368 / 1.9 | 1.6 / 1.2 | 34.5 / 1.1 |
+| page: JOIN FK, ORDER BY key DESC, 20 rows | 100.1 / 2.4 | 348.4 / 6.2 | 1.8 / 1.5 | 3.9 / 3.3 | 95 / 2.1 |
+| wide: 4 tables JOIN on key, key lookup | 2.1 / 2 | 13.7 / 5.4 | 14.1 / 5.5 | 1.6 / 1.3 | 1.3 / 1.3 |
+
+10k rows in flight:
+
+| shape | PostgreSQL | MySQL | MariaDB | SQL Server | Oracle |
+|---|---|---|---|---|---|
+| key lookup | 1.1 / 1 | 9.2 / 0.9 | 4.6 / 1.1 | 1 / 1 | 1.1 / 1 |
+| non-key filter (100 rows) | 1.4 / 1.4 | 10.8 / 1.6 | 4.7 / 1.3 | 3.2 / 3.9 | 1.5 / 1.3 |
+| FK filter, ORDER BY, LIMIT 3 | 1 / 1.1 | 6.3 / 0.7 | 3.2 / 0.8 | 1.1 / 1.1 | 1.2 / 1.1 |
+| key JOIN FK, both ScalarDB | 1.1 / 1.1 | 21.3 / 1.6 | 10.1 / 1.7 | 1.6 / 1.7 | 1.3 / 1.1 |
+| IN subquery on non-key | 5.7 / 3.1 | 15.4 / 10.1 | 9 / 6.1 | 3.3 / 4 | 0.6 / 2 |
+| LEFT JOIN, ScalarDB on both sides | 1.1 / 1.2 | 31.5 / 1795.8 | 14.3 / 996.3 | 1.8 / 1.1 | 1.2 / 1 |
+| full scan: SUM of 500k rows | 5.9 / 3.9 | 4.5 / 4 | 3.7 / 2.7 | 0.5 / 0.5 | 4.1 / 3.1 |
+| 3 tables: key lookup (5 rows) | 1.3 / 1.3 | 23.5 / 2.8 | 10.1 / 2.6 | 1.2 / 1.4 | 1.4 / 1.3 |
+| 4 tables: key lookup (25 rows) | 2 / 1.9 | 30.9 / 4.4 | 14.7 / 4.4 | 2.2 / 1.8 | 1.7 / 1.7 |
+| page: ORDER BY key DESC, 20 rows of 500k | 70.5 / 1.2 | 406.2 / 35.1 | 415.7 / 5.9 | 1.2 / 1.7 | 44.5 / 1.1 |
+| page: JOIN FK, ORDER BY key DESC, 20 rows | 155.1 / 168.3 | 1065.6 / 229.4 | 2.4 / 5.7 | 261.4 / 333.8 | 144.1 / 46.1 |
+| wide: 4 tables JOIN on key, key lookup | 2.1 / 1.9 | 53.4 / 3.8 | 25.9 / 4.6 | 1.8 / 1.5 | 1.3 / 1.3 |
+
+- **Selective shapes match the hand-written form at 100 rows in flight** on every engine, within
+  about 20%.
+- **At 10,000 rows in flight, MySQL and MariaDB are far better through the driver.** The per-row
+  check on tables reached through an index takes key lookups from 9.2x to 0.9x, key joins from 21x
+  to 1.6x and four tables from 31x to 4.4x.
+- **Pagination is close to the plain query** on PostgreSQL, MariaDB, SQL Server and Oracle. MySQL
+  is 1.7x at 100 rows in flight and 35x at 10,000.
+- **Still open:**
+  - a ScalarDB table on the nullable side of a LEFT JOIN, 790-1800x on MySQL and MariaDB,
+    which milestone 3c splits;
+  - the IN subquery on PostgreSQL, 1.9-3.1x, also 3c;
+  - a paginated join at 10,000 rows in flight, 46-334x on every engine but MariaDB, where the
+    hand-written form is as bad;
+  - PostgreSQL's SUM of 500k rows at 100 rows in flight, 2.7x against 1.3x.
+- **Wide tables gain from reading only the columns used**: four wide tables are 5.4x against 13.7x
+  on MySQL.
+
+**What routing costs**, `prepareStatement` through the vendor driver against through the driver,
+median µs. None of the vendor drivers contacts the server at prepare, so the difference is the
+driver's parse and rewrite, with nothing cached (todo 098):
+
+| shape | PostgreSQL | MySQL | MariaDB | SQL Server | Oracle |
+|---|---|---|---|---|---|
+| key lookup | 1 / 432 | 11 / 448 | 1 / 338 | 4 / 329 | 2 / 327 |
+| key JOIN FK, two tables | 0 / 489 | 8 / 619 | 0 / 526 | 0 / 432 | 2 / 471 |
+| 3 tables, key lookup | 0 / 837 | 11 / 1213 | 0 / 987 | 0 / 820 | 2 / 900 |
+| 4 tables, key lookup | 0 / 1711 | 14 / 2582 | 1 / 1986 | 0 / 1588 | 3 / 1810 |
+
+Todo 008's target is under 150 µs for an uncached statement and under 10 µs for a cached one. A
+statement run once, as `Statement.execute` or an ORM that does not keep its prepared statements,
+pays 0.3-2.6 ms: as much as the query itself for a key lookup. The statement cache is needed.
+

@@ -58,3 +58,17 @@ Option 1 (agreed 2026-10-12).
 
 **By:** Claude Code
 - From the 096 measurements and the check of ScalarDB's index and commit code.
+
+### 2026-10-13 - Imported tables: index through the virtual table
+
+**By:** Claude Code
+- Found while benchmarking through the driver.
+- On a decoupled imported table, `createIndex(ns, "<table>", col)` with the table's own name reaches
+  the raw data table. It indexes the data column and sets `indexed`, but creates no `before_<col>`
+  index on the metadata table.
+- `createIndex(ns, "<table>_scalardb", col)`, through the virtual table, creates both.
+- Measured on PostgreSQL at 10k rows in flight: the driver's foreign-key filter was 3.5x without
+  the before index and 1.0x with it.
+- The setup report should flag an indexed column whose before image has no index, and say to
+  create the index through the virtual table.
+

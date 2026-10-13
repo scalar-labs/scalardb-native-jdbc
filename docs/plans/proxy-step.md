@@ -192,7 +192,11 @@ the engines give. Done (2026-10-13): each copy reads only the columns used (todo
 committed check chosen per table on MySQL and MariaDB by access path and in-flight count, with
 prepared statements prepared again when the count changes their form (todo 103), the row limit in
 each copy (todo 089), and split reads without parallel workers on PostgreSQL. Not done: a split read
-whose plain plan is parallel keeping its workers, the statement cache, the driver-level benchmark. Open: todo 082, an Oracle read that returned no rows in two runs.
+whose plain plan is parallel keeping its workers (done the same day, with `EXPLAIN (GENERIC_PLAN)`),
+the statement cache, which the driver-level benchmark shows is needed (routing costs 0.3-2.6 ms per
+uncached statement, todo 098). The driver-level benchmark (`DRIVER` mode, 2026-10-13) meets the
+acceptance for the shapes the split covers; the LEFT JOIN's nullable side and the IN subquery wait
+for milestone 3c. Open: todo 082, an Oracle read that returned no rows in two runs.
 
 Tests: the cases of milestone 3 on every engine, each also with a join, an IN subquery, a LEFT JOIN, an
 aggregate and three tables, with rows in flight; every split statement's rows equal to the same query

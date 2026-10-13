@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "098"
 tags: [code-review, performance]
@@ -35,7 +35,7 @@ See Findings.
 
 ## Acceptance Criteria
 
-- [ ] Route cost recorded and compared with 008's target.
+- [x] Route cost recorded and compared with 008's target.
 
 ## Work Log
 
@@ -48,3 +48,13 @@ See Findings.
 
 - Commits 7503c10, ca8046d, 56c44ba; docs/design.md, docs/plans/proxy-step.md milestone 3b,
   docs/benchmarks/read-overhead.md.
+
+### 2026-10-13 - Measured
+
+**By:** Claude Code
+- `prepareStatement` through the driver, against the vendor driver: 330-620 µs for one or two
+  tables, 820-1210 µs for three, 1590-2580 µs for four, on all five engines.
+- The vendor drivers took 0-14 µs. Figures are in docs/benchmarks/read-overhead.md, "Through the
+  driver".
+- 008's target is under 150 µs for a miss, so the statement cache is needed.
+

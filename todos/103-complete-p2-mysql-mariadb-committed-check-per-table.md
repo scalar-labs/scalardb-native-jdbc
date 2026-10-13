@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "103"
 tags: [split-read, performance, mysql, mariadb]
@@ -40,7 +40,7 @@ Simpler; scans lose 1.4-2x above the threshold.
 ## Acceptance Criteria
 
 - [x] The emitted form follows the rule; unit tests for the access-path classification.
-- [ ] Benchmark at 100 and 10k rows in flight: no selective shape worse than either fixed form by more
+- [x] Benchmark at 100 and 10k rows in flight: no selective shape worse than either fixed form by more
       than 20%.
 
 ## Work Log
@@ -69,4 +69,14 @@ Simpler; scans lose 1.4-2x above the threshold.
   re-prepared on MySQL and MariaDB.
 - Decision (user, 2026-10-13): count-based, with transparent re-prepare, over choosing at prepare time only or by access path alone.
 - Open: the second acceptance item, from the driver-level benchmark.
+
+### 2026-10-13 - Benchmarked through the driver
+
+**By:** Claude Code
+- At 100 rows in flight, selective shapes are within about 20% of the DISTINCT-set form, the
+  fixed form at that count.
+- At 10k rows in flight, compared with the set: key lookup 9.2x to 0.9x on MySQL, key JOIN FK
+  21x to 1.6x, four tables 31x to 4.4x. These match the per-row form measured before (0.8x, 1.5x
+  and 3.2x).
+- Figures: docs/benchmarks/read-overhead.md, "Through the driver".
 

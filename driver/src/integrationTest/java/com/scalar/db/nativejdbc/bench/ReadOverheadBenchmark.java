@@ -1,7 +1,12 @@
 package com.scalar.db.nativejdbc.bench;
 
+import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
+import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
+import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -12,6 +17,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -133,7 +139,12 @@ class ReadOverheadBenchmark {
     /** MySQL: SPLIT_DAJ with NOT EXISTS kept a per-row probe ({@code NO_SEMIJOIN}). */
     SPLIT_DAJH,
     /** SPLIT_DRV with each derived table projecting only the columns the statement references. */
-    SPLIT_DRVN
+    SPLIT_DRVN,
+    /**
+     * BASE's statement through the driver, on the same tables imported into ScalarDB with their
+     * metadata copied: what the driver's own rewrite costs, parsing included.
+     */
+    DRIVER
   }
 
   enum Param {
@@ -584,6 +595,15 @@ class ReadOverheadBenchmark {
     try (Connection admin = e.open()) {
       load(e, admin);
     }
+    if (modes().contains(Mode.DRIVER)) {
+      importForDriver(e);
+      // the default catalog TTL, not the tests' 0, which reloads the catalog on every execution
+      driver =
+          DriverManager.getConnection(
+              "jdbc:scalardb-native:" + e.url().substring("jdbc:".length()),
+              e.username(),
+              e.password());
+    }
     // -Dnativejdbc.bench.rttMs=1: measure through a proxy adding this round-trip time
     double rtt = Double.parseDouble(System.getProperty("nativejdbc.bench.rttMs", "0"));
     Matcher hostPort = Pattern.compile("(?<=//|@)([^:/;@]+):(\\d+)").matcher(e.url());
@@ -703,6 +723,10 @@ class ReadOverheadBenchmark {
         report.append('\n');
       }
       report.append("\nStatement length in characters:\n\n").append(header).append(lengths);
+      Connection d = driver;
+      if (d != null) {
+        report.append(routeCost(c, d, engine, only));
+      }
       report.append(writes(c, e));
       String suffix =
           (only.isEmpty() ? "" : "-" + only.replaceAll("\\W+", "_"))
@@ -717,6 +741,12 @@ class ReadOverheadBenchmark {
       Path out = Path.of("build", "bench", "read-overhead-" + e + suffix + ".md");
       Files.createDirectories(Path.of("build", "bench"));
       Files.writeString(out, report.toString(), StandardCharsets.UTF_8);
+    } finally {
+      Connection d = driver;
+      driver = null;
+      if (d != null) {
+        d.close();
+      }
     }
   }
 
@@ -727,7 +757,7 @@ class ReadOverheadBenchmark {
     for (Map.Entry<Mode, String> m : sqls.entrySet()) {
       noParallel(c, e.engine(), q, m.getKey(), true);
       try {
-        results.put(m.getKey(), measure(c, m.getValue(), q.params));
+        results.put(m.getKey(), measure(on(m.getKey(), c), m.getValue(), q.params));
       } catch (SQLException ex) {
         System.out.printf(
             "BENCH %s | %s | %s | error %s%n", e, q.name, m.getKey(), ex.getMessage());
@@ -752,7 +782,7 @@ class ReadOverheadBenchmark {
     try {
       for (Map.Entry<Mode, String> m : sqls.entrySet()) {
         try {
-          PreparedStatement ps = c.prepareStatement(m.getValue());
+          PreparedStatement ps = on(m.getKey(), c).prepareStatement(m.getValue());
           statements.put(m.getKey(), ps);
           rows.put(m.getKey(), timed(c, e, q, m.getKey(), m.getValue(), ps, 4242, 7, null));
           times.put(m.getKey(), new ArrayList<>());
@@ -835,13 +865,183 @@ class ReadOverheadBenchmark {
     noParallel(c, e.engine(), q, m, true);
     try {
       long t0 = System.nanoTime();
-      List<String> rows = run(c, sql, ps, placeholders(ps), q.params, customer, region);
+      List<String> rows = run(on(m, c), sql, ps, placeholders(ps), q.params, customer, region);
       if (times != null) {
         times.add((System.nanoTime() - t0) / 1e6);
       }
       return rows;
     } finally {
       noParallel(c, e.engine(), q, m, false);
+    }
+  }
+
+  /**
+   * The driver's cost per statement before it reaches the server (todo 098): prepareStatement
+   * through the driver and through the vendor driver, which none of the five sends to the server at
+   * prepare, so the difference is the driver's parse and rewrite with nothing cached.
+   */
+  private static String routeCost(Connection vendor, Connection driver, Engine engine, String only)
+      throws SQLException {
+    StringBuilder out =
+        new StringBuilder(
+            "\nprepareStatement, median µs of 1,000 after 300 warm-up, vendor driver / through the"
+                + " driver:\n\n| query | vendor | driver |\n|---|---|---|\n");
+    for (Query q : QUERIES) {
+      if (!Pattern.compile(only).matcher(q.name).find()) {
+        continue;
+      }
+      String sql = render(q, Mode.BASE, engine);
+      if (sql == null) {
+        continue;
+      }
+      out.append(
+          String.format(
+              Locale.ROOT,
+              "| %s | %.0f | %.0f |%n",
+              q.name,
+              prepareMicros(vendor, sql),
+              prepareMicros(driver, sql)));
+    }
+    return out.toString();
+  }
+
+  private static double prepareMicros(Connection c, String sql) throws SQLException {
+    List<Double> times = new ArrayList<>();
+    for (int i = 0; i < 1300; i++) {
+      long t0 = System.nanoTime();
+      c.prepareStatement(sql).close();
+      if (i >= 300) {
+        times.add((System.nanoTime() - t0) / 1e3);
+      }
+    }
+    Collections.sort(times);
+    return times.get(times.size() / 2);
+  }
+
+  // the driver's connection, for DRIVER; one per test run
+  private static @Nullable Connection driver;
+
+  private static Connection on(Mode m, Connection vendor) {
+    return m == Mode.DRIVER ? Objects.requireNonNull(driver, "driver connection") : vendor;
+  }
+
+  /**
+   * For DRIVER: imports the benchmark's ScalarDB tables into ScalarDB, decoupled, with ScalarDB
+   * indexes on the indexed columns (which also index their before images), copies each table's
+   * metadata rows, its rows in flight included, into ScalarDB's metadata table, and runs the
+   * driver's setup.
+   */
+  private static void importForDriver(Engines e) throws Exception {
+    Engine engine = e.engine();
+    String ns = e.storedSchema("bn");
+    Map<String, String> indexed = Map.of("c", "region", "o", "customer_id", "w", "c01", "k", "grp");
+    if (engine == Engine.ORACLE) {
+      // Oracle takes one index per column list: ScalarDB's replaces the benchmark's own
+      try (Connection c = e.open()) {
+        e.execute(
+            c,
+            "DROP INDEX bn.c_region",
+            "DROP INDEX bn.o_customer",
+            "DROP INDEX bn.w_c01",
+            "DROP INDEX bn.k_grp");
+      }
+    }
+    List<String> tables = List.of("c", "o", "r", "w", "k");
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace(ns, true);
+      for (String t : tables) {
+        admin.importTable(
+            ns, e.storedTable(t), Map.of("transaction-metadata-decoupling", "true"), Map.of());
+      }
+    }
+    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      for (String t : tables) {
+        String col = indexed.get(t);
+        if (col != null) {
+          // through the virtual table, ScalarDB's name for the imported table, so that it indexes
+          // the before image as well; the data table's own name reaches the raw table only
+          String virtual =
+              Objects.requireNonNull(
+                  catalog.lookup(List.of(), ns, e.storedTable(t)).virtualTable(), "virtual table");
+          admin.createIndex(ns, virtual, e.storedColumn(col), true);
+        }
+      }
+    }
+    catalog.invalidate();
+    try (Connection c = e.open()) {
+      for (String t : tables) {
+        TableInfo info = catalog.lookup(List.of(), ns, e.storedTable(t));
+        List<String> cols = new ArrayList<>(key(t));
+        cols.addAll(
+            List.of("tx_id", "tx_state", "tx_version", "before_tx_id", "before_tx_version"));
+        for (String col : Objects.requireNonNull(NON_KEY.get(t))) {
+          cols.add("before_" + col);
+        }
+        List<String> target = new ArrayList<>();
+        for (String col : cols) {
+          target.add(
+              engine.quote(
+                  col.startsWith("tx_") || col.startsWith("before_tx_")
+                      ? col
+                      : col.startsWith("before_")
+                          ? "before_" + e.storedColumn(col.substring("before_".length()))
+                          : e.storedColumn(col)));
+        }
+        e.execute(
+            c,
+            "INSERT INTO "
+                + engine.quote(info.namespace())
+                + "."
+                + engine.quote(Objects.requireNonNull(info.metadataTable()))
+                + " ("
+                + String.join(", ", target)
+                + ") SELECT "
+                + String.join(", ", cols)
+                + " FROM bn."
+                + t
+                + "m");
+      }
+      // statistics on the filled metadata tables and the indexed data tables, as load() gathers
+      // them for the benchmark's own; the setup adds the tx_state histograms
+      List<String> stats = new ArrayList<>();
+      for (String t : tables) {
+        TableInfo info = catalog.lookup(List.of(), ns, e.storedTable(t));
+        for (String name :
+            List.of(info.dataTable(), Objects.requireNonNull(info.metadataTable()))) {
+          String q = engine.quote(info.namespace()) + "." + engine.quote(name);
+          switch (engine) {
+            case POSTGRESQL:
+              stats.add("ANALYZE " + q);
+              break;
+            case MYSQL:
+            case MARIADB:
+              stats.add("ANALYZE TABLE " + q);
+              break;
+            case SQLSERVER:
+              stats.add("UPDATE STATISTICS " + q + " WITH FULLSCAN");
+              break;
+            case ORACLE:
+              stats.add(
+                  "BEGIN DBMS_STATS.GATHER_TABLE_STATS('\""
+                      + info.namespace()
+                      + "\"', '\""
+                      + name
+                      + "\"'); END;");
+              break;
+          }
+        }
+      }
+      e.execute(c, stats.toArray(new String[0]));
+      List<Setup.Result> results =
+          Setup.run(catalog, c, i -> i.namespace().equals(ns), Duration.ofMinutes(30), List.of());
+      for (Setup.Result r : results) {
+        if (!r.succeeded()) {
+          throw new IllegalStateException("setup failed: " + r);
+        }
+      }
     }
   }
 
@@ -918,7 +1118,7 @@ class ReadOverheadBenchmark {
   private static final Pattern COLUMN = Pattern.compile("\\{(\\w+)\\.(\\w+)(?:/([AB]))?\\}");
 
   static @Nullable String render(Query q, Mode m, Engine engine) {
-    String sql = renderRaw(q, m, engine);
+    String sql = renderRaw(q, m == Mode.DRIVER ? Mode.BASE : m, engine);
     if (sql == null) {
       return null;
     }
@@ -1320,7 +1520,7 @@ class ReadOverheadBenchmark {
         return "bn." + t + " " + x;
       case VIEW_LJ:
       case SPLIT_LJ:
-        return "bn.rc_" + t + " " + x;
+        return "bn.rcl_" + t + " " + x;
       case VIEW_CASE:
         return "bn.rcj_" + t + " " + x;
       default:
@@ -1955,7 +2155,7 @@ class ReadOverheadBenchmark {
             + " WHERE xm.tx_state IN (1, 2) AND (xm.before_tx_id IS NOT NULL"
             + " OR xm.before_tx_version IS NOT NULL)";
     return List.of(
-        "CREATE VIEW bn.rc_"
+        "CREATE VIEW bn.rcl_"
             + t
             + " AS SELECT "
             + raw
