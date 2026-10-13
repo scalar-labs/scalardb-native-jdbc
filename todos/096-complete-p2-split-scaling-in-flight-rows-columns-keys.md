@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "096"
 tags: [code-review, performance, split-read, benchmark]
@@ -49,7 +49,7 @@ See Findings.
 ## Acceptance Criteria
 
 - [x] Results recorded in docs/benchmarks/read-overhead.md.
-- [ ] Fragments project only referenced columns unless `*` is used, if the measurement supports it.
+- [x] Fragments project only referenced columns unless `*` is used, if the measurement supports it.
 
 ## Work Log
 
@@ -105,3 +105,10 @@ See Findings.
 - ScalarDB's own plain `before_x` indexes serve the in-flight copy like the filtered ones; the
   driver creates none, the setup reports gaps (todo 102). MySQL and MariaDB: the per-row committed
   check wins from about 1k rows in flight on selective shapes, the set on scans (todo 103).
+
+### 2026-10-13 - Referenced columns only
+
+**By:** Claude Code
+- `SqlAst.columnsReadFrom` and `SplitRead.columnsRead`: each copy's fragment reads only the columns
+  qualified by its table and every unqualified one; all of them under `*`, `t.*`, NATURAL or USING.
+- All six integration configurations pass.

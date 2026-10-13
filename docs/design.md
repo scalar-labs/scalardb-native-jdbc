@@ -778,7 +778,10 @@ union as a derived table.
   repeated once per combination of their **copies**, 2^n statements joined by UNION ALL into one: in a
   copy each table is either *committed*, `T` with its rows in flight excluded and its own columns, or
   *in flight*, `T JOIN T_meta` restricted to the rows in flight that have a before image, with every
-  non-key column `c` read as `before_c`. A row is in exactly one copy of its table, so the copies are
+  non-key column `c` read as `before_c`. Either reads only the columns the statement may read from
+  the table, every column it qualifies by the table and every unqualified one, and all of them under
+  a `*` or a NATURAL or USING join; on a 50-column table this shortens the statement up to 5x, which
+  MySQL and MariaDB parse on every execution. A row is in exactly one copy of its table, so the copies are
   disjoint and need no dedup, and each copy is the user's own statement over base tables, so every
   join and filter keeps its indexes; the copies with a table in flight start from the in-flight index
   and are empty unless a matching row is in flight. Measured (`docs/benchmarks/read-overhead.md`):

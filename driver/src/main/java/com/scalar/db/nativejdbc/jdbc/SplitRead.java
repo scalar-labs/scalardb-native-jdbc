@@ -6,8 +6,10 @@ import com.scalar.db.nativejdbc.sql.SqlAst;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -61,18 +63,23 @@ final class SplitRead {
     if (split.isEmpty() || split.size() > MAX_TABLES) {
       return null;
     }
+    List<List<String>> read = new ArrayList<>();
+    for (SqlAst.TableRef r : split) {
+      read.add(columnsRead(ast, r, Objects.requireNonNull(scalarDb.get(r))));
+    }
     List<SqlAst.Naming> copies = new ArrayList<>();
     for (int bits = 0; bits < 1 << split.size(); bits++) {
       Map<SqlAst.TableRef, String> naming = new IdentityHashMap<>(views);
       for (int i = 0; i < split.size(); i++) {
         SqlAst.TableRef r = split.get(i);
         TableInfo t = Objects.requireNonNull(scalarDb.get(r));
+        List<String> cols = read.get(i);
         boolean inFlight = (bits & 1 << i) != 0;
         naming.put(
             r,
             inFlight
-                ? inFlight(engine, t)
-                : committed(engine, t, check(engine, split.size(), bits)));
+                ? inFlight(engine, t, cols)
+                : committed(engine, t, cols, check(engine, split.size(), bits)));
       }
       copies.add(naming::get);
     }
@@ -81,6 +88,24 @@ final class SplitRead {
       columns.put(e.getKey(), e.getValue().dataColumns());
     }
     return ast.emitSplit(copies, columns);
+  }
+
+  /**
+   * The table's columns the statement may read, in the table's order; its first key column when it
+   * reads none, since a derived table needs one.
+   */
+  private static List<String> columnsRead(SqlAst ast, SqlAst.TableRef r, TableInfo t) {
+    Set<String> names = ast.columnsReadFrom(r);
+    if (names == null) {
+      return t.dataColumns();
+    }
+    List<String> out = new ArrayList<>();
+    for (String c : t.dataColumns()) {
+      if (names.contains(c.toLowerCase(Locale.ROOT))) {
+        out.add(c);
+      }
+    }
+    return out.isEmpty() ? List.of(t.keyColumns().get(0)) : out;
   }
 
   private static Check check(Engine engine, int tables, int bits) {
@@ -102,12 +127,12 @@ final class SplitRead {
     throw new AssertionError(engine);
   }
 
-  /** The table's rows not in flight, with its own columns. */
-  private static String committed(Engine engine, TableInfo t, Check check) {
+  /** The table's rows not in flight, with the columns {@code read} of its own. */
+  private static String committed(Engine engine, TableInfo t, List<String> read, Check check) {
     String txState = engine.quote("tx_state");
     StringBuilder sql = new StringBuilder("(SELECT ");
     List<String> cols = new ArrayList<>();
-    for (String c : t.dataColumns()) {
+    for (String c : read) {
       cols.add("t." + engine.quote(c));
     }
     sql.append(String.join(", ", cols)).append(" FROM ").append(data(engine, t)).append(" t");
@@ -153,11 +178,11 @@ final class SplitRead {
     return sql.append(")").toString();
   }
 
-  /** The before image of each of the table's rows in flight that has one. */
-  private static String inFlight(Engine engine, TableInfo t) {
+  /** The before image of each of the table's rows in flight that has one, columns {@code read}. */
+  private static String inFlight(Engine engine, TableInfo t, List<String> read) {
     List<String> cols = new ArrayList<>();
     List<String> keys = t.keyColumns();
-    for (String c : t.dataColumns()) {
+    for (String c : read) {
       String q = engine.quote(c);
       cols.add(keys.contains(c) ? "t." + q : "m." + engine.quote("before_" + c) + " AS " + q);
     }

@@ -1305,6 +1305,53 @@ public final class SqlAst {
     return List.copyOf(out);
   }
 
+  /**
+   * Returns the names, lower-cased and unquoted, of the columns the statement may read from {@code
+   * r}: every column qualified by its alias or name, and every unqualified column, whichever table
+   * it belongs to. Null when it may read them all: a {@code *} in the select list, a {@code t.*} of
+   * it, or a NATURAL or USING join. A split copy reads only these (todo 096); naming too many is
+   * harmless, too few would fail the statement or let an unqualified name resolve to another table.
+   *
+   * @param r a reference of {@link #splittableRefs()}
+   * @return the column names, or {@code null} for all
+   */
+  public @Nullable Set<String> columnsReadFrom(TableRef r) {
+    if (!(statement instanceof PlainSelect)) {
+      return null;
+    }
+    PlainSelect s = (PlainSelect) statement;
+    for (SelectItem<?> item : s.getSelectItems()) {
+      Expression e = item.getExpression();
+      if (e instanceof AllColumns && !(e instanceof AllTableColumns)) {
+        return null; // a t.* is a column reference, below
+      }
+    }
+    if (s.getJoins() != null) {
+      for (Join j : s.getJoins()) {
+        if (j.isNatural() || (j.getUsingColumns() != null && !j.getUsingColumns().isEmpty())) {
+          return null;
+        }
+      }
+    }
+    String self = lowerUnquoted(r.hasAlias() ? Objects.requireNonNull(r.alias()) : r.name());
+    Set<String> out = new HashSet<>();
+    for (ColumnRef c : columnRefs) {
+      Table q = c.qualifierNode();
+      if (q != null && q.getName() != null && !lowerUnquoted(q.getName()).equals(self)) {
+        continue;
+      }
+      if (c.isAllColumnsOfTable()) {
+        return null;
+      }
+      out.add(lowerUnquoted(c.name()));
+    }
+    return out;
+  }
+
+  private static String lowerUnquoted(String name) {
+    return unquoted(name.strip()).toLowerCase(Locale.ROOT);
+  }
+
   private static final Set<String> MYSQL_SELECT_MODIFIERS =
       Set.of(
           "HIGH_PRIORITY",

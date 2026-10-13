@@ -233,6 +233,28 @@ class SplitTest {
     assertThat(split(my, Map.of()).sql()).startsWith("SELECT v.c1 AS `rank` FROM (");
   }
 
+  private static @Nullable List<String> read(String sql, int ref) {
+    SqlAst ast = parse(sql);
+    java.util.Set<String> names = ast.columnsReadFrom(ast.tableRefs().get(ref));
+    return names == null ? null : names.stream().sorted().toList();
+  }
+
+  @Test
+  void columnsReadFrom_areItsQualifiedAndEveryUnqualifiedColumn() {
+    String join = "select a.x, y from a join b on a.id = b.aid where \"Z\" = 1 order by b.w";
+    assertThat(read(join, 0)).containsExactly("id", "x", "y", "z");
+    assertThat(read(join, 1)).containsExactly("aid", "w", "y", "z");
+    // a correlated subquery's columns count too
+    assertThat(read("select 1 from a t where exists (select 1 from c where c.k = t.k2)", 0))
+        .containsExactly("k2");
+    assertThat(read("select count(*) from a", 0)).isEmpty();
+    assertThat(read("select * from a", 0)).isNull();
+    assertThat(read("select a.* , b.x from a join b on a.id = b.aid", 0)).isNull();
+    assertThat(read("select a.* , b.x from a join b on a.id = b.aid", 1))
+        .containsExactly("aid", "x");
+    assertThat(read("select x from a join b using (id)", 0)).isNull();
+  }
+
   @Test
   void splittableRefs_includeGroupingStatements() {
     assertThat(splittable("select count(*) from a")).containsExactly("a");
