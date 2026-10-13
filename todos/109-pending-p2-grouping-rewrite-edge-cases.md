@@ -57,6 +57,19 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
   routing), security, performance and simplicity reviewers. Claims marked "verified" were checked
   against the code before filing.
 
+### 2026-10-13 - Reproduced
+
+**By:** Claude Code
+- `ReviewFindingsIntegrationTest` (uncommitted until the fixes) asserts the correct behaviour, on
+  all six configurations.
+- **Confirmed:**
+  - `ORDER BY LOWER(x)` fails on PostgreSQL ("column x does not exist") and SQL Server ("Invalid
+    column name"); Oracle passed;
+  - `COUNT(m.*)` fails on PostgreSQL ("missing FROM-clause entry");
+  - the label of `SUM(CASE WHEN m.x = ? ...)` on MySQL and MariaDB is the text with `?`, where
+    the plain statement shows `'a'`.
+- **Not tested:** the schema in `columnKey`.
+
 ## Resources
 
 - Commits a772e20, 48f523a, 785e126, cdbc969, 2892bad, 59c9309, d719647; docs/design.md 4.2;

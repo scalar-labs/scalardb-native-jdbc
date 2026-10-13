@@ -52,6 +52,15 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
   routing), security, performance and simplicity reviewers. Claims marked "verified" were checked
   against the code before filing.
 
+### 2026-10-13 - Reproduced
+
+**By:** Claude Code
+- `ReviewFindingsIntegrationTest` (uncommitted until the fixes) asserts the correct behaviour, on
+  all six configurations.
+- **Confirmed:** `SELECT m FROM made m WHERE m.id = 1` returned `(1)` instead of `(1,a)` on
+  PostgreSQL.
+- **Not tested:** doubled quotes.
+
 ## Resources
 
 - Commits a772e20, 48f523a, 785e126, cdbc969, 2892bad, 59c9309, d719647; docs/design.md 4.2;

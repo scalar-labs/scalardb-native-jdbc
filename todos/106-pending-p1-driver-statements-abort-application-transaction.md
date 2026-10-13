@@ -70,6 +70,18 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
   routing), security, performance and simplicity reviewers. Claims marked "verified" were checked
   against the code before filing.
 
+### 2026-10-13 - Reproduced
+
+**By:** Claude Code
+- `ReviewFindingsIntegrationTest` (uncommitted until the fixes) asserts the correct behaviour, on
+  all six configurations.
+- **Confirmed: EXPLAIN.** On PostgreSQL, `? IS NULL OR id = ?` in a transaction failed with "could
+  not determine data type of parameter $1", and the transaction's earlier insert was lost.
+- **Confirmed: COUNT.** With a Connector/J streaming result open, `prepareStatement` on a ScalarDB
+  table failed with "Streaming result set ... is still active".
+- **Not reproduced: SET/SHOW before an SQL `ROLLBACK`.** After a failed statement in a
+  transaction, `execute("ROLLBACK")` worked.
+
 ## Resources
 
 - Commits a772e20, 48f523a, 785e126, cdbc969, 2892bad, 59c9309, d719647; docs/design.md 4.2;

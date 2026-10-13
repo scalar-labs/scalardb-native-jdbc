@@ -1,6 +1,6 @@
 ---
 status: pending
-priority: p2
+priority: p3
 issue_id: "107"
 tags: [code-review, performance, postgresql]
 dependencies: []
@@ -61,6 +61,20 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 - Review of 6388f1b..d719647 (today's 3b work), 2026-10-13: correctness (rewrites; re-prepare and
   routing), security, performance and simplicity reviewers. Claims marked "verified" were checked
   against the code before filing.
+
+### 2026-10-13 - Reproduced
+
+**By:** Claude Code
+- `ReviewFindingsIntegrationTest` (uncommitted until the fixes) asserts the correct behaviour, on
+  all six configurations.
+- **Not reproduced: the lost value.** After a split read, `SET search_path`, then `SHOW`, the
+  value was still 2. `beforeRun` restores the session's value before the `SET` runs, since a `SET`
+  is not a split read, so the driver's 0 is never what `SHOW` sees afterwards.
+- **What stands:**
+  - the toggles around statements that do not need the setting (performance);
+  - the wrong guess after a rolled-back `SET`;
+  - the session-level `SET` behind a transaction-mode pooler.
+- Lowered to P3.
 
 ## Resources
 

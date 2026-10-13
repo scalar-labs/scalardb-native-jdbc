@@ -68,6 +68,17 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
   routing), security, performance and simplicity reviewers. Claims marked "verified" were checked
   against the code before filing.
 
+### 2026-10-13 - Reproduced
+
+**By:** Claude Code
+- `ReviewFindingsIntegrationTest` (uncommitted until the fixes) asserts the correct behaviour, on
+  all six configurations.
+- **Confirmed on MySQL and MariaDB:**
+  - a closed statement ran again after the count changed its form;
+  - `setLargeMaxRows(100); setMaxRows(5); setLargeMaxRows(7)` came back as 5;
+  - on MySQL, an unwrapped vendor statement was closed.
+- **Not tested:** the old `getParameterMetaData` object, `cancel()` visibility, the masked error.
+
 ## Resources
 
 - Commits a772e20, 48f523a, 785e126, cdbc969, 2892bad, 59c9309, d719647; docs/design.md 4.2;
