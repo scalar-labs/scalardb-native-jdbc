@@ -12,7 +12,7 @@ dependencies: []
 
 `conn.unwrap(ScalarDbTables.class).kind(null, "t")` throws a raw NPE from `engine.quote(null)`
 (`Proxies.java:153`, `Router.java:547`). A null schema, meaning "the session's schemas", is a
-likely call on the driver's public interface. Not from today's commits; found by the security
+likely call on the driver's public interface. Added in 7c000b5 (the shell session's work); found by the security
 reviewer.
 
 ## Findings
