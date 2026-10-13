@@ -11,7 +11,7 @@ dependencies: ["026", "084"]
 ## Problem Statement
 
 The driver cannot settle a row ScalarDB left prepared, and ScalarDB has no job that does (todo 084).
-Such rows show stale values to the driver's reads and block its writes, with no sign of why. Todo 082
+Such rows show stale values to the driver's reads and block its writes, with no sign of why. Todo 105
 showed they happen in normal operation on Oracle, not only after a crash. An operator needs to see them.
 
 ## Proposed Solution

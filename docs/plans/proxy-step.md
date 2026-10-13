@@ -196,7 +196,8 @@ whose plain plan is parallel keeping its workers (done the same day, with `EXPLA
 the statement cache, which the driver-level benchmark shows is needed (routing costs 0.3-2.6 ms per
 uncached statement, todo 098). The driver-level benchmark (`DRIVER` mode, 2026-10-13) meets the
 acceptance for the shapes the split covers; the LEFT JOIN's nullable side and the IN subquery wait
-for milestone 3c. Open: todo 082, an Oracle read that returned no rows in two runs.
+for milestone 3c. Todo 105 (formerly 082), an Oracle read that returned no rows in two runs, is
+closed: ScalarDB's record commit, todos 083-085.
 
 Tests: the cases of milestone 3 on every engine, each also with a join, an IN subquery, a LEFT JOIN, an
 aggregate and three tables, with rows in flight; every split statement's rows equal to the same query

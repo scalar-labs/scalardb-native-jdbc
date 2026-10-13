@@ -3,7 +3,7 @@ status: pending
 priority: p2
 issue_id: "083"
 tags: [upstream, scalardb, oracle, consensus-commit]
-dependencies: ["082"]
+dependencies: ["105"]
 ---
 
 # Upstream request to ScalarDB: retry ORA-08177 in the record commit
@@ -28,7 +28,7 @@ in `JdbcAdmin`); the record commit does not.
 
 For ScalarDB's own readers this costs only a lazy recovery. For anything that reads the records without
 the coordinator (the driver), the committed rows look uncommitted until something recovers them. See todo
-082 for the evidence: 4 of 20 complete integration runs failed this way.
+105 for the evidence: 4 of 20 complete integration runs failed this way.
 
 ## Proposed Changes
 
@@ -43,11 +43,11 @@ the coordinator (the driver), the committed rows look uncommitted until somethin
 
 - [ ] Raised with ScalarDB (issue or PR link here).
 - [ ] With a fix released, the driver's Oracle test container no longer needs
-      `_disable_last_successful_login_time` (todo 082) to pass 20 consecutive complete runs.
+      `_disable_last_successful_login_time` (todo 105) to pass 20 consecutive complete runs.
 
 ## Work Log
 
 ### 2026-10-12 - Recorded
 
 **By:** Claude Code
-- Written from the diagnosis in todo 082; the ScalarDB code references are from the v3.19.1 tag.
+- Written from the diagnosis in todo 105; the ScalarDB code references are from the v3.19.1 tag.

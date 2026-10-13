@@ -1,7 +1,7 @@
 ---
-status: pending
+status: complete
 priority: p1
-issue_id: "082"
+issue_id: "105"
 tags: [correctness, oracle, split-read]
 dependencies: []
 ---
@@ -90,3 +90,10 @@ ORA-08177 in the record commit. The upstream request is todo 083. Design section
   recursive statement: `select user#, password, ... from user$ where name = :1`, failing in a
   consistent read (`kcbgtcr -> ktrexc`). A probe showed each logon moving SYSTEM's `last_login`, and
   `_disable_last_successful_login_time = TRUE` (SYSDBA only) stopping it.
+
+### 2026-10-13 - Renumbered and closed
+
+**By:** Claude Code
+- Renumbered from 082, which another todo also used (MySQL through MariaDB Connector/J).
+- Closed: the test fix holds, and what remains for production belongs to todos 083 (ScalarDB
+  retrying ORA-08177), 084 (ScalarDB's recovery job) and 085 (the driver's stuck-row report).

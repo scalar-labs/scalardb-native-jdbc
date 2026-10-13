@@ -1429,7 +1429,7 @@ between `T` and plain tables are the database's own.
   recovery runs, although ScalarDB told its client "committed". On Oracle this path is not rare: at the
   SERIALIZABLE level that ScalarDB requires there for decoupled tables, a hard parse reads `SYS.USER$` at
   the transaction's snapshot, every logon writes the user's last login time into `USER$`, and the read then
-  fails with ORA-08177, which ScalarDB's record commit does not retry (todos 082, 083). Oracle's hidden
+  fails with ORA-08177, which ScalarDB's record commit does not retry (todos 105, 083). Oracle's hidden
   `_disable_last_successful_login_time`, set by a DBA, and long-lived ScalarDB connection pools make it
   rarer; neither removes the failure path.
 - **Liveness depends on ScalarDB-side recovery** for rows left by crashed ScalarDB transactions or failed

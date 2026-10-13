@@ -3,7 +3,7 @@ status: pending
 priority: p2
 issue_id: "084"
 tags: [upstream, scalardb, consensus-commit, liveness]
-dependencies: ["082"]
+dependencies: ["105"]
 ---
 
 # Upstream request to ScalarDB: a job that recovers prepared records on its own
