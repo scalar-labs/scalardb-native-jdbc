@@ -905,3 +905,22 @@ Todo 008's target is under 150 µs for an uncached statement and under 10 µs fo
 statement run once, as `Statement.execute` or an ORM that does not keep its prepared statements,
 pays 0.3-2.6 ms: as much as the query itself for a key lookup. The statement cache is needed.
 
+**With the route cache (todo 008, 2026-10-14)**: each connection keeps the routes of its last 256
+texts, the parser runs on shared threads, and a statement without comments is not lexed again after
+its split is emitted. `prepareStatement`, median µs, vendor / through the driver, same text / new
+text each time (leading blanks, which the cache does not hold):
+
+| shape | MySQL | SQL Server |
+|---|---|---|
+| key lookup | 14 / 30 / 299 | 2 / 4 / 308 |
+| key JOIN FK, two tables | 8 / 72 / 410 | 1 / 2 / 338 |
+| 3 tables, key lookup | 11 / 211 / 646 | 0 / 3 / 418 |
+| 4 tables, key lookup | 14 / 543 / 1111 | 0 / 6 / 543 |
+
+A repeated text costs the driver 1-5 µs. What remains on MySQL, and on MariaDB and Oracle (up to
+50 and 150 µs for four tables), is the vendor driver's own prepare of the longer split text, which
+it scans for placeholders. A new text costs two parses, the statement and its first copy, about
+0.3-0.5 ms on SQL Server, above todo 008's 150 µs; MySQL adds the vendor's prepare of the split
+text. On PostgreSQL a new text also asks the server for the plain statement's plan (design 4.2),
+about 1-5 ms once per text and connection.
+

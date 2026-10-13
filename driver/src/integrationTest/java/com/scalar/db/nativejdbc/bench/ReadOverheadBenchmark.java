@@ -884,8 +884,10 @@ class ReadOverheadBenchmark {
       throws SQLException {
     StringBuilder out =
         new StringBuilder(
-            "\nprepareStatement, median µs of 1,000 after 300 warm-up, vendor driver / through the"
-                + " driver:\n\n| query | vendor | driver |\n|---|---|---|\n");
+            "\nprepareStatement, median µs of 1,000 after 300 warm-up: vendor driver, through the"
+                + " driver, and through the driver with a new text each time (i leading blanks),"
+                + " which the route cache does not hold:\n\n| query | vendor | driver | driver, new"
+                + " text |\n|---|---|---|---|\n");
     for (Query q : QUERIES) {
       if (!Pattern.compile(only).matcher(q.name).find()) {
         continue;
@@ -897,19 +899,22 @@ class ReadOverheadBenchmark {
       out.append(
           String.format(
               Locale.ROOT,
-              "| %s | %.0f | %.0f |%n",
+              "| %s | %.0f | %.0f | %.0f |%n",
               q.name,
-              prepareMicros(vendor, sql),
-              prepareMicros(driver, sql)));
+              prepareMicros(vendor, sql, false),
+              prepareMicros(driver, sql, false),
+              prepareMicros(driver, sql, true)));
     }
     return out.toString();
   }
 
-  private static double prepareMicros(Connection c, String sql) throws SQLException {
+  private static double prepareMicros(Connection c, String sql, boolean newText)
+      throws SQLException {
     List<Double> times = new ArrayList<>();
     for (int i = 0; i < 1300; i++) {
+      String text = newText ? " ".repeat(i) + sql : sql;
       long t0 = System.nanoTime();
-      c.prepareStatement(sql).close();
+      c.prepareStatement(text).close();
       if (i >= 300) {
         times.add((System.nanoTime() - t0) / 1e3);
       }

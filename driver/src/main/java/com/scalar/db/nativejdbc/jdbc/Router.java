@@ -157,6 +157,17 @@ final class Router {
           return size() > 256;
         }
       };
+  // per statement text: its last route, reused while current() finds it still holds; bounded,
+  // least recently used first out
+  // ponytail: per connection, so each pooled connection parses a text once; share across
+  // connections, keyed with the session state, if warming every connection shows in profiles
+  private final Map<String, Route> routes =
+      new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Route> eldest) {
+          return size() > 256;
+        }
+      };
   private boolean passthrough;
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
 
@@ -180,7 +191,8 @@ final class Router {
   }
 
   /**
-   * Routes a statement.
+   * Routes a statement: the route last decided for the same text, if nothing it was decided under
+   * has moved ({@link #current}), so that a text is parsed once, not per execution (todo 008).
    *
    * @param vendor the vendor connection, for the session state and the autocommit mode
    * @param sql the statement as the application wrote it
@@ -189,6 +201,14 @@ final class Router {
    *     statement must not use, or a catalog failure
    */
   Route route(Connection vendor, String sql) throws SQLException {
+    Route cached = routes.get(sql);
+    Route r = cached == null ? decide(vendor, sql) : current(vendor, cached);
+    routes.put(sql, r);
+    return r;
+  }
+
+  /** Routes a statement from its text, as {@link #route}. */
+  private Route decide(Connection vendor, String sql) throws SQLException {
     if (passthrough) {
       if (!vendor.getAutoCommit()) {
         throw Errors.unsupported("the passthrough setting applies in autocommit mode only");
@@ -689,7 +709,7 @@ final class Router {
     if (unchanged && (prepared.recheckAt == 0 || System.nanoTime() - prepared.recheckAt < 0)) {
       return prepared;
     }
-    Route now = route(vendor, prepared.source);
+    Route now = decide(vendor, prepared.source);
     if (now.sql.equals(prepared.sql) || now.perRow.equals(prepared.perRow)) {
       return now;
     }
@@ -697,7 +717,7 @@ final class Router {
     Route same;
     forcedPerRow = prepared.perRow;
     try {
-      same = route(vendor, prepared.source);
+      same = decide(vendor, prepared.source);
     } finally {
       forcedPerRow = null;
     }

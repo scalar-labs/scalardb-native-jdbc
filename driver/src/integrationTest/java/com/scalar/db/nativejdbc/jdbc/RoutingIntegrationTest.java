@@ -361,6 +361,24 @@ class RoutingIntegrationTest {
   }
 
   @Test
+  void aStatementText_isRoutedOnce_untilWhatItWasDecidedUnderMoves() throws SQLException {
+    Catalog catalog = new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open);
+    Session session = new Session(PG.engine());
+    Router router = new Router(PG.engine(), catalog, session);
+    String sql = "SELECT x FROM m1.s WHERE id = ?";
+    try (Connection vendor = PG.open()) {
+      Router.Route first = router.route(vendor, sql);
+      assertThat(router.route(vendor, sql)).isSameAs(first);
+      catalog.invalidate();
+      Router.Route second = router.route(vendor, sql);
+      assertThat(second).isNotSameAs(first);
+      assertThat(second.sql).isEqualTo(first.sql);
+      session.changed(vendor);
+      assertThat(router.route(vendor, sql)).isNotSameAs(second);
+    }
+  }
+
+  @Test
   void backgroundReview_aPreparedRoute_expiresWithTheCatalogTtl() throws Exception {
     try (Connection c = PG.open()) {
       PG.execute(c, "CREATE TABLE IF NOT EXISTS m1.late (id INT PRIMARY KEY, x TEXT)");

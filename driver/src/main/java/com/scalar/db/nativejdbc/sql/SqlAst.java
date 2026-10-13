@@ -18,6 +18,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.AnalyticExpression;
 import net.sf.jsqlparser.expression.ConnectByRootOperator;
@@ -249,6 +251,19 @@ public final class SqlAst {
   }
 
   /**
+   * The threads JSQLParser parses on, so that it can time a parse out. Without one it starts and
+   * stops a thread per parse, most of a parse's cost (todo 008); a timed-out parse keeps its thread
+   * busy, so the pool grows rather than queue, and idle threads end after a minute.
+   */
+  private static final ExecutorService PARSER =
+      Executors.newCachedThreadPool(
+          r -> {
+            Thread t = new Thread(r, "scalardb-native-jdbc-parser");
+            t.setDaemon(true);
+            return t;
+          });
+
+  /**
    * Parses one statement as {@link #parse(String, Engine, boolean)} does, and says why when it
    * refuses it.
    *
@@ -264,7 +279,7 @@ public final class SqlAst {
       // parseStatements, not parse: the latter silently keeps only the first of "a; b"
       Statements statements =
           CCJSqlParserUtil.parseStatements(
-              sql, p -> p.withSquareBracketQuotation(engine == Engine.SQLSERVER));
+              sql, PARSER, p -> p.withSquareBracketQuotation(engine == Engine.SQLSERVER));
       if (statements.size() != 1) {
         return Outcome.refused(
             statements.isEmpty()
@@ -894,7 +909,8 @@ public final class SqlAst {
    */
   private boolean parses(String sql) {
     try {
-      CCJSqlParserUtil.parse(sql, p -> p.withSquareBracketQuotation(engine == Engine.SQLSERVER));
+      CCJSqlParserUtil.parse(
+          sql, PARSER, p -> p.withSquareBracketQuotation(engine == Engine.SQLSERVER));
       return true;
     } catch (Exception e) {
       return false;
@@ -2013,13 +2029,19 @@ public final class SqlAst {
 
   /**
    * The split read, if its text holds exactly the placeholders it was emitted with, which a comment
-   * swallowing a copy would break, and no more than the engine takes.
+   * swallowing a copy would break, and no more than the engine takes. Without a comment in the
+   * statement, the copies repeat its tokens, as the first copy parsed, around the driver's own
+   * fragments, which hold no placeholder: lexing the whole text, most of an uncached route's time
+   * (todo 008), would only count what was emitted.
    */
   private @Nullable SplitText checked(String sql, List<Integer> sources) {
     // SQL Server takes 2100 parameters; the others' protocols 65535
     int max = engine == Engine.SQLSERVER ? 2100 : 65535;
     if (sources.size() > max) {
       return null;
+    }
+    if (!hasComments()) {
+      return new SplitText(sql, sources);
     }
     CCJSqlParser lexer =
         CCJSqlParserUtil.newParser(sql).withSquareBracketQuotation(engine == Engine.SQLSERVER);
@@ -2637,6 +2659,19 @@ public final class SqlAst {
     for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
       if (t.image.equals("#")) {
         return true;
+      }
+    }
+    return false;
+  }
+
+  /** Whether the statement holds a comment, a hint included, anywhere, after its end too. */
+  private boolean hasComments() {
+    for (Token t = root.jjtGetFirstToken(); t != null; t = t.next) {
+      if (t.specialToken != null) {
+        return true;
+      }
+      if (t.kind == 0) {
+        break;
       }
     }
     return false;

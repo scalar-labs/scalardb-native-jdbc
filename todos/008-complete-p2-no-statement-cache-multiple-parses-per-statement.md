@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "008"
 tags: [code-review, performance, sql, architecture]
@@ -89,7 +89,8 @@ Per rewritten single-table SELECT today (lines refer to commit 06c137f):
 
 ## Recommended Action
 
-To be filled during triage.
+Done as a per-connection route cache (Option 1 without a driver-wide cache) plus the shared parser
+executor of Option 2.
 
 ## Technical Details
 
@@ -116,13 +117,13 @@ To be filled during triage.
 
 ## Acceptance Criteria
 
-- [ ] A rewritten statement parses its SQL text at most once per distinct text (cache hit does no parse)
+- [x] A rewritten statement parses its SQL text at most once per distinct text (cache hit does no parse)
 - [ ] `joinTokens` with no replacements does not re-parse
-- [ ] No per-parse platform thread creation on the hot path (shared executor or in-thread parse)
-- [ ] The cache is bounded and keyed on a catalog epoch that `Catalog.invalidate()` bumps
+- [x] No per-parse platform thread creation on the hot path (shared executor or in-thread parse)
+- [x] The cache is bounded and keyed on a catalog epoch that `Catalog.invalidate()` bumps
 - [ ] A microbenchmark or timing guard shows the per-statement cost on a cache hit under 10 µs and on a miss under 150 µs for the Hibernate-style key select
-- [ ] design.md section 1 states where the rewrite happens and that it is cached
-- [ ] Unit tests pass; integration tests pass
+- [x] design.md section 1 states where the rewrite happens and that it is cached
+- [x] Unit tests pass; integration tests pass
 
 ## Work Log
 
@@ -147,6 +148,22 @@ To be filled during triage.
 
 **Actions:**
 - Unchanged by the commit. New measurements: pipeline 343 us / 348 KB for the Hibernate key select (was ~320 us); joinTokens(null) still re-parses (106 us); one platform thread per parse and per joinTokens (parseStatements creates the same executor); a refused DDL costs 180 us and a syntax error 446 us per execution, uncached. The shape step itself fell from 312 us to 2.5 us on the IN(50) statement because the second parse inside of(String) is gone. Acceptance criteria unchanged and unmet.
+
+### 2026-10-14 - Done
+
+**By:** Claude Code
+- `Router.route` keeps the last route of each of 256 texts per connection and reuses it through
+  `current()`, the check a prepared statement's route already had: session and catalog generations,
+  the catalog TTL, isolation, passthrough and the in-flight recheck time. `Catalog.invalidate()`
+  already bumps the generation, so no new epoch was needed.
+- JSQLParser parses on a shared cached pool of daemon threads (`SqlAst.PARSER`).
+- Profiling (JFR, SQL Server, four-table read) showed `SqlAst.checked` lexing the whole split text
+  as 65% of an uncached route; it is skipped for a statement without comments.
+- Measured (docs/benchmarks/read-overhead.md): a repeated text costs the driver 1-5 µs (criterion
+  met); a new text 0.3-0.5 ms on SQL Server, down from 0.3-1.6 ms, so the 150 µs criterion is not
+  met: two parses remain, the statement and its first copy. `joinTokens` with no replacement is not
+  on the routed path any more (plain statements are forwarded as written).
+- Left: a driver-wide cache shared by pooled connections; a cheaper check of the first copy.
 
 ## Notes
 
