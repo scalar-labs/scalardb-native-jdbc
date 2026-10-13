@@ -873,10 +873,13 @@ union as a derived table.
   - **Placeholders** that the copies repeat are re-bound in each copy (todo 012), and the statement is
     cached per text (todo 008).
   - **PostgreSQL parallel plans.** The split's estimated cost makes PostgreSQL start parallel workers,
-    about 10 ms, for statements that take 1 ms (12-28x). The driver keeps
-    `max_parallel_workers_per_gather = 0` on its sessions and restores the session's value around a
-    split read only when the plain statement's own plan is parallel, a long one; toggling it around
-    every statement cost about 1 ms each.
+    about 10 ms, for statements that take 1 ms (12-28x). The driver runs split reads with
+    `max_parallel_workers_per_gather = 0` and every other statement with the session's own value,
+    read once and again after a statement that may set it; the setting changes only when the next
+    statement needs the other value, since toggling it around every statement cost about 1 ms each,
+    and a rollback, which undoes a SET in its transaction, makes it read the setting again. Not yet:
+    keeping the session's value for a split read whose plain statement's own plan is parallel, a long
+    one, which needs that plan with the bound values; until then such reads run without workers.
   - **Not split, served through `rc_T`**: a ScalarDB table in a shape the four kinds do not cover (a
     scalar subquery, a subquery naming two ScalarDB tables or holding an aggregate or a row limit, a
     CTE, a set operation's branch, a nullable side that is itself a join, a FULL JOIN, Oracle's

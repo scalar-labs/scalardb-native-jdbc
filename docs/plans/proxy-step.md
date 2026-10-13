@@ -188,7 +188,11 @@ functions, an unaliased expression in the select
 list of a statement with ORDER BY, a limit or DISTINCT (its label differs by engine), and `*` over a
 plain table or subquery under ORDER BY. Done (2026-10-13): GROUP BY over columns and COUNT, SUM,
 MIN, MAX and AVG, per copy and combined on top except on PostgreSQL (design 4.2), with the labels
-the engines give. Not done: PostgreSQL's parallel plans, the statement cache. Open: todo 082, an Oracle read that returned no rows in two runs.
+the engines give. Done (2026-10-13): each copy reads only the columns used (todo 096), the
+committed check chosen per table on MySQL and MariaDB by access path and in-flight count, with
+prepared statements prepared again when the count changes their form (todo 103), the row limit in
+each copy (todo 089), and split reads without parallel workers on PostgreSQL. Not done: a split read
+whose plain plan is parallel keeping its workers, the statement cache, the driver-level benchmark. Open: todo 082, an Oracle read that returned no rows in two runs.
 
 Tests: the cases of milestone 3 on every engine, each also with a join, an IN subquery, a LEFT JOIN, an
 aggregate and three tables, with rows in flight; every split statement's rows equal to the same query

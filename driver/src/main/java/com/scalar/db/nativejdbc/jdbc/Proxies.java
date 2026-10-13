@@ -214,6 +214,7 @@ public final class Proxies {
         case "rollback":
           {
             Object r = forward(vendor, method, args);
+            router.rolledBack();
             if (args == null || args.length == 0) {
               session.transactionEnded();
             } else {
@@ -402,6 +403,7 @@ public final class Proxies {
       if (name.startsWith("execute") && name.endsWith("Batch")) {
         batchPending = false;
       }
+      owner.router.beforeRun(owner.vendor, ran);
       Object result;
       try {
         result = forward(vendor, method, routed);

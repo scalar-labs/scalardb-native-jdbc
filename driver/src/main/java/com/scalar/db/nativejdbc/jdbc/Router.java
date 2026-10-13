@@ -125,6 +125,10 @@ final class Router {
   private final Map<String, long[]> inflight = new HashMap<>();
   // while set, read() takes these per-row choices instead of reading counts
   private @Nullable List<Integer> forcedPerRow;
+  // PostgreSQL's max_parallel_workers_per_gather: the session's own value (-1 until read), and
+  // whether the driver's 0 is in effect (null when not known, after a rollback or a SET)
+  private long sessionWorkers = -1;
+  private @Nullable Boolean workersOff;
   private boolean passthrough;
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
 
@@ -391,6 +395,63 @@ final class Router {
   }
 
   /**
+   * Before routed statements run, on PostgreSQL: a split read runs with {@code
+   * max_parallel_workers_per_gather = 0}, since its estimated cost makes PostgreSQL start workers
+   * (about 10 ms) for statements that take 1 ms; every other statement runs with the session's own
+   * value. The setting changes only when the next statement needs the other one (design 4.2).
+   *
+   * @param vendor the vendor connection
+   * @param routes the routes about to run
+   * @throws SQLException if the setting cannot be read or set
+   */
+  // ponytail: a split read never runs parallel, long analytic reads of ScalarDB tables included;
+  // restore the session's value for those whose plain plan is parallel (EXPLAIN with the bound
+  // values, design 4.2) when they matter
+  void beforeRun(Connection vendor, List<Route> routes) throws SQLException {
+    if (engine != Engine.POSTGRESQL || routes.isEmpty()) {
+      return;
+    }
+    boolean off = false;
+    for (Route r : routes) {
+      off |= r.parameterSources != null; // a split read
+    }
+    if (workersOff == null) {
+      long shown;
+      try (Statement st = vendor.createStatement();
+          ResultSet rs = st.executeQuery("SHOW max_parallel_workers_per_gather")) {
+        rs.next();
+        shown = Long.parseLong(rs.getString(1));
+      }
+      if (shown != 0 || sessionWorkers <= 0) {
+        sessionWorkers = shown;
+      }
+      // a 0 with a known session value is the driver's own, which a rollback kept
+      workersOff = shown == 0;
+    }
+    if (off && !workersOff) {
+      setWorkers(vendor, 0);
+      workersOff = true;
+    } else if (!off && workersOff && sessionWorkers > 0) {
+      setWorkers(vendor, sessionWorkers);
+      workersOff = false;
+    }
+  }
+
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "a number the driver read from the session, or 0")
+  private static void setWorkers(Connection vendor, long n) throws SQLException {
+    try (Statement st = vendor.createStatement()) {
+      st.execute("SET max_parallel_workers_per_gather = " + n);
+    }
+  }
+
+  /** After a rollback, which undoes a SET made in the transaction. */
+  void rolledBack() {
+    workersOff = null;
+  }
+
+  /**
    * Classifies a table by its stored names, for {@link ScalarDbTables}: the lookup a statement
    * naming it, quoted, would make.
    *
@@ -475,6 +536,8 @@ final class Router {
    */
   void ran(Connection vendor, Route route) {
     if (route.changesSession) {
+      sessionWorkers = -1; // the statement may have set it
+      workersOff = null;
       session.changed(vendor);
     }
     if (route.changesNames) {

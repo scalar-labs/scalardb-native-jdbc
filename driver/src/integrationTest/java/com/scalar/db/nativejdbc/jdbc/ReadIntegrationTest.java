@@ -264,6 +264,25 @@ class ReadIntegrationTest {
         assertThat(router.route(vendor, "SELECT COUNT(*) FROM " + made).sql)
             .contains("UNION ALL")
             .doesNotContainIgnoringCase("rc_");
+        if (engine == Engine.POSTGRESQL) {
+          // a split read runs without parallel workers, anything else with the session's value
+          e.execute(vendor, "SET max_parallel_workers_per_gather = 3");
+          Router.Route plain = router.route(vendor, "SELECT 1");
+          router.beforeRun(vendor, List.of(router.route(vendor, join)));
+          assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("0");
+          router.beforeRun(vendor, List.of(plain));
+          assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("3");
+          // a rollback undoes the SET made in its transaction
+          vendor.setAutoCommit(false);
+          router.beforeRun(vendor, List.of(router.route(vendor, join)));
+          vendor.rollback();
+          router.rolledBack();
+          vendor.setAutoCommit(true);
+          router.beforeRun(vendor, List.of(router.route(vendor, join)));
+          assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("0");
+          router.beforeRun(vendor, List.of(plain));
+          assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("3");
+        }
         // a subquery's table is read through its view
         assertThat(
                 router.route(
