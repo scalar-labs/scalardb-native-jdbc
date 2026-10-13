@@ -62,8 +62,10 @@ import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.merge.Merge;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
+import net.sf.jsqlparser.statement.select.Fetch;
 import net.sf.jsqlparser.statement.select.GroupByElement;
 import net.sf.jsqlparser.statement.select.Join;
+import net.sf.jsqlparser.statement.select.Limit;
 import net.sf.jsqlparser.statement.select.OrderByElement;
 import net.sf.jsqlparser.statement.select.ParenthesedSelect;
 import net.sf.jsqlparser.statement.select.PlainSelect;
@@ -1852,9 +1854,19 @@ public final class SqlAst {
       }
       lift.outer.get(i).emit(top);
     }
+    CopyLimit limit = grouping == null ? copyLimit(s) : null;
+    if (limit != null && (lift.copyOrder.isEmpty() || lift.copyOrder.contains(null))) {
+      limit = null;
+    }
     List<String> texts = new ArrayList<>();
     for (int c = 0; c < copies.size(); c++) {
       Emitter e = new Emitter(froms.get(c), tos.get(c), placeholders, sources);
+      if (limit != null) {
+        e.text("SELECT");
+        e.text("*");
+        e.text("FROM");
+        e.text("(");
+      }
       e.text("SELECT");
       for (int i = 0; i < lift.inner.size(); i++) {
         if (i > 0) {
@@ -1863,6 +1875,21 @@ public final class SqlAst {
         lift.inner.get(i).emit(e);
       }
       e.tokens(lift.bodyStart, lift.bodyEnd);
+      if (limit != null) {
+        // each copy sorts and stops after the rows the limit on top can take from it
+        e.text("ORDER BY " + String.join(", ", lift.copyOrder));
+        if (engine == Engine.ORACLE) {
+          // FETCH FIRST would number the whole copy; ROWNUM over the ordered copy stops early
+          e.text(")");
+          e.text("WHERE ROWNUM <=");
+          limit.emit(e);
+        } else {
+          e.text("LIMIT");
+          limit.emit(e);
+          e.text(")");
+          e.text("p" + (c + 1));
+        }
+      }
       texts.add(e.text());
     }
     Emitter tail = new Emitter(topFrom, topTo, placeholders, sources);
@@ -1953,6 +1980,8 @@ public final class SqlAst {
     final Token bodyEnd;
     final List<Piece> inner = new ArrayList<>();
     final List<Piece> outer = new ArrayList<>();
+    // the statement's ORDER BY in the copies' own column names; a null where one cannot be named
+    final List<@Nullable String> copyOrder = new ArrayList<>();
     // replacements in the select list on top and in the tail
     final Map<Token, String> tailFrom = new IdentityHashMap<>();
     final Map<Token, Token> tailTo = new IdentityHashMap<>();
@@ -2079,18 +2108,29 @@ public final class SqlAst {
       for (OrderByElement o : s.getOrderByElements()) {
         Expression e = o.getExpression();
         if (e instanceof LongValue) {
-          continue; // a position in the select list on top, which keeps its order
+          // a position in the select list on top, which keeps its order
+          long position = ((LongValue) e).getValue();
+          lift.copyOrder.add(
+              position >= 1 && position <= lift.outer.size()
+                  ? "c" + position + direction(o)
+                  : null);
+          continue;
         }
         if (e instanceof Column && ((Column) e).getTable() == null) {
           String name = key(engine, ((Column) e).getColumnName());
           int matches = 0;
-          for (String l : labels) {
-            matches += key(engine, l).equals(name) ? 1 : 0;
+          int at = -1;
+          for (int i = 0; i < labels.size(); i++) {
+            if (key(engine, labels.get(i)).equals(name)) {
+              matches++;
+              at = i;
+            }
           }
           if (matches > 1) {
             return null; // ambiguous on top, where the copies' items are distinct columns
           }
           if (matches == 1) {
+            lift.copyOrder.add("c" + (at + 1) + direction(o));
             continue; // names a column on top
           }
         }
@@ -2102,12 +2142,115 @@ public final class SqlAst {
           return null; // on top, DISTINCT may sort only by what it selects
         }
         String generated = "s" + ++hidden;
+        lift.copyOrder.add(generated + direction(o));
         lift.inner.add(new Piece(n.jjtGetFirstToken(), n.jjtGetLastToken(), "AS " + generated));
         lift.tailFrom.put(n.jjtGetFirstToken(), "v." + generated);
         lift.tailTo.put(n.jjtGetFirstToken(), n.jjtGetLastToken());
       }
     }
     return lift;
+  }
+
+  /** An ORDER BY element's direction and null ordering, as written. */
+  private static String direction(OrderByElement o) {
+    String out = o.isAscDescPresent() ? (o.isAsc() ? " ASC" : " DESC") : "";
+    if (o.getNullOrdering() == OrderByElement.NullOrdering.NULLS_FIRST) {
+      out += " NULLS FIRST";
+    } else if (o.getNullOrdering() == OrderByElement.NullOrdering.NULLS_LAST) {
+      out += " NULLS LAST";
+    }
+    return out;
+  }
+
+  /**
+   * How many rows each copy needs of a statement with ORDER BY and a row limit, so that each copy
+   * sorts and stops early as well (todo 089): the offset plus the count when both are literals, or
+   * the count's placeholder when there is no offset. Null when the copies cannot stop early: no
+   * limit, a DISTINCT or an aggregate on top, a limit that is not a plain row count, and on SQL
+   * Server, whose plan already stops early over the union.
+   */
+  private @Nullable CopyLimit copyLimit(PlainSelect s) {
+    if (engine == Engine.SQLSERVER
+        || s.getOrderByElements() == null
+        || s.getDistinct() != null
+        || s.getTop() != null
+        || isGrouped(s)) {
+      return null;
+    }
+    Expression count = null;
+    Expression offset = null;
+    if (s.getLimit() != null) {
+      Limit l = s.getLimit();
+      if (l.getByExpressions() != null) {
+        return null; // LIMIT ALL and LIMIT NULL have no number, which leaves them out below
+      }
+      count = l.getRowCount();
+      offset = l.getOffset();
+    }
+    if (s.getFetch() != null) {
+      Fetch f = s.getFetch();
+      for (String p : f.getFetchParameters()) {
+        String u = p.toUpperCase(Locale.ROOT);
+        if (u.contains("PERCENT") || u.contains("TIES")) {
+          return null;
+        }
+      }
+      if (count != null) {
+        return null;
+      }
+      count = f.getExpression();
+    }
+    if (s.getOffset() != null) {
+      if (offset != null) {
+        return null;
+      }
+      offset = s.getOffset().getOffset();
+    }
+    long skipped = 0;
+    if (offset != null) {
+      if (!(offset instanceof LongValue)) {
+        return null;
+      }
+      skipped = ((LongValue) offset).getValue();
+    }
+    if (count instanceof LongValue) {
+      return new CopyLimit(null, skipped + ((LongValue) count).getValue());
+    }
+    if (count instanceof JdbcParameter && skipped == 0) {
+      Node n = count.getASTNode();
+      Token t = n == null ? null : n.jjtGetFirstToken();
+      return t == null || !t.image.equals("?") ? null : new CopyLimit(t, 0);
+    }
+    return null;
+  }
+
+  /** The rows each copy needs: a literal count, or the statement's placeholder for it. */
+  private static final class CopyLimit {
+    final @Nullable Token placeholder;
+    final long rows;
+
+    CopyLimit(@Nullable Token placeholder, long rows) {
+      this.placeholder = placeholder;
+      this.rows = rows;
+    }
+
+    void emit(Emitter e) {
+      if (placeholder != null) {
+        e.tokens(placeholder, placeholder);
+      } else {
+        e.text(Long.toString(rows));
+      }
+    }
+  }
+
+  /**
+   * Returns whether each copy of the split read sorts and stops after the rows the statement's
+   * limit needs, rather than only the union on top (todo 089).
+   *
+   * @return whether the copies apply the limit too
+   */
+  public boolean limitsEachCopy() {
+    return statement instanceof PlainSelect && copyLimit((PlainSelect) statement) != null;
   }
 
   /** A column item's label on top; a reserved word may follow a qualifier on MySQL, but not AS. */

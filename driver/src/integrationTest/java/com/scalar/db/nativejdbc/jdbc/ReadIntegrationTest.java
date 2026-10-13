@@ -178,6 +178,28 @@ class ReadIntegrationTest {
         assertThat(rows(c, "SELECT COUNT(*) FROM " + made)).containsExactly("3");
         assertThat(rows(c, "SELECT " + mx + " FROM " + made + " ORDER BY " + mx + " DESC" + limit2))
             .containsExactly("c", "b");
+        // each copy sorts and stops early too: an offset, and a limit bound later
+        boolean fetch = engine == Engine.SQLSERVER || engine == Engine.ORACLE;
+        assertThat(
+                rows(
+                    c,
+                    "SELECT "
+                        + mx
+                        + " FROM "
+                        + made
+                        + " ORDER BY "
+                        + mid
+                        + " DESC"
+                        + (fetch ? " OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY" : " LIMIT 1 OFFSET 1")))
+            .containsExactly("b");
+        if (!fetch) {
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "SELECT " + mx + " FROM " + made + " ORDER BY " + mid + " LIMIT ?")) {
+            ps.setInt(1, 2);
+            assertThat(rows(ps)).containsExactly("a", "b");
+          }
+        }
         // a table name as a qualifier, and a join of both layouts
         assertThat(
                 rows(

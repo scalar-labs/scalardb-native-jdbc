@@ -805,7 +805,14 @@ union as a derived table.
     `T_meta`'s key with `COALESCE(tx_state, 3) = 3`, since SQL Server otherwise plans those copies as
     if empty and scans the in-flight index once per row (5-10x with rows in flight).
   - **On top of the union**: the user's ORDER BY, row limit, DISTINCT and window functions, over the
-    copies as a derived table. A whole-query aggregate that decomposes (`COUNT`, `SUM`, `MIN`, `MAX`,
+    copies as a derived table. A statement with ORDER BY and a row limit also sorts and stops each
+    copy after offset + n rows, so pagination does not read every matching row (todo 089: 20 of
+    500k rows 36-365x down to 1.1-1.5x): `LIMIT` inside the copy on PostgreSQL, MySQL and MariaDB,
+    `WHERE ROWNUM <=` around the ordered copy on Oracle, whose `FETCH FIRST` numbers the whole
+    copy, and nothing on SQL Server, whose plan already stops early over the union. On MySQL every
+    committed table of such a statement uses the per-row left join, since the DISTINCT set and
+    NOT EXISTS are built whole before the first row. Only for a literal offset and count, or a
+    count placeholder without offset, and not under DISTINCT or an aggregate. A whole-query aggregate that decomposes (`COUNT`, `SUM`, `MIN`, `MAX`,
     `AVG` as `SUM` and `COUNT`, each with its `GROUP BY`) is computed per copy and combined on top on
     every engine but PostgreSQL, so that no copy streams its rows through the union (full scans
     3-10x down to 1.2-2.5x); any other aggregate is applied on top of the union. Per copy, each copy

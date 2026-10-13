@@ -186,14 +186,44 @@ class SplitTest {
             "select a.x, b.y as yy from a join b on a.id = b.aid where a.k = ?"
                 + " order by a.z desc, yy, 1 limit ?");
     SqlAst.SplitText split = split(ast, Map.of());
+    // each copy sorts and stops after the rows the limit takes
     assertThat(split.sql())
         .isEqualTo(
-            "SELECT v.c1 AS x, v.c2 AS yy FROM (SELECT a.x AS c1, b.y AS c2, a.z AS s1 from"
-                + " (select * from a0) a join (select * from b0) b on a.id = b.aid where a.k = ?"
-                + " UNION ALL SELECT a.x AS c1, b.y AS c2, a.z AS s1 from (select * from a1) a"
-                + " join (select * from b1) b on a.id = b.aid where a.k = ?) v order by v.s1"
-                + " desc, yy, 1 limit ?");
-    assertThat(split.parameterSources()).containsExactly(1, 1, 2);
+            "SELECT v.c1 AS x, v.c2 AS yy FROM (SELECT * FROM(SELECT a.x AS c1, b.y AS c2, a.z"
+                + " AS s1 from (select * from a0) a join (select * from b0) b on a.id = b.aid"
+                + " where a.k = ? ORDER BY s1 DESC, c2, c1 LIMIT ?) p1 UNION ALL SELECT * FROM("
+                + "SELECT a.x AS c1, b.y AS c2, a.z AS s1 from (select * from a1) a join"
+                + " (select * from b1) b on a.id = b.aid where a.k = ? ORDER BY s1 DESC, c2, c1"
+                + " LIMIT ?) p2) v order by v.s1 desc, yy, 1 limit ?");
+    assertThat(split.parameterSources()).containsExactly(1, 2, 1, 2, 2);
+  }
+
+  @Test
+  void emitSplit_limitsEachCopy_toTheOffsetAndTheCount() {
+    SqlAst pg = parse("select a.x from a order by a.x limit 20 offset 100");
+    assertThat(pg.limitsEachCopy()).isTrue();
+    assertThat(split(pg, Map.of()).sql()).contains("ORDER BY s1 LIMIT 120) p1");
+    SqlAst oracle =
+        SqlAst.parse("SELECT a.x FROM a ORDER BY 1 DESC FETCH FIRST 5 ROWS ONLY", Engine.ORACLE)
+            .orElseThrow();
+    assertThat(split(oracle, Map.of()).sql())
+        .contains(
+            "SELECT * FROM(SELECT a.x AS c1 FROM (select * from a0) a ORDER BY c1 DESC)"
+                + " WHERE ROWNUM <= 5 UNION ALL");
+    // not when the copies cannot know how many rows the top takes from them
+    for (String sql :
+        List.of(
+            "select a.x from a order by a.x limit ? offset 3",
+            "select distinct a.x from a order by a.x limit 3",
+            "select a.x from a limit 3",
+            "select count(*) from a group by a.x order by 1 limit 3")) {
+      assertThat(parse(sql).limitsEachCopy()).as(sql).isFalse();
+    }
+    assertThat(
+            SqlAst.parse("SELECT TOP 3 a.x FROM a ORDER BY a.x", Engine.SQLSERVER)
+                .orElseThrow()
+                .limitsEachCopy())
+        .isFalse();
   }
 
   @Test

@@ -73,6 +73,9 @@ final class SplitRead {
     for (SqlAst.TableRef r : split) {
       read.add(columnsRead(ast, r, Objects.requireNonNull(scalarDb.get(r))));
     }
+    // MySQL builds the DISTINCT set, and NOT EXISTS's anti-join, whole before the first row, so
+    // a copy that stops after a few rows has to check its rows one by one (todo 089)
+    boolean rowByRowUnderLimit = engine == Engine.MYSQL && ast.limitsEachCopy();
     List<SqlAst.Naming> copies = new ArrayList<>();
     for (int bits = 0; bits < 1 << split.size(); bits++) {
       Map<SqlAst.TableRef, String> naming = new IdentityHashMap<>(views);
@@ -89,7 +92,9 @@ final class SplitRead {
                     engine,
                     t,
                     cols,
-                    perRow.contains(r) ? Check.LEFT_JOIN : check(engine, split.size(), bits)));
+                    perRow.contains(r) || rowByRowUnderLimit
+                        ? Check.LEFT_JOIN
+                        : check(engine, split.size(), bits)));
       }
       copies.add(naming::get);
     }

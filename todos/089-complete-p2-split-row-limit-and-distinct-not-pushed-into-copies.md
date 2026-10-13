@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "089"
 tags: [code-review, performance, split-read]
@@ -67,7 +67,7 @@ See Findings.
 ## Acceptance Criteria
 
 - [x] Benchmark results for the shapes above recorded in docs/benchmarks/read-overhead.md.
-- [ ] Per-copy limits or DISTINCT emitted on the engines where they measure better.
+- [x] Per-copy limits or DISTINCT emitted on the engines where they measure better.
 
 ## Work Log
 
@@ -86,3 +86,19 @@ See Findings.
 
 - Commits 7503c10, ca8046d, 56c44ba; docs/design.md, docs/plans/proxy-step.md milestone 3b,
   docs/benchmarks/read-overhead.md.
+
+### 2026-10-13 - Implemented
+
+**By:** Claude Code
+- What the copies do:
+  - Each copy sorts by the statement's ORDER BY in its own column names and keeps offset + n rows.
+  - That is `LIMIT` on PostgreSQL, MySQL and MariaDB, and `ROWNUM` on Oracle; SQL Server needs
+    nothing.
+  - MySQL uses the left join on the metadata in every copy.
+- Where it applies: literal offset and count, or a count placeholder without offset. DISTINCT and
+  aggregates stay on top only.
+- Not done:
+  - DISTINCT inside the copies on Oracle, the only engine it helped (1.8x down to 1.2x);
+  - DISTINCT on MySQL and MariaDB, which stays 14-23x and has no form found.
+- Tests: unit emission tests; integration pagination with rows in flight on every engine.
+

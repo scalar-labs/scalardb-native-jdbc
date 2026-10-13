@@ -67,5 +67,6 @@ Simpler; scans lose 1.4-2x above the threshold.
     replayed. Under a pending batch it keeps the old text, which returns the same rows.
 - Test: `ReadIntegrationTest` holds 501 rows in flight, and a statement prepared before them is
   re-prepared on MySQL and MariaDB.
+- Decision (user, 2026-10-13): count-based, with transparent re-prepare, over choosing at prepare time only or by access path alone.
 - Open: the second acceptance item, from the driver-level benchmark.
 
