@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "107"
 tags: [code-review, performance, postgresql]
@@ -80,3 +80,17 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 - Commits a772e20, 48f523a, 785e126, cdbc969, 2892bad, 59c9309, d719647; docs/design.md 4.2;
   docs/benchmarks/read-overhead.md, "Through the driver".
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- Option 1. `Router.ran` forgets the session's value only after a statement that names
+  `max_parallel_workers_per_gather` or runs `RESET ALL` / `DISCARD ALL`, and
+  `Router.transactionEnded` forgets it at commit or rollback when such a statement ran in the
+  transaction (SET LOCAL, rolled-back SET).
+- `beforeRun` restores the session's value only before a statement PostgreSQL may run in parallel
+  (`Route.plansParallel`: not a write, not a session statement), and reads nothing for those.
+- Test: `ReadIntegrationTest`, PostgreSQL block: a SET search_path after a split read keeps 3 for
+  the next plain read; a SET of the workers becomes the new value.
+- Not fixed, documented in design 4.2: a transaction-mode pooler sees the session-level SET;
+  generic plans can misjudge a short read as parallel.

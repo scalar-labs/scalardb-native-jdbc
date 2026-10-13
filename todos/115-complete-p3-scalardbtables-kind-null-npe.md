@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "115"
 tags: [code-review, correctness, api]
@@ -48,3 +48,9 @@ See Findings. Paths are under `driver/src/main/java/com/scalar/db/nativejdbc/`.
 
 - Commits a772e20, 48f523a, 785e126, cdbc969, 2892bad, 59c9309, d719647; docs/design.md 4.2;
   docs/benchmarks/read-overhead.md, "Through the driver".
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- A null schema is an unqualified name, found through the session's schemas, as in a statement;
+  `ScalarDbTables.kind` documents it. Test in `RoutingIntegrationTest.scalarDbTables_classifiesByStoredName`.
