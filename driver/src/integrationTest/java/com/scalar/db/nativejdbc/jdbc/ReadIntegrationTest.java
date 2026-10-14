@@ -379,7 +379,11 @@ class ReadIntegrationTest {
         assertThat(ps.toString().equals(before)).isEqualTo(!perRow);
         try (Connection vendor = e.open()) {
           String sql = new Router(engine, catalog, new Session(engine)).route(vendor, byKey).sql;
-          assertThat(sql.contains("COALESCE")).isEqualTo(perRow);
+          if (engine == Engine.POSTGRESQL) {
+            assertThat(sql).contains("scalardb_native_x"); // a key read anchors its row (4b)
+          } else {
+            assertThat(sql.contains("COALESCE")).isEqualTo(perRow);
+          }
         }
       } finally {
         tx.rollback();

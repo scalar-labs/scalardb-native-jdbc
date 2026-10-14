@@ -817,6 +817,24 @@ public final class SqlAst {
   }
 
   /**
+   * Returns one past the last item of a single SELECT's select list: where an item appended to the
+   * list goes.
+   *
+   * @return the offset, or -1 for another statement or when the item cannot be placed in the text
+   */
+  public int selectListEnd() {
+    if (!(statement instanceof PlainSelect)) {
+      return -1;
+    }
+    List<SelectItem<?>> items = ((PlainSelect) statement).getSelectItems();
+    Node n = items == null || items.isEmpty() ? null : items.get(items.size() - 1).getASTNode();
+    Token first = n == null ? null : n.jjtGetFirstToken();
+    Token last = n == null ? null : n.jjtGetLastToken();
+    int[] s = first == null || last == null ? null : span(first, last);
+    return s == null ? -1 : s[1];
+  }
+
+  /**
    * Returns one past the statement's last token: where a clause appended to it goes, before any
    * comment or semicolon that follows.
    *
@@ -1664,6 +1682,16 @@ public final class SqlAst {
      */
     default String fragment(TableRef ref, Piece piece) {
       return Objects.requireNonNull(replacementFor(ref));
+    }
+
+    /**
+     * Returns the expressions this copy appends to the select list, after the statement's own
+     * items, the same number in every copy.
+     *
+     * @return the expressions, none by default
+     */
+    default List<String> selectExtra() {
+      return List.of();
     }
   }
 
@@ -2789,11 +2817,25 @@ public final class SqlAst {
             || s.getFetch() != null
             || s.getOrderByElements() != null;
     List<Integer> sources = new ArrayList<>();
+    List<SelectItem<?>> items = s.getSelectItems();
+    Node lastItemNode = items.get(items.size() - 1).getASTNode();
+    Token lastItem = lastItemNode == null ? null : lastItemNode.jjtGetLastToken();
+    int extras = copies.get(0).selectExtra().size();
     if (!onTop) {
       List<String> texts = new ArrayList<>();
       for (int c = 0; c < copies.size(); c++) {
         Emitter e = new Emitter(edits.get(c), placeholders, sources);
-        e.tokens(start, null);
+        if (extras == 0) {
+          e.tokens(start, null);
+        } else {
+          if (lastItem == null) {
+            return null;
+          }
+          e.tokens(start, lastItem);
+          e.text(",");
+          e.text(extraItems(copies.get(c)));
+          e.tokens(lastItem.next, null);
+        }
         texts.add(e.text());
       }
       return parses(texts.get(0)) && (lastCopy == 0 || parses(texts.get(lastCopy)))
@@ -2823,6 +2865,10 @@ public final class SqlAst {
       }
       lift.outer.get(i).emit(top);
     }
+    for (int i = 0; i < extras; i++) {
+      top.text(",");
+      top.text("v." + engine.quote(EXTRA + i));
+    }
     CopyLimit limit = copyLimit(s); // none for a grouped statement
     if (limit != null && (lift.copyOrder.isEmpty() || lift.copyOrder.contains(null))) {
       limit = null;
@@ -2842,6 +2888,10 @@ public final class SqlAst {
           e.text(",");
         }
         lift.inner.get(i).emit(e);
+      }
+      if (extras > 0) {
+        e.text(",");
+        e.text(extraItems(copies.get(c)));
       }
       e.tokens(lift.bodyStart, lift.bodyEnd);
       if (limit != null) {
@@ -2877,6 +2927,19 @@ public final class SqlAst {
       return null;
     }
     return checked(head + String.join(" UNION ALL ", texts) + end, sources);
+  }
+
+  /** The label of a copy's appended select item {@code i}. */
+  private static final String EXTRA = "scalardb_native_x";
+
+  /** A copy's appended items, each labelled, so that a select list on top can name them. */
+  private String extraItems(Copy copy) {
+    List<String> out = new ArrayList<>();
+    List<String> extra = copy.selectExtra();
+    for (int i = 0; i < extra.size(); i++) {
+      out.add(extra.get(i) + " AS " + engine.quote(EXTRA + i));
+    }
+    return String.join(", ", out);
   }
 
   private static int countInner(Split split) {

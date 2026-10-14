@@ -140,6 +140,8 @@ public final class Proxies {
     final Session session;
     // after an abort the driver decided, until the application rolls back (design 4.4)
     volatile boolean rollbackOnly;
+    // the versions the open transaction read, the anchors of its writes (4.2)
+    final Anchors anchors = new Anchors();
 
     ConnectionHandler(Connection vendor, Router router, Session session) {
       super(vendor);
@@ -159,6 +161,11 @@ public final class Proxies {
     void ran(Router.Route route) {
       if (route.kind == SqlAst.Kind.ROLLBACK) {
         rollbackOnly = false; // as Connection.rollback()
+      }
+      if (route.kind == SqlAst.Kind.COMMIT || route.kind == SqlAst.Kind.ROLLBACK) {
+        anchors.transactionEnded();
+      } else if (route.kind == SqlAst.Kind.ROLLBACK_TO_SAVEPOINT) {
+        anchors.rolledBackToSavepoint();
       }
       router.ran(vendor, route);
     }
@@ -243,6 +250,7 @@ public final class Proxies {
             Object r = forward(vendor, method, args);
             session.transactionEnded();
             router.transactionEnded();
+            anchors.transactionEnded();
             return r;
           }
         case "rollback":
@@ -253,8 +261,10 @@ public final class Proxies {
               rollbackOnly = false;
               session.transactionEnded();
               router.transactionEnded();
+              anchors.transactionEnded();
             } else {
               session.rolledBackToSavepoint(); // the transaction goes on
+              anchors.rolledBackToSavepoint();
             }
             return r;
           }
@@ -275,6 +285,7 @@ public final class Proxies {
             if (wasInTransaction && on) {
               session.transactionEnded();
               router.transactionEnded();
+              anchors.transactionEnded();
             }
             return r;
           }
@@ -395,6 +406,10 @@ public final class Proxies {
     @Nullable Long writeCount;
     // the driver's statement a write is running, which cancel() reaches from another thread
     volatile @Nullable Statement runningWrite;
+    // the last execute's anchored read, whose result sets hide and record the versions, and whether
+    // it ran in a transaction, the only place its anchors serve
+    Router.@Nullable Anchored anchored;
+    boolean recording;
 
     @Override
     void handedOut() {
@@ -598,6 +613,18 @@ public final class Proxies {
       if (name.startsWith("execute") && name.endsWith("Batch")) {
         batchPending = false;
       }
+      if (name.startsWith("execute")) {
+        anchored = ran.size() == 1 ? ran.get(0).anchored : null;
+        recording = anchored != null && !owner.vendor.getAutoCommit();
+      }
+      if (name.equals("getMetaData") && prepared != null && prepared.anchored != null) {
+        Object md = forward(vendor(), method, args);
+        return md == null
+            ? null
+            : proxy(
+                java.sql.ResultSetMetaData.class,
+                new HiddenColumns(md, prepared.anchored.hidden()));
+      }
       owner.router.beforeRun(owner.vendor, ran);
       Object result;
       try {
@@ -607,9 +634,16 @@ public final class Proxies {
           owner.ran(route);
         }
       }
-      return result instanceof ResultSet
+      if (!(result instanceof ResultSet)) {
+        return result;
+      }
+      Router.Anchored a = anchored;
+      return a == null
           ? proxy(ResultSet.class, new ChildHandler(result, connection, (Statement) proxy))
-          : result;
+          : proxy(
+              ResultSet.class,
+              new AnchoredHandler(
+                  result, connection, (Statement) proxy, a, recording ? owner.anchors : null));
     }
 
     /** Runs a write the driver plans, and answers as the vendor's statement would. */
@@ -664,6 +698,11 @@ public final class Proxies {
                 @Override
                 public void rollbackOnly() {
                   owner.rollbackOnly = true;
+                }
+
+                @Override
+                public Anchors anchors() {
+                  return owner.anchors;
                 }
               });
       writeCount = count;
@@ -781,6 +820,118 @@ public final class Proxies {
             target,
             method,
             new Object[] {Objects.requireNonNull(split.parameterSources).indexOf(index) + 1});
+      }
+      return forward(target, method, args);
+    }
+  }
+
+  /**
+   * The result set of an anchored read: the application sees its own columns only, and each row it
+   * moves to in a transaction records the row's key and version (design 4.2).
+   */
+  private static final class AnchoredHandler extends Handler {
+    final Connection connection;
+    final Statement statement;
+    final Router.Anchored anchored;
+    final @Nullable Anchors anchors;
+    int visible = -1;
+
+    AnchoredHandler(
+        Object vendor,
+        Connection connection,
+        Statement statement,
+        Router.Anchored anchored,
+        @Nullable Anchors anchors) {
+      super(vendor);
+      this.connection = connection;
+      this.statement = statement;
+      this.anchored = anchored;
+      this.anchors = anchors;
+    }
+
+    private int visible() throws SQLException {
+      if (visible < 0) {
+        visible = ((ResultSet) target).getMetaData().getColumnCount() - anchored.hidden();
+      }
+      return visible;
+    }
+
+    @Override
+    @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+      String name = method.getName();
+      switch (name) {
+        case "getConnection":
+          return connection;
+        case "getStatement":
+          return statement;
+        case "getMetaData":
+          return proxy(
+              java.sql.ResultSetMetaData.class,
+              new HiddenColumns(created(target, method, args), anchored.hidden()));
+        case "findColumn":
+          {
+            int i = (Integer) Objects.requireNonNull(forward(target, method, args));
+            if (i > visible()) {
+              throw new SQLException("no column " + args[0] + " in the result", "42703");
+            }
+            return i;
+          }
+        default:
+          break;
+      }
+      if ((name.startsWith("get") || name.startsWith("update"))
+          && args != null
+          && args.length > 0
+          && args[0] instanceof Integer
+          && (Integer) args[0] > visible()) {
+        throw new SQLException("the column index " + args[0] + " is out of range", "22023");
+      }
+      Object result = forward(target, method, args);
+      if (anchors != null
+          && Boolean.TRUE.equals(result)
+          && (name.equals("next")
+              || name.equals("previous")
+              || name.equals("first")
+              || name.equals("last")
+              || name.equals("absolute")
+              || name.equals("relative"))) {
+        ResultSet rs = (ResultSet) target;
+        int at = visible() + 1;
+        Object[] key = Writes.readKey(rs, at, anchored.keys);
+        if (key != null) {
+          anchors.read(
+              anchored.table,
+              key,
+              new Anchors.Version(
+                  rs.getString(at + anchored.keys), rs.getObject(at + anchored.keys + 1)));
+        }
+      }
+      return result instanceof ResultSet
+          ? proxy(ResultSet.class, new ChildHandler(result, connection, null))
+          : result;
+    }
+  }
+
+  /** Result set metadata without the trailing columns the driver added. */
+  private static final class HiddenColumns extends Handler {
+    final int hidden;
+
+    HiddenColumns(Object vendor, int hidden) {
+      super(vendor);
+      this.hidden = hidden;
+    }
+
+    @Override
+    @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+      int count = ((java.sql.ResultSetMetaData) target).getColumnCount() - hidden;
+      if (method.getName().equals("getColumnCount")) {
+        return count;
+      }
+      if (args != null
+          && args.length == 1
+          && args[0] instanceof Integer
+          && (Integer) args[0] > count) {
+        throw new SQLException("the column index " + args[0] + " is out of range", "22023");
       }
       return forward(target, method, args);
     }

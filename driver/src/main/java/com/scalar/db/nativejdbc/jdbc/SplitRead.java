@@ -64,7 +64,9 @@ final class SplitRead {
       SqlAst.Split split,
       Map<SqlAst.TableRef, TableInfo> scalarDb,
       Map<SqlAst.TableRef, String> views,
-      Set<SqlAst.TableRef> perRow) {
+      Set<SqlAst.TableRef> perRow,
+      SqlAst.@Nullable TableRef anchored,
+      java.util.function.Function<SqlAst.Piece, List<String>> extras) {
     Map<SqlAst.TableRef, SqlAst.Place> places = split.places();
     List<SqlAst.TableRef> refs = new ArrayList<>();
     List<List<SqlAst.Piece>> pieces = new ArrayList<>();
@@ -92,7 +94,19 @@ final class SplitRead {
     }
     Map<SqlAst.TableRef, List<String>> read = new IdentityHashMap<>();
     for (SqlAst.TableRef r : places.keySet()) {
-      read.put(r, columnsRead(ast, r, Objects.requireNonNull(scalarDb.get(r))));
+      TableInfo t = Objects.requireNonNull(scalarDb.get(r));
+      List<String> cols = columnsRead(ast, r, t);
+      if (r == anchored) {
+        // the key, which the copies' versions are read by and the anchors keyed on
+        List<String> withKey = new ArrayList<>();
+        for (String c : t.dataColumns()) {
+          if (cols.contains(c) || t.keyColumns().contains(c)) {
+            withKey.add(c);
+          }
+        }
+        cols = withKey;
+      }
+      read.put(r, cols);
     }
     // MySQL builds the DISTINCT set, and NOT EXISTS's anti-join, whole before the first row, so
     // a copy that stops after a few rows has to check its rows one by one (todo 089)
@@ -122,6 +136,13 @@ final class SplitRead {
             @Override
             public SqlAst.Piece piece(SqlAst.TableRef ref) {
               return of.getOrDefault(ref, SqlAst.Piece.COMMITTED);
+            }
+
+            @Override
+            public List<String> selectExtra() {
+              return anchored == null
+                  ? List.of()
+                  : extras.apply(of.getOrDefault(anchored, SqlAst.Piece.COMMITTED));
             }
 
             @Override

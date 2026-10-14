@@ -52,6 +52,9 @@ final class Writes {
 
     /** Marks the application's transaction rollback-only after an abort (4.4). */
     void rollbackOnly();
+
+    /** The versions the transaction read, the anchors of its writes (4.2). */
+    Anchors anchors();
   }
 
   /** An abort the driver decides (4.4). */
@@ -448,8 +451,7 @@ final class Writes {
   }
 
   /** Reads a key value so that it binds back unchanged: a local time is not shifted by the zone. */
-  private static Object @Nullable [] readKey(ResultSet rs, int from, int width)
-      throws SQLException {
+  static Object @Nullable [] readKey(ResultSet rs, int from, int width) throws SQLException {
     Object[] key = new Object[width];
     for (int i = 0; i < width; i++) {
       int c = from + i;
@@ -515,6 +517,14 @@ final class Writes {
                   rs.getObject(2 * width + 2)));
         }
       }
+      // first-updater-wins (4.3 step 1): a key this transaction read must still be at that version
+      Anchors anchors = run.context.anchors();
+      for (Row row : rows) {
+        Anchors.Version read = anchors.anchor(n.table, row.key);
+        if (read != null && !read.is(row.txId, row.version)) {
+          throw new Aborted("a row this transaction read was changed by another one since");
+        }
+      }
       long total = 0;
       for (Row row : rows) {
         if (delete && row.metaKey == null) {
@@ -539,6 +549,7 @@ final class Writes {
         if (!(delete && row.metaKey == null) && cas(run, row) != 1) {
           throw new Aborted("a row the statement writes changed after it was read");
         }
+        anchors.written(n.table, row.key);
         total++;
       }
       return total;
@@ -715,6 +726,8 @@ final class Writes {
   /** The table's names, quoted, and the clauses built from them. */
   static final class Names {
     final Engine engine;
+    final String table; // as Router.Anchored names it
+
     final List<String> keyColumns;
     final String data;
     final String meta;
@@ -727,6 +740,7 @@ final class Writes {
 
     Names(Engine engine, TableInfo t) {
       this.engine = engine;
+      this.table = t.namespace() + "." + t.table();
       this.keyColumns = t.keyColumns();
       String ns = engine.quote(t.namespace()) + ".";
       this.data = ns + engine.quote(t.dataTable());

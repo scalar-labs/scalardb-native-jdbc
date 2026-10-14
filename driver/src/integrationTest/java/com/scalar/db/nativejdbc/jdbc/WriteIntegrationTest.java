@@ -570,6 +570,185 @@ class WriteIntegrationTest {
     }
   }
 
+  /** Milestone 4b: a read in a transaction anchors the writes that follow it (design 4.2, 4.3). */
+  @ParameterizedTest
+  @MethodSource("engines")
+  void anchorsFromReads(Engines e) throws Exception {
+    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4)");
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          "CREATE SCHEMA an",
+          "CREATE TABLE an.imp (id INT PRIMARY KEY, x TEXT)",
+          "INSERT INTO an.imp SELECT g, 'a' FROM generate_series(1, 9) g");
+    }
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace("an", true);
+      admin.importTable("an", "imp", DECOUPLED, Map.of());
+      admin.createTable(
+          "an",
+          "made",
+          TableMetadata.newBuilder()
+              .addColumn("id", DataType.INT)
+              .addColumn("x", DataType.TEXT)
+              .addPartitionKey("id")
+              .build(),
+          DECOUPLED);
+    }
+    try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
+      DistributedTransaction tx = tm.begin();
+      for (int i = 1; i <= 9; i++) {
+        tx.insert(
+            Insert.newBuilder()
+                .namespace("an")
+                .table("made")
+                .partitionKey(Key.ofInt("id", i))
+                .textValue("x", "a")
+                .build());
+      }
+      tx.commit();
+    }
+    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog, c, t -> t.namespace().equals("an"), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    TableInfo imp = catalog.lookup(List.of(), "an", "imp");
+    List<Table> tables =
+        List.of(
+            new Table(
+                "an.imp", "an." + imp.metadataTable(), Objects.requireNonNull(imp.virtualTable())),
+            new Table(
+                "an.made",
+                "an." + catalog.lookup(List.of(), "an", "made").metadataTable(),
+                "made"));
+    try (DistributedTransactionManager tm = scalarDb.getTransactionManager();
+        TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager()) {
+      for (Table t : tables) {
+        try (Connection d = e.openDriver();
+            Connection other = e.openDriver()) {
+          // the application's columns only
+          try (PreparedStatement ps =
+              d.prepareStatement("SELECT x AS label FROM " + t.sql + " WHERE id = ?")) {
+            ps.setInt(1, 1);
+            assertThat(ps.getMetaData().getColumnCount()).isEqualTo(1);
+            try (ResultSet rs = ps.executeQuery()) {
+              assertThat(rs.getMetaData().getColumnCount()).isEqualTo(1);
+              assertThat(rs.next()).isTrue();
+              assertThat(rs.getString("label")).isEqualTo("a");
+              assertThatThrownBy(() -> rs.getObject(2)).isInstanceOf(SQLException.class);
+            }
+          }
+          d.setAutoCommit(false);
+          // read, then a ScalarDB commit of the row: the write aborts, no lost update
+          assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 1")).containsExactly("a");
+          scalarDbSet(tm, t, 1, "scalardb");
+          assertThatThrownBy(
+                  () ->
+                      d.createStatement()
+                          .executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id = 1"))
+              .isInstanceOf(SQLTransactionRollbackException.class);
+          d.rollback();
+          // read by predicate, then another driver transaction writes one of the rows
+          assertThat(rows(d, "SELECT id FROM " + t.sql + " WHERE id IN (2, 3) ORDER BY id"))
+              .containsExactly("2", "3");
+          other.createStatement().executeUpdate("UPDATE " + t.sql + " SET x = 'o' WHERE id = 3");
+          assertThat(
+                  d.createStatement()
+                      .executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id = 2"))
+              .isEqualTo(1);
+          assertThatThrownBy(
+                  () ->
+                      d.createStatement()
+                          .executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id = 3"))
+              .isInstanceOf(SQLTransactionRollbackException.class);
+          d.rollback();
+          // a key the transaction wrote is written again; its read after the write anchors nothing
+          // new
+          d.createStatement().executeUpdate("UPDATE " + t.sql + " SET x = 'w1' WHERE id = 4");
+          assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 4")).containsExactly("w1");
+          assertThat(
+                  d.createStatement()
+                      .executeUpdate("UPDATE " + t.sql + " SET x = 'w2' WHERE id = 4"))
+              .isEqualTo(1);
+          d.commit();
+          // a rolled-back transaction's reads anchor nothing in the next one
+          assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 5")).containsExactly("a");
+          d.rollback();
+          scalarDbSet(tm, t, 5, "scalardb");
+          assertThat(
+                  d.createStatement()
+                      .executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id = 5"))
+              .isEqualTo(1);
+          d.commit();
+          // a row read in flight is anchored on its before image: a ScalarDB rollback keeps it
+          // valid,
+          // a commit does not
+          for (boolean commit : new boolean[] {false, true}) {
+            int id = commit ? 7 : 6;
+            TwoPhaseCommitTransaction held = tpc.begin();
+            held.update(
+                Update.newBuilder()
+                    .namespace("an")
+                    .table(t.scalarDbName)
+                    .partitionKey(Key.ofInt("id", id))
+                    .textValue("x", "held")
+                    .build());
+            held.prepare();
+            assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = " + id))
+                .containsExactly("a");
+            if (commit) {
+              held.validate();
+              held.commit();
+            } else {
+              held.rollback();
+            }
+            String update = "UPDATE " + t.sql + " SET x = 'd' WHERE id = " + id;
+            if (commit) {
+              assertThatThrownBy(() -> d.createStatement().executeUpdate(update))
+                  .isInstanceOf(SQLTransactionRollbackException.class);
+              d.rollback();
+            } else {
+              assertThat(d.createStatement().executeUpdate(update)).isEqualTo(1);
+              d.commit();
+            }
+          }
+          d.setAutoCommit(true);
+          // in autocommit a read anchors nothing
+          assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 8")).containsExactly("a");
+          scalarDbSet(tm, t, 8, "scalardb");
+          assertThat(
+                  d.createStatement()
+                      .executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id = 8"))
+              .isEqualTo(1);
+        }
+      }
+    }
+  }
+
+  private static void scalarDbSet(DistributedTransactionManager tm, Table t, int id, String x)
+      throws TransactionException {
+    DistributedTransaction tx = tm.begin();
+    tx.get(
+        Get.newBuilder()
+            .namespace("an")
+            .table(t.scalarDbName)
+            .partitionKey(Key.ofInt("id", id))
+            .build());
+    tx.update(
+        Update.newBuilder()
+            .namespace("an")
+            .table(t.scalarDbName)
+            .partitionKey(Key.ofInt("id", id))
+            .textValue("x", x)
+            .build());
+    tx.commit();
+  }
+
   private static Optional<String> scalarDbX(DistributedTransactionManager tm, Table t, int id)
       throws TransactionException {
     DistributedTransaction tx = tm.begin();
