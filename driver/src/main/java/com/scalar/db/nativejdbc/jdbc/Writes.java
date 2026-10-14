@@ -63,6 +63,12 @@ final class Writes {
 
     /** Records a key an INSERT wrote, in its data table's spelling, for {@link #returned}. */
     void inserted(Object[] key);
+
+    /**
+     * Hands over a locking read's rows, its statement closed with them, and the version of each row
+     * it locked, read under the lock.
+     */
+    void locked(ResultSet rows, List<Object[]> keys, List<Anchors.Version> versions);
   }
 
   /** An abort the driver decides (4.4). */
@@ -101,6 +107,11 @@ final class Writes {
     /** Whether it is an INSERT, whose rows {@link #returned} reads back. */
     boolean inserts() {
       return false;
+    }
+
+    /** Whether the statement's result is rows: its own {@code RETURNING}, or a locking read's. */
+    boolean returnsRows() {
+      return returning() != null;
     }
 
     abstract long apply(Run run) throws SQLException;
@@ -393,7 +404,16 @@ final class Writes {
 
     /** A driver statement with what is left of the timeout, reachable by {@code cancel()}. */
     PreparedStatement prepare(String sql) throws SQLException {
-      PreparedStatement ps = v.prepareStatement(sql);
+      return prepare(sql, false);
+    }
+
+    /** As {@link #prepare(String)}; a scrollable one's rows can be read twice. */
+    PreparedStatement prepare(String sql, boolean scrollable) throws SQLException {
+      PreparedStatement ps =
+          scrollable
+              ? v.prepareStatement(
+                  sql, ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY)
+              : v.prepareStatement(sql);
       try {
         if (deadline != 0) {
           long left = deadline - System.nanoTime();
@@ -412,7 +432,12 @@ final class Writes {
 
     /** A step prepared and bound: its binds, then the key's values, if any. */
     PreparedStatement prepare(Step step, Object @Nullable [] key) throws SQLException {
-      PreparedStatement ps = prepare(step.sql);
+      return prepare(step, key, false);
+    }
+
+    private PreparedStatement prepare(Step step, Object @Nullable [] key, boolean scrollable)
+        throws SQLException {
+      PreparedStatement ps = prepare(step.sql, scrollable);
       try {
         int i = 1;
         for (int b : step.binds) {
@@ -594,12 +619,7 @@ final class Writes {
           throw new Aborted(
               "a row the statement writes is being written by a ScalarDB transaction");
         }
-        try {
-          Thread.sleep(20);
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new Aborted("the wait for a row in flight was interrupted");
-        }
+        sleep();
       }
     }
 
@@ -895,6 +915,127 @@ final class Writes {
     } catch (SQLException | RuntimeException e) {
       ps.close();
       throw e;
+    }
+  }
+
+  /**
+   * A user's {@code FOR UPDATE} or {@code FOR SHARE} of one ScalarDB table (design 4.2): the
+   * committed rows locked, a row in flight treated as one another transaction holds. Unless the
+   * clause skips locked rows, a row in flight that the predicate matches fails a {@code NOWAIT}
+   * with {@code 55P03}, and otherwise waits the bounded wait of section 6, then aborts. Each locked
+   * row's metadata is read again under the lock: PostgreSQL re-checks a row updated since the
+   * statement began against the metadata table as the statement began, so a row a ScalarDB prepare
+   * wrote meanwhile would pass as committed; it aborts the read instead.
+   */
+  static final class LockPlan extends Plan {
+    final Step lock;
+    final @Nullable Step inFlight;
+    final boolean noWait;
+
+    LockPlan(Names n, Step lock, @Nullable Step inFlight, boolean noWait) {
+      super(n);
+      this.lock = lock;
+      this.inFlight = inFlight;
+      this.noWait = noWait;
+    }
+
+    @Override
+    boolean returnsRows() {
+      return true;
+    }
+
+    @Override
+    List<String> sql() {
+      return inFlight == null ? List.of(lock.sql) : List.of(inFlight.sql, lock.sql);
+    }
+
+    @Override
+    long apply(Run run) throws SQLException {
+      if (inFlight != null) {
+        long until = System.nanoTime() + run.context.inflightWait().toNanos();
+        while (true) {
+          try (PreparedStatement ps = run.prepare(inFlight, null);
+              ResultSet rs = ps.executeQuery()) {
+            if (!rs.next()) {
+              break;
+            }
+          }
+          if (noWait) {
+            throw new SQLException(
+                "could not lock a row: a ScalarDB transaction is writing it", "55P03");
+          }
+          if (System.nanoTime() - until >= 0) {
+            throw new Aborted(
+                "a row the statement locks is being written by a ScalarDB transaction");
+          }
+          sleep();
+        }
+      }
+      int width = n.keyColumns.size();
+      PreparedStatement ps = run.prepare(lock, null, true);
+      try {
+        ResultSet rs = ps.executeQuery();
+        // the key, then the two version lookups the anchored read appends
+        int from = rs.getMetaData().getColumnCount() - width - 1;
+        List<Object[]> keys = new ArrayList<>();
+        while (rs.next()) {
+          keys.add(Objects.requireNonNull(readKey(rs, from, width)));
+        }
+        List<Anchors.Version> versions = new ArrayList<>();
+        List<Object[]> locked = new ArrayList<>();
+        if (!keys.isEmpty()) {
+          try (PreparedStatement check =
+              run.prepare(
+                  "SELECT "
+                      + n.columns("d")
+                      + ", m."
+                      + n.txId
+                      + ", m."
+                      + n.txVersion
+                      + ", m."
+                      + n.txState
+                      + " FROM "
+                      + n.data
+                      + " d LEFT JOIN "
+                      + n.meta
+                      + " m ON "
+                      + n.keyJoin("m", "d")
+                      + " WHERE "
+                      + n.anyKey("d", keys.size()))) {
+            int i = 1;
+            for (Object[] key : keys) {
+              i = bind(check, i, key);
+            }
+            try (ResultSet m = check.executeQuery()) {
+              while (m.next()) {
+                if (inFlight(m.getObject(width + 3))) {
+                  throw new Aborted(
+                      "a row the statement locks went in flight in a ScalarDB transaction");
+                }
+                locked.add(Objects.requireNonNull(readKey(m, 1, width)));
+                versions.add(new Anchors.Version(m.getString(width + 1), m.getObject(width + 2)));
+              }
+            }
+          }
+        }
+        rs.beforeFirst();
+        ps.closeOnCompletion();
+        run.context.locked(rs, locked, versions);
+        return keys.size();
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
+        throw e;
+      }
+    }
+  }
+
+  /** The poll interval of the bounded wait (section 6). */
+  private static void sleep() throws SQLException {
+    try {
+      Thread.sleep(20);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new Aborted("the wait for a row in flight was interrupted");
     }
   }
 

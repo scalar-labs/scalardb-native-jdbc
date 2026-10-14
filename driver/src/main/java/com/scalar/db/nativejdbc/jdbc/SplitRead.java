@@ -59,6 +59,7 @@ final class SplitRead {
    *     MySQL and MariaDB
    * @param anchored the reference whose rows carry their versions, which reads its key too, or null
    * @param extras what each copy appends to the select list for its piece of {@code anchored}
+   * @param committedOnly whether to emit the committed copy alone, as a locking read takes it
    * @return the split read, or {@code null} to read through the views
    */
   static SqlAst.@Nullable SplitText emit(
@@ -69,7 +70,8 @@ final class SplitRead {
       Map<SqlAst.TableRef, String> views,
       Set<SqlAst.TableRef> perRow,
       SqlAst.@Nullable TableRef anchored,
-      @Nullable Function<SqlAst.Piece, List<String>> extras) {
+      @Nullable Function<SqlAst.Piece, List<String>> extras,
+      boolean committedOnly) {
     Map<SqlAst.TableRef, SqlAst.Place> places = split.places();
     List<SqlAst.TableRef> refs = new ArrayList<>();
     List<List<SqlAst.Piece>> pieces = new ArrayList<>();
@@ -84,6 +86,9 @@ final class SplitRead {
           continue; // read over both pieces inside every copy
         default:
           of = List.of(SqlAst.Piece.COMMITTED, SqlAst.Piece.IN_FLIGHT);
+      }
+      if (committedOnly) {
+        of = List.of(SqlAst.Piece.COMMITTED);
       }
       refs.add(e.getKey());
       pieces.add(of);
@@ -272,7 +277,7 @@ final class SplitRead {
   }
 
   /** The before image of each of the table's rows in flight that has one, columns {@code read}. */
-  private static String inFlight(Engine engine, TableInfo t, List<String> read) {
+  static String inFlight(Engine engine, TableInfo t, List<String> read) {
     List<String> cols = new ArrayList<>();
     List<String> keys = t.keyColumns();
     for (String c : read) {

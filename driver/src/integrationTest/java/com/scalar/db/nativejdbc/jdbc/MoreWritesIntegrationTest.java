@@ -46,7 +46,8 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Milestone 4c on PostgreSQL and both decoupled layouts: batches of writes, keys the database
- * generates and {@code RETURNING} (design 4.4), the bounded wait for a row in flight (section 6).
+ * generates and {@code RETURNING} (design 4.4), the bounded wait for a row in flight (section 6),
+ * and the application's own locking reads (4.2).
  */
 @SuppressFBWarnings(
     value = {"SQL_INJECTION_JDBC", "OBL_UNSATISFIED_OBLIGATION", "ODR_OPEN_DATABASE_RESOURCE"},
@@ -75,7 +76,7 @@ class MoreWritesIntegrationTest {
 
   @ParameterizedTest
   @MethodSource("engines")
-  void batchesKeysAndWaits(Engines e) throws Exception {
+  void batchesKeysWaitsAndLocks(Engines e) throws Exception {
     assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4)");
     try (Connection c = e.open()) {
       e.execute(
@@ -137,6 +138,7 @@ class MoreWritesIntegrationTest {
         batches(e, tm, tpc, t);
         returning(e, t);
         inFlightWait(e, tpc, t);
+        lockingReads(e, tm, tpc, t);
       }
       TableInfo gen = catalog.lookup(List.of(), "wb", "gen");
       generatedKeys(
@@ -402,6 +404,134 @@ class MoreWritesIntegrationTest {
     } finally {
       held.rollback();
     }
+  }
+
+  private static void lockingReads(
+      Engines e, DistributedTransactionManager tm, TwoPhaseCommitTransactionManager tpc, Table t)
+      throws Exception {
+    ExecutorService pool = Executors.newCachedThreadPool();
+    try (Connection d = e.openDriver();
+        Connection other = e.openDriver()) {
+      d.createStatement()
+          .executeUpdate(
+              "INSERT INTO "
+                  + t.sql
+                  + " (id, x) VALUES (40, 'a'), (41, 'b'), (42, 'c'), (43, 'd')");
+      // the committed row, the driver's columns hidden, locked until the transaction ends
+      d.setAutoCommit(false);
+      try (PreparedStatement ps =
+          d.prepareStatement("SELECT x AS label FROM " + t.sql + " WHERE id = ? FOR UPDATE")) {
+        assertThat(ps.getMetaData().getColumnCount()).isEqualTo(1);
+        ps.setInt(1, 40);
+        try (ResultSet rs = ps.executeQuery()) {
+          assertThat(rs.getMetaData().getColumnCount()).isEqualTo(1);
+          assertThat(rows(rs)).containsExactly("a");
+        }
+      }
+      Future<?> scalarDb =
+          pool.submit(
+              () -> {
+                scalarDbSet(tm, t, 40, "s");
+                return null;
+              });
+      Thread.sleep(300);
+      assertThat(scalarDb.isDone()).as("ScalarDB waits for the lock").isFalse();
+      // the transaction writes the row it locked
+      assertThat(update(d, t, 40)).isEqualTo(1);
+      d.commit();
+      // ScalarDB read the row before the driver wrote it: its commit fails
+      assertThatThrownBy(() -> scalarDb.get(20, TimeUnit.SECONDS))
+          .hasCauseInstanceOf(TransactionException.class);
+      assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 40")).containsExactly("a+");
+      d.commit();
+      // a row in flight is a row another transaction holds
+      TwoPhaseCommitTransaction held = prepared(tpc, t, 42, "held");
+      try {
+        String queue =
+            "SELECT id FROM "
+                + t.sql
+                + " WHERE id >= 41 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED";
+        assertThat(rows(d, queue)).containsExactly("41");
+        other.setAutoCommit(false);
+        assertThat(rows(other, queue)).as("41 locked, 42 in flight").containsExactly("43");
+        other.rollback();
+        assertThatThrownBy(
+                () -> rows(other, "SELECT x FROM " + t.sql + " WHERE id = 42 FOR SHARE NOWAIT"))
+            .isInstanceOf(SQLException.class)
+            .extracting("SQLState")
+            .isEqualTo("55P03");
+        other.rollback();
+        assertThatThrownBy(
+                () -> rows(other, "SELECT x FROM " + t.sql + " WHERE id >= 42 FOR UPDATE"))
+            .isInstanceOf(SQLTransactionRollbackException.class);
+        assertThatThrownBy(other::commit).isInstanceOf(SQLTransactionRollbackException.class);
+        other.rollback();
+        other.setAutoCommit(true);
+      } finally {
+        held.rollback();
+      }
+      d.rollback();
+      // in autocommit too
+      assertThat(rows(d, "SELECT * FROM " + t.sql + " WHERE id = 43 FOR UPDATE"))
+          .containsExactly("43/d");
+      d.setAutoCommit(true);
+      // a ScalarDB prepare queued for the row ahead of the read writes it before the read gets
+      // its lock; PostgreSQL's re-check would pass its after image as committed
+      other.setAutoCommit(false);
+      rows(other, "SELECT x FROM " + t.sql + " WHERE id = 43 FOR UPDATE");
+      TwoPhaseCommitTransaction prepare = tpc.begin();
+      try {
+        prepare.update(
+            Update.newBuilder()
+                .namespace("wb")
+                .table(t.scalarDbName)
+                .partitionKey(Key.ofInt("id", 43))
+                .textValue("x", "after")
+                .build());
+        Future<?> prepared =
+            pool.submit(
+                () -> {
+                  prepare.prepare();
+                  return null;
+                });
+        Thread.sleep(300);
+        d.setAutoCommit(false);
+        Future<List<String>> read =
+            pool.submit(() -> rows(d, "SELECT x FROM " + t.sql + " WHERE id = 43 FOR UPDATE"));
+        Thread.sleep(300);
+        other.commit();
+        prepared.get(20, TimeUnit.SECONDS);
+        assertThatThrownBy(() -> read.get(20, TimeUnit.SECONDS))
+            .hasCauseInstanceOf(SQLTransactionRollbackException.class);
+      } finally {
+        d.rollback(); // the read's lock, which ScalarDB's rollback waits for
+        d.setAutoCommit(true);
+        other.rollback();
+        other.setAutoCommit(true);
+        prepare.rollback();
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  private static void scalarDbSet(DistributedTransactionManager tm, Table t, int id, String x)
+      throws TransactionException {
+    DistributedTransaction tx = tm.begin();
+    tx.get(
+        Get.newBuilder()
+            .namespace("wb")
+            .table(t.scalarDbName)
+            .partitionKey(Key.ofInt("id", id))
+            .build());
+    tx.update(
+        Update.newBuilder()
+            .namespace("wb")
+            .table(t.scalarDbName)
+            .partitionKey(Key.ofInt("id", id))
+            .textValue("x", x)
+            .build());
+    tx.commit();
   }
 
   private static TwoPhaseCommitTransaction prepared(

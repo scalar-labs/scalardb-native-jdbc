@@ -104,6 +104,10 @@ class StatementShapeTest {
     assertThat(shape("select * from t where id = ? for update").lockMode())
         .isEqualTo(ForMode.UPDATE);
     assertThat(shape("select * from t for share").lockMode()).isEqualTo(ForMode.SHARE);
+    StatementShape skip = shape("select * from t order by id limit 1 for update skip locked");
+    assertThat(skip.skipLocked()).isTrue();
+    assertThat(skip.noWait()).isFalse();
+    assertThat(shape("select * from t where id = ? for share nowait").noWait()).isTrue();
   }
 
   @Test
@@ -207,8 +211,6 @@ class StatementShapeTest {
         "insert into t (id) values (?) on duplicate key update x = 1",
         "insert into t (id) values (?) on conflict (id) do nothing",
         "insert into t (id) output inserted.id values (?)",
-        "select * from t where id = ? for update skip locked",
-        "select * from t where id = ? for update nowait",
         "select * from t where id = ? for update wait 5",
         "select /*+ full(t) */ * from t where id = ?",
         "update /*+ index(t i) */ t set x = ? where id = ?",
@@ -264,7 +266,6 @@ class StatementShapeTest {
       delimiter = '|',
       value = {
         "select * from a join b on a.id = b.id | 2 tables",
-        "select * from t where id = ? for update skip locked | SKIP LOCKED",
         "insert ignore into t (id) values (?) | INSERT IGNORE",
         "insert into t select * from u | 2 tables",
         "update t set (x, y) = (?, ?) where id = ? | set one column at a time",

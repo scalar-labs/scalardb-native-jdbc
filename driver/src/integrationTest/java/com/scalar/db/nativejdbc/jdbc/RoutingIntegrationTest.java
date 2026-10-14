@@ -168,7 +168,11 @@ class RoutingIntegrationTest {
       // a subquery in a SET is a read whose result changes the session: not a plain read
       assertRefused(() -> st.execute("SET x.y = (SELECT x FROM m1.s LIMIT 1)"), "0AN01", "m1.s");
       assertRefused(
-          () -> st.executeQuery("SELECT x FROM m1.s WHERE id = 99 FOR UPDATE"), "0AN01", "locking");
+          () ->
+              st.executeQuery(
+                  "SELECT s.x FROM m1.s s JOIN m1.p p ON p.id = s.id WHERE s.id = 99 FOR UPDATE"),
+          "0AN01",
+          "locking");
       assertRefused(
           () -> st.executeQuery("SELECT x FROM m1.s TABLESAMPLE SYSTEM (100)"), "0AN01", "hint");
     }

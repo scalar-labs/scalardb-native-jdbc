@@ -318,8 +318,8 @@ other engines keep refusing them with `0AN01`.
   transaction between the read and the write abort it; a key written twice; autocommit reads and
   rolled-back transactions anchor nothing; a row read in flight is anchored on its before image.
   Not anchored yet, so not protected: joins and subqueries (the split read), and the grouped and
-  DISTINCT reads, whose rows are not the table's; a `FOR UPDATE` on them is the attributable lock of
-  4c.
+  DISTINCT reads, whose rows are not the table's; until joins anchor, a `FOR UPDATE` of the one
+  table, which 4c locks and anchors, protects such a read-then-write.
 - **4c, the rest**: batches, the bounded wait of section 6, generated keys, `RETURNING`, a user `FOR
   UPDATE` or `FOR SHARE`.
   **Batches, generated keys and `RETURNING` done (2026-10-15)**, on PostgreSQL (design 4.4): a batch
@@ -336,6 +336,16 @@ other engines keep refusing them with `0AN01`.
   timeout, then aborts; nothing is locked while it waits. `MoreWritesIntegrationTest` covers a ScalarDB
   rollback and a commit during the wait, a key read before the wait keeping its anchor, and the abort
   once the wait runs out.
+  **A user `FOR UPDATE` or `FOR SHARE` done (2026-10-15)**, on PostgreSQL, for one table read row
+  by row (design 4.2): the committed copy alone, with the clause, run by the driver as a write is; a
+  row in flight counts as locked by another transaction, skipped by `SKIP LOCKED`, `55P03` for
+  `NOWAIT`, otherwise the bounded wait and `40001`; each locked row's metadata read again under the
+  lock, which anchors it. `MoreWritesIntegrationTest` covers both layouts: the lock holding a
+  ScalarDB update back, whose commit then fails since the driver wrote the row; a `SKIP LOCKED` queue
+  of two connections; `NOWAIT`; the abort; autocommit; and a ScalarDB prepare queued for the lock
+  ahead of the read, whose after image PostgreSQL's re-check would have returned as committed (the
+  test fails without the second metadata read). Refused: a locking read of a join or a subquery.
+  Milestone 4 is complete on PostgreSQL; joins in the anchors come next, then milestone 5.
 
 ### Milestone 5: interleaving tests
 

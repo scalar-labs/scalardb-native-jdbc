@@ -2821,14 +2821,16 @@ public final class SqlAst {
         return null;
       }
     }
+    // one copy needs nothing on top: the statement as written, its locking clause included
     boolean onTop =
-        grouping != null
-            || s.getDistinct() != null
-            || s.getTop() != null
-            || s.getLimit() != null
-            || s.getOffset() != null
-            || s.getFetch() != null
-            || s.getOrderByElements() != null;
+        copies.size() > 1
+            && (grouping != null
+                || s.getDistinct() != null
+                || s.getTop() != null
+                || s.getLimit() != null
+                || s.getOffset() != null
+                || s.getFetch() != null
+                || s.getOrderByElements() != null);
     List<Integer> sources = new ArrayList<>();
     List<SelectItem<?>> items = s.getSelectItems();
     Node lastItemNode = items.get(items.size() - 1).getASTNode();

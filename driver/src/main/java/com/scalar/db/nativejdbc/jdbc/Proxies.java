@@ -386,6 +386,13 @@ public final class Proxies {
         || Integer.valueOf(Statement.RETURN_GENERATED_KEYS).equals(args[1]);
   }
 
+  /** A locking read's rows and what it locked, handed over by {@link Writes.Context#locked}. */
+  private static final class Locked {
+    @Nullable ResultSet rows;
+    List<Object[]> keys = List.of();
+    List<Anchors.Version> versions = List.of();
+  }
+
   /** A recorded call, replayed on a statement prepared again. */
   private static final class Call {
     final Method method;
@@ -689,7 +696,11 @@ public final class Proxies {
                   + " UPDATE");
         }
       }
-      if (name.equals("getMetaData") && prepared != null && prepared.anchored != null) {
+      if (name.equals("getMetaData")
+          && prepared != null
+          && prepared.anchored != null
+          && prepared.write == null) {
+        // the vendor statement holds the anchored text; a locking read's holds the application's
         Object md = forward(vendor(), method, args);
         return md == null
             ? null
@@ -731,9 +742,12 @@ public final class Proxies {
         throws SQLException {
       Writes.Plan plan = Objects.requireNonNull(route.write);
       String own = plan.returning();
-      if (name.equals("executeQuery") && own == null) {
+      if (name.equals("executeQuery") && !plan.returnsRows()) {
         throw new SQLException("the statement returns no result set", "02000");
       }
+      // a locking read anchors its rows as an anchored read does, in a transaction only
+      boolean recording = !owner.vendor.getAutoCommit() && !owner.vendor.isReadOnly();
+      long epoch = owner.anchors.epoch();
       boolean prepared = args == null || args.length == 0 || !(args[0] instanceof String);
       String items =
           own != null
@@ -747,7 +761,8 @@ public final class Proxies {
         open.close();
       }
       List<Object[]> keys = new ArrayList<>();
-      Writes.Context context = writeContext(prepared ? parameters : null, keys);
+      Locked locked = new Locked();
+      Writes.Context context = writeContext(prepared ? parameters : null, keys, locked);
       long[] count = {0};
       ResultSet[] rows = {null};
       try {
@@ -761,18 +776,41 @@ public final class Proxies {
               }
             });
       } catch (SQLException | RuntimeException e) {
-        if (rows[0] != null) {
-          rows[0].close();
+        for (ResultSet r : new ResultSet[] {rows[0], locked.rows}) {
+          if (r != null) {
+            r.close();
+          }
         }
         throw e;
       }
       writeCount = count[0];
-      writeReturns = own != null;
-      writeResult =
-          rows[0] == null
-              ? null
-              : (ResultSet)
-                  proxy(ResultSet.class, new ChildHandler(rows[0], connection, (Statement) proxy));
+      writeReturns = plan.returnsRows();
+      ResultSet lockedRows = locked.rows;
+      if (lockedRows != null) {
+        if (recording) {
+          for (int i = 0; i < locked.keys.size(); i++) {
+            owner.anchors.read(epoch, plan.n.table, locked.keys.get(i), locked.versions.get(i));
+          }
+        }
+        writeResult =
+            (ResultSet)
+                proxy(
+                    ResultSet.class,
+                    new AnchoredHandler(
+                        lockedRows,
+                        connection,
+                        (Statement) proxy,
+                        new Router.Anchored(plan.n.table, plan.n.keyColumns.size()),
+                        null,
+                        epoch));
+      } else {
+        writeResult =
+            rows[0] == null
+                ? null
+                : (ResultSet)
+                    proxy(
+                        ResultSet.class, new ChildHandler(rows[0], connection, (Statement) proxy));
+      }
       switch (name) {
         case "executeQuery":
           return writeResult;
@@ -781,7 +819,7 @@ public final class Proxies {
         case "executeLargeUpdate":
           return count[0];
         default:
-          return writeReturns; // execute: a result set for RETURNING, an update count otherwise
+          return writeReturns; // execute: a result set for rows, an update count otherwise
       }
     }
 
@@ -790,8 +828,20 @@ public final class Proxies {
      * inserts added to {@code inserted}.
      */
     private Writes.Context writeContext(
-        @Nullable Map<Integer, Call> parameters, @Nullable List<Object[]> inserted) {
+        @Nullable Map<Integer, Call> parameters,
+        @Nullable List<Object[]> inserted,
+        @Nullable Locked locked) {
       return new Writes.Context() {
+        @Override
+        public void locked(ResultSet rows, List<Object[]> keys, List<Anchors.Version> versions) {
+          if (locked == null) {
+            throw new IllegalStateException("a locking read run as a batch entry");
+          }
+          locked.rows = rows;
+          locked.keys = keys;
+          locked.versions = versions;
+        }
+
         @Override
         public void inserted(Object[] key) {
           if (inserted != null) {
@@ -865,8 +915,10 @@ public final class Proxies {
       }
       for (int i = 0; i < size; i++) {
         Writes.Plan plan = routes.apply(i).write;
-        if (plan != null && plan.returning() != null) {
-          throw Errors.unsupported("a statement with RETURNING cannot be batched; run it alone");
+        if (plan != null && plan.returnsRows()) {
+          throw Errors.unsupported(
+              "a statement that returns rows (RETURNING, a locking read) cannot be batched; run it"
+                  + " alone");
         }
       }
       long[] counts = new long[size];
@@ -876,7 +928,7 @@ public final class Proxies {
       try {
         Writes.within(
             owner.vendor,
-            writeContext(null, null),
+            writeContext(null, null, null),
             () -> {
               Writes.Plan last = null;
               for (int i = 0; i < size; i++) {
@@ -884,7 +936,8 @@ public final class Proxies {
                 if (route.write != null) {
                   last = route.write;
                   counts[i] =
-                      Writes.apply(owner.vendor, last, writeContext(parameters.apply(i), inserted));
+                      Writes.apply(
+                          owner.vendor, last, writeContext(parameters.apply(i), inserted, null));
                 } else {
                   counts[i] = runPlain(route);
                 }

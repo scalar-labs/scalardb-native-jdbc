@@ -31,6 +31,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
+import net.sf.jsqlparser.expression.Expression;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -504,14 +505,14 @@ final class Router {
    * ORDER BY.
    */
   private SqlAst.@Nullable TableRef anchorable(
-      SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+      SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb, boolean locking) {
     Optional<StatementShape> shape = StatementShape.of(ast);
     if (engine != Engine.POSTGRESQL
         || scalarDb.size() != 1
         || shape.isEmpty()
         || shape.get().kind() != StatementShape.Kind.SELECT
         || !ast.rowPerRow()
-        || shape.get().lockMode() != null) {
+        || (shape.get().lockMode() != null) != locking) {
       return null;
     }
     SqlAst.TableRef ref = shape.get().table();
@@ -555,6 +556,93 @@ final class Router {
     return out;
   }
 
+  /**
+   * A user's locking read of one ScalarDB table (design 4.2): its committed copy alone, the
+   * statement as written over it, locking clause included, which locks the data table's rows; and
+   * the same predicate over the rows in flight, which the driver checks first.
+   */
+  private Route lockingRead(
+      String sql,
+      SqlAst ast,
+      IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb,
+      SqlAst.TableRef ref,
+      String tables)
+      throws SQLException {
+    TableInfo t = Objects.requireNonNull(scalarDb.get(ref));
+    if (t.layout() == Layout.CLASSIC) {
+      throw Errors.unsupported(
+          "tables in ScalarDB's classic layout are not supported yet" + tables);
+    }
+    if (ref.hasHintOrLink()) {
+      throw Errors.unsupported(
+          "a table hint, sample clause, PIVOT or database link on a ScalarDB table is not"
+              + " supported"
+              + tables);
+    }
+    StatementShape shape = StatementShape.of(ast).orElseThrow();
+    for (SqlAst.ColumnRef c : ast.columnRefs()) {
+      SqlAst.TableRef q = c.qualifier();
+      if (q != null && q.schema() != null) {
+        throw Errors.unsupported(
+            "a column qualified by a schema in a locking read of a ScalarDB table" + tables);
+      }
+    }
+    Writes.Names n = new Writes.Names(engine, t);
+    SqlAst.SplitText text =
+        SplitRead.emit(
+            engine,
+            ast,
+            ast.split(r -> scalarDb.containsKey(r) ? t.keyColumns() : null),
+            scalarDb,
+            new IdentityHashMap<>(),
+            Set.of(),
+            ref,
+            piece -> versions(ref, n, piece),
+            true);
+    Expression where = shape.where();
+    int[] span = where == null ? null : ast.span(where);
+    List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
+    if (text == null || (where != null && span == null) || inWhere == null) {
+      throw Errors.unsupported(
+          "the locking read cannot be rewritten onto the committed rows" + tables);
+    }
+    Writes.Step inFlight =
+        shape.skipLocked()
+            ? null // a row in flight is a locked row, skipped
+            : new Writes.Step(
+                "SELECT 1 FROM "
+                    + SplitRead.inFlight(engine, t, t.dataColumns())
+                    + " "
+                    + exposed(ref)
+                    + (span == null ? "" : " WHERE " + ast.source().substring(span[0], span[1]))
+                    + " LIMIT 1",
+                inWhere);
+    Writes.Plan plan =
+        new Writes.LockPlan(
+            n, new Writes.Step(text.sql(), text.parameterSources()), inFlight, shape.noWait());
+    return new Route(
+            sql,
+            sql,
+            false,
+            false,
+            false,
+            SqlAst.Kind.SELECT,
+            isolation,
+            session.generation(),
+            catalog.generation(),
+            catalog.trustedUntil(),
+            null,
+            ast.parameterCount(),
+            0,
+            false,
+            List.of(),
+            false,
+            false,
+            plan,
+            null)
+        .anchored(new Anchored(n.table, n.keyColumns.size()));
+  }
+
   /** The version lookups' alias for the metadata table, which an anchored read must not use. */
   private static final String META_ALIAS = "scalardb_native_meta";
 
@@ -588,10 +676,14 @@ final class Router {
               + tables);
     }
     if (ast.hasLockingOrIntoClause()) {
-      throw Errors.unsupported(
-          "a locking read (FOR UPDATE, FOR SHARE) or SELECT ... INTO of a ScalarDB table is not"
-              + " supported yet"
-              + tables);
+      SqlAst.TableRef locked = anchorable(ast, scalarDb, true);
+      if (locked == null) {
+        throw Errors.unsupported(
+            "a locking read (FOR UPDATE, FOR SHARE) of a ScalarDB table must read that table alone"
+                + " row by row, on PostgreSQL; SELECT ... INTO is not supported"
+                + tables);
+      }
+      return lockingRead(sql, ast, scalarDb, locked, tables);
     }
     IdentityHashMap<SqlAst.TableRef, String> views = new IdentityHashMap<>();
     for (Map.Entry<SqlAst.TableRef, TableInfo> e : scalarDb.entrySet()) {
@@ -655,7 +747,7 @@ final class Router {
         }
       }
     }
-    SqlAst.TableRef anchored = anchorable(ast, scalarDb);
+    SqlAst.TableRef anchored = anchorable(ast, scalarDb, false);
     Writes.Names anchorNames =
         anchored == null
             ? null
@@ -671,7 +763,8 @@ final class Router {
             anchored,
             anchored == null
                 ? null
-                : piece -> versions(anchored, Objects.requireNonNull(anchorNames), piece));
+                : piece -> versions(anchored, Objects.requireNonNull(anchorNames), piece),
+            false);
     if (text != null) {
       Route r =
           route(

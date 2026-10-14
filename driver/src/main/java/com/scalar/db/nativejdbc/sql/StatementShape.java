@@ -83,6 +83,8 @@ public final class StatementShape {
   private final boolean ordered;
   private final boolean limited;
   private final @Nullable ForMode lockMode;
+  private final boolean skipLocked;
+  private final boolean noWait;
   private final @Nullable Expression where;
   private final List<String> whereColumns;
   private final List<String> insertColumns;
@@ -101,6 +103,8 @@ public final class StatementShape {
     this.ordered = b.ordered;
     this.limited = b.limited;
     this.lockMode = b.lockMode;
+    this.skipLocked = b.skipLocked;
+    this.noWait = b.noWait;
     this.where = b.where;
     this.whereColumns = List.copyOf(b.whereColumns);
     this.insertColumns = List.copyOf(b.insertColumns);
@@ -263,6 +267,24 @@ public final class StatementShape {
    */
   public @Nullable ForMode lockMode() {
     return lockMode;
+  }
+
+  /**
+   * Returns whether the locking clause skips rows locked by others, {@code SKIP LOCKED}.
+   *
+   * @return whether it skips them
+   */
+  public boolean skipLocked() {
+    return skipLocked;
+  }
+
+  /**
+   * Returns whether the locking clause fails at once on a row locked by others, {@code NOWAIT}.
+   *
+   * @return whether it does not wait
+   */
+  public boolean noWait() {
+    return noWait;
   }
 
   /**
@@ -463,6 +485,8 @@ public final class StatementShape {
     boolean ordered;
     boolean limited;
     @Nullable ForMode lockMode;
+    boolean skipLocked;
+    boolean noWait;
     @Nullable Expression where;
     List<String> whereColumns = List.of();
     List<String> insertColumns = List.of();
@@ -538,10 +562,6 @@ public final class StatementShape {
               "TOP",
               s.getOracleHint() != null,
               "an optimizer hint",
-              s.isSkipLocked(),
-              "SKIP LOCKED",
-              s.isNoWait(),
-              "NOWAIT",
               s.getWait() != null,
               "WAIT",
               // clauses that read or write something other than the table's rows
@@ -592,6 +612,8 @@ public final class StatementShape {
       ordered = s.getOrderByElements() != null && !s.getOrderByElements().isEmpty();
       limited = s.getLimit() != null || s.getOffset() != null || s.getFetch() != null;
       lockMode = s.getForMode();
+      skipLocked = s.isSkipLocked();
+      noWait = s.isNoWait();
       if (s.getForUpdateTables() != null) {
         for (Table target : s.getForUpdateTables()) {
           // FOR UPDATE OF names this table, by its alias or its name, or nothing this shape knows

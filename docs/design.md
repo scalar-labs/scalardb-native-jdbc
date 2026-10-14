@@ -746,18 +746,27 @@ union as a derived table.
   the writer's pair would let the CAS succeed after the writer committed, a lost update. Every other
   shape (joins, subqueries, a predicate that cannot be attributed to one table) takes the split read
   below and no anchor. A
-  user `SELECT ... FOR UPDATE` or `FOR SHARE` keeps this form with the lock pushed into the **first
-  arm's** derived table only, as in the SERIALIZABLE bullet, because PostgreSQL rejects a locking clause
-  on the union itself; the lock lands on the rows of `T` and `T_meta`, or on `T` alone where the
-  locking-clause rule below rewrites it, and blocks a ScalarDB prepare on them until commit. On MySQL
-  and MariaDB a user `FOR UPDATE` stays in the first arm, since an exclusive lock reaches the row; a user
-  `FOR SHARE`, and on SQL Server any user locking clause, is taken as the separate primary-key re-read of
-  the SERIALIZABLE bullet, since a shared lock through a covering index would not reach the row. A user
-  locking clause on a split read of several ScalarDB tables is refused for now. The second
-  arm is never locked: its rows are in flight, a lock on them would block
-  the ScalarDB commit, rollback or recovery that has to settle them, and a later write to such a key by
-  this transaction would then wait, in 4.3 step 1, on a row that cannot settle while this transaction
-  holds the lock. Rows from the second arm keep the in-flight rules of 4.3 and section 6, unlocked.
+  user `SELECT ... FOR UPDATE` or `FOR SHARE` of one table, read row by row, reads the **first arm
+  alone**: the statement as written over the first arm's derived table, its locking clause, `NOWAIT`
+  and `SKIP LOCKED` included, which on PostgreSQL locks the rows of `T` only, the in-flight check
+  being a sublink the lock does not reach, and blocks a ScalarDB prepare on them until commit; no
+  union, which PostgreSQL would refuse a locking clause on. A row in flight is a row another
+  transaction holds, as a native lock would treat it: `SKIP LOCKED` skips it, the first arm leaving
+  it out already; otherwise the driver first checks the predicate over the second arm, and a row
+  there fails a `NOWAIT` with `55P03` and otherwise waits the bounded wait of section 6, then aborts
+  with `40001`. That check ignores `ORDER BY ... LIMIT`, so a row in flight that the limit would not
+  have reached waits or aborts too, conservatively. The second arm is never locked nor returned: a
+  lock on its rows would block the ScalarDB commit, rollback or recovery that has to settle them, and
+  a later write to such a key by this transaction would then wait, in 4.3 step 1, on a row that
+  cannot settle while this transaction holds the lock. **Under the lock the driver reads each locked
+  row's metadata again**, and those versions are the rows' anchors: PostgreSQL re-checks a row
+  updated after the statement began against the other tables as they were when it began, the
+  metadata table included, so a row a ScalarDB prepare wrote in between, queued for the lock ahead of
+  the read, would pass as committed with its after image; the read aborts with `40001` instead. On
+  MySQL and MariaDB a user `FOR UPDATE` stays in the first arm, since an exclusive lock reaches the
+  row; a user `FOR SHARE`, and on SQL Server any user locking clause, is taken as the separate
+  primary-key re-read of the SERIALIZABLE bullet, since a shared lock through a covering index would
+  not reach the row. A user locking clause on a join or a subquery is refused for now.
 - **SNAPSHOT**: the detector `P OR (tx_state IN (1,2) AND P_before)`, in the same two-arm form:
   ```sql
   SELECT <user columns>, tx_state FROM cc_T WHERE P                              -- index on T(x)
