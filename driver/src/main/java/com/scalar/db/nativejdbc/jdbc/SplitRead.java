@@ -22,8 +22,11 @@ import org.jspecify.annotations.Nullable;
 @SuppressWarnings("IdentityHashMapUsage")
 final class SplitRead {
 
-  /** At most this many tables are split, 16 copies; a statement with more is read through rc_T. */
-  static final int MAX_TABLES = 4;
+  /**
+   * At most this many statements are joined, 16, four inner tables; a statement with more is read
+   * through rc_T.
+   */
+  static final int MAX_COPIES = 16;
 
   /** How a committed copy of a table excludes its rows in flight. */
   private enum Check {
@@ -48,6 +51,7 @@ final class SplitRead {
    *
    * @param engine the engine
    * @param ast the statement
+   * @param split its references split, from {@link SqlAst#split}
    * @param scalarDb its ScalarDB table references, each with its table
    * @param views the read view of each ScalarDB reference, already quoted, for those not split
    * @param perRow the references whose committed copies exclude their rows in flight row by row, on
@@ -57,53 +61,93 @@ final class SplitRead {
   static SqlAst.@Nullable SplitText emit(
       Engine engine,
       SqlAst ast,
+      SqlAst.Split split,
       Map<SqlAst.TableRef, TableInfo> scalarDb,
       Map<SqlAst.TableRef, String> views,
       Set<SqlAst.TableRef> perRow) {
-    List<SqlAst.TableRef> split = new ArrayList<>();
-    for (SqlAst.TableRef r : ast.splittableRefs()) {
-      if (scalarDb.containsKey(r)) {
-        split.add(r);
+    Map<SqlAst.TableRef, SqlAst.Place> places = split.places();
+    List<SqlAst.TableRef> refs = new ArrayList<>();
+    List<List<SqlAst.Piece>> pieces = new ArrayList<>();
+    int count = 1;
+    for (Map.Entry<SqlAst.TableRef, SqlAst.Place> e : places.entrySet()) {
+      List<SqlAst.Piece> of;
+      switch (e.getValue()) {
+        case NULLABLE:
+          of = List.of(SqlAst.Piece.COMMITTED, SqlAst.Piece.IN_FLIGHT, SqlAst.Piece.UNMATCHED);
+          break;
+        case IN_EXPRESSION:
+          continue; // read over both pieces inside every copy
+        default:
+          of = List.of(SqlAst.Piece.COMMITTED, SqlAst.Piece.IN_FLIGHT);
+      }
+      refs.add(e.getKey());
+      pieces.add(of);
+      count *= of.size();
+      if (count > MAX_COPIES) {
+        return null;
       }
     }
-    if (split.isEmpty() || split.size() > MAX_TABLES) {
+    if (places.isEmpty()) {
       return null;
     }
-    List<List<String>> read = new ArrayList<>();
-    for (SqlAst.TableRef r : split) {
-      read.add(columnsRead(ast, r, Objects.requireNonNull(scalarDb.get(r))));
+    Map<SqlAst.TableRef, List<String>> read = new IdentityHashMap<>();
+    for (SqlAst.TableRef r : places.keySet()) {
+      read.put(r, columnsRead(ast, r, Objects.requireNonNull(scalarDb.get(r))));
     }
     // MySQL builds the DISTINCT set, and NOT EXISTS's anti-join, whole before the first row, so
     // a copy that stops after a few rows has to check its rows one by one (todo 089)
     // when it reads up to a thousand rows; past that, row by row loses to the set (todo 112)
     boolean rowByRowUnderLimit = engine == Engine.MYSQL && ast.limitsEachCopyTo(1000);
-    List<SqlAst.Naming> copies = new ArrayList<>();
-    for (int bits = 0; bits < 1 << split.size(); bits++) {
-      Map<SqlAst.TableRef, String> naming = new IdentityHashMap<>(views);
-      for (int i = 0; i < split.size(); i++) {
-        SqlAst.TableRef r = split.get(i);
-        TableInfo t = Objects.requireNonNull(scalarDb.get(r));
-        List<String> cols = read.get(i);
-        boolean inFlight = (bits & 1 << i) != 0;
-        naming.put(
-            r,
-            inFlight
-                ? inFlight(engine, t, cols)
-                : committed(
-                    engine,
-                    t,
-                    cols,
-                    perRow.contains(r) || rowByRowUnderLimit
-                        ? Check.LEFT_JOIN
-                        : check(engine, split.size(), bits)));
+    List<SqlAst.Copy> copies = new ArrayList<>();
+    for (int n = 0; n < count; n++) {
+      Map<SqlAst.TableRef, SqlAst.Piece> of = new IdentityHashMap<>();
+      boolean anyInFlight = false;
+      for (int i = 0, rest = n; i < refs.size(); i++) {
+        int size = pieces.get(i).size();
+        SqlAst.Piece p = pieces.get(i).get(rest % size);
+        rest /= size;
+        of.put(refs.get(i), p);
+        anyInFlight |= p != SqlAst.Piece.COMMITTED;
       }
-      copies.add(naming::get);
+      Check inCopy = check(engine, places.size(), anyInFlight);
+      copies.add(
+          new SqlAst.Copy() {
+            @Override
+            public @Nullable String replacementFor(SqlAst.TableRef ref) {
+              return places.containsKey(ref)
+                  ? fragment(ref, of.getOrDefault(ref, SqlAst.Piece.COMMITTED))
+                  : views.get(ref);
+            }
+
+            @Override
+            public SqlAst.Piece piece(SqlAst.TableRef ref) {
+              return of.getOrDefault(ref, SqlAst.Piece.COMMITTED);
+            }
+
+            @Override
+            public String fragment(SqlAst.TableRef ref, SqlAst.Piece piece) {
+              TableInfo t = Objects.requireNonNull(scalarDb.get(ref));
+              List<String> cols = Objects.requireNonNull(read.get(ref));
+              switch (piece) {
+                case IN_FLIGHT:
+                  return inFlight(engine, t, cols);
+                case UNMATCHED:
+                  return none(engine, t, cols);
+                default:
+                  return committed(
+                      engine,
+                      t,
+                      cols,
+                      perRow.contains(ref) || rowByRowUnderLimit ? Check.LEFT_JOIN : inCopy);
+              }
+            }
+          });
     }
     Map<SqlAst.TableRef, List<String>> columns = new IdentityHashMap<>();
     for (Map.Entry<SqlAst.TableRef, TableInfo> e : scalarDb.entrySet()) {
       columns.put(e.getKey(), e.getValue().dataColumns());
     }
-    return ast.emitSplit(copies, columns);
+    return ast.emitSplit(split, copies, columns);
   }
 
   /**
@@ -124,7 +168,7 @@ final class SplitRead {
     return out.isEmpty() ? List.of(t.keyColumns().get(0)) : out;
   }
 
-  private static Check check(Engine engine, int tables, int bits) {
+  private static Check check(Engine engine, int tables, boolean anyInFlight) {
     switch (engine) {
       case POSTGRESQL:
       case ORACLE:
@@ -135,7 +179,7 @@ final class SplitRead {
       case SQLSERVER:
         // in a copy with a table in flight SQL Server plans NOT EXISTS as if that table were
         // empty and probes the in-flight index once per row
-        if (bits != 0) {
+        if (anyInFlight) {
           return Check.LEFT_JOIN;
         }
         return tables <= 2 ? Check.NOT_EXISTS : Check.DISTINCT_SET;
@@ -192,6 +236,15 @@ final class SplitRead {
         break;
     }
     return sql.append(")").toString();
+  }
+
+  /** No row, with the columns {@code read} of the table and their types. */
+  private static String none(Engine engine, TableInfo t, List<String> read) {
+    List<String> cols = new ArrayList<>();
+    for (String c : read) {
+      cols.add("t." + engine.quote(c));
+    }
+    return "(SELECT " + String.join(", ", cols) + " FROM " + data(engine, t) + " t WHERE 1 = 0)";
   }
 
   /** The before image of each of the table's rows in flight that has one, columns {@code read}. */

@@ -839,8 +839,9 @@ union as a derived table.
     1. **Inner**: a table joined by an inner join in the top-level FROM clause, a LEFT JOIN's
        preserved side included. Two pieces, committed and in flight. A row of the result comes from
        exactly one row of the table, which is in exactly one copy.
-    2. **Nullable**: one table, not a join, on the nullable side of a top-level LEFT JOIN (RIGHT JOIN
-       mirrored), its ON clause naming only it and the tables before it. Three pieces. In the
+    2. **Nullable**: one table, not a join, on the nullable side of a top-level LEFT JOIN with an ON
+       clause (a RIGHT JOIN, USING and NATURAL stay on `rc_T`), the ON clause naming only it and the
+       tables before it. Three pieces. In the
        committed and the in-flight piece the LEFT JOIN becomes an inner join with that copy's
        fragment. The **unmatched piece** joins an empty fragment, `(SELECT <columns> FROM T WHERE
        1 = 0)`, so every column of the table is NULL with its own type, and adds to the WHERE clause
@@ -853,29 +854,47 @@ union as a derived table.
        row, each in exactly one copy; one without matches gets exactly one NULL-extended row; an ON
        clause that is UNKNOWN is no match both in the join and in `NOT EXISTS`. Predicates after the
        join see the values of the plain statement, NULLs in the unmatched piece. Measured with one
-       inner table (6 pieces): 1.3-2.5x, against 376-1495x through `rc_T` on MySQL and MariaDB.
+       inner table (6 pieces): 1.3-2.5x by hand, against 376-1495x through `rc_T` on MySQL and
+       MariaDB; through the driver 1.2-2.3x on every engine (todo 095).
     3. **Semi-joined**: the one ScalarDB table of an `IN (subquery)` or `EXISTS (subquery)` that is a
        top-level conjunct of the WHERE clause, the subquery a single SELECT naming no other ScalarDB
        table, without aggregates, GROUP BY, HAVING, a row limit, window functions or a set operation.
-       Two pieces, as for an inner table, so the engine can still drive the plan from the subquery's
-       index. An outer row must come out of exactly one piece: the committed piece keeps the
-       subquery over the committed fragment; the in-flight piece keeps it over the in-flight fragment
-       and adds `NOT EXISTS` of the subquery over the committed fragment, with the IN's comparison
-       as one more conjunct. A row the committed piece returns is not returned again, and an UNKNOWN
-       comparison is no match there as it is in IN. When the subquery selects the table's whole key,
-       each value is in exactly one copy and the `NOT EXISTS` is left out. Measured for the key case:
-       1.7-3.7x, against 109-1200x through the view on MySQL and MariaDB, where an IN over a union
-       runs once per outer row. The `NOT EXISTS` of the non-key case is not measured.
-    4. **In an expression**: `NOT IN`, `NOT EXISTS`, and an IN or EXISTS under OR or NOT or in the
-       select list, over a subquery of the same form. These add no pieces: the subquery is written
+       The table is joined inside the subquery by an inner join, so that the subquery's rows are the
+       union of its rows over each piece. Two pieces, as for an inner table, so the engine can still
+       drive the plan from the subquery's index. An outer row must come out of exactly one piece:
+       the committed piece keeps the subquery over the committed fragment; the in-flight piece keeps
+       it over the in-flight fragment and adds that it does not match over the committed fragment:
+       `NOT EXISTS (S_c)` for EXISTS; for `x IN (SELECT y FROM ... WHERE w)`, `NOT EXISTS (SELECT 1
+       FROM ... WHERE (w) AND (y) = (x))` over the committed fragment, which probes the subquery's
+       index row by row. A row the committed piece returns is not returned again, and an UNKNOWN
+       comparison is no match there as it is in IN. The correlated form needs x to be one column
+       qualified by a name the subquery's FROM clause does not use, or the subquery could read it
+       as its own; otherwise the IN is repeated whole, `CASE WHEN x IN (S_c) THEN 1 ELSE 0 END =
+       0`, which PostgreSQL computes by hashing the whole committed subquery (1205x at 10,000 rows
+       in flight in the benchmark's shape). When the subquery selects the table's key, a single column,
+       each value is in exactly one copy and the condition is left out: the table is split as an
+       inner one. Measured for the key case: 1.7-3.7x by hand, against 109-1200x through the view
+       on MySQL and MariaDB, where an IN over a union runs once per outer row; through the driver
+       0.4-2.4x at 100 rows in flight, up to 16x on MySQL at 10,000. The non-key case, with the
+       correlated `NOT EXISTS`: 1.7-5.4x at 100 rows in flight, against 190-1520x through the view
+       on PostgreSQL, MySQL and MariaDB; at 10,000 up to 6.8x, 27x on MySQL (todo 118).
+    4. **In an expression**: `NOT IN`, `NOT EXISTS`, and an IN or EXISTS under OR or NOT, anywhere
+       in the WHERE clause, over a subquery of the same form; in the select list, the ON clauses
+       and HAVING a subquery's table stays on `rc_T`. These add no pieces: the subquery is written
        twice inside every piece, as `x NOT IN (S_c) AND x NOT IN (S_f)`, `NOT EXISTS (S_c) AND NOT
        EXISTS (S_f)`, `(x IN (S_c) OR x IN (S_f))` or `(EXISTS (S_c) OR EXISTS (S_f))`, `S_c` and
        `S_f` the subquery over the committed and the in-flight fragment. In three-valued logic each
        equals the quantifier over the union of the two, De Morgan's laws included, and an outer row
-       is returned once. ANY and SOME follow IN, ALL follows NOT IN. Not measured; an anti-join probes
-       or scans per outer row in the plain statement too.
+       is returned once. A NOT EXISTS replaces only the EXISTS under its NOT, which De Morgan turns
+       into the AND. ANY, SOME and ALL, which would follow IN and NOT IN, stay on `rc_T` so far.
+       On MySQL the in-flight writing carries `/*+ NO_SEMIJOIN() */`: built whole as an anti-join,
+       it is read by a scan of the metadata table, whose state MySQL estimates at every row (93-399x
+       through the view, 13.6x at 100 rows in flight and 2.0x at 10,000 with the hint; elsewhere
+       1.1-6.3x).
 
-    Splitting a subquery's table naively, as an inner table, would be wrong: an outer row whose
+    A statement is split into at most 16 copies, four inner tables or a nullable table with two
+    inner ones; one that needs more is read through `rc_T` (todo 095). Splitting a subquery's
+    table naively, as an inner table, would be wrong: an outer row whose
     subquery matches rows in both copies would come out twice, and an outer join would add a
     NULL-extended row in each copy. The rules above exist to prevent that.
   - **Placeholders** that the copies repeat are re-bound in each copy (todo 012), and the statement is

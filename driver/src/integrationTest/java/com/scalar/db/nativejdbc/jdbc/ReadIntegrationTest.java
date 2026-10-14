@@ -222,6 +222,8 @@ class ReadIntegrationTest {
         splitReads(c, made, mid, mx);
         try (Connection vendor = e.open()) {
           groupedReads(c, vendor, made, mid, mx);
+          outerJoinAndSubqueryReads(
+              c, vendor, new Router(engine, catalog, new Session(engine)), made, mid, mx);
         }
         // a trailing line comment ends every copy, not only the first
         assertThat(rows(c, "SELECT " + mx + " FROM " + made + " -- note"))
@@ -265,6 +267,30 @@ class ReadIntegrationTest {
         assertThat(router.route(vendor, "SELECT COUNT(*) FROM " + made).sql)
             .contains("UNION ALL")
             .doesNotContainIgnoringCase("rc_");
+        // a LEFT JOIN's nullable side and a subquery's table are split too (milestone 3c)
+        assertThat(
+                router.route(
+                        vendor,
+                        "SELECT a."
+                            + mx
+                            + " FROM "
+                            + made
+                            + " a LEFT JOIN "
+                            + made
+                            + " b ON b."
+                            + mid
+                            + " = a."
+                            + mid
+                            + " WHERE a."
+                            + mid
+                            + " IN (SELECT c."
+                            + mid
+                            + " + 1 FROM "
+                            + made
+                            + " c)")
+                    .sql)
+            .contains("UNION ALL")
+            .doesNotContainIgnoringCase("rc_");
         if (engine == Engine.POSTGRESQL) {
           // a split read runs without parallel workers, anything else with the session's value
           e.execute(vendor, "SET max_parallel_workers_per_gather = 3");
@@ -301,11 +327,15 @@ class ReadIntegrationTest {
           router.beforeRun(vendor, List.of(plain));
           assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("2");
         }
-        // a subquery's table is read through its view
+        // a subquery's table that an aggregate reads is read through its view
         assertThat(
                 router.route(
                         vendor,
-                        "SELECT x FROM rd.imp WHERE id IN (SELECT " + mid + " FROM " + made + ")")
+                        "SELECT x FROM rd.imp WHERE id IN (SELECT MAX("
+                            + mid
+                            + ") FROM "
+                            + made
+                            + ")")
                     .sql)
             .contains("UNION ALL")
             .containsIgnoringCase("rc_");
@@ -446,10 +476,10 @@ class ReadIntegrationTest {
                     + mid
                     + " = b.id WHERE b.id < 3"))
         .containsExactlyInAnyOrder("a/a/a", "b/b/b");
-    // the subquery's table is read whole; the outer row comes out once
+    // the subquery's table is split; the outer row comes out once
     assertThat(rows(c, "SELECT x FROM rd.imp WHERE id IN (SELECT " + mid + " FROM " + made + ")"))
         .containsExactlyInAnyOrder("a", "b", "c");
-    // the nullable side of a LEFT JOIN is read whole
+    // the nullable side of a LEFT JOIN is split
     assertThat(
             rows(
                 c,
@@ -481,9 +511,6 @@ class ReadIntegrationTest {
    * Grouping reads while {@code made} has rows in flight: the rows and labels of the same statement
    * over {@code pl}, a plain table holding {@code made}'s committed image.
    */
-  @SuppressFBWarnings(
-      value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
-      justification = "test queries written in the test sources")
   private static void groupedReads(
       Connection c, Connection vendor, String made, String mid, String mx) throws SQLException {
     String[][] statements = {
@@ -503,6 +530,84 @@ class ReadIntegrationTest {
         "0"
       },
     };
+    sameAsPlain(c, vendor, made, mid, mx, statements);
+  }
+
+  /**
+   * LEFT JOINs and subqueries over {@code made} while it has rows in flight (milestone 3c): the
+   * committed piece holds id 1, the in-flight piece ids 2 and 3, and id 4 has no before image.
+   * Compared with the same statement over {@code pl}, as {@link #groupedReads} does.
+   */
+  private static void outerJoinAndSubqueryReads(
+      Connection c, Connection vendor, Router router, String made, String mid, String mx)
+      throws SQLException {
+    String[][] statements = {
+      // a match in each piece, and none
+      {"SELECT a.{X}, b.{X} FROM {T} a LEFT JOIN {T} b ON b.{ID} = a.{ID} + 1 ORDER BY a.{ID}"},
+      // an ON clause that is UNKNOWN is no match
+      {
+        "SELECT a.{ID}, b.{ID} FROM {T} a LEFT JOIN {T} b"
+            + " ON b.{X} = CASE WHEN a.{ID} = 2 THEN NULL ELSE a.{X} END ORDER BY a.{ID}"
+      },
+      // two matches in two pieces, a placeholder in the ON clause, the WHERE clause after the join
+      {
+        "SELECT a.{X}, b.{X} FROM {T} a LEFT JOIN {T} b ON b.{ID} > a.{ID} AND b.{ID} <= ?"
+            + " WHERE b.{ID} IS NULL OR a.{ID} = 1 ORDER BY 1, 2",
+        "3"
+      },
+      {
+        "SELECT a.{X}, COUNT(b.{ID}) AS n FROM {T} a LEFT JOIN {T} b ON b.{ID} > a.{ID}"
+            + " GROUP BY a.{X} ORDER BY a.{X}"
+      },
+      // the key: each value in one piece
+      {
+        "SELECT p.{X} FROM rd.pl p WHERE p.{ID} IN (SELECT m.{ID} FROM {T} m WHERE m.{ID} <> ?) ORDER BY 1",
+        "0"
+      },
+      // a value both pieces hold, and an UNKNOWN comparison
+      {"SELECT p.{X} FROM rd.pl p WHERE p.{ID} IN (SELECT m.{ID} * 0 + 1 FROM {T} m) ORDER BY 1"},
+      {
+        "SELECT p.{X} FROM rd.pl p WHERE p.{ID} IN"
+            + " (SELECT CASE WHEN m.{ID} = 2 THEN NULL ELSE m.{ID} * 0 + 2 END FROM {T} m) ORDER BY 1"
+      },
+      {
+        "SELECT p.{X} FROM rd.pl p WHERE EXISTS (SELECT 1 FROM {T} m WHERE m.{ID} >= p.{ID}) ORDER BY 1"
+      },
+      // both sides split
+      {"SELECT a.{X} FROM {T} a WHERE a.{ID} IN (SELECT b.{ID} + 1 FROM {T} b) ORDER BY 1"},
+      // in an expression: NOT IN with and without a NULL, NOT EXISTS, IN under OR
+      {"SELECT p.{X} FROM rd.pl p WHERE p.{ID} NOT IN (SELECT m.{ID} + 1 FROM {T} m) ORDER BY 1"},
+      {
+        "SELECT p.{X} FROM rd.pl p WHERE p.{ID} NOT IN"
+            + " (SELECT CASE WHEN m.{ID} = 3 THEN NULL ELSE m.{ID} END FROM {T} m)"
+      },
+      {
+        "SELECT p.{X} FROM rd.pl p WHERE NOT EXISTS"
+            + " (SELECT 1 FROM {T} m WHERE m.{ID} = p.{ID} + 2) ORDER BY 1"
+      },
+      {
+        "SELECT a.{X} FROM {T} a WHERE a.{ID} = 3"
+            + " OR a.{ID} IN (SELECT b.{ID} FROM {T} b WHERE b.{ID} = ?) ORDER BY 1",
+        "1"
+      },
+    };
+    for (String[] st : statements) {
+      String sql = st[0].replace("{X}", mx).replace("{ID}", mid).replace("{T}", made);
+      assertThat(router.route(vendor, sql).sql).as(sql).doesNotContainIgnoringCase("rc_");
+    }
+    sameAsPlain(c, vendor, made, mid, mx, statements);
+  }
+
+  /**
+   * Runs each statement, its placeholders bound to the integers after it, through the driver over
+   * {@code made} and directly over {@code pl}, and compares the labels and rows.
+   */
+  @SuppressFBWarnings(
+      value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
+      justification = "test queries written in the test sources")
+  private static void sameAsPlain(
+      Connection c, Connection vendor, String made, String mid, String mx, String[][] statements)
+      throws SQLException {
     for (String[] st : statements) {
       String sql = st[0].replace("{X}", mx).replace("{ID}", mid);
       List<String> expected = new ArrayList<>();

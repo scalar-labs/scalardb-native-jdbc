@@ -227,6 +227,15 @@ committed image computed through ScalarDB. Acceptance: the benchmark's LEFT JOIN
 the driver within their recorded ratios; the non-key IN and the expression forms measured and
 recorded.
 
+Done (2026-10-14): the three kinds, with a semi-joined IN over a non-key checked by a correlated
+`NOT EXISTS` where its outer column cannot be captured, NOT EXISTS written as two, MySQL's in-flight
+writing probed per outer row (`NO_SEMIJOIN`), and the per-row committed check of MySQL and MariaDB
+extended to nullable and subquery tables. Through the driver the benchmark's LEFT JOIN is 1.2-2.3x
+on every engine, against 790-1850x on MySQL and MariaDB before; the IN and NOT EXISTS shapes are
+1.1-7.4x except on MySQL (`docs/benchmarks/read-overhead.md`, last section; todo 118). Not done: a
+RIGHT JOIN, ANY, SOME and ALL, and subqueries outside the WHERE clause stay on `rc_T`; the limit
+stays at 16 copies until the 32-copy measurement (todo 119).
+
 ### Milestone 4: writes under READ COMMITTED
 
 Carried over from milestone 3: result stripping and the anchors, for the key read that returns

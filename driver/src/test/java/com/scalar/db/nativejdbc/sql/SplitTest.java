@@ -468,4 +468,187 @@ class SplitTest {
     }
     assertThat(twoCopies(ast, cols)).isNull();
   }
+
+  private static final List<SqlAst.Piece> PIECES =
+      List.of(SqlAst.Piece.COMMITTED, SqlAst.Piece.IN_FLIGHT, SqlAst.Piece.UNMATCHED);
+
+  /**
+   * The split of a statement over ScalarDB tables keyed by {@code id}: pieces enumerated as the
+   * driver does, a fragment written {@code c_<table>}, {@code f_<table>} or {@code u_<table>}.
+   */
+  private static SqlAst.@Nullable SplitText pieces(SqlAst ast, String... tables) {
+    List<String> scalarDb = List.of(tables);
+    SqlAst.Split split = ast.split(r -> scalarDb.contains(r.name()) ? List.of("id") : null);
+    List<SqlAst.TableRef> refs = new ArrayList<>();
+    List<Integer> sizes = new ArrayList<>();
+    int count = 1;
+    for (Map.Entry<SqlAst.TableRef, SqlAst.Place> e : split.places().entrySet()) {
+      int size = e.getValue() == SqlAst.Place.NULLABLE ? 3 : 2;
+      if (e.getValue() != SqlAst.Place.IN_EXPRESSION) {
+        refs.add(e.getKey());
+        sizes.add(size);
+        count *= size;
+      }
+    }
+    List<SqlAst.Copy> copies = new ArrayList<>();
+    for (int n = 0; n < count; n++) {
+      Map<SqlAst.TableRef, SqlAst.Piece> of = new HashMap<>();
+      for (int i = 0, rest = n; i < refs.size(); i++) {
+        of.put(refs.get(i), PIECES.get(rest % sizes.get(i)));
+        rest /= sizes.get(i);
+      }
+      copies.add(
+          new SqlAst.Copy() {
+            @Override
+            public @Nullable String replacementFor(SqlAst.TableRef ref) {
+              return split.places().containsKey(ref)
+                  ? fragment(ref, piece(ref))
+                  : scalarDb.contains(ref.name()) ? "rc_" + ref.name() : null;
+            }
+
+            @Override
+            public SqlAst.Piece piece(SqlAst.TableRef ref) {
+              return of.getOrDefault(ref, SqlAst.Piece.COMMITTED);
+            }
+
+            @Override
+            public String fragment(SqlAst.TableRef ref, SqlAst.Piece piece) {
+              return "cfu".charAt(PIECES.indexOf(piece)) + "_" + ref.name();
+            }
+          });
+    }
+    return ast.emitSplit(split, copies, Map.of());
+  }
+
+  private static Map<String, SqlAst.Place> places(String sql, String... tables) {
+    List<String> scalarDb = List.of(tables);
+    Map<String, SqlAst.Place> out = new java.util.LinkedHashMap<>();
+    SqlAst.Split split = parse(sql).split(r -> scalarDb.contains(r.name()) ? List.of("id") : null);
+    split.places().forEach((r, p) -> out.put(r.exposedName(), p));
+    return out;
+  }
+
+  @Test
+  void split_placesEachScalarDbTable_byWhereItStands() {
+    assertThat(
+            places(
+                "select * from c left join o on o.cid = c.id join p on p.id = c.pid",
+                "c",
+                "o",
+                "p"))
+        .containsExactly(
+            Map.entry("c", SqlAst.Place.INNER),
+            Map.entry("o", SqlAst.Place.NULLABLE),
+            Map.entry("p", SqlAst.Place.INNER));
+    assertThat(places("select * from c where c.id in (select o.cid from o) and c.x = 1", "c", "o"))
+        .containsEntry("o", SqlAst.Place.SEMI_JOINED);
+    // the key: each value is in exactly one piece
+    assertThat(places("select * from c where c.oid in (select id from o where o.s = 1)", "c", "o"))
+        .containsEntry("o", SqlAst.Place.INNER);
+    assertThat(
+            places("select * from c where exists (select 1 from o where o.cid = c.id)", "c", "o"))
+        .containsEntry("o", SqlAst.Place.SEMI_JOINED);
+    assertThat(places("select * from c where c.id not in (select o.cid from o)", "c", "o"))
+        .containsEntry("o", SqlAst.Place.IN_EXPRESSION);
+    assertThat(
+            places(
+                "select * from c where not exists (select 1 from o where o.cid = c.id)", "c", "o"))
+        .containsEntry("o", SqlAst.Place.IN_EXPRESSION);
+    assertThat(places("select * from c where c.x = 1 or c.id in (select o.cid from o)", "c", "o"))
+        .containsEntry("o", SqlAst.Place.IN_EXPRESSION);
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "select * from c left join o using (id)",
+        "select * from c left join (o join p on p.id = o.pid) on o.cid = c.id",
+        "select * from c where c.id in (select o.cid from o group by o.cid)",
+        "select * from c where c.id in (select max(o.cid) from o)",
+        "select * from c where c.id in (select o.cid from o join p on p.oid = o.id)",
+        "select * from c where c.id in (select p.cid from p left join o on o.pid = p.id)",
+        "select * from c where c.id in (select o.cid from o union select p.cid from p)",
+        "select * from c where c.id = any (select o.cid from o)",
+        "select * from c where c.id = (select o.cid from o)",
+        "select * from c where c.id in (select x.cid from (select * from o) x)"
+      })
+  void split_leavesOtherShapesOnTheView(String sql) {
+    assertThat(places(sql, "c", "o", "p")).containsOnlyKeys("c");
+  }
+
+  @Test
+  void emitSplit_nullableTable_isJoinedPerPiece_andUnmatchedOnce() {
+    SqlAst.SplitText split =
+        Objects.requireNonNull(
+            pieces(
+                parse("select c.id, o.x from c left join o on o.cid = c.id where c.r = ?"), "o"));
+    assertThat(split.sql())
+        .isEqualTo(
+            "select c.id, o.x from c JOIN c_o o on o.cid = c.id where c.r = ?"
+                + " UNION ALL select c.id, o.x from c JOIN f_o o on o.cid = c.id where c.r = ?"
+                + " UNION ALL select c.id, o.x from c left join u_o o on o.cid = c.id where(c.r ="
+                + " ? ) AND NOT EXISTS (SELECT 1 FROM c_o o WHERE o.cid = c.id) AND NOT EXISTS"
+                + " (SELECT 1 FROM f_o o WHERE o.cid = c.id)");
+    // without a WHERE clause, and with a placeholder in the ON clause, written three times
+    split =
+        Objects.requireNonNull(
+            pieces(parse("select c.id from c left outer join o on o.cid = c.id and o.s = ?"), "o"));
+    assertThat(split.sql())
+        .endsWith(
+            " UNION ALL select c.id from c left outer join u_o o on o.cid = c.id and o.s = ?"
+                + " WHERE NOT EXISTS (SELECT 1 FROM c_o o WHERE o.cid = c.id and o.s = ?) AND NOT"
+                + " EXISTS (SELECT 1 FROM f_o o WHERE o.cid = c.id and o.s = ?)");
+    assertThat(split.parameterSources()).containsExactly(1, 1, 1, 1, 1);
+  }
+
+  @Test
+  void emitSplit_semiJoinedTable_returnsAnOuterRowFromOnePiece() {
+    // correlated by the IN's comparison, so that the subquery's index is probed row by row
+    String in = "select c.id from c where c.id in (select o.cid from o where o.s = ?)";
+    assertThat(Objects.requireNonNull(pieces(parse(in), "o")).sql())
+        .isEqualTo(
+            "select c.id from c where c.id in(select o.cid from c_o o where o.s = ?) UNION ALL"
+                + " select c.id from c where(c.id in(select o.cid from f_o o where o.s = ?) AND"
+                + " NOT EXISTS (SELECT 1 FROM c_o o WHERE(o.s = ? ) AND(o.cid ) = ( c.id )))");
+    // an unqualified column, or one the subquery's FROM clause names, would be read as the
+    // subquery's own: the IN is repeated whole
+    String unqualified = "select c.id from c where id in (select o.cid from o)";
+    assertThat(Objects.requireNonNull(pieces(parse(unqualified), "o")).sql())
+        .endsWith(
+            " UNION ALL select c.id from c where(id in(select o.cid from f_o o) AND CASE WHEN id"
+                + " in(select o.cid from c_o o) THEN 1 ELSE 0 END = 0)");
+    String captured = "select c.id from c where c.id in (select c.cid from o c)";
+    assertThat(Objects.requireNonNull(pieces(parse(captured), "o")).sql()).contains("CASE WHEN");
+    String exists = "select c.id from c where exists (select 1 from o where o.cid = c.id)";
+    assertThat(Objects.requireNonNull(pieces(parse(exists), "o")).sql())
+        .isEqualTo(
+            "select c.id from c where exists(select 1 from c_o o where o.cid = c.id) UNION ALL"
+                + " select c.id from c where(exists(select 1 from f_o o where o.cid = c.id) AND"
+                + " NOT exists(select 1 from c_o o where o.cid = c.id))");
+    String key = "select c.id from c where c.oid in (select id from o where o.s = ?)";
+    assertThat(Objects.requireNonNull(pieces(parse(key), "o")).sql())
+        .isEqualTo(
+            "select c.id from c where c.oid in(select id from c_o o where o.s = ?) UNION ALL"
+                + " select c.id from c where c.oid in(select id from f_o o where o.s = ?)");
+  }
+
+  @Test
+  void emitSplit_subqueryInAnExpression_isWrittenOverBothPieces() {
+    String sql =
+        "select c.id from c where c.id not in (select o.cid from o) and (c.x = ? or not exists"
+            + " (select 1 from o p where p.cid = c.id))";
+    SqlAst.SplitText split = Objects.requireNonNull(pieces(parse(sql), "o"));
+    assertThat(split.sql())
+        .isEqualTo(
+            "select c.id from c where(c.id not in(select o.cid from c_o o) AND c.id not"
+                + " in(select o.cid from f_o o)) and(c.x = ? or(not exists(select 1 from c_o p"
+                + " where p.cid = c.id) AND not exists(select 1 from f_o p where p.cid = c.id)))");
+    assertThat(split.parameterSources()).containsExactly(1);
+    // on MySQL the in-flight piece is probed per outer row, not built whole
+    SqlAst my = SqlAst.parse(sql, Engine.MYSQL).orElseThrow();
+    assertThat(Objects.requireNonNull(pieces(my, "o")).sql())
+        .contains(
+            "AND c.id not in(SELECT /*+ NO_SEMIJOIN() */ o.cid from f_o o)",
+            "AND not exists(SELECT /*+ NO_SEMIJOIN() */ 1 from f_o p where p.cid = c.id)");
+  }
 }

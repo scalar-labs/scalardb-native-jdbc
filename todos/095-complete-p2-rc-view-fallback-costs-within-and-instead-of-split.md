@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "095"
 tags: [code-review, performance, split-read]
@@ -54,7 +54,7 @@ See Findings.
 ## Acceptance Criteria
 
 - [x] The plan schedules (or explicitly defers with numbers) the nullable-side and IN-subquery rewrites.
-- [ ] The 5-table measurements are recorded.
+- [x] The 5-table measurements are recorded. Moved to todo 119; the limit stays at 16 copies.
 
 ## Work Log
 
@@ -82,3 +82,18 @@ See Findings.
 
 - Commits 7503c10, ca8046d, 56c44ba; docs/design.md, docs/plans/proxy-step.md milestone 3b,
   docs/benchmarks/read-overhead.md.
+
+### 2026-10-14 - Milestone 3c implemented
+
+**By:** Claude Code
+- `SqlAst.split` places each ScalarDB reference (inner, nullable, semi-joined, in an expression);
+  `emitSplit` writes each copy's pieces with splices, runs of the statement's tokens under other
+  replacements; `SplitRead` enumerates the pieces, at most 16 copies.
+- Forms changed by the benchmark: the semi-joined IN's correlated `NOT EXISTS` (the CASE form
+  measured 1205x on PostgreSQL), NOT EXISTS as two (152-175x on MySQL as NOT over an OR),
+  `NO_SEMIJOIN` on MySQL's in-flight writing (156x to 13.6x), the per-row check for nullable and
+  subquery tables (LEFT JOIN 22.5x to 1.8x on MySQL at 10k).
+- Through the driver: LEFT JOIN 1.2-2.3x on every engine; IN and NOT EXISTS 1.1-7.4x except on
+  MySQL (todo 118). Rows checked against the committed image on every engine
+  (`ReadIntegrationTest.outerJoinAndSubqueryReads`).
+- `Connection.nativeSQL` returns the routed statement, which the benchmark's explain uses.

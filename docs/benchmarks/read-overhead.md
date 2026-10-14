@@ -65,6 +65,11 @@ The read algorithm the measurements lead to (sections below, in the order they w
    forms; routing a statement costs 0.3-2.6 ms before it reaches the server, so the statement
    cache (todo 008) is needed. Not measured: joins of five or more ScalarDB tables (32 copies
    and up).
+8. **LEFT JOINs and subqueries through the driver** (milestone 3c, last section): the nullable side
+   of a LEFT JOIN goes from 790-1850x through `rc_T` on MySQL and MariaDB to 1.2-2.3x on every
+   engine. An IN or NOT EXISTS that went through `rc_T` at 93-1520x on PostgreSQL, MySQL and
+   MariaDB is now 1.1-7.4x, except on MySQL: 26x for an IN over a non-key at 10,000 rows in
+   flight, 16x for one over the key, and 13.6x for a NOT EXISTS at 100 rows in flight (todo 118).
 
 ## Ratios to BASE, indexed shapes (run with the statistics and IN fixes)
 
@@ -929,3 +934,67 @@ it scans for placeholders. A new text costs two parses, the statement and its fi
 text. On PostgreSQL a new text also asks the server for the plain statement's plan (design 4.2),
 about 1-5 ms once per text and connection.
 
+## LEFT JOINs and subqueries through the driver (milestone 3c, 2026-10-14)
+
+The driver now splits a ScalarDB table on the nullable side of a LEFT JOIN, in an IN or EXISTS
+subquery that is a top-level conjunct of the WHERE clause, and in IN, EXISTS, NOT IN and NOT
+EXISTS elsewhere in the WHERE clause (design 4.2, "Which tables are split"). Run as the previous
+section, `-Dnativejdbc.bench.only='IN subquery|LEFT JOIN|NOT EXISTS'`, at 100 and 10,000 rows in
+flight. Two shapes are new:
+- "IN subquery selecting a non-key", `a.id IN (SELECT b.customer_id FROM o b)`: the in-flight piece
+  adds that the subquery over the committed piece does not match, as a correlated `NOT EXISTS`.
+- "NOT EXISTS, ScalarDB on both sides": the subquery is written over both pieces inside every
+  copy.
+
+"IN subquery on non-key" selects the subquery table's key, so it is split as an inner table. Every
+mode returned BASE's rows. `-Dnativejdbc.bench.explain` now shows the driver's SQL for `DRIVER`,
+which `Connection.nativeSQL` returns.
+
+Ratios to BASE, medians, through `rc_T` before 3c / through the driver now. "Through `rc_T`" is the
+previous section's `DRIVER` for the LEFT JOIN and the key IN, and this run's `SPLIT_DRV`, the outer
+table split and the subquery's through its view, for the new shapes:
+
+100 rows in flight:
+
+| shape | PostgreSQL | MySQL | MariaDB | SQL Server | Oracle |
+|---|---|---|---|---|---|
+| LEFT JOIN, ScalarDB on both sides | 1.3 / 1.2 | 1847 / 2.3 | 788 / 2.2 | 1.1 / 2.1 | 1.3 / 1.7 |
+| IN subquery selecting the key | 1.9 / 1.4 | 1.3 / 1.7 | 3.2 / 2.4 | 2.7 / 2.1 | 1.6 / 0.4 |
+| IN subquery selecting a non-key | 192 / 1.7 | 300 / 2.5 | 1524 / 2.2 | 3.5 / 5.0 | 2.8 / 5.4 |
+| NOT EXISTS, ScalarDB on both sides | 93 / 1.1 | 307 / 13.6 | 399 / 1.7 | 3.0 / 3.6 | 6.0 / 6.3 |
+
+10,000 rows in flight:
+
+| shape | PostgreSQL | MySQL | MariaDB | SQL Server | Oracle |
+|---|---|---|---|---|---|
+| LEFT JOIN, ScalarDB on both sides | 1.2 / 1.2 | 1796 / 1.8 | 996 / 1.9 | 1.1 / 2.2 | 1.0 / 1.3 |
+| IN subquery selecting the key | 3.1 / 5.1 | 10.1 / 16.3 | 6.1 / 7.4 | 4.0 / 3.8 | 2.0 / 0.5 |
+| IN subquery selecting a non-key | 389 / 3.7 | 283 / 26.7 | 1422 / 6.8 | 2.8 / 3.8 | 1.7 / 2.0 |
+| NOT EXISTS, ScalarDB on both sides | 125 / 2.1 | 356 / 2.0 | 371 / 1.6 | 1.9 / 1.7 | 3.1 / 2.8 |
+
+The forms these numbers led to:
+- **A nullable table and a subquery's table take the per-row committed check on MySQL and
+  MariaDB** when a top-level conjunct of an ON clause or of the subquery's WHERE clause reaches them
+  through an index, as inner tables do. Without it the LEFT JOIN measured 22.5x on MySQL and 8.6x on
+  MariaDB at 10,000 rows in flight.
+- **A semi-joined IN over a non-key is checked against the committed piece by a correlated `NOT
+  EXISTS`** on the subquery's index. The first form, `CASE WHEN x IN (S_c) THEN 1 ELSE 0 END = 0`,
+  made PostgreSQL hash the whole committed subquery, 500k rows: 1205x at 10,000 rows in flight. The
+  CASE form remains where the correlated one could read an outer column as the subquery's.
+- **NOT EXISTS is written `NOT EXISTS (S_c) AND NOT EXISTS (S_f)`**, not as NOT over an OR of the
+  two EXISTS, which MySQL ran row by row at 152-175x. MySQL still built the in-flight piece's
+  anti-join whole, by a scan of the metadata table, whose state it estimates at every row, so on
+  MySQL the in-flight piece of a subquery in an expression carries `/*+ NO_SEMIJOIN() */` and is
+  probed per outer row: 156x down to 13.6x at 100 rows in flight, 177x down to 2.0x at 10,000. At
+  100 it still reads every row in flight per probe, through the in-flight index rather than the
+  before image's (todo 118). MariaDB reads the hint as a comment. The MySQL `NOT EXISTS` figures are
+  from a separate run with the hint; `MYSQL_LOWER_CASE` was not run again.
+
+What is left:
+- **MySQL at 10,000 rows in flight**: the IN subqueries, 16-27x; the hand-written form is as slow
+  (16x). Not explained yet; likely the outer table, which is reached only through the IN, which the
+  per-row check does not follow, so it builds the DISTINCT set of 10,000 keys.
+- **SQL Server and Oracle read some subqueries better through the view**: an IN over a non-key at
+  100 rows in flight, 5.0x and 5.4x against 3.5x and 2.8x; SQL Server's LEFT JOIN 2.1-2.2x against
+  1.1x. Both still stay within a few times the plain query.
+- **PostgreSQL's key IN at 10,000 rows in flight**, 5.1x against 3.1x through the view.

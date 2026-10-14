@@ -33,6 +33,7 @@ import net.sf.jsqlparser.expression.KeepExpression;
 import net.sf.jsqlparser.expression.LongValue;
 import net.sf.jsqlparser.expression.MySQLGroupConcat;
 import net.sf.jsqlparser.expression.NextValExpression;
+import net.sf.jsqlparser.expression.NotExpression;
 import net.sf.jsqlparser.expression.UserVariable;
 import net.sf.jsqlparser.expression.VariableAssignment;
 import net.sf.jsqlparser.expression.XMLSerializeExpr;
@@ -40,6 +41,7 @@ import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.relational.Between;
 import net.sf.jsqlparser.expression.operators.relational.ComparisonOperator;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
+import net.sf.jsqlparser.expression.operators.relational.ExistsExpression;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.GreaterThan;
 import net.sf.jsqlparser.expression.operators.relational.GreaterThanEquals;
@@ -70,6 +72,7 @@ import net.sf.jsqlparser.statement.merge.Merge;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
 import net.sf.jsqlparser.statement.select.Fetch;
+import net.sf.jsqlparser.statement.select.FromItem;
 import net.sf.jsqlparser.statement.select.GroupByElement;
 import net.sf.jsqlparser.statement.select.Join;
 import net.sf.jsqlparser.statement.select.Limit;
@@ -1121,13 +1124,64 @@ public final class SqlAst {
   }
 
   /**
+   * The replacements of one rewritten text: a token's text up to another token, and splices, each
+   * emitted in place of a range of tokens.
+   */
+  private static final class Edits {
+    final Map<Token, String> from;
+    final Map<Token, Token> to;
+    final Map<Token, Splice> splices = new IdentityHashMap<>();
+
+    Edits(Map<Token, String> from, Map<Token, Token> to) {
+      this.from = from;
+      this.to = to;
+    }
+
+    /** These edits with the splices of {@code other} added. */
+    Edits with(Map<Token, Splice> other) {
+      Edits e = new Edits(from, to);
+      e.splices.putAll(splices);
+      e.splices.putAll(other);
+      return e;
+    }
+  }
+
+  /**
+   * Emitted in place of the tokens from the token it is keyed by to {@code last}: texts, and runs
+   * of the statement's tokens under other edits, so that one range can be written twice.
+   */
+  private static final class Splice {
+    final Token last;
+    final List<Object> parts;
+
+    Splice(Token last, Object... parts) {
+      this.last = last;
+      this.parts = List.of(parts);
+    }
+  }
+
+  /** The tokens from {@code first} to {@code last} under {@code edits}. */
+  private static final class Run {
+    final Token first;
+    final Token last;
+    final Edits edits;
+
+    Run(Token first, Token last, Edits edits) {
+      this.first = first;
+      this.last = last;
+      this.edits = edits;
+    }
+  }
+
+  /**
    * Joins tokens with the replacements of a rewrite, as {@link #joinTokens(Naming)} does, and
    * records which placeholder of the statement each emitted placeholder is.
    */
   private static final class Emitter {
     private final StringBuilder out = new StringBuilder();
-    private final Map<Token, String> from;
-    private final Map<Token, Token> to;
+    private Map<Token, String> from;
+    private Map<Token, Token> to;
+    private Map<Token, Splice> splices = Map.of();
     private final Map<Token, Integer> placeholders;
     private final List<Integer> emitted;
     private @Nullable String prev;
@@ -1145,14 +1199,24 @@ public final class SqlAst {
       this.emitted = emitted;
     }
 
+    Emitter(Edits edits, Map<Token, Integer> placeholders, List<Integer> emitted) {
+      this(edits.from, edits.to, placeholders, emitted);
+      this.splices = edits.splices;
+    }
+
     /** Emits the tokens from {@code first} to {@code last}, or to the end when it is null. */
     void tokens(Token first, @Nullable Token last) {
       Token skipEnd = null;
+      // a splice emits its tokens' comments in its runs
+      boolean spliced = false;
       for (Token t = first; t != null; t = t.next) {
-        for (Token sp : specialTokensOf(t)) {
-          appendToken(out, prev, sp.image, openLineComment);
-          openLineComment = isLineComment(sp);
-          prev = null; // nothing is tightened right after a comment
+        Splice splice = skipEnd == null ? splices.get(t) : null;
+        if (splice == null && !spliced) {
+          for (Token sp : specialTokensOf(t)) {
+            appendToken(out, prev, sp.image, openLineComment);
+            openLineComment = isLineComment(sp);
+            prev = null; // nothing is tightened right after a comment
+          }
         }
         if (t.kind == 0 || t.image.isEmpty()) {
           return; // EOF
@@ -1160,7 +1224,18 @@ public final class SqlAst {
         if (skipEnd != null) {
           if (t == skipEnd) {
             skipEnd = null; // the rest of a replaced range ends here
+            spliced = false;
           }
+        } else if (splice != null) {
+          for (Object part : splice.parts) {
+            if (part instanceof Run) {
+              run((Run) part);
+            } else {
+              text((String) part);
+            }
+          }
+          skipEnd = splice.last == t ? null : splice.last;
+          spliced = skipEnd != null;
         } else if (from.containsKey(t)) {
           text(from.get(t));
           Token end = to.get(t);
@@ -1176,6 +1251,20 @@ public final class SqlAst {
           return;
         }
       }
+    }
+
+    /** Emits a run of tokens under its own edits. */
+    private void run(Run r) {
+      Map<Token, String> outerFrom = from;
+      Map<Token, Token> outerTo = to;
+      Map<Token, Splice> outerSplices = splices;
+      from = r.edits.from;
+      to = r.edits.to;
+      splices = r.edits.splices;
+      tokens(r.first, r.last);
+      from = outerFrom;
+      to = outerTo;
+      splices = outerSplices;
     }
 
     void text(String image) {
@@ -1365,6 +1454,529 @@ public final class SqlAst {
     return List.copyOf(out);
   }
 
+  /** Where a ScalarDB table reference stands in a split read, which decides its pieces. */
+  public enum Place {
+    /** Joined by an inner join in the top-level FROM clause: committed and in-flight pieces. */
+    INNER,
+    /** On the nullable side of a top-level LEFT JOIN: those two and the unmatched piece. */
+    NULLABLE,
+    /** In an IN or EXISTS subquery that is a top-level conjunct of the WHERE clause: two pieces. */
+    SEMI_JOINED,
+    /** In an IN or EXISTS subquery elsewhere in the WHERE clause: written twice in every piece. */
+    IN_EXPRESSION
+  }
+
+  /** The rows of a split table one piece reads. */
+  public enum Piece {
+    /** The rows not in flight. */
+    COMMITTED,
+    /** The before images of the rows in flight. */
+    IN_FLIGHT,
+    /** None: the NULL-extended row of a nullable table, which only the unmatched piece reads. */
+    UNMATCHED
+  }
+
+  /**
+   * One statement of a split read. {@link #replacementFor(TableRef)} gives each reference its text
+   * in this statement: the fragment of its piece for a split one, the committed fragment for one
+   * {@link Place#IN_EXPRESSION}.
+   */
+  public interface Copy extends Naming {
+    /**
+     * Returns the piece of a split reference in this statement.
+     *
+     * @param ref a reference of {@link Split#places()}
+     * @return its piece
+     */
+    default Piece piece(TableRef ref) {
+      return Piece.COMMITTED;
+    }
+
+    /**
+     * Returns the derived table of a split reference's piece, already quoted, for the subqueries
+     * that read another piece than the statement's.
+     *
+     * @param ref a reference of {@link Split#places()}
+     * @param piece the piece
+     * @return the derived table
+     */
+    default String fragment(TableRef ref, Piece piece) {
+      return Objects.requireNonNull(replacementFor(ref));
+    }
+  }
+
+  /** The ScalarDB table references a split read takes pieces of, and where each stands. */
+  public static final class Split {
+    private final Map<TableRef, Place> places = new LinkedHashMap<>();
+    private final Map<TableRef, LeftJoin> leftJoins = new IdentityHashMap<>();
+    private final Map<TableRef, Subquery> subqueries = new IdentityHashMap<>();
+    // the subqueries whose tables are split, whose WHERE clauses reach them
+    private final List<PlainSelect> selects = new ArrayList<>();
+
+    /**
+     * Returns the references, in the order of the text, each with its place.
+     *
+     * @return the places
+     */
+    public Map<TableRef, Place> places() {
+      return Collections.unmodifiableMap(places);
+    }
+  }
+
+  /** The tokens of a LEFT JOIN: its keywords and its ON clause. */
+  private static final class LeftJoin {
+    final Token left;
+    final Token join;
+    final Token onFirst;
+    final Token onLast;
+
+    LeftJoin(Token left, Token join, Token onFirst, Token onLast) {
+      this.left = left;
+      this.join = join;
+      this.onFirst = onFirst;
+      this.onLast = onLast;
+    }
+  }
+
+  /** The tokens of an IN or EXISTS predicate over a subquery, NOT EXISTS included. */
+  private static final class Subquery {
+    final Token first;
+    final Token last;
+    final boolean in;
+    final boolean negated;
+    // for a semi-joined IN, the tokens of its correlated NOT EXISTS, when it can be written
+    @Nullable Correlated correlated;
+    // the subquery's SELECT keyword
+    @Nullable Token select;
+
+    Subquery(Token first, Token last, boolean in, boolean negated) {
+      this.first = first;
+      this.last = last;
+      this.in = in;
+      this.negated = negated;
+    }
+  }
+
+  /**
+   * {@code x IN (SELECT item FROM body WHERE w)} as {@code NOT EXISTS (SELECT 1 FROM body WHERE (w)
+   * AND (item) = (x))}: the tokens of the body, the WHERE clause, the item and x.
+   */
+  private static final class Correlated {
+    final Token bodyFirst;
+    final Token bodyLast;
+    final @Nullable Token whereFirst;
+    final @Nullable Token whereLast;
+    final Token itemFirst;
+    final Token itemLast;
+    final Token xFirst;
+    final Token xLast;
+
+    Correlated(
+        Token bodyFirst,
+        Token bodyLast,
+        @Nullable Token whereFirst,
+        @Nullable Token whereLast,
+        Token itemFirst,
+        Token itemLast,
+        Token xFirst,
+        Token xLast) {
+      this.bodyFirst = bodyFirst;
+      this.bodyLast = bodyLast;
+      this.whereFirst = whereFirst;
+      this.whereLast = whereLast;
+      this.itemFirst = itemFirst;
+      this.itemLast = itemLast;
+      this.xFirst = xFirst;
+      this.xLast = xLast;
+    }
+  }
+
+  /**
+   * Returns the ScalarDB table references a split read takes pieces of (design 4.2, "Which tables
+   * are split"): those of {@link #splittableRefs()}; a table alone on the nullable side of a
+   * top-level LEFT JOIN with an ON clause; and the one ScalarDB table of an IN or EXISTS subquery
+   * in the WHERE clause, a single SELECT without aggregates, grouping or a row limit that reads it
+   * through an inner join. An IN subquery that selects the table's whole key is read as an inner
+   * table, since each key value is in exactly one piece. Any other ScalarDB table is read through
+   * its view.
+   *
+   * @param keyOf a ScalarDB table's key columns, null for a table that is not one
+   * @return the references
+   */
+  public Split split(java.util.function.Function<TableRef, @Nullable List<String>> keyOf) {
+    Split out = new Split();
+    List<TableRef> inner = splittableRefs();
+    if (inner.isEmpty()) {
+      return out;
+    }
+    Map<TableRef, Place> found = new IdentityHashMap<>();
+    for (TableRef r : inner) {
+      if (keyOf.apply(r) != null) {
+        found.put(r, Place.INNER);
+      }
+    }
+    PlainSelect s = (PlainSelect) statement;
+    if (s.getJoins() != null) {
+      for (Join j : s.getJoins()) {
+        TableRef r = fromRef(j.getFromItem());
+        LeftJoin tokens = leftJoin(j);
+        if (r != null && tokens != null && keyOf.apply(r) != null) {
+          found.put(r, Place.NULLABLE);
+          out.leftJoins.put(r, tokens);
+        }
+      }
+    }
+    List<Expression> conjuncts = new ArrayList<>();
+    conjuncts(s.getWhere(), conjuncts);
+    Map<Token, Integer> order = new IdentityHashMap<>();
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      order.put(t, order.size());
+    }
+    for (Expression c : conjuncts) {
+      if (subquery(c, true, keyOf, order, found, out)) {
+        continue;
+      }
+      c.accept(
+          new ExpressionVisitorAdapter<Void>() {
+            @Override
+            public <S> Void visit(InExpression e, S context) {
+              if (!subquery(e, false, keyOf, order, found, out)) {
+                super.visit(e, context);
+              }
+              return null;
+            }
+
+            @Override
+            public <S> Void visit(ExistsExpression e, S context) {
+              subquery(e, false, keyOf, order, found, out);
+              return null;
+            }
+
+            @Override
+            public <S> Void visit(NotExpression e, S context) {
+              if (!subquery(e, false, keyOf, order, found, out)) {
+                super.visit(e, context);
+              }
+              return null;
+            }
+
+            @Override
+            public <S> Void visit(ParenthesedSelect select, S context) {
+              return null; // its own scope
+            }
+
+            @Override
+            public <S> Void visit(Select select, S context) {
+              return null;
+            }
+          },
+          null);
+    }
+    for (TableRef r : tableRefs) {
+      Place p = found.get(r);
+      if (p != null) {
+        out.places.put(r, p);
+      }
+    }
+    return out;
+  }
+
+  /** The reference of a FROM item that is a table, or null. */
+  private @Nullable TableRef fromRef(FromItem item) {
+    for (TableRef r : tableRefs) {
+      if (r.node == item && !r.isColumnQualifier()) {
+        return r;
+      }
+    }
+    return null;
+  }
+
+  /** The tokens of a LEFT JOIN of one table with one ON clause, or null for any other join. */
+  private static @Nullable LeftJoin leftJoin(Join j) {
+    if (!j.isLeft()
+        || j.isNatural()
+        || j.isApply()
+        || !(j.getFromItem() instanceof Table)
+        || (j.getUsingColumns() != null && !j.getUsingColumns().isEmpty())
+        || j.getOnExpressions() == null
+        || j.getOnExpressions().size() != 1
+        || j.getASTNode() == null) {
+      return null;
+    }
+    Token left = j.getASTNode().jjtGetFirstToken();
+    Token join = left == null ? null : left.next;
+    if (join != null && join.image.equalsIgnoreCase("OUTER")) {
+      join = join.next;
+    }
+    Expression on = j.getOnExpressions().iterator().next();
+    Token onLast = lastToken(on);
+    if (left == null
+        || !left.image.equalsIgnoreCase("LEFT")
+        || join == null
+        || !join.image.equalsIgnoreCase("JOIN")
+        || onLast == null) {
+      return null;
+    }
+    Token onFirst = null;
+    for (Token t = join.next; t != null && t != onLast; t = t.next) {
+      if (t.image.equalsIgnoreCase("ON")) {
+        onFirst = t.next;
+        break;
+      }
+    }
+    return onFirst == null ? null : new LeftJoin(left, join, onFirst, onLast);
+  }
+
+  /**
+   * Records the ScalarDB table of an IN or EXISTS predicate over a subquery of the form the split
+   * takes, at {@code place}, and answers whether it did.
+   */
+  private boolean subquery(
+      Expression e,
+      boolean conjunct,
+      java.util.function.Function<TableRef, @Nullable List<String>> keyOf,
+      Map<Token, Integer> order,
+      Map<TableRef, Place> found,
+      Split out) {
+    // NOT EXISTS is one predicate, written NOT EXISTS (...) AND NOT EXISTS (...), which MySQL runs
+    // as two anti-joins; NOT over an OR of the two it probes row by row
+    boolean not = e instanceof NotExpression;
+    Expression p = not ? ((NotExpression) e).getExpression() : e;
+    boolean in = p instanceof InExpression;
+    if ((not && in) || (!in && !(p instanceof ExistsExpression))) {
+      return false;
+    }
+    Expression right =
+        in ? ((InExpression) p).getRightExpression() : ((ExistsExpression) p).getRightExpression();
+    boolean negated = not || (in && ((InExpression) p).isNot());
+    Token first = firstToken(e);
+    Token last = lastToken(e);
+    Token keyword = not ? firstToken(p) : first;
+    if (!(right instanceof ParenthesedSelect)
+        || first == null
+        || last == null
+        || (in && ((InExpression) p).getOldOracleJoinSyntax() != 0)
+        || (!in
+            && (keyword == null
+                || !keyword.image.equalsIgnoreCase("EXISTS")
+                || ((ExistsExpression) p).isNot()))) {
+      return false;
+    }
+    ParenthesedSelect ps = (ParenthesedSelect) right;
+    if (!(ps.getSelect() instanceof PlainSelect)
+        || ps.getOrderByElements() != null
+        || ps.getLimit() != null
+        || ps.getOffset() != null
+        || ps.getFetch() != null) {
+      return false;
+    }
+    PlainSelect q = (PlainSelect) ps.getSelect();
+    if (q.getFromItem() == null
+        || (q.getWithItemsList() != null && !q.getWithItemsList().isEmpty())
+        || q.getGroupBy() != null
+        || q.getHaving() != null
+        || q.getQualify() != null
+        || q.getLimit() != null
+        || q.getOffset() != null
+        || q.getFetch() != null
+        || q.getTop() != null
+        || q.getOracleHierarchical() != null
+        || q.getWindowDefinitions() != null
+        || q.getOrderByElements() != null) {
+      return false;
+    }
+    RowWise check = new RowWise(false);
+    for (SelectItem<?> item : q.getSelectItems()) {
+      if (item.getExpression() != null) {
+        item.getExpression().accept(check, null);
+      }
+    }
+    if (!check.rowWise) {
+      return false;
+    }
+    // the subquery's rows are a union of the table's pieces only when the table is inner-joined
+    Set<Object> inner = Collections.newSetFromMap(new IdentityHashMap<>());
+    inner.add(q.getFromItem());
+    if (q.getJoins() != null) {
+      for (Join j : q.getJoins()) {
+        if (j.isRight() || j.isFull() || (j.isOuter() && !j.isLeft()) || j.isSemi()) {
+          return false;
+        }
+        if (!j.isLeft() && !j.isApply()) {
+          inner.add(j.getFromItem());
+        }
+      }
+    }
+    Node psNode = ps.getASTNode();
+    if (psNode == null) {
+      return false;
+    }
+    Integer from = order.get(psNode.jjtGetFirstToken());
+    Integer to = order.get(psNode.jjtGetLastToken());
+    TableRef table = null;
+    for (TableRef r : tableRefs) {
+      Node n = r.node.getASTNode();
+      Integer at = n == null ? null : order.get(n.jjtGetFirstToken());
+      if (r.isColumnQualifier()
+          || at == null
+          || from == null
+          || to == null
+          || at < from
+          || at > to
+          || keyOf.apply(r) == null) {
+        continue;
+      }
+      if (table != null || !inner.contains(r.node)) {
+        return false; // a second ScalarDB table, or one on a nullable side
+      }
+      table = r;
+    }
+    if (table == null) {
+      return false;
+    }
+    Place place = Place.IN_EXPRESSION;
+    if (conjunct && !negated) {
+      place =
+          in && selectsKey(q, table, Objects.requireNonNull(keyOf.apply(table)))
+              ? Place.INNER
+              : Place.SEMI_JOINED;
+    }
+    found.put(table, place);
+    out.selects.add(q);
+    if (place != Place.INNER) {
+      Subquery sq = new Subquery(first, last, in, negated);
+      sq.select = psNode.jjtGetFirstToken().next;
+      if (place == Place.SEMI_JOINED && in) {
+        sq.correlated = correlated((InExpression) p, q);
+      }
+      out.subqueries.put(table, sq);
+    }
+    return true;
+  }
+
+  /**
+   * The tokens of an IN's correlated form, or null when it cannot be written: x must be one column
+   * qualified by a name the subquery's FROM clause does not use, or the subquery could read it as
+   * one of its own columns.
+   */
+  private static @Nullable Correlated correlated(InExpression in, PlainSelect q) {
+    if (!(in.getLeftExpression() instanceof Column) || q.getSelectItems().size() != 1) {
+      return null;
+    }
+    Column x = (Column) in.getLeftExpression();
+    if (x.getTable() == null || x.getTable().getName() == null) {
+      return null;
+    }
+    Set<String> inner = new HashSet<>();
+    List<FromItem> items = new ArrayList<>();
+    items.add(q.getFromItem());
+    if (q.getJoins() != null) {
+      for (Join j : q.getJoins()) {
+        items.add(j.getFromItem());
+      }
+    }
+    for (FromItem f : items) {
+      if (f.getAlias() != null) {
+        inner.add(lowerUnquoted(f.getAlias().getName()));
+      } else if (f instanceof Table) {
+        inner.add(lowerUnquoted(((Table) f).getName()));
+      } else {
+        return null;
+      }
+    }
+    if (inner.contains(lowerUnquoted(x.getTable().getName()))) {
+      return null;
+    }
+    Expression item = q.getSelectItems().get(0).getExpression();
+    Node from = q.getFromItem().getASTNode();
+    Node bodyEnd =
+        q.getJoins() != null && !q.getJoins().isEmpty()
+            ? q.getJoins().get(q.getJoins().size() - 1).getASTNode()
+            : from;
+    Node itemNode = item == null ? null : item.getASTNode();
+    Token itemLast = item == null ? null : lastToken(item);
+    Node xNode = x.getASTNode();
+    Token whereLast = q.getWhere() == null ? null : lastToken(q.getWhere());
+    Token whereFirst = whereLast == null ? null : firstWhereToken(bodyEnd, whereLast);
+    if (from == null
+        || bodyEnd == null
+        || itemNode == null
+        || itemLast == null
+        || xNode == null
+        || (q.getWhere() != null && whereFirst == null)) {
+      return null;
+    }
+    return new Correlated(
+        from.jjtGetFirstToken(),
+        bodyEnd.jjtGetLastToken(),
+        whereFirst,
+        whereLast,
+        itemNode.jjtGetFirstToken(),
+        itemLast,
+        xNode.jjtGetFirstToken(),
+        xNode.jjtGetLastToken());
+  }
+
+  /** The first token of a WHERE clause: the one after the WHERE keyword that follows the body. */
+  private static @Nullable Token firstWhereToken(@Nullable Node bodyEnd, Token whereLast) {
+    for (Token t = bodyEnd == null ? null : bodyEnd.jjtGetLastToken();
+        t != null && t != whereLast;
+        t = t.next) {
+      if (t.image.equalsIgnoreCase("WHERE")) {
+        return t.next;
+      }
+    }
+    return null;
+  }
+
+  /** Whether a subquery selects exactly its table's single-column key. */
+  private static boolean selectsKey(PlainSelect q, TableRef table, List<String> key) {
+    if (key.size() != 1 || q.getSelectItems().size() != 1) {
+      return false;
+    }
+    Expression e = q.getSelectItems().get(0).getExpression();
+    if (!(e instanceof Column)) {
+      return false;
+    }
+    Column c = (Column) e;
+    boolean alone = q.getJoins() == null || q.getJoins().isEmpty();
+    boolean ofTable =
+        (c.getTable() == null || c.getTable().getName() == null)
+            ? alone
+            : lowerUnquoted(c.getTable().getName()).equals(table.exposedName());
+    return ofTable && lowerUnquoted(c.getColumnName()).equals(key.get(0).toLowerCase(Locale.ROOT));
+  }
+
+  /**
+   * The first token of an expression: its node's, or for EXISTS and NOT, which have none, the one
+   * before their operand's.
+   */
+  private @Nullable Token firstToken(Expression e) {
+    Node n = e.getASTNode();
+    if (n != null) {
+      return n.jjtGetFirstToken();
+    }
+    Expression operand =
+        e instanceof NotExpression
+            ? ((NotExpression) e).getExpression()
+            : e instanceof ExistsExpression ? ((ExistsExpression) e).getRightExpression() : null;
+    Token t = operand == null ? null : firstToken(operand);
+    return t == null ? null : before(root.jjtGetFirstToken(), t);
+  }
+
+  /** The last token of an expression: its node's, or for EXISTS and NOT their operand's. */
+  private static @Nullable Token lastToken(Expression e) {
+    Node n = e.getASTNode();
+    if (n != null) {
+      return n.jjtGetLastToken();
+    }
+    Expression operand =
+        e instanceof NotExpression
+            ? ((NotExpression) e).getExpression()
+            : e instanceof ExistsExpression ? ((ExistsExpression) e).getRightExpression() : null;
+    return operand == null ? null : lastToken(operand);
+  }
+
   /**
    * Returns the names, lower-cased and unquoted, of the columns the statement may read from {@code
    * r}: every column qualified by its alias or name, and every unqualified column, whichever table
@@ -1429,6 +2041,21 @@ public final class SqlAst {
    * @return the references reached
    */
   public Set<TableRef> reachedByIndex(Map<TableRef, Set<String>> leading, boolean ranges) {
+    return reachedByIndex(new Split(), leading, ranges);
+  }
+
+  /**
+   * Returns the references reached as {@link #reachedByIndex(Map, boolean)} does, a subquery's
+   * table of {@code split} also through the top-level conjuncts of its subquery's WHERE clause.
+   *
+   * @param split the split, whose subqueries are looked into
+   * @param leading for references of {@link Split#places()}, the lower-cased names of the columns
+   *     that lead an index of their tables
+   * @param ranges whether a range reaches a reference too
+   * @return the references reached
+   */
+  public Set<TableRef> reachedByIndex(
+      Split split, Map<TableRef, Set<String>> leading, boolean ranges) {
     Set<TableRef> reached = Collections.newSetFromMap(new IdentityHashMap<>());
     if (!(statement instanceof PlainSelect)) {
       return reached;
@@ -1442,6 +2069,9 @@ public final class SqlAst {
     List<Expression[]> sides = new ArrayList<>(); // a column, then the expressions it meets
     List<Expression> conjuncts = new ArrayList<>();
     conjuncts(s.getWhere(), conjuncts);
+    for (PlainSelect q : split.selects) {
+      conjuncts(q.getWhere(), conjuncts);
+    }
     if (s.getJoins() != null) {
       for (Join j : s.getJoins()) {
         if (j.getOnExpressions() != null) {
@@ -1883,7 +2513,31 @@ public final class SqlAst {
    *     table without an entry cannot be covered
    * @return the split read, or {@code null} when it cannot be emitted; nothing has been rewritten
    */
-  public @Nullable SplitText emitSplit(List<Naming> copies, Map<TableRef, List<String>> columns) {
+  public @Nullable SplitText emitSplit(
+      List<? extends Naming> copies, Map<TableRef, List<String>> columns) {
+    List<Copy> asCopies = new ArrayList<>();
+    for (Naming n : copies) {
+      asCopies.add(n::replacementFor);
+    }
+    return emitSplit(new Split(), asCopies, columns);
+  }
+
+  /**
+   * Emits a split read, as {@link #emitSplit(List, Map)} does, with the pieces of {@code split}: in
+   * a nullable table's committed and in-flight pieces its LEFT JOIN becomes an inner join, and its
+   * unmatched piece adds to the WHERE clause that no row of either other piece matches the ON
+   * clause; a semi-joined table's in-flight piece adds that its subquery does not match over the
+   * committed piece, so that an outer row comes out once; and a subquery in an expression is
+   * written over both pieces, joined by OR, or by AND for NOT IN. Each is exact in three-valued
+   * logic (design 4.2).
+   *
+   * @param split the references split and their places
+   * @param copies one per statement of the union
+   * @param columns as for {@link #emitSplit(List, Map)}
+   * @return the split read, or {@code null} when it cannot be emitted
+   */
+  public @Nullable SplitText emitSplit(
+      Split split, List<? extends Copy> copies, Map<TableRef, List<String>> columns) {
     Token start = root.jjtGetFirstToken();
     if (start == null
         || copies.isEmpty()
@@ -1902,20 +2556,17 @@ public final class SqlAst {
     if (placeholders.size() != parameterCount || last == null || last.image.equals(";")) {
       return null;
     }
-    List<Map<Token, String>> froms = new ArrayList<>();
-    List<Map<Token, Token>> tos = new ArrayList<>();
-    for (Naming n : copies) {
-      Rewrite plan = planRewrite(n, true);
-      Map<Token, String> from = new IdentityHashMap<>();
-      Map<Token, Token> to = new IdentityHashMap<>();
-      if (plan.unrepresentable
-          || lockTargetIsRenamed(plan)
-          || !collectReplacements(plan, from, to)) {
+    List<Edits> edits = new ArrayList<>();
+    for (Copy c : copies) {
+      Edits e = copyEdits(split, c);
+      if (e == null) {
         return null;
       }
-      froms.add(from);
-      tos.add(to);
+      edits.add(e);
     }
+    // the copies differ only in the derived tables, but for the pieces' own conditions, which
+    // the last copy, every table at its last piece, holds
+    int lastCopy = countInner(split) == split.places.size() ? 0 : copies.size() - 1;
     PlainSelect s = (PlainSelect) statement;
     Grouping grouping = null;
     if (isGrouped(s)) {
@@ -1936,27 +2587,28 @@ public final class SqlAst {
     if (!onTop) {
       List<String> texts = new ArrayList<>();
       for (int c = 0; c < copies.size(); c++) {
-        Emitter e = new Emitter(froms.get(c), tos.get(c), placeholders, sources);
+        Emitter e = new Emitter(edits.get(c), placeholders, sources);
         e.tokens(start, null);
         texts.add(e.text());
       }
-      // the copies differ only in the derived tables the naming gives
-      return parses(texts.get(0)) ? checked(String.join(" UNION ALL ", texts), sources) : null;
+      return parses(texts.get(0)) && (lastCopy == 0 || parses(texts.get(lastCopy)))
+          ? checked(String.join(" UNION ALL ", texts), sources)
+          : null;
     }
     Lift lift = grouping != null ? liftGrouped(s, grouping) : lift(s, columns);
     if (lift == null) {
       return null;
     }
     // emitted in the order of the text, so that the placeholders' sources follow it
-    Emitter prefix = new Emitter(froms.get(0), tos.get(0), placeholders, sources);
+    Emitter prefix = new Emitter(edits.get(0).from, edits.get(0).to, placeholders, sources);
     if (start.next != lift.firstItem) {
       if (lift.beforeFirstItem == null) {
         return null;
       }
       prefix.tokens(start.next, lift.beforeFirstItem);
     }
-    Map<Token, String> topFrom = new IdentityHashMap<>(froms.get(0));
-    Map<Token, Token> topTo = new IdentityHashMap<>(tos.get(0));
+    Map<Token, String> topFrom = new IdentityHashMap<>(edits.get(0).from);
+    Map<Token, Token> topTo = new IdentityHashMap<>(edits.get(0).to);
     topFrom.putAll(lift.tailFrom);
     topTo.putAll(lift.tailTo);
     Emitter top = new Emitter(topFrom, topTo, placeholders, sources);
@@ -1972,7 +2624,7 @@ public final class SqlAst {
     }
     List<String> texts = new ArrayList<>();
     for (int c = 0; c < copies.size(); c++) {
-      Emitter e = new Emitter(froms.get(c), tos.get(c), placeholders, sources);
+      Emitter e = new Emitter(edits.get(c), placeholders, sources);
       if (limit != null) {
         e.text("SELECT");
         e.text("*");
@@ -2015,10 +2667,156 @@ public final class SqlAst {
     String head =
         "SELECT " + (prefixText.isEmpty() ? "" : prefixText + " ") + top.text() + " FROM (";
     String end = (") v " + tail.text()).strip();
-    if (!parses(head + texts.get(0) + end)) {
+    if (!parses(head + texts.get(0) + end)
+        || (lastCopy != 0 && !parses(head + texts.get(lastCopy) + end))) {
       return null;
     }
     return checked(head + String.join(" UNION ALL ", texts) + end, sources);
+  }
+
+  private static int countInner(Split split) {
+    int n = 0;
+    for (Place p : split.places.values()) {
+      n += p == Place.INNER ? 1 : 0;
+    }
+    return n;
+  }
+
+  /** The edits of one copy: its derived tables, and the conditions of its pieces. */
+  private @Nullable Edits copyEdits(Split split, Copy copy) {
+    Rewrite plan = planRewrite(copy, true);
+    Edits base = edits(plan);
+    if (base == null) {
+      return null;
+    }
+    Map<Token, Splice> splices = new IdentityHashMap<>();
+    List<Object> unmatched = new ArrayList<>();
+    for (Map.Entry<TableRef, Place> e : split.places.entrySet()) {
+      TableRef r = e.getKey();
+      Piece piece = copy.piece(r);
+      Place place = e.getValue();
+      if (place == Place.NULLABLE) {
+        LeftJoin j = Objects.requireNonNull(split.leftJoins.get(r));
+        if (piece != Piece.UNMATCHED) {
+          base.from.put(j.left, "JOIN");
+          base.to.put(j.left, j.join);
+          continue;
+        }
+        // the subqueries take the table's alias, so the ON clause reads them unchanged
+        String alias = Objects.requireNonNull(plan.aliases.getOrDefault(r, r.alias()));
+        for (Piece p : List.of(Piece.COMMITTED, Piece.IN_FLIGHT)) {
+          if (!unmatched.isEmpty()) {
+            unmatched.add("AND");
+          }
+          unmatched.add(
+              "NOT EXISTS (SELECT 1 FROM " + copy.fragment(r, p) + " " + alias + " WHERE");
+          unmatched.add(new Run(j.onFirst, j.onLast, base));
+          unmatched.add(")");
+        }
+        continue;
+      }
+      Subquery q = split.subqueries.get(r);
+      if (q == null || (place == Place.SEMI_JOINED && piece != Piece.IN_FLIGHT)) {
+        continue; // an inner table, or a semi-joined one's committed piece: its fragment only
+      }
+      Edits other =
+          edits(
+              planRewrite(
+                  variant(copy, r, place == Place.SEMI_JOINED ? Piece.COMMITTED : Piece.IN_FLIGHT),
+                  true));
+      if (other == null) {
+        return null;
+      }
+      if (place == Place.IN_EXPRESSION
+          && engine == Engine.MYSQL
+          && q.select != null
+          && q.select.image.equalsIgnoreCase("SELECT")) {
+        // MySQL builds the in-flight piece of an anti-join whole, by a scan of the metadata whose
+        // state it cannot estimate; probed per outer row, it reads the in-flight index
+        other.from.put(q.select, "SELECT /*+ NO_SEMIJOIN() */");
+        other.to.put(q.select, q.select);
+      }
+      Run here = new Run(q.first, q.last, base);
+      Run there = new Run(q.first, q.last, other);
+      if (place == Place.IN_EXPRESSION) {
+        splices.put(q.first, new Splice(q.last, "(", here, q.negated ? "AND" : "OR", there, ")"));
+      } else if (q.correlated != null) {
+        // by the subquery's index, row by row; CASE below would build the subquery whole
+        Correlated k = q.correlated;
+        List<Object> parts = new ArrayList<>();
+        parts.add("(");
+        parts.add(here);
+        parts.add("AND NOT EXISTS (SELECT 1 FROM");
+        parts.add(new Run(k.bodyFirst, k.bodyLast, other));
+        parts.add("WHERE");
+        if (k.whereFirst != null && k.whereLast != null) {
+          parts.add("(");
+          parts.add(new Run(k.whereFirst, k.whereLast, other));
+          parts.add(") AND");
+        }
+        parts.add("(");
+        parts.add(new Run(k.itemFirst, k.itemLast, other));
+        parts.add(") = (");
+        parts.add(new Run(k.xFirst, k.xLast, base));
+        parts.add(")))");
+        splices.put(q.first, new Splice(q.last, parts.toArray()));
+      } else if (q.in) {
+        // CASE: an UNKNOWN comparison is no match, as in the IN itself, not a NULL that drops the
+        // row
+        splices.put(
+            q.first,
+            new Splice(q.last, "(", here, "AND CASE WHEN", there, "THEN 1 ELSE 0 END = 0", ")"));
+      } else {
+        splices.put(q.first, new Splice(q.last, "(", here, "AND NOT", there, ")"));
+      }
+    }
+    Edits spliced = base.with(splices);
+    if (unmatched.isEmpty()) {
+      return spliced;
+    }
+    PlainSelect s = (PlainSelect) statement;
+    List<Object> parts = new ArrayList<>();
+    Token first;
+    Token last;
+    if (s.getWhere() != null) {
+      first = firstToken(s.getWhere());
+      last = lastToken(s.getWhere());
+      if (first == null || last == null) {
+        return null;
+      }
+      parts.add("(");
+      parts.add(new Run(first, last, spliced));
+      parts.add(") AND");
+    } else {
+      Node j = s.getJoins().get(s.getJoins().size() - 1).getASTNode();
+      if (j == null) {
+        return null;
+      }
+      first = j.jjtGetFirstToken();
+      last = j.jjtGetLastToken();
+      parts.add(new Run(first, last, spliced));
+      parts.add("WHERE");
+    }
+    parts.addAll(unmatched);
+    Edits wrapped = spliced.with(Map.of());
+    wrapped.splices.put(first, new Splice(last, parts.toArray()));
+    return wrapped;
+  }
+
+  /** A copy with one reference read in another piece. */
+  private static Naming variant(Copy copy, TableRef r, Piece piece) {
+    return ref -> ref == r ? copy.fragment(r, piece) : copy.replacementFor(ref);
+  }
+
+  /** The replacements of a plan, or null when it cannot be represented. */
+  private @Nullable Edits edits(Rewrite plan) {
+    Edits e = new Edits(new IdentityHashMap<>(), new IdentityHashMap<>());
+    if (plan.unrepresentable
+        || lockTargetIsRenamed(plan)
+        || !collectReplacements(plan, e.from, e.to)) {
+      return null;
+    }
+    return e;
   }
 
   /**
@@ -2052,24 +2850,24 @@ public final class SqlAst {
    * Tokens to emit, from {@code first} to {@code last} when first is not null, inside {@code
    * wrap(...)} when wrap is not null, then text.
    */
-  private static final class Piece {
+  private static final class Part {
     final @Nullable String wrap;
     final @Nullable Token first;
     final @Nullable Token last;
     final String text;
 
-    Piece(@Nullable String wrap, @Nullable Token first, @Nullable Token last, String text) {
+    Part(@Nullable String wrap, @Nullable Token first, @Nullable Token last, String text) {
       this.wrap = wrap;
       this.first = first;
       this.last = last;
       this.text = text;
     }
 
-    Piece(@Nullable Token first, @Nullable Token last, String text) {
+    Part(@Nullable Token first, @Nullable Token last, String text) {
       this(null, first, last, text);
     }
 
-    Piece(String text) {
+    Part(String text) {
       this(null, null, null, text);
     }
 
@@ -2096,8 +2894,8 @@ public final class SqlAst {
     final @Nullable Token beforeFirstItem;
     final Token bodyStart;
     final Token bodyEnd;
-    final List<Piece> inner = new ArrayList<>();
-    final List<Piece> outer = new ArrayList<>();
+    final List<Part> inner = new ArrayList<>();
+    final List<Part> outer = new ArrayList<>();
     // the statement's ORDER BY in the copies' own column names; a null where one cannot be named
     final List<@Nullable String> copyOrder = new ArrayList<>();
     // replacements in the select list on top and in the tail
@@ -2114,26 +2912,28 @@ public final class SqlAst {
     }
   }
 
-  /** The node a copy's body ends with: the WHERE clause, the last join or the FROM item. */
-  private static @Nullable Node bodyEnd(PlainSelect s) {
-    return s.getWhere() != null
-        ? s.getWhere().getASTNode()
-        : s.getJoins() != null && !s.getJoins().isEmpty()
+  /** The token a copy's body ends with: of the WHERE clause, the last join or the FROM item. */
+  private static @Nullable Token bodyEnd(PlainSelect s) {
+    if (s.getWhere() != null) {
+      return lastToken(s.getWhere());
+    }
+    Node n =
+        s.getJoins() != null && !s.getJoins().isEmpty()
             ? s.getJoins().get(s.getJoins().size() - 1).getASTNode()
             : s.getFromItem().getASTNode();
+    return n == null ? null : n.jjtGetLastToken();
   }
 
-  /** A lift's token positions: the select list, and the body up to {@code bodyEndNode}. */
-  private @Nullable Lift opening(PlainSelect s, @Nullable Node bodyEndNode) {
+  /** A lift's token positions: the select list, and the body up to {@code bodyEnd}. */
+  private @Nullable Lift opening(PlainSelect s, @Nullable Token bodyEnd) {
     List<SelectItem<?>> items = s.getSelectItems();
     Node firstNode = items.get(0).getASTNode();
     Node lastNode = items.get(items.size() - 1).getASTNode();
-    if (firstNode == null || lastNode == null || bodyEndNode == null) {
+    if (firstNode == null || lastNode == null) {
       return null;
     }
     Token firstItem = firstNode.jjtGetFirstToken();
     Token lastItem = lastNode.jjtGetLastToken();
-    Token bodyEnd = bodyEndNode.jjtGetLastToken();
     if (firstItem == null || lastItem == null || lastItem.next == null || bodyEnd == null) {
       return null;
     }
@@ -2192,8 +2992,8 @@ public final class SqlAst {
           for (String col : cols) {
             String name = engine.quote(col);
             String generated = "c" + (lift.outer.size() + 1);
-            lift.inner.add(new Piece(null, null, qualifier + "." + name + " " + "AS " + generated));
-            lift.outer.add(new Piece("v." + generated + " AS " + name));
+            lift.inner.add(new Part(null, null, qualifier + "." + name + " " + "AS " + generated));
+            lift.outer.add(new Part("v." + generated + " AS " + name));
             labels.add(col);
           }
         }
@@ -2228,8 +3028,8 @@ public final class SqlAst {
         return null; // the engine's label for an expression differs by engine
       }
       String generated = "c" + (lift.outer.size() + 1);
-      lift.inner.add(new Piece(first, end, "AS " + generated));
-      lift.outer.add(new Piece("v." + generated + " AS " + label));
+      lift.inner.add(new Part(first, end, "AS " + generated));
+      lift.outer.add(new Part("v." + generated + " AS " + label));
       labels.add(label);
     }
     if (s.getOrderByElements() != null) {
@@ -2272,7 +3072,7 @@ public final class SqlAst {
         }
         String generated = "s" + ++hidden;
         lift.copyOrder.add(generated + direction(o));
-        lift.inner.add(new Piece(n.jjtGetFirstToken(), n.jjtGetLastToken(), "AS " + generated));
+        lift.inner.add(new Part(n.jjtGetFirstToken(), n.jjtGetLastToken(), "AS " + generated));
         lift.tailFrom.put(n.jjtGetFirstToken(), "v." + generated);
         lift.tailTo.put(n.jjtGetFirstToken(), n.jjtGetLastToken());
       }
@@ -2424,7 +3224,7 @@ public final class SqlAst {
         opening(
             s,
             g.perCopy && !g.groupBy.isEmpty()
-                ? g.groupBy.get(g.groupBy.size() - 1).getASTNode()
+                ? lastToken(g.groupBy.get(g.groupBy.size() - 1))
                 : bodyEnd(s));
     if (lift == null) {
       return null;
@@ -2446,7 +3246,7 @@ public final class SqlAst {
         return null;
       }
       String name = prefix + (generated.size() + 1);
-      lift.inner.add(new Piece(n.jjtGetFirstToken(), n.jjtGetLastToken(), "AS " + name));
+      lift.inner.add(new Part(n.jjtGetFirstToken(), n.jjtGetLastToken(), "AS " + name));
       generated.put(k, name);
     }
     List<Column> replaced = new ArrayList<>(g.outside);
@@ -2472,11 +3272,11 @@ public final class SqlAst {
             return null;
           }
           String b = "a" + ++n;
-          lift.inner.add(new Piece("SUM", open.next, argLast, "AS " + a));
-          lift.inner.add(new Piece("COUNT", open.next, argLast, "AS " + b));
+          lift.inner.add(new Part("SUM", open.next, argLast, "AS " + a));
+          lift.inner.add(new Part("COUNT", open.next, argLast, "AS " + b));
           combined = "SUM(v." + a + ") / NULLIF(SUM(v." + b + "), 0)";
         } else {
-          lift.inner.add(new Piece(first, last, "AS " + a));
+          lift.inner.add(new Part(first, last, "AS " + a));
           combined =
               (name.equals("count") ? "SUM" : name.toUpperCase(Locale.ROOT)) + "(v." + a + ")";
           if (name.equals("count") && (engine == Engine.MYSQL || engine == Engine.MARIADB)) {
@@ -2489,7 +3289,7 @@ public final class SqlAst {
       }
     } else {
       if (generated.isEmpty()) {
-        lift.inner.add(new Piece("1 AS c1"));
+        lift.inner.add(new Part("1 AS c1"));
       }
       replaced.addAll(g.groupBy);
       replaced.addAll(g.inside);
@@ -2523,7 +3323,7 @@ public final class SqlAst {
           return null;
         }
       }
-      lift.outer.add(new Piece(first, last, label.isEmpty() ? "" : "AS " + label));
+      lift.outer.add(new Part(first, last, label.isEmpty() ? "" : "AS " + label));
     }
     return lift;
   }

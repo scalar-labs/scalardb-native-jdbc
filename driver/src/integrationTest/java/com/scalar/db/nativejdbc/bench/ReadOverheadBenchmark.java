@@ -340,6 +340,22 @@ class ReadOverheadBenchmark {
               List.of("b", "a"),
               Param.REGION),
           new Query(
+              "IN subquery selecting a non-key",
+              "SELECT a.id FROM {C:a} WHERE {W:a} AND {a.region} = ? AND a.id IN"
+                  + " (SELECT {b.customer_id} FROM {O:b} WHERE {W:b})",
+              null,
+              null,
+              List.of("a"),
+              Param.REGION),
+          new Query(
+              "NOT EXISTS, ScalarDB on both sides",
+              "SELECT a.id FROM {C:a} WHERE {W:a} AND {a.region} = ? AND NOT EXISTS"
+                  + " (SELECT 1 FROM {O:b} WHERE {W:b} AND {b.customer_id} = a.id)",
+              null,
+              null,
+              List.of("a"),
+              Param.REGION),
+          new Query(
               "LEFT JOIN, ScalarDB on both sides",
               "SELECT a.id, b.id FROM {C:a} LEFT JOIN {O:b} ON {b.customer_id} = a.id AND {W:b}"
                   + " WHERE {W:a} AND a.id = ?",
@@ -658,6 +674,9 @@ class ReadOverheadBenchmark {
             String sql = render(q, m, engine);
             if (sql == null) {
               continue;
+            }
+            if (m == Mode.DRIVER) {
+              sql = on(m, c).nativeSQL(sql); // what the driver sends
             }
             noParallel(c, engine, q, m, true);
             plans.append("==== ").append(q.name).append(" / ").append(m).append('\n');

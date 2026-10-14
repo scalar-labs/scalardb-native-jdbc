@@ -353,11 +353,17 @@ final class Router {
       }
       views.put(e.getKey(), engine.quote(t.namespace()) + "." + engine.quote(t.readView(engine)));
     }
+    SqlAst.Split split =
+        ast.split(
+            r -> {
+              TableInfo t = scalarDb.get(r);
+              return t == null ? null : t.keyColumns();
+            });
     Set<SqlAst.TableRef> perRow = Collections.newSetFromMap(new IdentityHashMap<>());
     List<Integer> chosen = new ArrayList<>();
     long recheckAt = 0;
     if (engine == Engine.MYSQL || engine == Engine.MARIADB) {
-      List<SqlAst.TableRef> refs = ast.splittableRefs();
+      List<SqlAst.TableRef> refs = new ArrayList<>(split.places().keySet());
       IdentityHashMap<SqlAst.TableRef, Set<String>> leading = new IdentityHashMap<>();
       for (SqlAst.TableRef r : refs) {
         TableInfo t = scalarDb.get(r);
@@ -365,8 +371,8 @@ final class Router {
           leading.put(r, leadingColumns(vendor, t));
         }
       }
-      Set<SqlAst.TableRef> byEquality = ast.reachedByIndex(leading, false);
-      Set<SqlAst.TableRef> reached = ast.reachedByIndex(leading, true);
+      Set<SqlAst.TableRef> byEquality = ast.reachedByIndex(split, leading, false);
+      Set<SqlAst.TableRef> reached = ast.reachedByIndex(split, leading, true);
       for (int i = 0; i < refs.size(); i++) {
         SqlAst.TableRef r = refs.get(i);
         TableInfo t = scalarDb.get(r);
@@ -393,16 +399,16 @@ final class Router {
         }
       }
     }
-    SqlAst.SplitText split = SplitRead.emit(engine, ast, scalarDb, views, perRow);
-    if (split != null) {
+    SqlAst.SplitText text = SplitRead.emit(engine, ast, split, scalarDb, views, perRow);
+    if (text != null) {
       Route r =
           route(
               sql,
-              split.sql(),
+              text.sql(),
               false,
               false,
               false,
-              split.parameterSources(),
+              text.parameterSources(),
               ast.parameterCount(),
               recheckAt,
               chosen,
