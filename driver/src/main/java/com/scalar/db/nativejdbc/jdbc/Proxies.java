@@ -164,8 +164,6 @@ public final class Proxies {
       }
       if (route.kind == SqlAst.Kind.COMMIT || route.kind == SqlAst.Kind.ROLLBACK) {
         anchors.transactionEnded();
-      } else if (route.kind == SqlAst.Kind.ROLLBACK_TO_SAVEPOINT) {
-        anchors.rolledBackToSavepoint();
       }
       router.ran(vendor, route);
     }
@@ -264,7 +262,6 @@ public final class Proxies {
               anchors.transactionEnded();
             } else {
               session.rolledBackToSavepoint(); // the transaction goes on
-              anchors.rolledBackToSavepoint();
             }
             return r;
           }
@@ -410,6 +407,7 @@ public final class Proxies {
     // it ran in a transaction, the only place its anchors serve
     Router.@Nullable Anchored anchored;
     boolean recording;
+    long epoch;
 
     @Override
     void handedOut() {
@@ -615,7 +613,20 @@ public final class Proxies {
       }
       if (name.startsWith("execute")) {
         anchored = ran.size() == 1 ? ran.get(0).anchored : null;
-        recording = anchored != null && !owner.vendor.getAutoCommit();
+        // nothing to anchor in autocommit, nor where nothing can be written (todo 146)
+        recording = anchored != null && !owner.vendor.getAutoCommit() && !owner.vendor.isReadOnly();
+        epoch = owner.anchors.epoch();
+        Router.Route read = ran.size() == 1 ? ran.get(0) : null;
+        if (read != null
+            && read.write == null
+            && !read.sql.equals(read.source)
+            && vendor().getResultSetConcurrency() == ResultSet.CONCUR_UPDATABLE) {
+          // the vendor would update the rows through the rewritten text, outside a write's
+          // protocol, or fail on it (todo 144)
+          throw Errors.unsupported(
+              "an updatable result set over a ScalarDB table is not supported; update the rows with"
+                  + " UPDATE");
+        }
       }
       if (name.equals("getMetaData") && prepared != null && prepared.anchored != null) {
         Object md = forward(vendor(), method, args);
@@ -637,13 +648,20 @@ public final class Proxies {
       if (!(result instanceof ResultSet)) {
         return result;
       }
-      Router.Anchored a = anchored;
+      // only the statement's own result is anchored, not getGeneratedKeys' (todo 144)
+      Router.Anchored a =
+          name.startsWith("execute") || name.equals("getResultSet") ? anchored : null;
       return a == null
           ? proxy(ResultSet.class, new ChildHandler(result, connection, (Statement) proxy))
           : proxy(
               ResultSet.class,
               new AnchoredHandler(
-                  result, connection, (Statement) proxy, a, recording ? owner.anchors : null));
+                  result,
+                  connection,
+                  (Statement) proxy,
+                  a,
+                  recording ? owner.anchors : null,
+                  epoch));
     }
 
     /** Runs a write the driver plans, and answers as the vendor's statement would. */
@@ -834,6 +852,7 @@ public final class Proxies {
     final Statement statement;
     final Router.Anchored anchored;
     final @Nullable Anchors anchors;
+    final long epoch;
     int visible = -1;
 
     AnchoredHandler(
@@ -841,12 +860,14 @@ public final class Proxies {
         Connection connection,
         Statement statement,
         Router.Anchored anchored,
-        @Nullable Anchors anchors) {
+        @Nullable Anchors anchors,
+        long epoch) {
       super(vendor);
       this.connection = connection;
       this.statement = statement;
       this.anchored = anchored;
       this.anchors = anchors;
+      this.epoch = epoch;
     }
 
     private int visible() throws SQLException {
@@ -882,9 +903,16 @@ public final class Proxies {
       if ((name.startsWith("get") || name.startsWith("update"))
           && args != null
           && args.length > 0
-          && args[0] instanceof Integer
-          && (Integer) args[0] > visible()) {
-        throw new SQLException("the column index " + args[0] + " is out of range", "22023");
+          && (args[0] instanceof Integer || args[0] instanceof String)) {
+        // a hidden column by index, or by its label: the vendor resolves a label to its first
+        // column, so an application column of the same label stays reachable (todo 144)
+        int i =
+            args[0] instanceof Integer
+                ? (Integer) args[0]
+                : ((ResultSet) target).findColumn((String) args[0]);
+        if (i > visible()) {
+          throw new SQLException("no column " + args[0] + " in the result", "22023");
+        }
       }
       Object result = forward(target, method, args);
       if (anchors != null
@@ -900,6 +928,7 @@ public final class Proxies {
         Object[] key = Writes.readKey(rs, at, anchored.keys);
         if (key != null) {
           anchors.read(
+              epoch,
               anchored.table,
               key,
               new Anchors.Version(

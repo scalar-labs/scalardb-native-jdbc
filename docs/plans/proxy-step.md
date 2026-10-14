@@ -300,19 +300,20 @@ other engines keep refusing them with `0AN01`.
 - **4b, anchors from reads.** A single-table read returns `(tx_id, tx_version)` per key, which the
   driver strips from the results and remembers for the transaction (4.2, READ COMMITTED); a later write
   to such a key checks that anchor, and a key written once is not CAS-ed again (4.3 step 4).
-  **Done (2026-10-15)**, on PostgreSQL: a single-table read, row by row (no DISTINCT, grouping, aggregate,
-  window or unknown function, or the table's name as a whole row; `*` included), keeps the split read and has each
+  **Done (2026-10-15)**, on PostgreSQL: a single-table read, row by row (no DISTINCT, grouping, or aggregate
+  in the select list or ORDER BY; `*` and row-wise functions included), keeps the split read and has each
   copy append the key and the version of the rows it returns, read by key: the committed copy's
   `(tx_id, tx_version)`, the in-flight copy's before image's. The result set proxy hides them,
-  metadata included, and records each row the application moves to, in a transaction only
-  (`Anchors`, first read wins, cleared at commit and rollback). Two forms that replaced the table by
+  metadata included, and records each row the application moves to, in the transaction it was
+  executed in only and not on a read-only connection (`Anchors`, first read wins, cleared at
+  commit and rollback). Two forms that replaced the table by
   the read view's arms inline were measured and dropped: with the version in the arms, a deep page
   took 2,400x and an unindexed scan 53x; with it on top, 67-292x and 1.9-3.8x. Appended per copy,
   through the driver at 100 / 10,000 rows in flight: key lookup 1.0 / 1.1x, non-key filter (100 rows)
   1.5 / 2.0x (0.9 / 1.4x before), FK filter with ORDER BY and LIMIT 3 1.1 / 1.1x, unindexed scan 1.1 /
-  1.2x, page of 20 rows ordered by key 1.5 / 1.2x. A write then aborts with `40001` when a key the transaction read moved since; a key it
-  wrote is not checked again, and a rollback to a savepoint forgets the written keys, so a later
-  write of them is checked against the read again, which can abort but never lose an update.
+  1.2x, page of 20 rows ordered by key 1.5 / 1.2x. A write then aborts with `40001` when a key the transaction read moved since; a row carrying one
+  of the transaction's own write stamps counts as unchanged, so a key it wrote, or a rollback to a
+  savepoint in between, does not abort it.
   `WriteIntegrationTest.anchorsFromReads` covers both layouts: a ScalarDB commit and another driver
   transaction between the read and the write abort it; a key written twice; autocommit reads and
   rolled-back transactions anchor nothing; a row read in flight is anchored on its before image.

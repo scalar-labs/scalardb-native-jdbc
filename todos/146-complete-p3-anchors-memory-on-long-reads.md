@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "146"
 tags: [code-review, performance, anchors]
@@ -26,9 +26,11 @@ ceiling. Dropping entries would drop protection.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] A read-only transaction records nothing; the ceiling documented.
+- [x] A read-only transaction records nothing; the ceiling documented.
 
 ## Work Log
 
@@ -36,3 +38,8 @@ ceiling. Dropping entries would drop protection.
 
 **By:** Claude Code
 - From the review of ef68593 and b312ced (milestone 4b).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- No recording on a read-only connection; the ceiling stays in the ponytail note of Anchors. Not tested (nothing observable but memory).

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "141"
 tags: [code-review, correctness, jdbc, anchors]
@@ -33,9 +33,11 @@ and drops a row when it moved. Optionally skip the anchor check in autocommit.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] Both probe scenarios succeed; a row read in an earlier transaction never anchors a later one.
+- [x] Both probe scenarios succeed; a row read in an earlier transaction never anchors a later one.
 
 ## Work Log
 
@@ -43,3 +45,8 @@ and drops a row when it moved. Optionally skip the anchor check in autocommit.
 
 **By:** Claude Code
 - From the review of ef68593 and b312ced (milestone 4b).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- Anchors has an epoch, moved at every transaction's end; a result set records only while the epoch it was executed in is current. Test "141" (a result set iterated after commit).

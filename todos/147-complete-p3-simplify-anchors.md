@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "147"
 tags: [code-review, quality, simplification]
@@ -32,9 +32,11 @@ Do it with the fixes of 141-145, which touch the same code.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] `:driver:check` and the integration suite pass.
+- [x] `:driver:check` and the integration suite pass.
 
 ## Work Log
 
@@ -42,3 +44,8 @@ Do it with the fixes of 141-145, which touch the same code.
 
 **By:** Claude Code
 - From the review of ef68593 and b312ced (milestone 4b).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- `selectListEnd` and the stale whole-row loop removed, `rowPerRow` via `isGrouped`, the version lookups built from `Writes.Names`, the extras function nullable with its @params. Kept: AnchoredHandler and HiddenColumns each check their own range (different targets).

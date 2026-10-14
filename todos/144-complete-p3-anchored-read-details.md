@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "144"
 tags: [code-review, jdbc, anchors]
@@ -36,9 +36,11 @@ ScalarDB tables.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] Each item fixed, with a probe or unit test where cheap.
+- [x] Each item fixed, with a probe or unit test where cheap.
 
 ## Work Log
 
@@ -46,3 +48,8 @@ ScalarDB tables.
 
 **By:** Claude Code
 - From the review of ef68593 and b312ced (milestone 4b).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- Hidden columns guarded by label too; only execute*/getResultSet results are anchored; the lookups' alias refused as the table's; an ORDER BY position past the select list leaves the split to the database; keepText carries the kept route's anchoring; an updatable result set over a rewritten ScalarDB read is refused (0AN01). Test "144".

@@ -10,6 +10,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -56,6 +57,8 @@ final class SplitRead {
    * @param views the read view of each ScalarDB reference, already quoted, for those not split
    * @param perRow the references whose committed copies exclude their rows in flight row by row, on
    *     MySQL and MariaDB
+   * @param anchored the reference whose rows carry their versions, which reads its key too, or null
+   * @param extras what each copy appends to the select list for its piece of {@code anchored}
    * @return the split read, or {@code null} to read through the views
    */
   static SqlAst.@Nullable SplitText emit(
@@ -66,7 +69,7 @@ final class SplitRead {
       Map<SqlAst.TableRef, String> views,
       Set<SqlAst.TableRef> perRow,
       SqlAst.@Nullable TableRef anchored,
-      java.util.function.Function<SqlAst.Piece, List<String>> extras) {
+      @Nullable Function<SqlAst.Piece, List<String>> extras) {
     Map<SqlAst.TableRef, SqlAst.Place> places = split.places();
     List<SqlAst.TableRef> refs = new ArrayList<>();
     List<List<SqlAst.Piece>> pieces = new ArrayList<>();
@@ -140,7 +143,7 @@ final class SplitRead {
 
             @Override
             public List<String> selectExtra() {
-              return anchored == null
+              return extras == null || anchored == null
                   ? List.of()
                   : extras.apply(of.getOrDefault(anchored, SqlAst.Piece.COMMITTED));
             }

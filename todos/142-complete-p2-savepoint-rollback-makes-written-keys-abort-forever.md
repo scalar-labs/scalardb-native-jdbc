@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "142"
 tags: [code-review, correctness, anchors, savepoints]
@@ -32,9 +32,11 @@ written set and the savepoint hook then go.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] The probe's sequence succeeds; a row another transaction changed still aborts.
+- [x] The probe's sequence succeeds; a row another transaction changed still aborts.
 
 ## Work Log
 
@@ -42,3 +44,8 @@ written set and the savepoint hook then go.
 
 **By:** Claude Code
 - From the review of ef68593 and b312ced (milestone 4b).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- Anchors keeps the transaction's own write stamps (CAS, stamp insert, INSERT plan) until it ends; a row carrying one counts as unchanged. The written set and the savepoint hooks are gone. Test "142" (JDBC and SQL savepoints).

@@ -753,6 +753,107 @@ class WriteIntegrationTest {
     }
   }
 
+  /** The findings of the 4b review (todos 141-145), each asserting the fixed behaviour. */
+  @ParameterizedTest
+  @MethodSource("engines")
+  void anchorReviewFindings(Engines e) throws Exception {
+    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4)");
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          "CREATE SCHEMA af",
+          "CREATE TABLE af.imp (id INT PRIMARY KEY, x TEXT)",
+          "INSERT INTO af.imp SELECT g, 'a' FROM generate_series(1, 9) g");
+    }
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace("af", true);
+      admin.importTable("af", "imp", DECOUPLED, Map.of());
+    }
+    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog, c, t -> t.namespace().equals("af"), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    String sdb = Objects.requireNonNull(catalog.lookup(List.of(), "af", "imp").virtualTable());
+    try (Connection d = e.openDriver();
+        Connection other = e.openDriver()) {
+      d.setAutoCommit(false);
+      // 141: a result set iterated after its transaction ended anchors nothing in the next one
+      ResultSet stale = d.createStatement().executeQuery("SELECT x FROM af.imp WHERE id = 1");
+      d.commit();
+      other.createStatement().executeUpdate("UPDATE af.imp SET x = 'o' WHERE id = 1");
+      assertThat(stale.next()).isTrue();
+      assertThat(rows(d, "SELECT x FROM af.imp WHERE id = 1")).containsExactly("o");
+      assertThat(d.createStatement().executeUpdate("UPDATE af.imp SET x = 'd' WHERE id = 1"))
+          .isEqualTo(1);
+      d.commit();
+      // 142: a rollback to a savepoint keeps the transaction's own writes its own
+      rows(d, "SELECT x FROM af.imp WHERE id = 2");
+      d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w1' WHERE id = 2");
+      d.rollback(d.setSavepoint());
+      assertThat(d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w2' WHERE id = 2"))
+          .isEqualTo(1);
+      d.createStatement().execute("SAVEPOINT s");
+      d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w3' WHERE id = 2");
+      d.createStatement().execute("ROLLBACK TO SAVEPOINT s");
+      assertThat(d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w4' WHERE id = 2"))
+          .isEqualTo(1);
+      d.commit();
+      // 143: an aggregate in ORDER BY only
+      assertThat(rows(d, "SELECT 1 FROM af.imp ORDER BY count(*)")).containsExactly("1");
+      // 144: hidden columns by label, generated keys, the lookups' alias, a position past the list,
+      // an updatable result set
+      try (Statement st = d.createStatement();
+          ResultSet rs = st.executeQuery("SELECT x FROM af.imp WHERE id = 3")) {
+        assertThat(rs.next()).isTrue();
+        assertThatThrownBy(() -> rs.getString("scalardb_native_x0"))
+            .isInstanceOf(SQLException.class);
+        assertThat(st.getGeneratedKeys().getMetaData().getColumnCount()).isZero();
+      }
+      assertThat(rows(d, "SELECT x FROM af.imp AS scalardb_native_meta WHERE id = 3"))
+          .containsExactly("a");
+      assertThatThrownBy(() -> rows(d, "SELECT x FROM af.imp ORDER BY 2"))
+          .isInstanceOf(SQLException.class);
+      d.rollback();
+      assertThatThrownBy(
+              () ->
+                  d.createStatement(ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_UPDATABLE)
+                      .executeQuery("SELECT id, x FROM af.imp WHERE id = 3"))
+          .isInstanceOf(SQLException.class)
+          .extracting("SQLState")
+          .isEqualTo("0AN01");
+      d.rollback();
+    }
+    // 145: a row without metadata read in flight, then rolled back by ScalarDB, is unchanged
+    try (Connection v = e.open()) {
+      e.execute(v, "INSERT INTO af.imp VALUES (20, 'n')");
+    }
+    try (TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();
+        Connection d = e.openDriver()) {
+      TwoPhaseCommitTransaction held = tpc.begin();
+      held.get(
+          Get.newBuilder().namespace("af").table(sdb).partitionKey(Key.ofInt("id", 20)).build());
+      held.update(
+          Update.newBuilder()
+              .namespace("af")
+              .table(sdb)
+              .partitionKey(Key.ofInt("id", 20))
+              .textValue("x", "held")
+              .build());
+      held.prepare();
+      d.setAutoCommit(false);
+      assertThat(rows(d, "SELECT x FROM af.imp WHERE id = 20")).containsExactly("n");
+      held.rollback();
+      assertThat(d.createStatement().executeUpdate("UPDATE af.imp SET x = 'd' WHERE id = 20"))
+          .isEqualTo(1);
+      d.commit();
+    }
+  }
+
   private static void scalarDbSet(DistributedTransactionManager tm, Table t, int id, String x)
       throws TransactionException {
     DistributedTransaction tx = tm.begin();

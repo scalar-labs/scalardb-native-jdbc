@@ -818,45 +818,15 @@ public final class SqlAst {
 
   /**
    * Returns whether a single SELECT returns one row per row its FROM clause reads: no DISTINCT,
-   * GROUP BY or HAVING, and every select item {@code *} or a value computed from one row by a known
-   * function.
+   * GROUP BY or HAVING, and no aggregate in its select list or ORDER BY (todo 143).
    *
    * @return whether each row of the result is one row of the table
    */
   public boolean rowPerRow() {
-    if (!(statement instanceof PlainSelect)) {
-      return false;
-    }
-    PlainSelect s = (PlainSelect) statement;
-    if (s.getDistinct() != null || s.getGroupBy() != null || s.getHaving() != null) {
-      return false;
-    }
-    RowWise check = new RowWise(false);
-    for (SelectItem<?> item : s.getSelectItems()) {
-      Expression e = item.getExpression();
-      if (e != null && !(e instanceof AllColumns)) {
-        e.accept(check, null);
-      }
-    }
-    return check.rowWise;
-  }
-
-  /**
-   * Returns one past the last item of a single SELECT's select list: where an item appended to the
-   * list goes.
-   *
-   * @return the offset, or -1 for another statement or when the item cannot be placed in the text
-   */
-  public int selectListEnd() {
-    if (!(statement instanceof PlainSelect)) {
-      return -1;
-    }
-    List<SelectItem<?>> items = ((PlainSelect) statement).getSelectItems();
-    Node n = items == null || items.isEmpty() ? null : items.get(items.size() - 1).getASTNode();
-    Token first = n == null ? null : n.jjtGetFirstToken();
-    Token last = n == null ? null : n.jjtGetLastToken();
-    int[] s = first == null || last == null ? null : span(first, last);
-    return s == null ? -1 : s[1];
+    // the split refuses unknown, window and volatile functions itself
+    return statement instanceof PlainSelect
+        && ((PlainSelect) statement).getDistinct() == null
+        && !isGrouped((PlainSelect) statement);
   }
 
   /**
@@ -3332,10 +3302,12 @@ public final class SqlAst {
         if (e instanceof LongValue) {
           // a position in the select list on top, which keeps its order
           long position = ((LongValue) e).getValue();
-          lift.copyOrder.add(
-              position >= 1 && position <= lift.outer.size()
-                  ? "c" + position + direction(o)
-                  : null);
+          if (position < 1 || position > lift.outer.size()) {
+            // left whole for the database to refuse, not ordered by a column appended to the
+            // list (todo 144)
+            return null;
+          }
+          lift.copyOrder.add("c" + position + direction(o));
           continue;
         }
         if (e instanceof Column && ((Column) e).getTable() == null) {

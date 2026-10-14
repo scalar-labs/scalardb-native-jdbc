@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "143"
 tags: [code-review, correctness, regression, anchors]
@@ -28,9 +28,11 @@ unknown, window and volatile functions, so the RowWise pass adds nothing (about 
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] The statement returns the plain query's rows through the driver; a SplitTest case.
+- [x] The statement returns the plain query's rows through the driver; a SplitTest case.
 
 ## Work Log
 
@@ -38,3 +40,8 @@ unknown, window and volatile functions, so the RowWise pass adds nothing (about 
 
 **By:** Claude Code
 - From the review of ef68593 and b312ced (milestone 4b).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- `rowPerRow` is `!isGrouped` and no DISTINCT, as the split decides grouping, ORDER BY included. Test "143".

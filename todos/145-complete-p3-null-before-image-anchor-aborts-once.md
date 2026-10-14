@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "145"
 tags: [code-review, anchors, imported-tables]
@@ -28,9 +28,11 @@ non-NULL tx_id.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] The probe's sequence writes the row.
+- [x] The probe's sequence writes the row.
 
 ## Work Log
 
@@ -38,3 +40,8 @@ non-NULL tx_id.
 
 **By:** Claude Code
 - From the review of ef68593 and b312ced (milestone 4b).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- `Version.is` treats two NULL tx_ids as equal whatever their versions. Test "145" (a row without metadata, read in flight, ScalarDB rollback, write).

@@ -520,8 +520,7 @@ final class Writes {
       // first-updater-wins (4.3 step 1): a key this transaction read must still be at that version
       Anchors anchors = run.context.anchors();
       for (Row row : rows) {
-        Anchors.Version read = anchors.anchor(n.table, row.key);
-        if (read != null && !read.is(row.txId, row.version)) {
+        if (!anchors.unchanged(n.table, row.key, row.txId, row.version)) {
           throw new Aborted("a row this transaction read was changed by another one since");
         }
       }
@@ -534,6 +533,7 @@ final class Writes {
           if (insertStamp(run, row) != 1) {
             throw new Aborted("a row the statement writes was given metadata after it was read");
           }
+          anchors.wrote(run.txId); // the stamp stays if the DELETE then matches nothing
         }
         int written;
         try (PreparedStatement ps = run.prepare(dml, row.key)) {
@@ -549,7 +549,7 @@ final class Writes {
         if (!(delete && row.metaKey == null) && cas(run, row) != 1) {
           throw new Aborted("a row the statement writes changed after it was read");
         }
-        anchors.written(n.table, row.key);
+        anchors.wrote(run.txId);
         total++;
       }
       return total;
@@ -719,6 +719,7 @@ final class Writes {
           throw new Aborted("a key the statement inserts has metadata in flight");
         }
       }
+      run.context.anchors().wrote(run.txId);
       return inserted;
     }
   }

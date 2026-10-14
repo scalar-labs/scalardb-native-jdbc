@@ -148,8 +148,8 @@ final class Router {
       this.catalogGeneration = catalogGeneration;
     }
 
-    /** This route, its rows carrying their versions as {@code a} describes. */
-    Route anchored(Anchored a) {
+    /** This route, its rows carrying their versions as {@code a} describes, or none. */
+    Route anchored(@Nullable Anchored a) {
       return new Route(
           source,
           sql,
@@ -500,8 +500,8 @@ final class Router {
   /**
    * The table whose rows a read anchors (design 4.2, READ COMMITTED): the one ScalarDB table of a
    * read row by row, on PostgreSQL, where writes run. Null for any other read, which takes no
-   * anchor: a join, a subquery, a grouped or DISTINCT select, an aggregate, window or unknown
-   * function, the table's name read as its whole row, which would carry the appended columns too.
+   * anchor: a join, a subquery, a grouped or DISTINCT select, an aggregate in the select list or
+   * ORDER BY.
    */
   private SqlAst.@Nullable TableRef anchorable(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
@@ -515,13 +515,8 @@ final class Router {
       return null;
     }
     SqlAst.TableRef ref = shape.get().table();
-    String self = engine.columnKey(engine.resolveIdentifier(exposed(ref)));
-    for (SqlAst.ColumnRef c : ast.columnRefs()) {
-      SqlAst.TableRef q = c.qualifier();
-      if ((q != null && q.schema() != null)
-          || (q == null && engine.columnKey(engine.resolveIdentifier(c.name())).equals(self))) {
-        return null;
-      }
+    if (engine.columnKey(engine.resolveIdentifier(exposed(ref))).equals(META_ALIAS)) {
+      return null; // the version lookups' own alias would capture the row's key (todo 144)
     }
     return scalarDb.containsKey(ref) ? ref : null;
   }
@@ -535,19 +530,12 @@ final class Router {
    * row it returns, read by key for those rows only; a committed copy's {@code tx_id}, an in-flight
    * copy's before image's (design 4.2).
    */
-  private List<String> versions(SqlAst.TableRef ref, TableInfo t, SqlAst.Piece piece) {
+  private List<String> versions(SqlAst.TableRef ref, Writes.Names n, SqlAst.Piece piece) {
     String x = exposed(ref);
-    String meta =
-        engine.quote(t.namespace())
-            + "."
-            + engine.quote(Objects.requireNonNull(t.metadataTable(), "metadata table"));
-    // an alias the statement cannot use, or its own table's would be read in its place
-    String m = engine.quote("scalardb_native_meta");
+    String m = engine.quote(META_ALIAS);
     List<String> out = new ArrayList<>();
-    List<String> on = new ArrayList<>();
-    for (String k : t.keyColumns()) {
+    for (String k : n.keyColumns) {
       out.add(x + "." + engine.quote(k));
-      on.add(m + "." + engine.quote(k) + " = " + x + "." + engine.quote(k));
     }
     String prefix = piece == SqlAst.Piece.COMMITTED ? "" : "before_";
     for (String c : List.of("tx_id", "tx_version")) {
@@ -557,15 +545,18 @@ final class Router {
               + "."
               + engine.quote(prefix + c)
               + " FROM "
-              + meta
+              + n.meta
               + " "
               + m
               + " WHERE "
-              + String.join(" AND ", on)
+              + n.keyJoin(m, x)
               + ")");
     }
     return out;
   }
+
+  /** The version lookups' alias for the metadata table, which an anchored read must not use. */
+  private static final String META_ALIAS = "scalardb_native_meta";
 
   /**
    * A read at READ COMMITTED: the split read, whose copies keep every join and filter on the base
@@ -665,7 +656,10 @@ final class Router {
       }
     }
     SqlAst.TableRef anchored = anchorable(ast, scalarDb);
-    TableInfo anchoredTable = anchored == null ? null : scalarDb.get(anchored);
+    Writes.Names anchorNames =
+        anchored == null
+            ? null
+            : new Writes.Names(engine, Objects.requireNonNull(scalarDb.get(anchored)));
     SqlAst.SplitText text =
         SplitRead.emit(
             engine,
@@ -675,10 +669,9 @@ final class Router {
             views,
             perRow,
             anchored,
-            piece ->
-                anchored == null
-                    ? List.of()
-                    : versions(anchored, Objects.requireNonNull(anchoredTable), piece));
+            anchored == null
+                ? null
+                : piece -> versions(anchored, Objects.requireNonNull(anchorNames), piece));
     if (text != null) {
       Route r =
           route(
@@ -693,9 +686,8 @@ final class Router {
               recheckAt,
               chosen,
               true);
-      if (anchored != null) {
-        TableInfo at = Objects.requireNonNull(anchoredTable);
-        r = r.anchored(new Anchored(at.namespace() + "." + at.table(), at.keyColumns().size()));
+      if (anchorNames != null) {
+        r = r.anchored(new Anchored(anchorNames.table, anchorNames.keyColumns.size()));
       }
       return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
           ? r.with(r.sql, r.parameterSources, r.perRow, false, true)
@@ -1033,7 +1025,9 @@ final class Router {
    * @return the kept text with the new route's recheck time
    */
   static Route keepText(Route kept, Route now) {
-    return now.with(kept.sql, kept.parameterSources, kept.perRow, false, kept.parallel);
+    // the kept text's hidden columns, not the new route's (todo 144)
+    return now.with(kept.sql, kept.parameterSources, kept.perRow, false, kept.parallel)
+        .anchored(kept.anchored);
   }
 
   /**
