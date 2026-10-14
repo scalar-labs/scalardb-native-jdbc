@@ -304,6 +304,58 @@ public final class StatementShape {
   }
 
   /**
+   * Returns, per {@code VALUES} row of an {@code INSERT}, the values of the given key columns in
+   * their order, when every row gives each of them as a placeholder or a literal.
+   *
+   * @param keyColumns the table's key columns as the catalog spells them
+   * @return the key values per row, or {@code null} when a key column is not listed or a value is
+   *     anything else
+   */
+  public @Nullable List<List<Expression>> insertKeyValues(List<String> keyColumns) {
+    if (kind != Kind.INSERT || insertColumns.isEmpty()) {
+      return null;
+    }
+    List<Integer> at = new ArrayList<>();
+    for (String k : keyColumns) {
+      int found = -1;
+      for (int i = 0; i < insertColumns.size(); i++) {
+        if (engine.columnKey(insertColumns.get(i)).equals(engine.columnKey(k))) {
+          found = i;
+        }
+      }
+      if (found < 0) {
+        return null;
+      }
+      at.add(found);
+    }
+    ExpressionList<?> top = ((Values) ((Insert) ast.statement()).getSelect()).getExpressions();
+    List<ExpressionList<?>> rows = new ArrayList<>();
+    if (top instanceof ParenthesedExpressionList<?>) {
+      rows.add(top);
+    } else {
+      for (Object row : top) {
+        rows.add((ExpressionList<?>) row);
+      }
+    }
+    List<List<Expression>> out = new ArrayList<>();
+    for (ExpressionList<?> row : rows) {
+      if (row.size() != insertColumns.size()) {
+        return null;
+      }
+      List<Expression> keys = new ArrayList<>();
+      for (int i : at) {
+        Expression v = (Expression) row.get(i);
+        if (!isConstant(v)) {
+          return null;
+        }
+        keys.add(v);
+      }
+      out.add(keys);
+    }
+    return out;
+  }
+
+  /**
    * Returns the resolved names of the columns an {@code UPDATE} assigns.
    *
    * @return the assigned columns

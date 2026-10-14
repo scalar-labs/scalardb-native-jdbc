@@ -155,10 +155,12 @@ class RoutingIntegrationTest {
         ps.setInt(1, 99);
         assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
       }
+      // the writes milestone 4a does not run yet (WriteIntegrationTest has the ones it does)
       assertRefused(
-          () -> st.executeUpdate("UPDATE m1.s SET x = 'y' WHERE id = 1"), "0AN01", "m1.s");
-      assertRefused(() -> st.execute("DELETE FROM m1.s"), "0AN01", "m1.s");
-      assertRefused(() -> st.addBatch("INSERT INTO m1.s VALUES (1, 'a')"), "0AN01", "m1.s");
+          () -> st.executeUpdate("UPDATE m1.s SET id = 2 WHERE id = 1"), "0AN01", "key column");
+      assertRefused(() -> st.execute("DELETE FROM m1.s RETURNING x"), "0AN01", "RETURNING");
+      assertRefused(
+          () -> st.addBatch("INSERT INTO m1.s (id, x) VALUES (1, 'a')"), "0AN01", "batched");
       assertRefused(() -> st.executeQuery("SELECT * FROM m1.s_scalardb"), "42000", "virtual table");
       assertRefused(() -> st.executeQuery("SELECT * FROM m1.s_tx_metadata"), "42000", "metadata");
       // a subquery in a SET is a read whose result changes the session: not a plain read

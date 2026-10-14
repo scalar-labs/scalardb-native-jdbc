@@ -7,6 +7,7 @@ import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.Outcome;
 import com.scalar.db.nativejdbc.sql.SqlAst;
+import com.scalar.db.nativejdbc.sql.StatementShape;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -99,6 +100,9 @@ final class Router {
      */
     final boolean plansParallel;
 
+    /** A write of a ScalarDB table, which the driver runs itself, or null. */
+    final Writes.@Nullable Plan write;
+
     private Route(
         String source,
         String sql,
@@ -116,9 +120,11 @@ final class Router {
         boolean countsOnly,
         List<Integer> perRow,
         boolean parallel,
-        boolean plansParallel) {
+        boolean plansParallel,
+        Writes.@Nullable Plan write) {
       this.parallel = parallel;
       this.plansParallel = plansParallel;
+      this.write = write;
       this.perRow = List.copyOf(perRow);
       this.recheckAt = recheckAt;
       this.countsOnly = countsOnly;
@@ -160,7 +166,8 @@ final class Router {
           countsOnly,
           perRow,
           parallel,
-          plansParallel);
+          plansParallel,
+          write);
     }
   }
 
@@ -360,6 +367,9 @@ final class Router {
         scalarDb.put(ref, table);
       }
     }
+    if (!scalarDb.isEmpty() && kind == SqlAst.Kind.DML) {
+      return write(sql, ast, scalarDb);
+    }
     if (!scalarDb.isEmpty()) {
       return read(vendor, sql, ast, scalarDb, forcedPerRow);
     }
@@ -378,6 +388,59 @@ final class Router {
         0,
         List.of(),
         plansParallel);
+  }
+
+  /** A write of a ScalarDB table: planned now, run by the driver (design 4.3, milestone 4a). */
+  private Route write(String sql, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
+      throws SQLException {
+    Set<String> names = new TreeSet<>();
+    for (TableInfo t : scalarDb.values()) {
+      names.add(t.namespace() + "." + t.table());
+    }
+    String tables = " (" + String.join(", ", names) + ")";
+    if (engine != Engine.POSTGRESQL) {
+      throw Errors.unsupported(
+          "writes of ScalarDB tables are supported on PostgreSQL only so far" + tables);
+    }
+    if (isolation != Connection.TRANSACTION_READ_COMMITTED) {
+      throw Errors.unsupported(
+          "writes of ScalarDB tables run at READ COMMITTED only so far; set that level on the"
+              + " connection"
+              + tables);
+    }
+    Outcome<StatementShape> shape = StatementShape.classify(ast);
+    if (!shape.isPresent()) {
+      throw Errors.unsupported(
+          "a write of a ScalarDB table must be one INSERT ... VALUES, UPDATE or DELETE of that"
+              + " table alone: "
+              + shape.reason()
+              + tables);
+    }
+    TableInfo t = Objects.requireNonNull(scalarDb.get(shape.get().table()));
+    if (t.layout() == Layout.CLASSIC) {
+      throw Errors.unsupported(
+          "tables in ScalarDB's classic layout are not supported yet" + tables);
+    }
+    Writes.Plan plan = Writes.plan(engine, shape.get(), t, tables);
+    return new Route(
+        sql,
+        sql,
+        false,
+        false,
+        false,
+        SqlAst.Kind.DML,
+        isolation,
+        session.generation(),
+        catalog.generation(),
+        catalog.trustedUntil(),
+        null,
+        ast.parameterCount(),
+        0,
+        false,
+        List.of(),
+        false,
+        false,
+        plan);
   }
 
   /**
@@ -550,7 +613,8 @@ final class Router {
         false,
         perRow,
         false,
-        plansParallel);
+        plansParallel,
+        null);
   }
 
   /**

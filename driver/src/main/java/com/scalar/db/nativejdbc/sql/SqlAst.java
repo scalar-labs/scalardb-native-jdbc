@@ -187,6 +187,8 @@ public final class SqlAst {
   private static final Set<String> NO_SPACE_AFTER = Set.of(".", "..", "(", ":");
 
   private final String source;
+  // where each line of the source starts, computed on first use; immutable once published
+  private volatile @Nullable List<Integer> lineStarts;
   private final Statement statement;
   private final List<TableRef> tableRefs;
   private final List<TableRef> cteRefs;
@@ -760,6 +762,120 @@ public final class SqlAst {
    */
   public String source() {
     return source;
+  }
+
+  /**
+   * Returns where an expression stands in {@link #source}: its first character and one past its
+   * last.
+   *
+   * @param e an expression of this statement
+   * @return the span, or {@code null} when its tokens cannot be placed in the text
+   */
+  public int @Nullable [] span(Expression e) {
+    Token first = firstToken(e);
+    Token last = lastToken(e);
+    return first == null || last == null ? null : span(first, last);
+  }
+
+  /**
+   * Returns where a table reference's name stands in {@link #source}: its schema included, its
+   * alias not.
+   *
+   * @param r a table reference of this statement
+   * @return the span, or {@code null} when its tokens cannot be placed in the text
+   */
+  public int @Nullable [] nameSpan(TableRef r) {
+    Node n = r.node.getASTNode();
+    Token first = n == null ? null : n.jjtGetFirstToken();
+    if (first == null) {
+      return null;
+    }
+    Token last = first;
+    while (last.next != null
+        && last.next.image.equals(".")
+        && last.next.next != null
+        && last.next.next.kind != 0) {
+      last = last.next.next;
+    }
+    return last.image.equals(r.name()) ? span(first, last) : null;
+  }
+
+  /**
+   * Returns one past the statement's last token: where a clause appended to it goes, before any
+   * comment or semicolon that follows.
+   *
+   * @return the offset, or -1 when the token cannot be placed in the text
+   */
+  public int end() {
+    Token first = root.jjtGetFirstToken();
+    Token last = null;
+    for (Token t = first; t != null && t.kind != 0 && !t.image.equals(";"); t = t.next) {
+      last = t;
+    }
+    int[] s = first == null || last == null ? null : span(first, last);
+    return s == null ? -1 : s[1];
+  }
+
+  /**
+   * Returns the placeholders, numbered over the whole statement, whose {@code ?} stands in {@code
+   * [from, to)} of {@link #source}, in order.
+   *
+   * @param from the first character
+   * @param to one past the last character
+   * @return the placeholders, or {@code null} when the statement has a placeholder other than
+   *     {@code ?} or one that cannot be placed in the text
+   */
+  public @Nullable List<Integer> placeholdersIn(int from, int to) {
+    List<Integer> out = new ArrayList<>();
+    int n = 0;
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      if (t.image.equals("?")) {
+        n++;
+        int[] s = span(t, t);
+        if (s == null) {
+          return null;
+        }
+        if (s[0] >= from && s[1] <= to) {
+          out.add(n);
+        }
+      }
+    }
+    return n == parameterCount ? out : null;
+  }
+
+  /** The characters of {@code first} to {@code last}, checked against their images. */
+  private int @Nullable [] span(Token first, Token last) {
+    List<Integer> starts = lineStarts();
+    if (first.beginLine < 1 || last.endLine > starts.size() || first.beginLine > last.endLine) {
+      return null;
+    }
+    int b = starts.get(first.beginLine - 1) + first.beginColumn - 1;
+    int e = starts.get(last.endLine - 1) + last.endColumn;
+    if (b < 0 || e > source.length() || b >= e) {
+      return null;
+    }
+    return source.startsWith(first.image, b)
+            && source.startsWith(last.image, e - last.image.length())
+        ? new int[] {b, e}
+        : null;
+  }
+
+  private List<Integer> lineStarts() {
+    List<Integer> out = lineStarts;
+    if (out == null) {
+      out = new ArrayList<>();
+      out.add(0);
+      for (int i = 0; i < source.length(); i++) {
+        char ch = source.charAt(i);
+        if (ch == '\n'
+            || (ch == '\r' && (i + 1 == source.length() || source.charAt(i + 1) != '\n'))) {
+          out.add(i + 1);
+        }
+      }
+      out = List.copyOf(out);
+      lineStarts = out;
+    }
+    return out;
   }
 
   /**

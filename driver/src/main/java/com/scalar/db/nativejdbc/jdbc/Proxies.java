@@ -134,6 +134,8 @@ public final class Proxies {
     final Connection vendor;
     final Router router;
     final Session session;
+    // after an abort the driver decided, until the application rolls back (design 4.4)
+    volatile boolean rollbackOnly;
 
     ConnectionHandler(Connection vendor, Router router, Session session) {
       super(vendor);
@@ -154,6 +156,12 @@ public final class Proxies {
       router.ran(vendor, route);
     }
 
+    void requireNotRollbackOnly() throws SQLException {
+      if (rollbackOnly) {
+        throw new Writes.Aborted("the transaction was aborted by an earlier statement");
+      }
+    }
+
     @Override
     @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
       Connection me = (Connection) proxy;
@@ -169,6 +177,11 @@ public final class Proxies {
         case "prepareCall":
           {
             Router.Route route = route((String) args[0]);
+            if (route.write != null
+                && (method.getName().equals("prepareCall") || asksForGeneratedKeys(args))) {
+              throw Errors.unsupported(
+                  "a write of a ScalarDB table cannot be a call or return generated keys yet");
+            }
             Object[] routed = args.clone();
             routed[0] = route.sql;
             StatementHandler h =
@@ -219,6 +232,7 @@ public final class Proxies {
           }
         case "commit":
           {
+            requireNotRollbackOnly();
             Object r = forward(vendor, method, args);
             session.transactionEnded();
             router.transactionEnded();
@@ -229,6 +243,7 @@ public final class Proxies {
             Object r = forward(vendor, method, args);
             router.rolledBack();
             if (args == null || args.length == 0) {
+              rollbackOnly = false;
               session.transactionEnded();
               router.transactionEnded();
             } else {
@@ -246,6 +261,9 @@ public final class Proxies {
             }
             // switching autocommit on commits an open transaction (Connection.setAutoCommit)
             boolean wasInTransaction = !vendor.getAutoCommit();
+            if (wasInTransaction && on) {
+              requireNotRollbackOnly();
+            }
             Object r = forward(vendor, method, args);
             if (wasInTransaction && on) {
               session.transactionEnded();
@@ -279,6 +297,16 @@ public final class Proxies {
     }
   }
 
+  /** Whether the arguments after a statement's text ask for generated keys. */
+  private static boolean asksForGeneratedKeys(Object[] args) {
+    if (args.length != 2) {
+      return false; // the text alone, or with result set type, concurrency and holdability
+    }
+    return args[1] instanceof int[]
+        || args[1] instanceof String[]
+        || Integer.valueOf(Statement.RETURN_GENERATED_KEYS).equals(args[1]);
+  }
+
   /** A recorded call, replayed on a statement prepared again. */
   private static final class Call {
     final Method method;
@@ -305,6 +333,8 @@ public final class Proxies {
     // the statement's state, like its vendor statement, may be read from another thread
     volatile boolean batchPending;
     volatile boolean unwrapped;
+    // the update count of the last write the driver ran itself, -1 once read past; null otherwise
+    @Nullable Long writeCount;
 
     @Override
     void handedOut() {
@@ -342,6 +372,39 @@ public final class Proxies {
         parameters.clear();
         return forward(vendor(), method, args);
       }
+      if (name.startsWith("execute") || name.equals("addBatch")) {
+        owner.requireNotRollbackOnly();
+        writeCount = null;
+      }
+      if (writeCount != null) {
+        switch (name) {
+          case "getUpdateCount":
+            return (int) Math.min(writeCount, Integer.MAX_VALUE);
+          case "getLargeUpdateCount":
+            return writeCount;
+          case "getResultSet":
+            return null;
+          case "getMoreResults":
+            writeCount = -1L;
+            return false;
+          default:
+            break;
+        }
+      }
+      Router.Route write = prepared == null ? null : prepared;
+      if (write != null && write.write != null) {
+        if (name.equals("addBatch")) {
+          throw Errors.unsupported("a write of a ScalarDB table cannot be batched yet");
+        }
+        if (name.startsWith("set")
+            && args != null
+            && args.length >= 2
+            && args[0] instanceof Integer) {
+          Object r = forward(vendor(), method, args); // kept for getParameterMetaData
+          parameters.put((Integer) args[0], new Call(method, args));
+          return r;
+        }
+      }
       if (name.equals("addBatch") && (args == null || args.length == 0)) {
         batchPending = true;
         return forward(vendor(), method, args);
@@ -374,6 +437,9 @@ public final class Proxies {
       boolean takesSql = args != null && args.length > 0 && args[0] instanceof String;
       if (takesSql && name.equals("addBatch")) {
         Router.Route route = owner.route((String) args[0]);
+        if (route.write != null) {
+          throw Errors.unsupported("a write of a ScalarDB table cannot be batched yet");
+        }
         if (!route.passthrough && (route.changesSession || route.changesNames)) {
           // the entries after it were routed before it changed what their names mean
           throw Errors.unsupported(
@@ -388,8 +454,19 @@ public final class Proxies {
       Object[] routed = args;
       if (takesSql && name.startsWith("execute")) {
         Router.Route route = owner.route((String) args[0]);
+        if (route.write != null) {
+          return runWrite(name, args, route);
+        }
         routed = withSql(args, route);
         ran.add(route);
+      } else if (prepared != null && prepared.write != null && name.startsWith("execute")) {
+        Router.Route route = owner.current(prepared);
+        if (route.write == null || !route.sql.equals(prepared.sql)) {
+          throw Errors.unsupported(
+              "the statement now routes differently from when it was prepared; prepare it again");
+        }
+        prepared = route;
+        return runWrite(name, args, route);
       } else if (prepared != null && name.startsWith("execute")) {
         Router.Route route = owner.current(prepared);
         if (!route.sql.equals(prepared.sql)) {
@@ -445,6 +522,47 @@ public final class Proxies {
       return result instanceof ResultSet
           ? proxy(ResultSet.class, new ChildHandler(result, connection, (Statement) proxy))
           : result;
+    }
+
+    /** Runs a write the driver plans, and answers as the vendor's statement would. */
+    private @Nullable Object runWrite(String name, @Nullable Object[] args, Router.Route route)
+        throws SQLException {
+      if (name.equals("executeQuery")) {
+        throw new SQLException("the statement returns no result set", "02000");
+      }
+      boolean prepared = args == null || args.length == 0 || !(args[0] instanceof String);
+      if (!prepared && asksForGeneratedKeys(args)) {
+        throw Errors.unsupported("a write of a ScalarDB table cannot return generated keys yet");
+      }
+      long count =
+          Writes.run(
+              owner.vendor,
+              Objects.requireNonNull(route.write),
+              (ps, position, placeholder) -> {
+                Call c = prepared ? parameters.get(placeholder) : null;
+                if (c == null) {
+                  throw new SQLException("no value is bound to parameter " + placeholder, "07001");
+                }
+                Object[] at = c.args.clone();
+                at[0] = position;
+                try {
+                  forward(ps, c.method, at);
+                } catch (SQLException | RuntimeException e) {
+                  throw e;
+                } catch (Throwable t) {
+                  throw new SQLException(t);
+                }
+              },
+              () -> owner.rollbackOnly = true);
+      writeCount = count;
+      switch (name) {
+        case "executeUpdate":
+          return (int) Math.min(count, Integer.MAX_VALUE);
+        case "executeLargeUpdate":
+          return count;
+        default:
+          return false; // execute: an update count, no result set
+      }
     }
 
     /**

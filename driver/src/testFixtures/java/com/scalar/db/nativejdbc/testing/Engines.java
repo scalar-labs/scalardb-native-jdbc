@@ -216,6 +216,11 @@ public enum Engines {
     p.setProperty("scalar.db.password", s.password);
     p.setProperty("scalar.db.transaction_manager", "consensus-commit");
     p.setProperty("scalar.db.jdbc.isolation_level", isolation());
+    // a few idle connections per pool, not ScalarDB's 20, so that the managers the test classes
+    // open stay within PostgreSQL's 100 connections
+    p.setProperty("scalar.db.jdbc.connection_pool.min_idle", "2");
+    p.setProperty("scalar.db.jdbc.table_metadata.connection_pool.min_idle", "1");
+    p.setProperty("scalar.db.jdbc.admin.connection_pool.min_idle", "1");
     return TransactionFactory.create(p);
   }
 
