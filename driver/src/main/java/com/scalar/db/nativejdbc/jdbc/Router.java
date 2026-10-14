@@ -50,6 +50,10 @@ final class Router {
     final boolean changesSession;
     final boolean changesNames;
     final boolean passthrough;
+
+    /** The kind of statement, or null in passthrough mode. */
+    final SqlAst.@Nullable Kind kind;
+
     final int isolation;
     final long sessionGeneration;
     final long catalogGeneration;
@@ -97,6 +101,7 @@ final class Router {
         boolean changesSession,
         boolean changesNames,
         boolean passthrough,
+        SqlAst.@Nullable Kind kind,
         int isolation,
         long sessionGeneration,
         long catalogGeneration,
@@ -122,6 +127,7 @@ final class Router {
       this.changesSession = changesSession;
       this.changesNames = changesNames;
       this.passthrough = passthrough;
+      this.kind = kind;
       this.sessionGeneration = sessionGeneration;
       this.catalogGeneration = catalogGeneration;
     }
@@ -139,6 +145,7 @@ final class Router {
           changesSession,
           changesNames,
           passthrough,
+          kind,
           isolation,
           sessionGeneration,
           catalogGeneration,
@@ -253,15 +260,24 @@ final class Router {
         throw Errors.unsupported("the passthrough setting applies in autocommit mode only");
       }
       // anything may run here, so assume it changed the session and the names
-      return route(sql, sql, true, true, true, null, 0, 0, List.of(), true);
+      return route(sql, sql, null, true, true, true, null, 0, 0, List.of(), true);
     }
-    Outcome<SqlAst> parsed =
-        SqlAst.analyze(sql, engine, session.doubleQuotesQuoteIdentifiers(vendor));
+    // parsed first as the session was last read: transaction control runs nothing before it, since
+    // it may end a transaction that a failed statement aborted (todo 122)
+    boolean quotes = session.doubleQuotesQuoteIdentifiersAsLastRead();
+    Outcome<SqlAst> parsed = SqlAst.analyze(sql, engine, quotes);
+    if (!(parsed.isPresent() && controlsTransaction(parsed.get().kind()))
+        && session.doubleQuotesQuoteIdentifiers(vendor) != quotes) {
+      parsed = SqlAst.analyze(sql, engine, !quotes);
+    }
     if (!parsed.isPresent()) {
       throw Errors.unsupported(parsed.reason());
     }
     SqlAst ast = parsed.get();
     SqlAst.Kind kind = ast.kind();
+    if (controlsTransaction(kind)) {
+      return route(sql, sql, kind, false, false, false, null, 0, 0, List.of(), false);
+    }
     String database = session.database();
     String target = ast.useTarget();
     if (database != null && target != null && !database.equals(target)) {
@@ -292,6 +308,7 @@ final class Router {
     return route(
         sql,
         sql,
+        kind,
         changesSession,
         changesNames,
         false,
@@ -405,6 +422,7 @@ final class Router {
           route(
               sql,
               text.sql(),
+              SqlAst.Kind.SELECT,
               false,
               false,
               false,
@@ -422,12 +440,30 @@ final class Router {
       throw Errors.unsupported("the statement cannot be rewritten onto the read views" + tables);
     }
     return route(
-        sql, rewritten, false, false, false, null, ast.parameterCount(), 0, List.of(), true);
+        sql,
+        rewritten,
+        SqlAst.Kind.SELECT,
+        false,
+        false,
+        false,
+        null,
+        ast.parameterCount(),
+        0,
+        List.of(),
+        true);
+  }
+
+  private static boolean controlsTransaction(SqlAst.Kind kind) {
+    return kind == SqlAst.Kind.COMMIT
+        || kind == SqlAst.Kind.ROLLBACK
+        || kind == SqlAst.Kind.ROLLBACK_TO_SAVEPOINT
+        || kind == SqlAst.Kind.SAVEPOINT;
   }
 
   private Route route(
       String source,
       String sql,
+      SqlAst.@Nullable Kind kind,
       boolean changesSession,
       boolean changesNames,
       boolean passthrough,
@@ -442,6 +478,7 @@ final class Router {
         changesSession,
         changesNames,
         passthrough,
+        kind,
         isolation,
         session.generation(),
         catalog.generation(),
@@ -615,9 +652,8 @@ final class Router {
    *
    * @param vendor the vendor connection
    * @param routes the routes about to run
-   * @throws SQLException if the setting cannot be read or set
    */
-  void beforeRun(Connection vendor, List<Route> routes) throws SQLException {
+  void beforeRun(Connection vendor, List<Route> routes) {
     if (engine != Engine.POSTGRESQL || routes.isEmpty()) {
       return;
     }
@@ -633,6 +669,15 @@ final class Router {
     if (!off && !on) {
       return; // writes and session statements: the setting does not matter (todo 107)
     }
+    try {
+      switchWorkers(vendor, off);
+    } catch (SQLException e) {
+      // only the speed depends on it; the statement itself reports an aborted transaction
+      workersOff = null;
+    }
+  }
+
+  private void switchWorkers(Connection vendor, boolean off) throws SQLException {
     if (workersOff == null) {
       long shown;
       try (Statement st = vendor.createStatement();
@@ -770,6 +815,17 @@ final class Router {
    * the session and forget resolved names, as it requires. Never throws.
    */
   void ran(Connection vendor, Route route) {
+    if (route.kind == SqlAst.Kind.COMMIT) {
+      session.transactionEnded();
+      transactionEnded();
+    } else if (route.kind == SqlAst.Kind.ROLLBACK) {
+      rolledBack();
+      session.transactionEnded();
+      transactionEnded();
+    } else if (route.kind == SqlAst.Kind.ROLLBACK_TO_SAVEPOINT) {
+      rolledBack();
+      session.rolledBackToSavepoint();
+    }
     if (route.changesSession) {
       if (engine == Engine.POSTGRESQL && setsWorkers(route.source)) {
         sessionWorkers = -1;

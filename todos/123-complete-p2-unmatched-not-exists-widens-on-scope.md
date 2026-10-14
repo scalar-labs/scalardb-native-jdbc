@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "123"
 tags: [code-review, correctness, split-read]
@@ -37,9 +37,11 @@ unique in the ON's scope can become ambiguous, so a valid query fails.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] The statement above runs and matches the plain read.
+- [x] The statement above runs and matches the plain read.
 
 ## Work Log
 
@@ -47,3 +49,11 @@ unique in the ON's scope can become ambiguous, so a valid query fails.
 
 **By:** Claude Code
 - From the review of 9a00150; reproduced on PostgreSQL and MySQL.
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- A LEFT JOIN is split only when every column under its ON clause, subqueries included, is
+  qualified; otherwise its table reads through `rc_`.
+- SplitTest cases in `split_leavesOtherShapesOnTheView`; ReviewFindingsIntegrationTest "123" (failed
+  with "Column 'n' ... is ambiguous" before the fix).

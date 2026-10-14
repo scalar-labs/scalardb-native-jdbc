@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "122"
 tags: [code-review, reliability, postgresql, transactions]
@@ -46,9 +46,11 @@ Happens with plain tables only.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] Scenarios A, B and C as integration tests on PostgreSQL; the application's ROLLBACK succeeds.
+- [x] Scenarios A, B and C as integration tests on PostgreSQL; the application's ROLLBACK succeeds.
 
 ## Work Log
 
@@ -56,3 +58,13 @@ Happens with plain tables only.
 
 **By:** Claude Code
 - From the review of d719647..9a00150 (regression from d33605e for A and C).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- New kinds COMMIT, ROLLBACK, ROLLBACK_TO_SAVEPOINT and SAVEPOINT. `Router.decide` parses with the
+  session's settings as last read and routes them without reading the session or planning workers;
+  `ran()` calls the same hooks as `Connection.commit()` / `rollback()`.
+- `beforeRun` is best effort: a failed SHOW/SET forgets the workers state and lets the statement run.
+- ReviewFindingsIntegrationTest "122": ROLLBACK after a failed insert, after a failed DDL statement,
+  and ROLLBACK TO SAVEPOINT after a split read (failed with 25P02 before the fix).

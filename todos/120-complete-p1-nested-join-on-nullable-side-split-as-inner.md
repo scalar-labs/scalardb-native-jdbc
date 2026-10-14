@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "120"
 tags: [code-review, correctness, split-read]
@@ -39,10 +39,12 @@ plain table.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] SplitTest: the statement above, with `d` (and with `o` plain), is not split.
-- [ ] An integration case compares it with the plain read.
+- [x] SplitTest: the statement above, with `d` (and with `o` plain), is not split.
+- [x] An integration case compares it with the plain read.
 
 ## Work Log
 
@@ -50,3 +52,11 @@ plain table.
 
 **By:** Claude Code
 - From the review of d719647..9a00150; confirmed with the split probe and on PostgreSQL and MySQL.
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- `splittableRefs()` returns no references when a join has more than one ON expression, or a LEFT
+  JOIN has no condition of its own: the statement reads through `rc_`.
+- SplitTest `split_leavesNestedJoinsOnTheView`; ReviewFindingsIntegrationTest "120" compares with the
+  plain read on every engine (it returned extra NULL-extended rows before the fix).

@@ -417,6 +417,15 @@ class SqlAstTest {
   }
 
   @Test
+  void transactionControl_hasItsOwnKinds() {
+    assertThat(parse("COMMIT").kind()).isEqualTo(SqlAst.Kind.COMMIT);
+    assertThat(parse("ROLLBACK").kind()).isEqualTo(SqlAst.Kind.ROLLBACK);
+    assertThat(parse("ROLLBACK TO SAVEPOINT s").kind())
+        .isEqualTo(SqlAst.Kind.ROLLBACK_TO_SAVEPOINT);
+    assertThat(parse("SAVEPOINT s").kind()).isEqualTo(SqlAst.Kind.SAVEPOINT);
+  }
+
+  @Test
   void setConfig_changesTheSession_inAnyForm() {
     for (String sql :
         List.of(

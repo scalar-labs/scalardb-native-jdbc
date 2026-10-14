@@ -41,6 +41,11 @@ final class Session {
     return doubleQuotesQuoteIdentifiers;
   }
 
+  /** The double-quote setting as last read, which a statement since may have changed. */
+  boolean doubleQuotesQuoteIdentifiersAsLastRead() {
+    return doubleQuotesQuoteIdentifiers;
+  }
+
   /**
    * Marks the session as changed by a statement or a call. Inside a transaction a change may also
    * be undone at its end ({@code SET LOCAL}, a rolled-back {@code SET}), so the end marks it again.

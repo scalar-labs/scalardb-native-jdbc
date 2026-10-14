@@ -59,7 +59,10 @@ import net.sf.jsqlparser.parser.StringProvider;
 import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
+import net.sf.jsqlparser.statement.Commit;
 import net.sf.jsqlparser.statement.ResetStatement;
+import net.sf.jsqlparser.statement.RollbackStatement;
+import net.sf.jsqlparser.statement.SavepointStatement;
 import net.sf.jsqlparser.statement.SetStatement;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
@@ -138,6 +141,14 @@ public final class SqlAst {
      * SESSION}: after it the session's schemas and settings must be read again.
      */
     SESSION,
+    /** {@code COMMIT}. */
+    COMMIT,
+    /** {@code ROLLBACK} of the whole transaction. */
+    ROLLBACK,
+    /** {@code ROLLBACK TO SAVEPOINT}. */
+    ROLLBACK_TO_SAVEPOINT,
+    /** {@code SAVEPOINT}. */
+    SAVEPOINT,
     /** Anything else. */
     OTHER
   }
@@ -717,6 +728,17 @@ public final class SqlAst {
     }
     if (statement instanceof Truncate) {
       return Kind.TRUNCATE;
+    }
+    if (statement instanceof Commit) {
+      return Kind.COMMIT;
+    }
+    if (statement instanceof RollbackStatement) {
+      return ((RollbackStatement) statement).getSavepointName() == null
+          ? Kind.ROLLBACK
+          : Kind.ROLLBACK_TO_SAVEPOINT;
+    }
+    if (statement instanceof SavepointStatement) {
+      return Kind.SAVEPOINT;
     }
     String n = statement.getClass().getName();
     if (n.startsWith("net.sf.jsqlparser.statement.create.")
@@ -1440,6 +1462,11 @@ public final class SqlAst {
         if (j.isRight() || j.isFull() || (j.isOuter() && !j.isLeft()) || j.isSemi()) {
           return List.of(); // what comes before is on a nullable side
         }
+        if ((j.getOnExpressions() != null && j.getOnExpressions().size() > 1)
+            || (j.isLeft() && !j.isNatural() && !hasCondition(j))) {
+          // a ... LEFT JOIN b JOIN c ON x ON y: b and c are on the nullable side (todo 120)
+          return List.of();
+        }
         if (!j.isLeft() && !j.isApply()) {
           split.add(j.getFromItem());
         }
@@ -1620,7 +1647,10 @@ public final class SqlAst {
       for (Join j : s.getJoins()) {
         TableRef r = fromRef(j.getFromItem());
         LeftJoin tokens = leftJoin(j);
-        if (r != null && tokens != null && keyOf.apply(r) != null) {
+        if (r != null
+            && tokens != null
+            && keyOf.apply(r) != null
+            && everyColumnQualified(j.getOnExpressions().iterator().next())) {
           found.put(r, Place.NULLABLE);
           out.leftJoins.put(r, tokens);
         }
@@ -1689,6 +1719,30 @@ public final class SqlAst {
       }
     }
     return null;
+  }
+
+  /** Whether a join has an ON or USING clause of its own. */
+  private static boolean hasCondition(Join j) {
+    return (j.getOnExpressions() != null && !j.getOnExpressions().isEmpty())
+        || (j.getUsingColumns() != null && !j.getUsingColumns().isEmpty());
+  }
+
+  /**
+   * Whether every column under {@code e} is qualified. The unmatched piece repeats a LEFT JOIN's ON
+   * clause in the WHERE clause, where an unqualified column can name a table joined later (todo
+   * 123).
+   */
+  private boolean everyColumnQualified(Expression e) {
+    Set<Object> nodes = valuesUnder(e);
+    if (nodes == null) {
+      return false;
+    }
+    for (ColumnRef c : columnRefs) {
+      if (c.isAmong(nodes) && c.qualifierNode() == null) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /** The tokens of a LEFT JOIN of one table with one ON clause, or null for any other join. */
@@ -1836,8 +1890,12 @@ public final class SqlAst {
     }
     Place place = Place.IN_EXPRESSION;
     if (conjunct && !negated) {
+      // each key value is in one piece, but other engines compare a text key with a number as
+      // numbers, so '1' committed and '01' in flight would both match 1 (todo 121)
       place =
-          in && selectsKey(q, table, Objects.requireNonNull(keyOf.apply(table)))
+          in
+                  && engine == Engine.POSTGRESQL
+                  && selectsKey(q, table, Objects.requireNonNull(keyOf.apply(table)))
               ? Place.INNER
               : Place.SEMI_JOINED;
     }

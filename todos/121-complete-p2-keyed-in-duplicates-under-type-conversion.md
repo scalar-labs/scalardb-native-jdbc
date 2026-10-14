@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "121"
 tags: [code-review, correctness, split-read, mysql, sqlserver, oracle]
@@ -40,10 +40,12 @@ copies. The IN would return it once.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] A text-keyed IN is not placed INNER on MySQL, MariaDB, SQL Server and Oracle.
-- [ ] Integration case with '1' committed and '01' in flight returns the row once.
+- [x] A text-keyed IN is not placed INNER on MySQL, MariaDB, SQL Server and Oracle.
+- [x] Integration case with '1' committed and '01' in flight returns the row once.
 
 ## Work Log
 
@@ -51,3 +53,10 @@ copies. The IN would return it once.
 
 **By:** Claude Code
 - From the review of 9a00150; reproduced on MySQL 8.4 against logical tables.
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- A keyed IN is placed INNER on PostgreSQL only; elsewhere it is SEMI_JOINED (design 4.2 updated).
+- SplitTest asserts the MySQL placement; ReviewFindingsIntegrationTest "121" ('1' committed, '01'
+  updated in flight) returns the row once on MySQL, MariaDB, SQL Server and Oracle (twice before).

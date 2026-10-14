@@ -7,6 +7,7 @@ import com.scalar.db.api.Insert;
 import com.scalar.db.api.TableMetadata;
 import com.scalar.db.api.TwoPhaseCommitTransaction;
 import com.scalar.db.api.TwoPhaseCommitTransactionManager;
+import com.scalar.db.api.Upsert;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
@@ -30,8 +31,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * The findings of the 2026-10-13 review (todos 106-111), each asserting the behaviour the driver
- * must have: a check fails while its finding stands. Collected, so one run shows them all.
+ * The findings of the 2026-10-13 and 2026-10-14 reviews (todos 106-111, 120-123), each asserting
+ * the behaviour the driver must have: a check fails while its finding stands. Collected, so one run
+ * shows them all.
  */
 class ReviewFindingsIntegrationTest {
 
@@ -64,7 +66,10 @@ class ReviewFindingsIntegrationTest {
           "INSERT INTO rv.pl VALUES (1, 'a')",
           "INSERT INTO rv.pl VALUES (2, 'b')",
           "INSERT INTO rv.pl VALUES (3, 'c')",
-          "CREATE TABLE rv.lg (n " + e.intType() + ")");
+          "CREATE TABLE rv.lg (n " + e.intType() + ")",
+          "CREATE TABLE rv.pn (n " + e.intType() + ")",
+          "INSERT INTO rv.pn VALUES (1)",
+          "INSERT INTO rv.pn VALUES (2)");
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
@@ -79,6 +84,15 @@ class ReviewFindingsIntegrationTest {
               .addPartitionKey("id")
               .build(),
           Map.of("transaction-metadata-decoupling", "true"));
+      admin.createTable(
+          rv,
+          "tk",
+          TableMetadata.newBuilder()
+              .addColumn("id", DataType.TEXT)
+              .addColumn("x", DataType.TEXT)
+              .addPartitionKey("id")
+              .build(),
+          Map.of("transaction-metadata-decoupling", "true"));
     }
     try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
       DistributedTransaction tx = tm.begin();
@@ -89,6 +103,15 @@ class ReviewFindingsIntegrationTest {
                 .table("made")
                 .partitionKey(Key.ofInt("id", i))
                 .textValue("x", String.valueOf((char) ('a' + i - 1)))
+                .build());
+      }
+      for (String k : List.of("1", "01")) {
+        tx.insert(
+            Insert.newBuilder()
+                .namespace(rv)
+                .table("tk")
+                .partitionKey(Key.ofText("id", k))
+                .textValue("x", k)
                 .build());
       }
       tx.commit();
@@ -136,6 +159,24 @@ class ReviewFindingsIntegrationTest {
         } catch (SQLException ex) {
           soft.fail("106 SQL ROLLBACK in an aborted transaction: " + ex.getMessage());
         }
+        c.rollback();
+      }
+      // 122: SQL ROLLBACK first after a failure, and after a failed DDL statement; ROLLBACK TO
+      // SAVEPOINT after a split read set the workers
+      try (Connection c = e.openDriver()) {
+        c.setAutoCommit(false);
+        failing(c, "INSERT INTO rv.pl VALUES (1, 'a')");
+        transactionControl(soft, c, "122 ROLLBACK after a failed insert", "ROLLBACK");
+        rows(c, "SELECT 1 FROM rv.pl");
+        failing(c, "CREATE TABLE rv.pl (n int)");
+        transactionControl(soft, c, "122 ROLLBACK after a failed DDL statement", "ROLLBACK");
+        transactionControl(soft, c, "122 SAVEPOINT", "SAVEPOINT s");
+        rows(c, "SELECT x FROM " + t);
+        failing(c, "INSERT INTO rv.pl VALUES (1, 'a')");
+        transactionControl(soft, c, "122 ROLLBACK TO SAVEPOINT", "ROLLBACK TO SAVEPOINT s");
+        soft.assertThat(rows(c, "SELECT x FROM " + t + " WHERE id = 1"))
+            .as("122 after ROLLBACK TO SAVEPOINT")
+            .containsExactly("a");
         c.rollback();
       }
       // 107: a SET after a split read must not lose the session's workers value
@@ -189,12 +230,81 @@ class ReviewFindingsIntegrationTest {
         // 110: a whole-row reference
         same(soft, "110 whole-row reference", d, v, "SELECT m FROM {T} m WHERE m.id = 1", t);
       }
+      // 120: a table in a nested join on a LEFT JOIN's nullable side
+      same(
+          soft,
+          "120 nested join on the nullable side",
+          d,
+          v,
+          "SELECT a."
+              + x
+              + ", b."
+              + x
+              + ", m."
+              + x
+              + " FROM rv.pl a LEFT JOIN {T} b JOIN {T} m ON m."
+              + id
+              + " = b."
+              + id
+              + " ON b."
+              + id
+              + " = a."
+              + id
+              + " + 1 ORDER BY 1",
+          t);
+      // 123: an unqualified column of the ON clause that a later table also has
+      same(
+          soft,
+          "123 unqualified column in the ON clause",
+          d,
+          v,
+          "SELECT a.n, b."
+              + x
+              + " FROM rv.pn a LEFT JOIN {T} b ON b."
+              + id
+              + " = a.n AND n = 1 JOIN rv.pn q ON q.n = a.n ORDER BY 1",
+          t);
       if (engine == Engine.MYSQL || engine == Engine.MARIADB) {
         // 109: a placeholder inside an unaliased item's label
         String sql = "SELECT SUM(CASE WHEN m.x = ? THEN 1 ELSE 0 END) FROM {T} m";
         soft.assertThat(labelsAndRows(d, sql.replace("{T}", t), "a"))
             .as("109 placeholder in a label")
             .isEqualTo(labelsAndRows(v, sql.replace("{T}", "rv.pl"), "a"));
+      }
+    }
+
+    if (engine != Engine.POSTGRESQL) {
+      // 121: '1' committed and '01' in flight both equal 1 where a text key is compared as a number
+      String tk = engine == Engine.ORACLE ? "rv.\"tk\"" : "rv.tk";
+      try (Connection c = e.openDriver();
+          TwoPhaseCommitTransactionManager tm = scalarDb.getTwoPhaseCommitTransactionManager()) {
+        TwoPhaseCommitTransaction tx = tm.begin();
+        tx.upsert(
+            Upsert.newBuilder()
+                .namespace(rv)
+                .table("tk")
+                .partitionKey(Key.ofText("id", "01"))
+                .textValue("x", "z")
+                .build());
+        tx.prepare();
+        try {
+          soft.assertThat(
+                  rows(
+                      c,
+                      "SELECT p."
+                          + x
+                          + " FROM rv.pl p WHERE p."
+                          + id
+                          + " IN (SELECT k."
+                          + id
+                          + " FROM "
+                          + tk
+                          + " k)"))
+              .as("121 keyed IN with a text key")
+              .containsExactly("a");
+        } finally {
+          tx.rollback();
+        }
       }
     }
 
@@ -269,6 +379,30 @@ class ReviewFindingsIntegrationTest {
       }
     }
     soft.assertAll();
+  }
+
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "test statements written in the test sources")
+  private static void failing(Connection c, String sql) {
+    try (Statement st = c.createStatement()) {
+      st.execute(sql);
+      throw new AssertionError("expected to fail: " + sql);
+    } catch (SQLException expected) {
+      // the transaction is aborted now
+    }
+  }
+
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "test statements written in the test sources")
+  private static void transactionControl(
+      SoftAssertions soft, Connection c, String what, String sql) {
+    try (Statement st = c.createStatement()) {
+      st.execute(sql);
+    } catch (SQLException ex) {
+      soft.fail(what + ": " + ex.getMessage());
+    }
   }
 
   private static void same(

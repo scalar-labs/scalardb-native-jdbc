@@ -972,6 +972,16 @@ table split and the subquery's through its view, for the new shapes:
 | IN subquery selecting a non-key | 389 / 3.7 | 283 / 26.7 | 1422 / 6.8 | 2.8 / 3.8 | 1.7 / 2.0 |
 | NOT EXISTS, ScalarDB on both sides | 125 / 2.1 | 356 / 2.0 | 371 / 1.6 | 1.9 / 1.7 | 3.1 / 2.8 |
 
+After todo 121 the key IN is split as an inner table on PostgreSQL only; on the other engines a
+text key compared with a number could match in both pieces, so it takes the correlated `NOT EXISTS`
+too. Through the driver, before / after (2026-10-14, `-Dnativejdbc.bench.only='IN subquery on
+non-key'`):
+
+| rows in flight | MySQL | MariaDB | SQL Server | Oracle |
+|---|---|---|---|---|
+| 100 | 1.7 / 1.8 | 2.4 / 2.5 | 2.1 / 2.7 | 0.4 / 0.4 |
+| 10,000 | 16.3 / 13.8 | 7.4 / 7.3 | 3.8 / 4.8 | 0.5 / 0.5 |
+
 The forms these numbers led to:
 - **A nullable table and a subquery's table take the per-row committed check on MySQL and
   MariaDB** when a top-level conjunct of an ON clause or of the subquery's WHERE clause reaches them

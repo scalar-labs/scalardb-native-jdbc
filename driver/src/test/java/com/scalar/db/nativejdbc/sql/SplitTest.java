@@ -543,8 +543,16 @@ class SplitTest {
     assertThat(places("select * from c where c.id in (select o.cid from o) and c.x = 1", "c", "o"))
         .containsEntry("o", SqlAst.Place.SEMI_JOINED);
     // the key: each value is in exactly one piece
-    assertThat(places("select * from c where c.oid in (select id from o where o.s = 1)", "c", "o"))
-        .containsEntry("o", SqlAst.Place.INNER);
+    String keyed = "select * from c where c.oid in (select id from o where o.s = 1)";
+    assertThat(places(keyed, "c", "o")).containsEntry("o", SqlAst.Place.INNER);
+    // elsewhere '1' and '01' would both match 1 (todo 121)
+    assertThat(
+            SqlAst.parse(keyed, Engine.MYSQL)
+                .orElseThrow()
+                .split(r -> List.of("id"))
+                .places()
+                .values())
+        .containsExactly(SqlAst.Place.INNER, SqlAst.Place.SEMI_JOINED);
     assertThat(
             places("select * from c where exists (select 1 from o where o.cid = c.id)", "c", "o"))
         .containsEntry("o", SqlAst.Place.SEMI_JOINED);
@@ -563,6 +571,9 @@ class SplitTest {
       strings = {
         "select * from c left join o using (id)",
         "select * from c left join (o join p on p.id = o.pid) on o.cid = c.id",
+        // the WHERE clause, where the unmatched piece repeats the ON clause, also sees q (todo 123)
+        "select * from c left join o on o.cid = c.id and k = 2 join q on q.id = c.id",
+        "select * from c left join o on o.cid = c.id and o.x in (select y from q)",
         "select * from c where c.id in (select o.cid from o group by o.cid)",
         "select * from c where c.id in (select max(o.cid) from o)",
         "select * from c where c.id in (select o.cid from o join p on p.oid = o.id)",
@@ -574,6 +585,18 @@ class SplitTest {
       })
   void split_leavesOtherShapesOnTheView(String sql) {
     assertThat(places(sql, "c", "o", "p")).containsOnlyKeys("c");
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        // p is on the nullable side of the LEFT JOIN (todo 120)
+        "select * from c left join o join p on p.oid = o.id on o.cid = c.id",
+        "select * from c left join q join p on p.qid = q.id on q.cid = c.id",
+        "select * from c join o join p on p.oid = o.id on o.cid = c.id"
+      })
+  void split_leavesNestedJoinsOnTheView(String sql) {
+    assertThat(places(sql, "c", "o", "p")).isEmpty();
   }
 
   @Test

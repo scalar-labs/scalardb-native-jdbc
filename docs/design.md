@@ -841,9 +841,10 @@ union as a derived table.
        exactly one row of the table, which is in exactly one copy.
     2. **Nullable**: one table, not a join, on the nullable side of a top-level LEFT JOIN with an ON
        clause (a RIGHT JOIN, USING and NATURAL stay on `rc_T`), the ON clause naming only it and the
-       tables before it. Three pieces. In the
-       committed and the in-flight piece the LEFT JOIN becomes an inner join with that copy's
-       fragment. The **unmatched piece** joins an empty fragment, `(SELECT <columns> FROM T WHERE
+       tables before it, every column qualified: the unmatched piece repeats the ON clause in the
+       WHERE clause, where an unqualified column could also name a table joined later (todo 123).
+       Three pieces. In the committed and the in-flight piece the LEFT JOIN becomes an inner join
+       with that copy's fragment. The **unmatched piece** joins an empty fragment, `(SELECT <columns> FROM T WHERE
        1 = 0)`, so every column of the table is NULL with its own type, and adds to the WHERE clause
        ```sql
        NOT EXISTS (SELECT 1 FROM <committed fragment> b WHERE <ON clause>)
@@ -856,28 +857,32 @@ union as a derived table.
        join see the values of the plain statement, NULLs in the unmatched piece. Measured with one
        inner table (6 pieces): 1.3-2.5x by hand, against 376-1495x through `rc_T` on MySQL and
        MariaDB; through the driver 1.2-2.3x on every engine (todo 095).
-    3. **Semi-joined**: the one ScalarDB table of an `IN (subquery)` or `EXISTS (subquery)` that is a
-       top-level conjunct of the WHERE clause, the subquery a single SELECT naming no other ScalarDB
-       table, without aggregates, GROUP BY, HAVING, a row limit, window functions or a set operation.
-       The table is joined inside the subquery by an inner join, so that the subquery's rows are the
-       union of its rows over each piece. Two pieces, as for an inner table, so the engine can still
-       drive the plan from the subquery's index. An outer row must come out of exactly one piece:
-       the committed piece keeps the subquery over the committed fragment; the in-flight piece keeps
-       it over the in-flight fragment and adds that it does not match over the committed fragment:
-       `NOT EXISTS (S_c)` for EXISTS; for `x IN (SELECT y FROM ... WHERE w)`, `NOT EXISTS (SELECT 1
-       FROM ... WHERE (w) AND (y) = (x))` over the committed fragment, which probes the subquery's
-       index row by row. A row the committed piece returns is not returned again, and an UNKNOWN
-       comparison is no match there as it is in IN. The correlated form needs x to be one column
-       qualified by a name the subquery's FROM clause does not use, or the subquery could read it
-       as its own; otherwise the IN is repeated whole, `CASE WHEN x IN (S_c) THEN 1 ELSE 0 END =
-       0`, which PostgreSQL computes by hashing the whole committed subquery (1205x at 10,000 rows
-       in flight in the benchmark's shape). When the subquery selects the table's key, a single column,
-       each value is in exactly one copy and the condition is left out: the table is split as an
-       inner one. Measured for the key case: 1.7-3.7x by hand, against 109-1200x through the view
-       on MySQL and MariaDB, where an IN over a union runs once per outer row; through the driver
-       0.4-2.4x at 100 rows in flight, up to 16x on MySQL at 10,000. The non-key case, with the
-       correlated `NOT EXISTS`: 1.7-5.4x at 100 rows in flight, against 190-1520x through the view
-       on PostgreSQL, MySQL and MariaDB; at 10,000 up to 6.8x, 27x on MySQL (todo 118).
+    3. **Semi-joined**: the one ScalarDB table of an `IN (subquery)` or `EXISTS (subquery)` that is
+       a top-level conjunct of the WHERE clause, the subquery a single SELECT naming no other
+       ScalarDB table, without aggregates, GROUP BY, HAVING, a row limit, window functions or a set
+       operation. The table is joined inside the subquery by an inner join, so that the subquery's
+       rows are the union of its rows over each piece. Two pieces, as for an inner table, so the
+       engine can still drive the plan from the subquery's index. An outer row must come out of
+       exactly one piece: the committed piece keeps the subquery over the committed fragment; the
+       in-flight piece keeps it over the in-flight fragment and adds that it does not match over the
+       committed fragment: `NOT EXISTS (S_c)` for EXISTS; for `x IN (SELECT y FROM ... WHERE w)`,
+       `NOT EXISTS (SELECT 1 FROM ... WHERE (w) AND (y) = (x))` over the committed fragment, which
+       probes the subquery's index row by row. A row the committed piece returns is not returned
+       again, and an UNKNOWN comparison is no match there as it is in IN. The correlated form needs
+       x to be one column qualified by a name the subquery's FROM clause does not use, or the
+       subquery could read it as its own; otherwise the IN is repeated whole, `CASE WHEN x IN (S_c)
+       THEN 1 ELSE 0 END = 0`, which PostgreSQL computes by hashing the whole committed subquery
+       (1205x at 10,000 rows in flight in the benchmark's shape). On PostgreSQL, when the subquery
+       selects the table's key, a single column, each value is in exactly one copy and the condition
+       is left out: the table is split as an inner one. The other engines compare a text key with a
+       number as numbers, so '1' committed and '01' in flight would both match 1, and the key case
+       is split as above (todo 121), at about the same cost (MySQL, MariaDB and Oracle unchanged,
+       SQL Server 2.7x against 2.1x at 100 rows in flight). Measured for the key case, before that
+       change: 1.7-3.7x by hand, against 109-1200x through the view on MySQL and MariaDB, where an
+       IN over a union runs once per outer row; through the driver 0.4-2.4x at 100 rows in flight,
+       up to 16x on MySQL at 10,000. The non-key case, with the correlated `NOT EXISTS`: 1.7-5.4x at
+       100 rows in flight, against 190-1520x through the view on PostgreSQL, MySQL and MariaDB; at
+       10,000 up to 6.8x, 27x on MySQL (todo 118).
     4. **In an expression**: `NOT IN`, `NOT EXISTS`, and an IN or EXISTS under OR or NOT, anywhere
        in the WHERE clause, over a subquery of the same form; in the select list, the ON clauses
        and HAVING a subquery's table stays on `rc_T`. These add no pieces: the subquery is written
@@ -914,8 +919,8 @@ union as a derived table.
     without the parameter values; before PostgreSQL 16 the answer is no.
   - **Not split, served through `rc_T`**: a ScalarDB table in a shape the four kinds do not cover (a
     scalar subquery, a subquery naming two ScalarDB tables or holding an aggregate or a row limit, a
-    CTE, a set operation's branch, a nullable side that is itself a join, a FULL JOIN, Oracle's
-    `(+)`), and a statement whose pieces, 2 per inner or semi-joined table and 3 per nullable one,
+    CTE, a set operation's branch, a nullable side that is itself a join, parenthesized or written
+    `a LEFT JOIN b JOIN c ON ... ON ...` (todo 120), a FULL JOIN, Oracle's `(+)`), and a statement whose pieces, 2 per inner or semi-joined table and 3 per nullable one,
     multiply past the configured limit (default 16), which keeps the split statement bounded; correct,
     at the costs of section 3. Whether a statement past the limit is cheaper whole through `rc_T` or
     with its first tables split and the rest through `rc_T`, and where the limit belongs (a 5-table
