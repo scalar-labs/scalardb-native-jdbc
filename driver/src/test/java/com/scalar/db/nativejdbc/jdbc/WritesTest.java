@@ -87,16 +87,20 @@ class WritesTest {
   }
 
   @Test
-  void insert_stampsEachRowsKey_andTakesOverOrphans() throws Exception {
+  void insert_returnsItsKeys_andTellsADuplicateFromAKeyInFlight() throws Exception {
     List<String> sql = plan("INSERT INTO t (x, id) VALUES (?, ?), ('b', 7)");
-    assertThat(sql.get(0)).isEqualTo("INSERT INTO t (x, id) VALUES (?, ?), ('b', 7)");
+    assertThat(sql.get(0))
+        .isEqualTo("INSERT INTO t (x, id) VALUES (?, ?), ('b', 7) RETURNING \"id\"");
     assertThat(sql.get(1))
         .isEqualTo(
-            "INSERT INTO \"ns\".\"t_meta\" (\"id\", \"tx_id\", \"tx_state\", \"tx_version\","
-                + " \"tx_prepared_at\", \"tx_committed_at\") VALUES (?, ?, 3, 1, ?, ?), (7, ?, 3, 1,"
-                + " ?, ?) ON CONFLICT DO NOTHING");
-    assertThat(sql.get(2))
-        .contains("WHERE ((\"id\" = ?) OR (\"id\" = 7)) AND \"tx_id\" IS DISTINCT FROM ?");
+            "SELECT COUNT(*) FROM \"ns\".\"t_meta\" WHERE ((\"id\" = ?) OR (\"id\" = 7)) AND"
+                + " \"tx_state\" IN (1, 2)");
+    // a key the database generates: no duplicate to classify
+    assertThat(plan("INSERT INTO t (x) VALUES ('a')"))
+        .containsExactly("INSERT INTO t (x) VALUES ('a') RETURNING \"id\"");
+    // the statement's own items first, before a trailing comment
+    assertThat(plan("INSERT INTO t (id, x) VALUES (1, 'a') RETURNING x AS y -- c").get(0))
+        .isEqualTo("INSERT INTO t (id, x) VALUES (1, 'a') RETURNING x AS y, \"id\" -- c");
   }
 
   @Test
@@ -105,16 +109,13 @@ class WritesTest {
     assertThat(sql.get(1))
         .isEqualTo("UPDATE \"ns\".\"t_data\" AS t SET x = 1 WHERE (t.id = ?) AND (\"id\" = ?)");
     assertThat(plan(created(), "INSERT INTO t (id, x) VALUES (1, 'a')").get(0))
-        .isEqualTo("INSERT INTO \"ns\".\"t_data\" AS t (id, x) VALUES (1, 'a')");
+        .isEqualTo("INSERT INTO \"ns\".\"t_data\" AS t (id, x) VALUES (1, 'a') RETURNING \"id\"");
   }
 
   @Test
   void refusesWhatTheFirstStepDoesNotRun() {
     for (String sql :
-        List.of(
-            "INSERT INTO t (x) VALUES ('a')",
-            "UPDATE t SET id = 2 WHERE id = 1",
-            "DELETE FROM t WHERE id = 1 RETURNING x")) {
+        List.of("UPDATE t SET id = 2 WHERE id = 1", "DELETE FROM t WHERE id = 1 RETURNING x")) {
       assertThatThrownBy(() -> plan(sql))
           .as(sql)
           .isInstanceOf(SQLException.class)

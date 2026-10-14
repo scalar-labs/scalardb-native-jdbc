@@ -155,12 +155,14 @@ class RoutingIntegrationTest {
         ps.setInt(1, 99);
         assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
       }
-      // the writes milestone 4a does not run yet (WriteIntegrationTest has the ones it does)
+      // the writes the driver does not run (WriteIntegrationTest has the ones it does)
       assertRefused(
           () -> st.executeUpdate("UPDATE m1.s SET id = 2 WHERE id = 1"), "0AN01", "key column");
       assertRefused(() -> st.execute("DELETE FROM m1.s RETURNING x"), "0AN01", "RETURNING");
       assertRefused(
-          () -> st.addBatch("INSERT INTO m1.s (id, x) VALUES (1, 'a')"), "0AN01", "batched");
+          () -> st.executeUpdate("INSERT INTO m1.s (id, x) VALUES (1, 'a')", new int[] {1}),
+          "0AN01",
+          "column index");
       assertRefused(() -> st.executeQuery("SELECT * FROM m1.s_scalardb"), "42000", "virtual table");
       assertRefused(() -> st.executeQuery("SELECT * FROM m1.s_tx_metadata"), "42000", "metadata");
       // a subquery in a SET is a read whose result changes the session: not a plain read
@@ -360,8 +362,9 @@ class RoutingIntegrationTest {
       c.setSchema("m1plain");
       st.addBatch("INSERT INTO s VALUES (102, 'raw')");
       c.setSchema("m1");
+      // run as what the text now names, a write of the ScalarDB table, under its protocol
       String outcome = batchOutcome(st);
-      assertThat(outcome + ", " + rawRow(102)).isEqualTo("refused 0AN01, not in m1.s");
+      assertThat(outcome + ", " + rawRow(102)).isEqualTo("ran, written into m1.s");
     }
   }
 

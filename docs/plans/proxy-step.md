@@ -322,6 +322,15 @@ other engines keep refusing them with `0AN01`.
   4c.
 - **4c, the rest**: batches, the bounded wait of section 6, generated keys, `RETURNING`, a user `FOR
   UPDATE` or `FOR SHARE`.
+  **Batches, generated keys and `RETURNING` done (2026-10-15)**, on PostgreSQL (design 4.4): a batch
+  holding a write runs in the driver, entry by entry in one transaction in autocommit; an INSERT returns
+  its keys and stamps the metadata from them, so a key the database generates, a `DEFAULT` or an
+  expression is no longer refused; the application's `RETURNING` rows and generated keys are read back by
+  key in the order written. `BatchAndKeysIntegrationTest` covers both layouts and an imported table
+  with an identity key: prepared and statement batches, mixed with a plain table's writes, a failure
+  undoing an autocommit batch, an in-flight row aborting one; `RETURN_GENERATED_KEYS` and named keys,
+  single and batched, as Spring Data JDBC's `saveAll` runs them; `RETURNING` through `executeQuery` and
+  `execute`. Still refused: `RETURNING` on UPDATE and DELETE, keys by column index.
 
 ### Milestone 5: interleaving tests
 

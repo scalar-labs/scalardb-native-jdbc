@@ -5,6 +5,7 @@ import com.scalar.db.nativejdbc.ScalarDbTables;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.SqlAst;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
@@ -13,6 +14,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ParameterMetaData;
@@ -21,11 +23,13 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.function.IntFunction;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -189,15 +193,18 @@ public final class Proxies {
         case "prepareCall":
           {
             Router.Route route = route((String) args[0]);
-            if (route.write != null
-                && (method.getName().equals("prepareCall") || asksForGeneratedKeys(args))) {
-              throw Errors.unsupported(
-                  "a write of a ScalarDB table cannot be a call or return generated keys yet");
+            if (route.write != null && method.getName().equals("prepareCall")) {
+              throw Errors.unsupported("a write of a ScalarDB table cannot be a call");
             }
+            String keys =
+                route.write != null && asksForGeneratedKeys(args)
+                    ? Writes.keysAsked(route.write, args[1])
+                    : null;
             Object[] routed = args.clone();
             routed[0] = route.sql;
             StatementHandler h =
                 new StatementHandler((Statement) created(vendor, method, routed), me, this, route);
+            h.keysAsked = keys;
             // only a route that depends on the in-flight counts is ever prepared again
             if (method.getName().equals("prepareStatement") && route.recheckAt != 0) {
               h.preparedWith = method;
@@ -390,6 +397,8 @@ public final class Proxies {
     Router.@Nullable Route prepared;
     // the routes of the statements added with addBatch(String), applied when the batch runs
     final List<Router.Route> batched = new ArrayList<>();
+    // the parameters of each addBatch() of a prepared write, which the driver runs itself
+    final List<Map<Integer, Call>> writeBatch = new ArrayList<>();
     // for a prepared split read, what it takes to prepare it again when the in-flight counts change
     // its form (todo 103): how it was prepared, its settings, its bound parameters
     @Nullable Method preparedWith;
@@ -401,6 +410,11 @@ public final class Proxies {
     volatile boolean unwrapped;
     // the update count of the last write the driver ran itself, -1 once read past; null otherwise
     @Nullable Long writeCount;
+    // the rows its INSERTs wrote, read back: the statement's own RETURNING result when
+    // writeReturns, otherwise the generated keys; keysAsked, the ones asked for at prepare
+    @Nullable ResultSet writeResult;
+    volatile boolean writeReturns;
+    @Nullable String keysAsked;
     // the driver's statement a write is running, which cancel() reaches from another thread
     volatile @Nullable Statement runningWrite;
     // the last execute's anchored read, whose result sets hide and record the versions, and whether
@@ -438,6 +452,7 @@ public final class Proxies {
       }
       if (name.equals("clearBatch")) {
         batched.clear();
+        writeBatch.clear();
         batchPending = false;
         return forward(vendor(), method, args);
       }
@@ -446,11 +461,19 @@ public final class Proxies {
         return forward(vendor(), method, args);
       }
       boolean takesSql = args != null && args.length > 0 && args[0] instanceof String;
-      if (name.startsWith("execute") || name.equals("addBatch")) {
-        if (!(takesSql && name.startsWith("execute"))) {
+      if (name.startsWith("execute") || name.equals("addBatch") || name.equals("close")) {
+        if (!(takesSql && name.startsWith("execute")) && !name.equals("close")) {
           owner.requireNotRollbackOnly(); // a statement's text is checked once it is routed
         }
         writeCount = null;
+        ResultSet rows = writeResult;
+        writeResult = null;
+        if (rows != null) {
+          rows.close();
+        }
+      }
+      if (name.equals("getGeneratedKeys") && writeResult != null) {
+        return writeResult;
       }
       if (name.equals("cancel")) {
         Statement running = runningWrite;
@@ -462,13 +485,21 @@ public final class Proxies {
       if (writeCount != null) {
         switch (name) {
           case "getUpdateCount":
-            return (int) Math.min(writeCount, Integer.MAX_VALUE);
+            return writeReturns ? -1 : (int) Math.min(writeCount, Integer.MAX_VALUE);
           case "getLargeUpdateCount":
+            if (writeReturns) {
+              return -1L;
+            }
             return writeCount;
           case "getResultSet":
-            return null;
+            return writeReturns ? writeResult : null;
           case "getMoreResults":
+            if (writeReturns && writeResult != null) {
+              writeResult.close();
+              writeResult = null;
+            }
             writeCount = -1L;
+            writeReturns = false;
             return false;
           default:
             break;
@@ -476,11 +507,20 @@ public final class Proxies {
       }
       if (prepared != null && prepared.write != null) {
         if (name.equals("addBatch")) {
-          throw Errors.unsupported("a write of a ScalarDB table cannot be batched yet");
+          writeBatch.add(new LinkedHashMap<>(parameters));
+          return null;
         }
         if (name.equals("executeBatch") || name.equals("executeLargeBatch")) {
-          // nothing can be added, so the batch is empty (133)
-          return name.equals("executeBatch") ? new int[0] : new long[0];
+          List<Map<Integer, Call>> entries = new ArrayList<>(writeBatch);
+          writeBatch.clear(); // cleared when it runs, whatever the outcome
+          Router.Route route = owner.current(prepared);
+          if (route.write == null || !route.sql.equals(prepared.sql)) {
+            throw Errors.unsupported(
+                "the statement now routes differently from when it was prepared; prepare it"
+                    + " again");
+          }
+          prepared = route;
+          return runBatch(proxy, name, entries.size(), i -> route, entries::get, keysAsked);
         }
         if (name.startsWith("set")
             && args != null
@@ -525,7 +565,8 @@ public final class Proxies {
       if (takesSql && name.equals("addBatch")) {
         Router.Route route = owner.route((String) args[0]);
         if (route.write != null) {
-          throw Errors.unsupported("a write of a ScalarDB table cannot be batched yet");
+          batched.add(route); // run by the driver, with the batch's other entries (below)
+          return null;
         }
         if (!route.passthrough && (route.changesSession || route.changesNames)) {
           // the entries after it were routed before it changed what their names mean
@@ -545,7 +586,7 @@ public final class Proxies {
           owner.requireNotRollbackOnly();
         }
         if (route.write != null) {
-          return runWrite(name, args, route);
+          return runWrite(proxy, name, args, route);
         }
         routed = withSql(args, route);
         ran.add(route);
@@ -556,7 +597,7 @@ public final class Proxies {
               "the statement now routes differently from when it was prepared; prepare it again");
         }
         prepared = route;
-        return runWrite(name, args, route);
+        return runWrite(proxy, name, args, route);
       } else if (prepared != null && name.startsWith("execute")) {
         Router.Route route = owner.current(prepared);
         if (route.write != null) {
@@ -586,14 +627,28 @@ public final class Proxies {
         // each entry was routed when it was added; check it again under the state it runs in
         List<Router.Route> entries = new ArrayList<>(batched);
         batched.clear(); // the driver clears the batch when it runs, whatever the outcome
+        List<Router.Route> nows = new ArrayList<>();
+        boolean writes = false;
         try {
           for (Router.Route entry : entries) {
             Router.Route now = owner.current(entry);
-            if (now.write != null) {
-              throw Errors.unsupported(
-                  "a batched statement now writes a ScalarDB table, which it did not when it was"
-                      + " added");
-            }
+            nows.add(now);
+            writes |= entry.write != null || now.write != null;
+          }
+        } catch (SQLException e) {
+          vendor().clearBatch();
+          throw e;
+        }
+        if (writes) {
+          // a write is several statements: the driver runs every entry itself, in order
+          vendor().clearBatch();
+          batchPending = false;
+          return runBatch(proxy, name, nows.size(), i -> nows.get(i), i -> null, null);
+        }
+        try {
+          for (int i = 0; i < entries.size(); i++) {
+            Router.Route entry = entries.get(i);
+            Router.Route now = nows.get(i);
             if (!now.sql.equals(entry.sql)) {
               if (!now.countsOnly) {
                 throw Errors.unsupported(
@@ -665,72 +720,210 @@ public final class Proxies {
     }
 
     /** Runs a write the driver plans, and answers as the vendor's statement would. */
-    private @Nullable Object runWrite(String name, @Nullable Object[] args, Router.Route route)
+    private @Nullable Object runWrite(
+        Object proxy, String name, @Nullable Object[] args, Router.Route route)
         throws SQLException {
-      if (name.equals("executeQuery")) {
+      Writes.Plan plan = Objects.requireNonNull(route.write);
+      String own = plan.returning();
+      if (name.equals("executeQuery") && own == null) {
         throw new SQLException("the statement returns no result set", "02000");
       }
       boolean prepared = args == null || args.length == 0 || !(args[0] instanceof String);
-      if (!prepared && asksForGeneratedKeys(args)) {
-        throw Errors.unsupported("a write of a ScalarDB table cannot return generated keys yet");
-      }
+      String items =
+          own != null
+              ? own
+              : prepared
+                  ? keysAsked
+                  : asksForGeneratedKeys(args) ? Writes.keysAsked(plan, args[1]) : null;
       // an execute closes the statement's current result set
       ResultSet open = vendor().getResultSet();
       if (open != null) {
         open.close();
       }
-      long count =
-          Writes.run(
-              owner.vendor,
-              Objects.requireNonNull(route.write),
-              new Writes.Context() {
-                @Override
-                public void bind(PreparedStatement ps, int position, int placeholder)
-                    throws SQLException {
-                  Call c = prepared ? parameters.get(placeholder) : null;
-                  if (c == null) {
-                    throw new SQLException(
-                        "no value is bound to parameter " + placeholder, "07001");
-                  }
-                  Object[] at = c.args.clone();
-                  at[0] = position;
-                  try {
-                    forward(ps, c.method, at);
-                  } catch (SQLException | RuntimeException e) {
-                    throw e;
-                  } catch (Throwable t) {
-                    throw new SQLException(t);
-                  }
-                }
-
-                @Override
-                public int queryTimeout() throws SQLException {
-                  return vendor().getQueryTimeout();
-                }
-
-                @Override
-                public void running(@Nullable Statement s) {
-                  runningWrite = s;
-                }
-
-                @Override
-                public void rollbackOnly() {
-                  owner.rollbackOnly = true;
-                }
-
-                @Override
-                public Anchors anchors() {
-                  return owner.anchors;
-                }
-              });
-      writeCount = count;
+      List<Object[]> keys = new ArrayList<>();
+      Writes.Context context = writeContext(prepared ? parameters : null, keys);
+      long[] count = {0};
+      ResultSet[] rows = {null};
+      try {
+        Writes.within(
+            owner.vendor,
+            context,
+            () -> {
+              count[0] = Writes.apply(owner.vendor, plan, context);
+              if (items != null) {
+                rows[0] = Writes.returned(owner.vendor, plan, items, keys);
+              }
+            });
+      } catch (SQLException | RuntimeException e) {
+        if (rows[0] != null) {
+          rows[0].close();
+        }
+        throw e;
+      }
+      writeCount = count[0];
+      writeReturns = own != null;
+      writeResult =
+          rows[0] == null
+              ? null
+              : (ResultSet)
+                  proxy(ResultSet.class, new ChildHandler(rows[0], connection, (Statement) proxy));
       switch (name) {
+        case "executeQuery":
+          return writeResult;
         case "executeUpdate":
-          return (int) Math.min(count, Integer.MAX_VALUE);
+          return (int) Math.min(count[0], Integer.MAX_VALUE);
         case "executeLargeUpdate":
-          return count;
+          return count[0];
         default:
-          return false; // execute: an update count, no result set
+          return writeReturns; // execute: a result set for RETURNING, an update count otherwise
+      }
+    }
+
+    /**
+     * What a write needs from this statement, its values bound from {@code parameters}, the keys it
+     * inserts added to {@code inserted}.
+     */
+    private Writes.Context writeContext(
+        @Nullable Map<Integer, Call> parameters, @Nullable List<Object[]> inserted) {
+      return new Writes.Context() {
+        @Override
+        public void inserted(Object[] key) {
+          if (inserted != null) {
+            inserted.add(key);
+          }
+        }
+
+        @Override
+        public void bind(PreparedStatement ps, int position, int placeholder) throws SQLException {
+          Call c = parameters == null ? null : parameters.get(placeholder);
+          if (c == null) {
+            throw new SQLException("no value is bound to parameter " + placeholder, "07001");
+          }
+          Object[] at = c.args.clone();
+          at[0] = position;
+          try {
+            forward(ps, c.method, at);
+          } catch (SQLException | RuntimeException e) {
+            throw e;
+          } catch (Throwable t) {
+            throw new SQLException(t);
+          }
+        }
+
+        @Override
+        public int queryTimeout() throws SQLException {
+          return vendor().getQueryTimeout();
+        }
+
+        @Override
+        public void running(@Nullable Statement s) {
+          runningWrite = s;
+        }
+
+        @Override
+        public void rollbackOnly() {
+          owner.rollbackOnly = true;
+        }
+
+        @Override
+        public Anchors anchors() {
+          return owner.anchors;
+        }
+      };
+    }
+
+    /**
+     * Runs a batch the driver runs itself, one that holds a write: each entry in order, in one
+     * transaction of its own in autocommit mode (design 4.4). A failure is a {@link
+     * BatchUpdateException} with the counts of the entries before it, its next exception the
+     * failure itself.
+     */
+    // ponytail: entry by entry, a round trip per statement of each; JDBC batching of the
+    // metadata statements if a large batch of INSERTs measures slow
+    private Object runBatch(
+        Object proxy,
+        String name,
+        int size,
+        IntFunction<Router.Route> routes,
+        IntFunction<@Nullable Map<Integer, Call>> parameters,
+        @Nullable String keys)
+        throws SQLException {
+      ResultSet open = vendor().getResultSet();
+      if (open != null) {
+        open.close();
+      }
+      for (int i = 0; i < size; i++) {
+        Writes.Plan plan = routes.apply(i).write;
+        if (plan != null && plan.returning() != null) {
+          throw Errors.unsupported("a statement with RETURNING cannot be batched; run it alone");
+        }
+      }
+      long[] counts = new long[size];
+      int[] done = {0};
+      List<Object[]> inserted = new ArrayList<>();
+      ResultSet[] rows = {null};
+      try {
+        Writes.within(
+            owner.vendor,
+            writeContext(null, null),
+            () -> {
+              Writes.Plan last = null;
+              for (int i = 0; i < size; i++) {
+                Router.Route route = routes.apply(i);
+                if (route.write != null) {
+                  last = route.write;
+                  counts[i] =
+                      Writes.apply(owner.vendor, last, writeContext(parameters.apply(i), inserted));
+                } else {
+                  counts[i] = runPlain(route);
+                }
+                done[0]++;
+              }
+              if (keys != null && last != null) {
+                rows[0] = Writes.returned(owner.vendor, last, keys, inserted);
+              }
+            });
+      } catch (SQLException e) {
+        if (rows[0] != null) {
+          rows[0].close();
+        }
+        BatchUpdateException b =
+            new BatchUpdateException(
+                e.getMessage(),
+                e.getSQLState(),
+                e.getErrorCode(),
+                Arrays.copyOf(counts, done[0]),
+                e);
+        b.setNextException(e);
+        throw b;
+      }
+      writeCount = -1L; // no update count of its own, as after a vendor batch
+      writeReturns = false;
+      writeResult =
+          rows[0] == null
+              ? null
+              : (ResultSet)
+                  proxy(ResultSet.class, new ChildHandler(rows[0], connection, (Statement) proxy));
+      if (name.equals("executeLargeBatch")) {
+        return counts;
+      }
+      int[] out = new int[size];
+      for (int i = 0; i < size; i++) {
+        out[i] = (int) Math.min(counts[i], Integer.MAX_VALUE);
+      }
+      return out;
+    }
+
+    /** Runs a batch entry that is not a write of a ScalarDB table, as the vendor batch would. */
+    @SuppressFBWarnings(
+        value = "SQL_INJECTION_JDBC",
+        justification = "the application's own statement, as the vendor batch would run it")
+    private long runPlain(Router.Route route) throws SQLException {
+      owner.router.beforeRun(owner.vendor, List.of(route));
+      try {
+        return vendor().executeLargeUpdate(route.sql);
+      } finally {
+        owner.ran(route);
       }
     }
 

@@ -846,6 +846,24 @@ public final class SqlAst {
   }
 
   /**
+   * Returns where the statement's last token spelled {@code word}, case aside, ends in {@link
+   * #source}: a keyword, since a literal or a quoted name is one token of another spelling.
+   *
+   * @param word the keyword
+   * @return one past its last character, or -1 when the statement has none
+   */
+  public int afterLast(String word) {
+    Token found = null;
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      if (t.image.equalsIgnoreCase(word)) {
+        found = t;
+      }
+    }
+    int[] s = found == null ? null : span(found, found);
+    return s == null ? -1 : s[1];
+  }
+
+  /**
    * Returns the placeholders, numbered over the whole statement, whose {@code ?} stands in {@code
    * [from, to)} of {@link #source}, in order.
    *
