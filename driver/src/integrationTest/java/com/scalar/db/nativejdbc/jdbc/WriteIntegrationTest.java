@@ -580,7 +580,7 @@ class WriteIntegrationTest {
           c,
           "CREATE SCHEMA an",
           "CREATE TABLE an.imp (id INT PRIMARY KEY, x TEXT)",
-          "INSERT INTO an.imp SELECT g, 'a' FROM generate_series(1, 9) g");
+          "INSERT INTO an.imp SELECT g, 'a' FROM generate_series(1, 11) g");
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
@@ -599,7 +599,7 @@ class WriteIntegrationTest {
     }
     try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
       DistributedTransaction tx = tm.begin();
-      for (int i = 1; i <= 9; i++) {
+      for (int i = 1; i <= 11; i++) {
         tx.insert(
             Insert.newBuilder()
                 .namespace("an")
@@ -643,7 +643,30 @@ class WriteIntegrationTest {
               assertThatThrownBy(() -> rs.getObject(2)).isInstanceOf(SQLException.class);
             }
           }
+          // SELECT * returns the table's own columns, in its order
+          try (ResultSet rs =
+              d.createStatement().executeQuery("SELECT * FROM " + t.sql + " WHERE id = 1")) {
+            assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);
+            assertThat(rs.getMetaData().getColumnLabel(1)).isEqualTo("id");
+            assertThat(rs.getMetaData().getColumnLabel(2)).isEqualTo("x");
+          }
           d.setAutoCommit(false);
+          // SELECT * and a row-wise function anchor too, each in a transaction of its own
+          String[][] reads = {
+            {"10", "SELECT * FROM %s WHERE id = 10", "10/a"},
+            {"11", "SELECT upper(x) FROM %s WHERE id = 11", "A"}
+          };
+          for (String[] r : reads) {
+            assertThat(rows(d, String.format(r[1], t.sql))).as(r[1]).containsExactly(r[2]);
+            scalarDbSet(tm, t, Integer.parseInt(r[0]), "scalardb");
+            assertThatThrownBy(
+                    () ->
+                        d.createStatement()
+                            .executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id = " + r[0]))
+                .as(r[1])
+                .isInstanceOf(SQLTransactionRollbackException.class);
+            d.rollback();
+          }
           // read, then a ScalarDB commit of the row: the write aborts, no lost update
           assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 1")).containsExactly("a");
           scalarDbSet(tm, t, 1, "scalardb");

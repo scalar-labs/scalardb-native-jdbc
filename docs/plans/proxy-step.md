@@ -300,8 +300,8 @@ other engines keep refusing them with `0AN01`.
 - **4b, anchors from reads.** A single-table read returns `(tx_id, tx_version)` per key, which the
   driver strips from the results and remembers for the transaction (4.2, READ COMMITTED); a later write
   to such a key checks that anchor, and a key written once is not CAS-ed again (4.3 step 4).
-  **Done (2026-10-15)**, on PostgreSQL: a single-table read, row by row (no DISTINCT, grouping, function
-  in the select list, `*`, or the table's name as a whole row), keeps the split read and has each
+  **Done (2026-10-15)**, on PostgreSQL: a single-table read, row by row (no DISTINCT, grouping, aggregate,
+  window or unknown function, or the table's name as a whole row; `*` included), keeps the split read and has each
   copy append the key and the version of the rows it returns, read by key: the committed copy's
   `(tx_id, tx_version)`, the in-flight copy's before image's. The result set proxy hides them,
   metadata included, and records each row the application moves to, in a transaction only
@@ -316,8 +316,9 @@ other engines keep refusing them with `0AN01`.
   `WriteIntegrationTest.anchorsFromReads` covers both layouts: a ScalarDB commit and another driver
   transaction between the read and the write abort it; a key written twice; autocommit reads and
   rolled-back transactions anchor nothing; a row read in flight is anchored on its before image.
-  Not anchored yet, so not protected: `SELECT *`, a function in the select list, joins and
-  subqueries (the split read); a `FOR UPDATE` on them is the attributable lock of 4c.
+  Not anchored yet, so not protected: joins and subqueries (the split read), and the grouped and
+  DISTINCT reads, whose rows are not the table's; a `FOR UPDATE` on them is the attributable lock of
+  4c.
 - **4c, the rest**: batches, the bounded wait of section 6, generated keys, `RETURNING`, a user `FOR
   UPDATE` or `FOR SHARE`.
 

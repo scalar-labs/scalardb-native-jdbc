@@ -500,8 +500,8 @@ final class Router {
   /**
    * The table whose rows a read anchors (design 4.2, READ COMMITTED): the one ScalarDB table of a
    * read row by row, on PostgreSQL, where writes run. Null for any other read, which takes no
-   * anchor: a join, a subquery, a grouped or DISTINCT select, a function in the select list, {@code
-   * *}, the table's name read as its whole row, which would carry the appended columns too.
+   * anchor: a join, a subquery, a grouped or DISTINCT select, an aggregate, window or unknown
+   * function, the table's name read as its whole row, which would carry the appended columns too.
    */
   private SqlAst.@Nullable TableRef anchorable(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
@@ -510,8 +510,7 @@ final class Router {
         || scalarDb.size() != 1
         || shape.isEmpty()
         || shape.get().kind() != StatementShape.Kind.SELECT
-        || shape.get().selectAll()
-        || shape.get().grouped()
+        || !ast.rowPerRow()
         || shape.get().lockMode() != null) {
       return null;
     }

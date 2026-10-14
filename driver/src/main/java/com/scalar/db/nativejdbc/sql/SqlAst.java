@@ -817,6 +817,31 @@ public final class SqlAst {
   }
 
   /**
+   * Returns whether a single SELECT returns one row per row its FROM clause reads: no DISTINCT,
+   * GROUP BY or HAVING, and every select item {@code *} or a value computed from one row by a known
+   * function.
+   *
+   * @return whether each row of the result is one row of the table
+   */
+  public boolean rowPerRow() {
+    if (!(statement instanceof PlainSelect)) {
+      return false;
+    }
+    PlainSelect s = (PlainSelect) statement;
+    if (s.getDistinct() != null || s.getGroupBy() != null || s.getHaving() != null) {
+      return false;
+    }
+    RowWise check = new RowWise(false);
+    for (SelectItem<?> item : s.getSelectItems()) {
+      Expression e = item.getExpression();
+      if (e != null && !(e instanceof AllColumns)) {
+        e.accept(check, null);
+      }
+    }
+    return check.rowWise;
+  }
+
+  /**
    * Returns one past the last item of a single SELECT's select list: where an item appended to the
    * list goes.
    *
