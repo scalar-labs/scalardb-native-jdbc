@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "127"
 tags: [code-review, jdbc-api, routing]
@@ -33,9 +33,11 @@ hysteresis and the route cache. It also throws 0AN01 for text the vendor would t
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] `nativeSQL` runs no statement on the connection and translates JDBC escapes as the vendor does.
+- [x] `nativeSQL` runs no statement on the connection and translates JDBC escapes as the vendor does.
 
 ## Work Log
 
@@ -43,3 +45,14 @@ hysteresis and the route cache. It also throws 0AN01 for text the vendor would t
 
 **By:** Claude Code
 - From the review of 9a00150; verified by a probe.
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- `Router.nativeSql`: a cached route's text, else a route decided with probes off (no count, no
+  primary-key lookup, no EXPLAIN; known values or defaults, nothing stored); the vendor's
+  `nativeSQL` for text forwarded as written, refused, or not routable now. A stale session is still
+  read, and its failure also falls back to the vendor.
+- RouterTest `nativeSql_runsNothing_andLeavesWhatTheDriverForwardsToTheVendor`;
+  ReviewFindingsIntegrationTest "127" (escape translated as the vendor does; a split read's text in a
+  failed transaction).

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "124"
 tags: [code-review, correctness, split-read, mysql, postgresql]
@@ -38,9 +38,11 @@ Three uncommon subquery shapes are split when they should be left on `rc_`. Each
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] SplitTest cases for each shape: not split (or, for 1, not placed INNER).
+- [x] SplitTest cases for each shape: not split (or, for 1, not placed INNER).
 
 ## Work Log
 
@@ -48,3 +50,13 @@ Three uncommon subquery shapes are split when they should be left on `rc_`. Each
 
 **By:** Claude Code
 - From the review of 9a00150; each reproduced against logical tables (1, 2 on MySQL 8.4; 3 on PostgreSQL).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- 1: `selectsKey` compares the qualifier as written with the alias (or table name) as written;
+  another spelling is SEMI_JOINED.
+- 2: on MySQL and MariaDB a NOT or `!` directly over an IN leaves the whole statement unsplit (it
+  covers `HIGH_NOT_PRECEDENCE` too).
+- 3: an IN or EXISTS subquery with DISTINCT ON is not split.
+- SplitTest cases for each.

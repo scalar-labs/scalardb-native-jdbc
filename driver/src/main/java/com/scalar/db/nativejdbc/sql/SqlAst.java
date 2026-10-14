@@ -272,7 +272,10 @@ public final class SqlAst {
   private static final ExecutorService PARSER =
       Executors.newCachedThreadPool(
           r -> {
-            Thread t = new Thread(r, "scalardb-native-jdbc-parser");
+            // nothing inherited from the thread that happened to start it, an application's
+            // class loader or thread-locals, which would stay reachable while it lives (todo 126)
+            Thread t = new Thread(null, r, "scalardb-native-jdbc-parser", 0, false);
+            t.setContextClassLoader(SqlAst.class.getClassLoader());
             t.setDaemon(true);
             return t;
           });
@@ -1662,6 +1665,7 @@ public final class SqlAst {
     for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
       order.put(t, order.size());
     }
+    boolean[] refused = {false};
     for (Expression c : conjuncts) {
       if (subquery(c, true, keyOf, order, found, out)) {
         continue;
@@ -1684,7 +1688,12 @@ public final class SqlAst {
 
             @Override
             public <S> Void visit(NotExpression e, S context) {
-              if (!subquery(e, false, keyOf, order, found, out)) {
+              if ((engine == Engine.MYSQL || engine == Engine.MARIADB)
+                  && e.getExpression() instanceof InExpression) {
+                // ! binds tighter than IN there, and NOT does under HIGH_NOT_PRECEDENCE: the
+                // operand is not the IN the parser reads (todo 124)
+                refused[0] = true;
+              } else if (!subquery(e, false, keyOf, order, found, out)) {
                 super.visit(e, context);
               }
               return null;
@@ -1701,6 +1710,9 @@ public final class SqlAst {
             }
           },
           null);
+    }
+    if (refused[0]) {
+      return new Split();
     }
     for (TableRef r : tableRefs) {
       Place p = found.get(r);
@@ -1836,8 +1848,9 @@ public final class SqlAst {
         || q.getTop() != null
         || q.getOracleHierarchical() != null
         || q.getWindowDefinitions() != null
-        || q.getOrderByElements() != null) {
-      return false;
+        || q.getOrderByElements() != null
+        || (q.getDistinct() != null && q.getDistinct().getOnSelectItems() != null)) {
+      return false; // DISTINCT ON picks one row of the whole table per value (todo 124)
     }
     RowWise check = new RowWise(false);
     for (SelectItem<?> item : q.getSelectItems()) {
@@ -1998,10 +2011,12 @@ public final class SqlAst {
     }
     Column c = (Column) e;
     boolean alone = q.getJoins() == null || q.getJoins().isEmpty();
+    // the qualifier as written: folding its case could take an outer alias for the table's (todo
+    // 124), which would then be read in both copies
     boolean ofTable =
         (c.getTable() == null || c.getTable().getName() == null)
             ? alone
-            : lowerUnquoted(c.getTable().getName()).equals(table.exposedName());
+            : c.getTable().getName().equals(table.hasAlias() ? table.alias() : table.name());
     return ofTable && lowerUnquoted(c.getColumnName()).equals(key.get(0).toLowerCase(Locale.ROOT));
   }
 

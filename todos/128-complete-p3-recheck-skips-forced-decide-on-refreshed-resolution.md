@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "128"
 tags: [code-review, correctness, routing, mysql, mariadb]
@@ -29,10 +29,13 @@ again".
 
 ## Recommended Action
 
+Option 2.
+
 ## Acceptance Criteria
 
-- [ ] A test shadowing a table name during a prepared statement's life gets "prepare it again" (or the
-      documented behavior), not a silent switch.
+- [x] A table shadowing a name moves the catalog's generation when the name is resolved again, so a
+      prepared statement routed on the old answer is decided again, as on any generation change
+      (tested at the catalog, not through a prepared statement).
 
 ## Work Log
 
@@ -40,3 +43,11 @@ again".
 
 **By:** Claude Code
 - From the review of 1a2b7c9 (reading the code; not reproduced).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- Option 2: `Catalog.resolve` moves the generation when a refreshed resolution names another table,
+  so every prepared route resolved on the old answer is checked again; `current()` is unchanged.
+- CatalogIntegrationTest `aNameResolvedAnew_toAnotherTable_movesTheGeneration` (PostgreSQL, fixed
+  clock: the name's resolution expires while the loaded catalog is still fresh).

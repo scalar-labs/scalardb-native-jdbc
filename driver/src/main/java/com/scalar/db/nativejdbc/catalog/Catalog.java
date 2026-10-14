@@ -466,6 +466,15 @@ public final class Catalog implements AutoCloseable {
     }
   }
 
+  private static boolean sameName(@Nullable QualifiedName a, @Nullable QualifiedName b) {
+    return a == null
+        ? b == null
+        : b != null
+            && a.schema().equals(b.schema())
+            && a.table().equals(b.table())
+            && a.isSynonym() == b.isSynonym();
+  }
+
   private Resolution resolve(List<String> sessionSchemas, @Nullable String schema, String table)
       throws SQLException {
     String key =
@@ -498,6 +507,10 @@ public final class Catalog implements AutoCloseable {
       Resolution fresh = new Resolution(resolved.orElse(null), now);
       synchronized (resolutions) {
         resolutions.put(key, fresh);
+      }
+      if (cached != null && !sameName(cached.name, fresh.name)) {
+        // a statement prepared on the old answer is checked again (todo 128)
+        generation.incrementAndGet();
       }
       return fresh;
     } finally {

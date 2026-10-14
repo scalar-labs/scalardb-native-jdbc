@@ -564,6 +564,37 @@ class CatalogIntegrationTest {
     assertThat(layout(byInvalidate, "app", "late2")).isEqualTo(Layout.DECOUPLED_IMPORTED);
   }
 
+  @ParameterizedTest
+  @MethodSource("engines")
+  void aNameResolvedAnew_toAnotherTable_movesTheGeneration(Engines e) throws Exception {
+    Assumptions.assumeTrue(e == Engines.POSTGRESQL, "the search path shows it on one engine");
+    prepare(e);
+    Instant[] now = {Instant.parse("2026-10-14T00:00:00Z")};
+    Catalog catalog =
+        new Catalog(
+            e.engine(),
+            Catalog.DEFAULT_METADATA_SCHEMA,
+            e::open,
+            Duration.ofSeconds(60),
+            fixedClock(now),
+            false);
+    List<String> path = List.of("public", "app");
+    try (Connection c = e.open()) {
+      e.execute(c, "CREATE TABLE app.r128 (id int)");
+      catalog.lookup(path, null, "orders"); // the catalog loaded at 0 s
+      now[0] = now[0].plusSeconds(10);
+      assertThat(catalog.lookup(path, null, "r128").namespace()).isEqualTo("app"); // at 10 s
+      now[0] = now[0].plusSeconds(51);
+      catalog.lookup(path, null, "orders"); // loaded again at 61 s
+      long before = catalog.generation();
+      // a table that shadows the name, found when its resolution expires at 70 s (todo 128)
+      e.execute(c, "CREATE TABLE public.r128 (id int)");
+      now[0] = now[0].plusSeconds(10);
+      assertThat(catalog.lookup(path, null, "r128").namespace()).isEqualTo("public");
+      assertThat(catalog.generation()).isGreaterThan(before);
+    }
+  }
+
   private static Layout layout(Catalog catalog, String rawSchema, String rawTable)
       throws SQLException {
     return catalog.lookup(NO_SESSION, rawSchema, rawTable).layout();

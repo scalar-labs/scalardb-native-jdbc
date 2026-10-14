@@ -7,6 +7,7 @@ import java.sql.SQLException;
 import java.sql.SQLNonTransientConnectionException;
 import java.sql.Statement;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -17,6 +18,7 @@ import org.jspecify.annotations.Nullable;
  */
 final class Session {
   private final Engine engine;
+  private final ReentrantLock lock = new ReentrantLock();
   private List<String> schemas = List.of();
   private boolean doubleQuotesQuoteIdentifiers;
   // SQL Server: the database the connection was opened in, the only one it may use
@@ -31,19 +33,34 @@ final class Session {
 
   /** The schemas, read again first if they may have changed. */
   List<String> schemas(Connection vendor) throws SQLException {
-    refreshIfStale(vendor);
-    return schemas;
+    lock.lock();
+    try {
+      refreshIfStale(vendor);
+      return schemas;
+    } finally {
+      lock.unlock();
+    }
   }
 
   /** The double-quote setting, read again first if it may have changed. */
   boolean doubleQuotesQuoteIdentifiers(Connection vendor) throws SQLException {
-    refreshIfStale(vendor);
-    return doubleQuotesQuoteIdentifiers;
+    lock.lock();
+    try {
+      refreshIfStale(vendor);
+      return doubleQuotesQuoteIdentifiers;
+    } finally {
+      lock.unlock();
+    }
   }
 
   /** The double-quote setting as last read, which a statement since may have changed. */
   boolean doubleQuotesQuoteIdentifiersAsLastRead() {
-    return doubleQuotesQuoteIdentifiers;
+    lock.lock();
+    try {
+      return doubleQuotesQuoteIdentifiers;
+    } finally {
+      lock.unlock();
+    }
   }
 
   /**
@@ -51,23 +68,33 @@ final class Session {
    * be undone at its end ({@code SET LOCAL}, a rolled-back {@code SET}), so the end marks it again.
    */
   void changed(Connection vendor) {
-    markStale();
-    boolean autoCommit;
+    lock.lock();
     try {
-      autoCommit = vendor.getAutoCommit();
-    } catch (SQLException e) {
-      autoCommit = false; // unknown: assume a transaction, so its end marks the session again
-    }
-    if (!autoCommit) {
-      changedInTransaction = true;
+      markStale();
+      boolean autoCommit;
+      try {
+        autoCommit = vendor.getAutoCommit();
+      } catch (SQLException e) {
+        autoCommit = false; // unknown: assume a transaction, so its end marks the session again
+      }
+      if (!autoCommit) {
+        changedInTransaction = true;
+      }
+    } finally {
+      lock.unlock();
     }
   }
 
   /** At commit or rollback: a change made inside the transaction may have been undone. */
   void transactionEnded() {
-    if (changedInTransaction) {
-      markStale();
-      changedInTransaction = false;
+    lock.lock();
+    try {
+      if (changedInTransaction) {
+        markStale();
+        changedInTransaction = false;
+      }
+    } finally {
+      lock.unlock();
     }
   }
 
@@ -76,14 +103,24 @@ final class Session {
    * holds until the transaction ends, so the transaction's end must still mark the session.
    */
   void rolledBackToSavepoint() {
-    if (changedInTransaction) {
-      markStale();
+    lock.lock();
+    try {
+      if (changedInTransaction) {
+        markStale();
+      }
+    } finally {
+      lock.unlock();
     }
   }
 
   /** Moves on whenever the session state may have changed; a route records the one it saw. */
   long generation() {
-    return generation;
+    lock.lock();
+    try {
+      return generation;
+    } finally {
+      lock.unlock();
+    }
   }
 
   private void markStale() {
@@ -100,27 +137,32 @@ final class Session {
    * @throws SQLException 08004 if the option is off
    */
   void requireReadCommittedSnapshot(Connection vendor) throws SQLException {
-    try (Statement st = vendor.createStatement();
-        ResultSet rs =
-            st.executeQuery(
-                "SELECT name, is_read_committed_snapshot_on FROM sys.databases"
-                    + " WHERE database_id = DB_ID()")) {
-      if (!rs.next()) {
-        throw new SQLNonTransientConnectionException(
-            "the current database is not visible in sys.databases", "08004");
+    lock.lock();
+    try {
+      try (Statement st = vendor.createStatement();
+          ResultSet rs =
+              st.executeQuery(
+                  "SELECT name, is_read_committed_snapshot_on FROM sys.databases"
+                      + " WHERE database_id = DB_ID()")) {
+        if (!rs.next()) {
+          throw new SQLNonTransientConnectionException(
+              "the current database is not visible in sys.databases", "08004");
+        }
+        String name = rs.getString(1);
+        if (!rs.getBoolean(2)) {
+          throw new SQLNonTransientConnectionException(
+              "database "
+                  + name
+                  + " has READ_COMMITTED_SNAPSHOT off, which the driver needs for consistent reads of"
+                  + " ScalarDB tables: ALTER DATABASE "
+                  + name
+                  + " SET READ_COMMITTED_SNAPSHOT ON",
+              "08004");
+        }
+        database = name;
       }
-      String name = rs.getString(1);
-      if (!rs.getBoolean(2)) {
-        throw new SQLNonTransientConnectionException(
-            "database "
-                + name
-                + " has READ_COMMITTED_SNAPSHOT off, which the driver needs for consistent reads of"
-                + " ScalarDB tables: ALTER DATABASE "
-                + name
-                + " SET READ_COMMITTED_SNAPSHOT ON",
-            "08004");
-      }
-      database = name;
+    } finally {
+      lock.unlock();
     }
   }
 
@@ -130,7 +172,12 @@ final class Session {
    * @return the database
    */
   @Nullable String database() {
-    return database;
+    lock.lock();
+    try {
+      return database;
+    } finally {
+      lock.unlock();
+    }
   }
 
   private void refreshIfStale(Connection vendor) throws SQLException {

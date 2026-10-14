@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "126"
 tags: [code-review, reliability, app-server]
@@ -30,9 +30,11 @@ deregister.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] Parser threads carry the driver's classloader and no inherited thread-locals.
+- [x] Parser threads carry the driver's classloader and no inherited thread-locals.
 
 ## Work Log
 
@@ -40,3 +42,12 @@ deregister.
 
 **By:** Claude Code
 - From the review of a7ea1c1 (reading the code).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- Parser threads are created with no inherited thread-locals and the driver's class loader as their
+  context class loader.
+- No test: the cached pool reuses an idle thread, so a test cannot choose which thread creates one.
+  Shutting the pool down on deregister is left out; its threads are daemons that end when idle
+  (60 s).

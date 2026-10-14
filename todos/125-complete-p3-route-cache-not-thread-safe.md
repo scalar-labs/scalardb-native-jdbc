@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "125"
 tags: [code-review, concurrency, routing]
@@ -28,9 +28,11 @@ loop or throw. Before a7ea1c1 only PostgreSQL's `parallelPlain` map had this ris
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] A unit test with concurrent `route()` calls keeps the bound and a working map.
+- [x] A unit test with concurrent `route()` calls keeps the bound and a working map.
 
 ## Work Log
 
@@ -38,3 +40,11 @@ loop or throw. Before a7ea1c1 only PostgreSQL's `parallelPlain` map had this ris
 
 **By:** Claude Code
 - From the review of a7ea1c1; reproduced with a probe.
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- Every Router and Session entry point holds a per-object `ReentrantLock` (not `synchronized`,
+  which pins a virtual thread's carrier through round trips; design section on Java targets).
+- RouterTest `routesFromSeveralThreads_keepTheCacheWorking`: 8 threads, then the cache's bound and
+  iteration checked.

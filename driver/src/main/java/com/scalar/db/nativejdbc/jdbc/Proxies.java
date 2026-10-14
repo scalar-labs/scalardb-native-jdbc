@@ -182,7 +182,7 @@ public final class Proxies {
           }
         case "nativeSQL":
           // the statement as the database receives it: rewritten for ScalarDB tables
-          return created(vendor, method, new Object[] {route((String) args[0]).sql});
+          return router.nativeSql(vendor, (String) args[0]);
         case "getMetaData":
           return proxy(
               DatabaseMetaData.class, new ChildHandler(created(vendor, method, args), me, null));

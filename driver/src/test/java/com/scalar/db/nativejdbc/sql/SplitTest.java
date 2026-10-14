@@ -553,6 +553,22 @@ class SplitTest {
                 .places()
                 .values())
         .containsExactly(SqlAst.Place.INNER, SqlAst.Place.SEMI_JOINED);
+    // a qualifier spelled otherwise may name an outer table where aliases are case-sensitive
+    assertThat(
+            places("select * from c O where O.x in (select O.id from o where o.s = 1)", "c", "o"))
+        .containsEntry("o", SqlAst.Place.SEMI_JOINED);
+    // MySQL reads ! c.x IN (...) as (!c.x) IN (...): the statement is left whole (todo 124)
+    for (String not : List.of("!", "NOT")) {
+      assertThat(
+              SqlAst.parse(
+                      "select * from c where " + not + " c.x in (select o.cid from o)",
+                      Engine.MYSQL)
+                  .orElseThrow()
+                  .split(r -> List.of("id"))
+                  .places())
+          .as(not)
+          .isEmpty();
+    }
     assertThat(
             places("select * from c where exists (select 1 from o where o.cid = c.id)", "c", "o"))
         .containsEntry("o", SqlAst.Place.SEMI_JOINED);
@@ -581,7 +597,9 @@ class SplitTest {
         "select * from c where c.id in (select o.cid from o union select p.cid from p)",
         "select * from c where c.id = any (select o.cid from o)",
         "select * from c where c.id = (select o.cid from o)",
-        "select * from c where c.id in (select x.cid from (select * from o) x)"
+        "select * from c where c.id in (select x.cid from (select * from o) x)",
+        // one row per value of the whole table, not of each piece (todo 124)
+        "select * from c where c.id in (select distinct on (o.a) o.cid from o)"
       })
   void split_leavesOtherShapesOnTheView(String sql) {
     assertThat(places(sql, "c", "o", "p")).containsOnlyKeys("c");

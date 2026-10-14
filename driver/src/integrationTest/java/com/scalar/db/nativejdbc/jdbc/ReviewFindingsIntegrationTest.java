@@ -31,7 +31,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * The findings of the 2026-10-13 and 2026-10-14 reviews (todos 106-111, 120-123), each asserting
+ * The findings of the 2026-10-13 and 2026-10-14 reviews (todos 106-111, 120-128), each asserting
  * the behaviour the driver must have: a check fails while its finding stands. Collected, so one run
  * shows them all.
  */
@@ -271,6 +271,29 @@ class ReviewFindingsIntegrationTest {
             .as("109 placeholder in a label")
             .isEqualTo(labelsAndRows(v, sql.replace("{T}", "rv.pl"), "a"));
       }
+    }
+
+    // 127: nativeSQL translates as the vendor does and runs nothing, in a failed transaction too
+    try (Connection c = e.openDriver();
+        Connection v = e.open()) {
+      soft.assertThat(c.nativeSQL("{call p(?)}"))
+          .as("127 escape")
+          .isEqualTo(v.nativeSQL("{call p(?)}"));
+      c.setAutoCommit(false);
+      rows(c, "SELECT " + x + " FROM " + t);
+      failing(c, "INSERT INTO rv.pl VALUES (1, 'a')");
+      try {
+        soft.assertThat(c.nativeSQL("SELECT " + x + " FROM " + t + " WHERE " + id + " = 2"))
+            .as("127 split read in a failed transaction")
+            .contains("UNION ALL");
+      } catch (SQLException ex) {
+        soft.fail("127 nativeSQL in a failed transaction: " + ex.getMessage());
+      }
+      c.rollback();
+      c.setAutoCommit(true);
+      soft.assertThat(rows(c, "SELECT " + x + " FROM " + t + " WHERE " + id + " = 2"))
+          .as("127 the read after it")
+          .containsExactly("b");
     }
 
     if (engine != Engine.POSTGRESQL) {

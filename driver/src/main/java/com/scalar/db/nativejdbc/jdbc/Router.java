@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 
@@ -39,6 +40,9 @@ import org.jspecify.annotations.Nullable;
  * exists.
  */
 final class Router {
+  // A connection may be used from several threads: every entry point holds the router's lock, so
+  // the route cache and the per-connection state stay consistent (todo 125). A ReentrantLock, not
+  // synchronized, which would pin a virtual thread's carrier through the round trips it waits on.
 
   /**
    * What to do with a statement, what running it does to the session and the catalog, and the state
@@ -179,6 +183,7 @@ final class Router {
   private final Engine engine;
   private final Catalog catalog;
   private final Session session;
+  private final ReentrantLock lock = new ReentrantLock();
   // per metadata table: the in-flight count, capped above PER_ROW_ABOVE_IN_RANGES, when it was
   // read, and which per-row choices were last made: 1 by equality, 2 in ranges
   private final Map<String, long[]> inflight = new HashMap<>();
@@ -211,6 +216,8 @@ final class Router {
         }
       };
   private boolean passthrough;
+  // false while nativeSQL decides a route: nothing runs on the connection (todo 127)
+  private boolean probes = true;
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
 
   Router(Engine engine, Catalog catalog, Session session) {
@@ -220,16 +227,65 @@ final class Router {
   }
 
   void setPassthrough(boolean on) {
-    passthrough = on;
+    lock.lock();
+    try {
+      passthrough = on;
+    } finally {
+      lock.unlock();
+    }
   }
 
   boolean passthrough() {
-    return passthrough;
+    lock.lock();
+    try {
+      return passthrough;
+    } finally {
+      lock.unlock();
+    }
   }
 
   /** After the connection's isolation level was set: a read of a ScalarDB table depends on it. */
   void setIsolation(int level) {
-    isolation = level;
+    lock.lock();
+    try {
+      isolation = level;
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * The statement as the database would receive it, for {@link Connection#nativeSQL}: decided from
+   * the counts and plans known so far, without reading them on the connection (todo 127), and not
+   * kept; only a session that changed since it was read is read again. A statement the driver
+   * forwards as written, or refuses, or cannot route now, is translated by the vendor.
+   *
+   * @param vendor the vendor connection
+   * @param sql the statement
+   * @return the statement as sent
+   * @throws SQLException if the vendor cannot translate it
+   */
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "the application's own statement, which nativeSQL translates and never runs")
+  String nativeSql(Connection vendor, String sql) throws SQLException {
+    lock.lock();
+    try {
+      Route r = routes.get(sql);
+      if (r == null) {
+        probes = false;
+        try {
+          r = decide(vendor, sql, null);
+        } catch (SQLException e) {
+          r = null;
+        } finally {
+          probes = true;
+        }
+      }
+      return r == null || r.sql.equals(sql) ? vendor.nativeSQL(sql) : r.sql;
+    } finally {
+      lock.unlock();
+    }
   }
 
   /**
@@ -243,10 +299,15 @@ final class Router {
    *     statement must not use, or a catalog failure
    */
   Route route(Connection vendor, String sql) throws SQLException {
-    Route cached = routes.get(sql);
-    Route r = cached == null ? decide(vendor, sql, null) : current(vendor, cached);
-    routes.put(sql, r);
-    return r;
+    lock.lock();
+    try {
+      Route cached = routes.get(sql);
+      Route r = cached == null ? decide(vendor, sql, null) : current(vendor, cached);
+      routes.put(sql, r);
+      return r;
+    } finally {
+      lock.unlock();
+    }
   }
 
   /**
@@ -505,8 +566,8 @@ final class Router {
       IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
       throws SQLException {
     Boolean known = parallelPlain.get(sql);
-    if (known != null) {
-      return known;
+    if (known != null || !probes) {
+      return Boolean.TRUE.equals(known);
     }
     boolean parallel = false;
     if (vendor.getMetaData().getDatabaseMajorVersion() >= 16) {
@@ -583,6 +644,9 @@ final class Router {
     if (lead != null) {
       return lead;
     }
+    if (!probes) {
+      return t.keyColumns().get(0).toLowerCase(Locale.ROOT);
+    }
     try (ResultSet rs =
         vendor.getMetaData().getPrimaryKeys(t.namespace(), t.namespace(), t.dataTable())) {
       while (rs.next()) {
@@ -620,6 +684,9 @@ final class Router {
     if (cached != null && now - cached[1] < COUNT_TTL_NANOS) {
       return cached;
     }
+    if (!probes) {
+      return cached == null ? new long[] {0, now, 0} : cached.clone();
+    }
     long count;
     // the count only chooses a plan: when it cannot be read, as with a streaming result open on
     // the connection (todo 106), the last one, or none, will do
@@ -654,26 +721,31 @@ final class Router {
    * @param routes the routes about to run
    */
   void beforeRun(Connection vendor, List<Route> routes) {
-    if (engine != Engine.POSTGRESQL || routes.isEmpty()) {
-      return;
-    }
-    boolean off = false;
-    boolean on = false;
-    for (Route r : routes) {
-      if (r.parameterSources != null && !r.parallel) {
-        off = true; // a short split read
-      } else {
-        on |= r.plansParallel;
-      }
-    }
-    if (!off && !on) {
-      return; // writes and session statements: the setting does not matter (todo 107)
-    }
+    lock.lock();
     try {
-      switchWorkers(vendor, off);
-    } catch (SQLException e) {
-      // only the speed depends on it; the statement itself reports an aborted transaction
-      workersOff = null;
+      if (engine != Engine.POSTGRESQL || routes.isEmpty()) {
+        return;
+      }
+      boolean off = false;
+      boolean on = false;
+      for (Route r : routes) {
+        if (r.parameterSources != null && !r.parallel) {
+          off = true; // a short split read
+        } else {
+          on |= r.plansParallel;
+        }
+      }
+      if (!off && !on) {
+        return; // writes and session statements: the setting does not matter (todo 107)
+      }
+      try {
+        switchWorkers(vendor, off);
+      } catch (SQLException e) {
+        // only the speed depends on it; the statement itself reports an aborted transaction
+        workersOff = null;
+      }
+    } finally {
+      lock.unlock();
     }
   }
 
@@ -723,15 +795,25 @@ final class Router {
 
   /** After a rollback, which undoes a SET made in the transaction. */
   void rolledBack() {
-    workersOff = null;
+    lock.lock();
+    try {
+      workersOff = null;
+    } finally {
+      lock.unlock();
+    }
   }
 
   /** At commit or rollback: a SET of the workers in the transaction may have been undone. */
   void transactionEnded() {
-    if (workersSetInTransaction) {
-      sessionWorkers = -1;
-      workersOff = null;
-      workersSetInTransaction = false;
+    lock.lock();
+    try {
+      if (workersSetInTransaction) {
+        sessionWorkers = -1;
+        workersOff = null;
+        workersSetInTransaction = false;
+      }
+    } finally {
+      lock.unlock();
     }
   }
 
@@ -789,25 +871,31 @@ final class Router {
    * @throws SQLException as {@link #route}
    */
   Route current(Connection vendor, Route prepared) throws SQLException {
-    boolean unchanged =
-        prepared.sessionGeneration == session.generation()
-            && prepared.catalogGeneration == catalog.generation()
-            && !catalog.hasPassed(prepared.trustedUntil)
-            && prepared.passthrough == passthrough
-            && prepared.isolation == isolation
-            && (!prepared.passthrough || vendor.getAutoCommit());
-    if (unchanged && (prepared.recheckAt == 0 || System.nanoTime() - prepared.recheckAt < 0)) {
-      return prepared;
+    lock.lock();
+    try {
+      boolean unchanged =
+          prepared.sessionGeneration == session.generation()
+              && prepared.catalogGeneration == catalog.generation()
+              && !catalog.hasPassed(prepared.trustedUntil)
+              && prepared.passthrough == passthrough
+              && prepared.isolation == isolation
+              && (!prepared.passthrough || vendor.getAutoCommit());
+      if (unchanged && (prepared.recheckAt == 0 || System.nanoTime() - prepared.recheckAt < 0)) {
+        return prepared;
+      }
+      Route now = decide(vendor, prepared.source, null);
+      if (now.sql.equals(prepared.sql) || now.perRow.equals(prepared.perRow)) {
+        return now;
+      }
+      // the per-row choices moved: is that all that moved? It is when only the counts were due
+      if (!unchanged
+          && !decide(vendor, prepared.source, prepared.perRow).sql.equals(prepared.sql)) {
+        return now;
+      }
+      return now.with(now.sql, now.parameterSources, now.perRow, true, now.parallel);
+    } finally {
+      lock.unlock();
     }
-    Route now = decide(vendor, prepared.source, null);
-    if (now.sql.equals(prepared.sql) || now.perRow.equals(prepared.perRow)) {
-      return now;
-    }
-    // the per-row choices moved: is that all that moved? It is when only the counts were due
-    if (!unchanged && !decide(vendor, prepared.source, prepared.perRow).sql.equals(prepared.sql)) {
-      return now;
-    }
-    return now.with(now.sql, now.parameterSources, now.perRow, true, now.parallel);
   }
 
   /**
@@ -815,31 +903,36 @@ final class Router {
    * the session and forget resolved names, as it requires. Never throws.
    */
   void ran(Connection vendor, Route route) {
-    if (route.kind == SqlAst.Kind.COMMIT) {
-      session.transactionEnded();
-      transactionEnded();
-    } else if (route.kind == SqlAst.Kind.ROLLBACK) {
-      rolledBack();
-      session.transactionEnded();
-      transactionEnded();
-    } else if (route.kind == SqlAst.Kind.ROLLBACK_TO_SAVEPOINT) {
-      rolledBack();
-      session.rolledBackToSavepoint();
-    }
-    if (route.changesSession) {
-      if (engine == Engine.POSTGRESQL && setsWorkers(route.source)) {
-        sessionWorkers = -1;
-        workersOff = null;
-        try {
-          workersSetInTransaction |= !vendor.getAutoCommit();
-        } catch (SQLException e) {
-          workersSetInTransaction = true; // unknown: the transaction's end, if any, forgets too
-        }
+    lock.lock();
+    try {
+      if (route.kind == SqlAst.Kind.COMMIT) {
+        session.transactionEnded();
+        transactionEnded();
+      } else if (route.kind == SqlAst.Kind.ROLLBACK) {
+        rolledBack();
+        session.transactionEnded();
+        transactionEnded();
+      } else if (route.kind == SqlAst.Kind.ROLLBACK_TO_SAVEPOINT) {
+        rolledBack();
+        session.rolledBackToSavepoint();
       }
-      session.changed(vendor);
-    }
-    if (route.changesNames) {
-      catalog.invalidateResolutions();
+      if (route.changesSession) {
+        if (engine == Engine.POSTGRESQL && setsWorkers(route.source)) {
+          sessionWorkers = -1;
+          workersOff = null;
+          try {
+            workersSetInTransaction |= !vendor.getAutoCommit();
+          } catch (SQLException e) {
+            workersSetInTransaction = true; // unknown: the transaction's end, if any, forgets too
+          }
+        }
+        session.changed(vendor);
+      }
+      if (route.changesNames) {
+        catalog.invalidateResolutions();
+      }
+    } finally {
+      lock.unlock();
     }
   }
 }
