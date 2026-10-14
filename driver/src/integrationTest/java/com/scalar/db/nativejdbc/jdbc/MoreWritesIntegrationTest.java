@@ -36,17 +36,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Properties;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * Milestone 4c on PostgreSQL and both decoupled layouts: batches of writes, and keys the database
- * generates (design 4.4).
+ * Milestone 4c on PostgreSQL and both decoupled layouts: batches of writes, keys the database
+ * generates and {@code RETURNING} (design 4.4), the bounded wait for a row in flight (section 6).
  */
 @SuppressFBWarnings(
     value = {"SQL_INJECTION_JDBC", "OBL_UNSATISFIED_OBLIGATION", "ODR_OPEN_DATABASE_RESOURCE"},
     justification = "statements written in the test sources, closed with their connection")
-class BatchAndKeysIntegrationTest {
+class MoreWritesIntegrationTest {
 
   private static final Map<String, String> DECOUPLED =
       Map.of("transaction-metadata-decoupling", "true");
@@ -70,7 +75,7 @@ class BatchAndKeysIntegrationTest {
 
   @ParameterizedTest
   @MethodSource("engines")
-  void batchesAndKeys(Engines e) throws Exception {
+  void batchesKeysAndWaits(Engines e) throws Exception {
     assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4)");
     try (Connection c = e.open()) {
       e.execute(
@@ -131,6 +136,7 @@ class BatchAndKeysIntegrationTest {
       for (Table t : tables) {
         batches(e, tm, tpc, t);
         returning(e, t);
+        inFlightWait(e, tpc, t);
       }
       TableInfo gen = catalog.lookup(List.of(), "wb", "gen");
       generatedKeys(
@@ -346,6 +352,76 @@ class BatchAndKeysIntegrationTest {
                 .build());
     tx.commit();
     assertThat(r.map(x -> x.getText("x"))).contains("g");
+  }
+
+  private static void inFlightWait(Engines e, TwoPhaseCommitTransactionManager tpc, Table t)
+      throws Exception {
+    Properties waits = new Properties();
+    waits.setProperty("scalardbnative.inflightWaitMs", "20000");
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection d = e.openDriver(waits)) {
+      // rolled back while the write waits: the write goes on, on the committed row
+      TwoPhaseCommitTransaction held = prepared(tpc, t, 3, "held");
+      Future<Integer> write = pool.submit(() -> update(d, t, 3));
+      Thread.sleep(300);
+      assertThat(write.isDone()).isFalse();
+      held.rollback();
+      assertThat(write.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+      // committed while it waits: a key the transaction never read goes on from ScalarDB's value
+      held = prepared(tpc, t, 3, "s");
+      write = pool.submit(() -> update(d, t, 3));
+      Thread.sleep(300);
+      assertThat(write.isDone()).isFalse();
+      held.commit();
+      assertThat(write.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+      assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 3")).containsExactly("s+");
+      // a key it read keeps that anchor through the wait: a rollback lets the write go on
+      d.setAutoCommit(false);
+      assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 3")).containsExactly("s+");
+      held = prepared(tpc, t, 3, "t");
+      write = pool.submit(() -> update(d, t, 3));
+      Thread.sleep(300);
+      held.rollback();
+      assertThat(write.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+      d.commit();
+      d.setAutoCommit(true);
+      assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 3")).containsExactly("s++");
+    } finally {
+      pool.shutdownNow();
+    }
+    // the wait runs out: an abort once it has
+    waits.setProperty("scalardbnative.inflightWaitMs", "500");
+    TwoPhaseCommitTransaction held = prepared(tpc, t, 3, "held");
+    try (Connection d = e.openDriver(waits)) {
+      long start = System.nanoTime();
+      assertThatThrownBy(() -> update(d, t, 3))
+          .isInstanceOf(SQLTransactionRollbackException.class)
+          .extracting("SQLState")
+          .isEqualTo("40001");
+      assertThat(System.nanoTime() - start).isGreaterThanOrEqualTo(500_000_000L);
+    } finally {
+      held.rollback();
+    }
+  }
+
+  private static TwoPhaseCommitTransaction prepared(
+      TwoPhaseCommitTransactionManager tpc, Table t, int id, String x) throws TransactionException {
+    TwoPhaseCommitTransaction tx = tpc.begin();
+    tx.update(
+        Update.newBuilder()
+            .namespace("wb")
+            .table(t.scalarDbName)
+            .partitionKey(Key.ofInt("id", id))
+            .textValue("x", x)
+            .build());
+    tx.prepare();
+    return tx;
+  }
+
+  private static int update(Connection d, Table t, int id) throws SQLException {
+    try (Statement st = d.createStatement()) {
+      return st.executeUpdate("UPDATE " + t.sql + " SET x = x || '+' WHERE id = " + id);
+    }
   }
 
   private static ResultSet executeQuery(PreparedStatement ps, int id, String x)

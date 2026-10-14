@@ -22,6 +22,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -50,10 +51,12 @@ public final class Proxies {
    * @param vendor the vendor connection
    * @param engine its engine
    * @param catalog the catalog for its database and identity
+   * @param inflightWait how long a write waits for a row in flight to settle, zero to abort at once
    * @return the connection the application uses
    * @throws SQLException if the session cannot be read or the isolation level set
    */
-  public static Connection connection(Connection vendor, Engine engine, Catalog catalog)
+  public static Connection connection(
+      Connection vendor, Engine engine, Catalog catalog, Duration inflightWait)
       throws SQLException {
     // vendor defaults differ (Connector/J and MariaDB start at REPEATABLE READ), so every engine
     // starts at READ COMMITTED, the driver's default level (design section 1)
@@ -68,7 +71,8 @@ public final class Proxies {
         Proxy.newProxyInstance(
             Proxies.class.getClassLoader(),
             new Class<?>[] {Connection.class, ScalarDbTables.class},
-            new ConnectionHandler(vendor, new Router(engine, catalog, session), session));
+            new ConnectionHandler(
+                vendor, new Router(engine, catalog, session), session, inflightWait));
   }
 
   private static Object proxy(Class<?> type, InvocationHandler h) {
@@ -146,12 +150,14 @@ public final class Proxies {
     volatile boolean rollbackOnly;
     // the versions the open transaction read, the anchors of its writes (4.2)
     final Anchors anchors = new Anchors();
+    final Duration inflightWait;
 
-    ConnectionHandler(Connection vendor, Router router, Session session) {
+    ConnectionHandler(Connection vendor, Router router, Session session, Duration inflightWait) {
       super(vendor);
       this.vendor = vendor;
       this.router = router;
       this.session = session;
+      this.inflightWait = inflightWait;
     }
 
     Router.Route route(String sql) throws SQLException {
@@ -813,6 +819,11 @@ public final class Proxies {
         @Override
         public int queryTimeout() throws SQLException {
           return vendor().getQueryTimeout();
+        }
+
+        @Override
+        public Duration inflightWait() {
+          return owner.inflightWait;
         }
 
         @Override

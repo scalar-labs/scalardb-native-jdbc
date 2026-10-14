@@ -1409,9 +1409,9 @@ One setting, the native connection's isolation level, selects everything else.
   committed value.
 - **READ COMMITTED write**: the in-flight check is step 1 of 4.3, a plain non-locking read before any
   DML, so a wait there holds no lock on the row. State 1 or 2 at that point: default abort with SQLSTATE
-  `40001`, or optionally poll `SELECT tx_state FROM T_meta WHERE k = :k` about every 20 ms up to a
-  configured limit, then continue with the same anchor for a key this transaction read, or a fresh one
-  for a key it never read; on timeout abort. For a key already read, the wait only helps when the
+  `40001`, or optionally, with `scalardbnative.inflightWaitMs` set, read the keys of step 1 again about
+  every 20 ms up to that limit and the statement's query timeout, then continue with the same anchor
+  for a key this transaction read, or a fresh one for a key it never read; on timeout abort. For a key already read, the wait only helps when the
   ScalarDB transaction rolls back, since a commit keeps the writer's `tx_id` and the anchored CAS fails
   anyway. A zero-row CAS in step 3 is always an abort with `40001`, never a wait: either the row moved
   after this transaction read it, a prevented lost update, or it went in flight after step 1; waiting

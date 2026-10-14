@@ -226,8 +226,21 @@ public enum Engines {
 
   /** Opens a connection through the driver, with a catalog of its own read afresh per lookup. */
   public Connection openDriver() throws SQLException {
+    return openDriver(new Properties());
+  }
+
+  /**
+   * Opens a connection through the driver with extra connect properties.
+   *
+   * @param extra the properties added to the user, password and catalog TTL of {@link
+   *     #openDriver()}
+   * @return the connection
+   * @throws SQLException if the driver refuses it
+   */
+  public Connection openDriver(Properties extra) throws SQLException {
     Started s = started();
     Properties p = new Properties();
+    p.putAll(extra);
     p.setProperty("user", s.username);
     p.setProperty("password", s.password);
     p.setProperty("scalardbnative.catalogTtlMs", "0");

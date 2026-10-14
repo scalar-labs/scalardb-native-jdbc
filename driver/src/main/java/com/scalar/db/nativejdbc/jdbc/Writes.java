@@ -15,6 +15,7 @@ import java.sql.SQLTransactionRollbackException;
 import java.sql.Savepoint;
 import java.sql.Statement;
 import java.sql.Types;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
@@ -47,6 +48,9 @@ final class Writes {
 
     /** The statement's query timeout in seconds, 0 for none. */
     int queryTimeout() throws SQLException;
+
+    /** How long the key read waits for a row in flight to settle, zero to abort at once (6). */
+    Duration inflightWait();
 
     /** The driver statement now running, which {@code cancel()} reaches; null when done. */
     void running(@Nullable Statement s);
@@ -519,23 +523,7 @@ final class Writes {
 
     @Override
     long apply(Run run) throws SQLException {
-      int width = n.keyColumns.size();
-      List<Row> rows = new ArrayList<>();
-      try (PreparedStatement ps = run.prepare(keys, null);
-          ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          if (inFlight(rs.getObject(2 * width + 3))) {
-            throw new Aborted(
-                "a row the statement writes is being written by a ScalarDB transaction");
-          }
-          rows.add(
-              new Row(
-                  Objects.requireNonNull(readKey(rs, 1, width)),
-                  readKey(rs, width + 1, width),
-                  rs.getString(2 * width + 1),
-                  rs.getObject(2 * width + 2)));
-        }
-      }
+      List<Row> rows = settledKeys(run);
       // first-updater-wins (4.3 step 1): a key this transaction read must still be at that version
       Anchors anchors = run.context.anchors();
       for (Row row : rows) {
@@ -572,6 +560,47 @@ final class Writes {
         total++;
       }
       return total;
+    }
+
+    /**
+     * Step 1: the keys and their metadata, read again until no row is in flight or the bounded wait
+     * of section 6 runs out, then an abort. Nothing is locked yet, so nothing is held while
+     * waiting; the statement's query timeout bounds the wait too.
+     */
+    // ponytail: polls the whole key read every 20 ms; a per-key poll of T_meta if a wait on a
+    // large predicate measures heavy
+    private List<Row> settledKeys(Run run) throws SQLException {
+      int width = n.keyColumns.size();
+      long until = System.nanoTime() + run.context.inflightWait().toNanos();
+      while (true) {
+        List<Row> rows = new ArrayList<>();
+        boolean held = false;
+        try (PreparedStatement ps = run.prepare(keys, null);
+            ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            held |= inFlight(rs.getObject(2 * width + 3));
+            rows.add(
+                new Row(
+                    Objects.requireNonNull(readKey(rs, 1, width)),
+                    readKey(rs, width + 1, width),
+                    rs.getString(2 * width + 1),
+                    rs.getObject(2 * width + 2)));
+          }
+        }
+        if (!held) {
+          return rows;
+        }
+        if (System.nanoTime() - until >= 0) {
+          throw new Aborted(
+              "a row the statement writes is being written by a ScalarDB transaction");
+        }
+        try {
+          Thread.sleep(20);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new Aborted("the wait for a row in flight was interrupted");
+        }
+      }
     }
 
     /**

@@ -128,7 +128,7 @@ public final class NativeJdbcDriver implements Driver {
       // refused here rather than at the first statement
       Catalog catalog = catalog(parsed, settings, vendor, vendorProperties);
       catalog.verify();
-      return Proxies.connection(connection, parsed.engine(), catalog);
+      return Proxies.connection(connection, parsed.engine(), catalog, settings.inflightWait);
     } catch (SQLException | RuntimeException e) {
       try {
         connection.close();

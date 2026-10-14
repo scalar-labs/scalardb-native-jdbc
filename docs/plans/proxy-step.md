@@ -326,11 +326,16 @@ other engines keep refusing them with `0AN01`.
   holding a write runs in the driver, entry by entry in one transaction in autocommit; an INSERT returns
   its keys and stamps the metadata from them, so a key the database generates, a `DEFAULT` or an
   expression is no longer refused; the application's `RETURNING` rows and generated keys are read back by
-  key in the order written. `BatchAndKeysIntegrationTest` covers both layouts and an imported table
+  key in the order written. `MoreWritesIntegrationTest` covers both layouts and an imported table
   with an identity key: prepared and statement batches, mixed with a plain table's writes, a failure
   undoing an autocommit batch, an in-flight row aborting one; `RETURN_GENERATED_KEYS` and named keys,
   single and batched, as Spring Data JDBC's `saveAll` runs them; `RETURNING` through `executeQuery` and
   `execute`. Still refused: `RETURNING` on UPDATE and DELETE, keys by column index.
+  **The bounded wait done (2026-10-15)**: with `scalardbnative.inflightWaitMs` set, the key read of
+  4.3 step 1 is read again every 20 ms while a row is in flight, up to that limit and the query
+  timeout, then aborts; nothing is locked while it waits. `MoreWritesIntegrationTest` covers a ScalarDB
+  rollback and a commit during the wait, a key read before the wait keeping its anchor, and the abort
+  once the wait runs out.
 
 ### Milestone 5: interleaving tests
 
