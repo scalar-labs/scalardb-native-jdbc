@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "130"
 tags: [code-review, correctness, jdbc, writes]
@@ -33,9 +33,11 @@ branch and the batch recheck; a write route can never be run as text.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] Probe scenario refused with 0AN01 "prepare it again"; batch variant too.
+- [x] Probe scenario refused with 0AN01 "prepare it again"; batch variant too.
 
 ## Work Log
 
@@ -43,3 +45,8 @@ branch and the batch recheck; a write route can never be run as text.
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- Proxies refuses ("prepare it again") a prepared statement or batch entry whose route has become a write; WriteIntegrationTest.reviewFindings "130".

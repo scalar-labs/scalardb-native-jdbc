@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "131"
 tags: [code-review, correctness, jdbc, writes]
@@ -29,9 +29,11 @@ Buffer the stream at set time into `byte[]`/`String` and record the setter as `s
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] Both probe scenarios store the full values.
+- [x] Both probe scenarios store the full values.
 
 ## Work Log
 
@@ -39,3 +41,8 @@ Buffer the stream at set time into `byte[]`/`String` and record the setter as `s
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- Proxies.buffered reads a stream or reader once at set time and records setBytes/setString/setNString (setUnicodeStream refused); the vendor statement gets the buffered call too. Test "131" (INSERT, and an UPDATE of two keys with a length-limited reader).

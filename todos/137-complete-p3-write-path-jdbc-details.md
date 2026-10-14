@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "137"
 tags: [code-review, jdbc, writes]
@@ -33,9 +33,11 @@ restore failure as suppressed; skip the rollback-only check for Kind.ROLLBACK an
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] Each item fixed or noted, with a probe or unit test where cheap.
+- [x] Each item fixed or noted, with a probe or unit test where cheap.
 
 ## Work Log
 
@@ -43,3 +45,8 @@ restore failure as suppressed; skip the rollback-only check for Kind.ROLLBACK an
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- The statement's current result set is closed before a write; the INSERT savepoint is released in a finally; a failing autocommit restore is suppressed onto the write's own failure; SQL ROLLBACK and ROLLBACK TO SAVEPOINT pass while rollback-only, and ROLLBACK clears it; ponytail note on the shared-connection window. Test "137" for the SQL ROLLBACK and the closed result set.

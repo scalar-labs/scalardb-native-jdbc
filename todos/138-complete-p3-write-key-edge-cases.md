@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "138"
 tags: [code-review, writes, postgresql]
@@ -28,9 +28,13 @@ timestamp types (or through `getObject(i, Class)` per column type).
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] Both probes write the row.
+- [x] The NULL-state row is written (WriteIntegrationTest "138").
+- [ ] A TIMESTAMP key in a DST gap is written: fixed by reading `LocalDateTime`, not tested (the JVM
+      zone would have to have DST).
 
 ## Work Log
 
@@ -38,3 +42,8 @@ timestamp types (or through `getObject(i, Class)` per column type).
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- Both CAS forms use COALESCE(tx_state, 3) = 3; TIMESTAMP, TIME and TIMESTAMP WITH TIME ZONE keys are read as LocalDateTime, LocalTime, OffsetDateTime. Test "138" for the NULL state; the DST case is not tested (needs the JVM zone).

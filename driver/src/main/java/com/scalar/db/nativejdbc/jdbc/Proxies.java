@@ -4,15 +4,19 @@ import com.scalar.db.nativejdbc.NativeJdbcDriver;
 import com.scalar.db.nativejdbc.ScalarDbTables;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
+import com.scalar.db.nativejdbc.sql.SqlAst;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ParameterMetaData;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -153,6 +157,9 @@ public final class Proxies {
     }
 
     void ran(Router.Route route) {
+      if (route.kind == SqlAst.Kind.ROLLBACK) {
+        rollbackOnly = false; // as Connection.rollback()
+      }
       router.ran(vendor, route);
     }
 
@@ -297,6 +304,57 @@ public final class Proxies {
     }
   }
 
+  /**
+   * A parameter setter whose stream or reader is read now, as {@code setBytes} or {@code
+   * setString}: a write binds each value into several statements, and a stream reads once.
+   */
+  // ponytail: the whole value in memory; a LOB of hundreds of megabytes costs that much here
+  private static Call buffered(Method method, Object[] args) throws SQLException {
+    Object value = args[1];
+    if (!(value instanceof InputStream) && !(value instanceof Reader)) {
+      return new Call(method, args);
+    }
+    String name = method.getName();
+    long limit = args.length > 2 && args[2] instanceof Number ? ((Number) args[2]).longValue() : -1;
+    try {
+      if (value instanceof Reader) {
+        StringBuilder text = new StringBuilder();
+        char[] buf = new char[8192];
+        Reader r = (Reader) value;
+        int n;
+        while ((limit < 0 || text.length() < limit)
+            && (n =
+                    r.read(
+                        buf,
+                        0,
+                        limit < 0 ? buf.length : (int) Math.min(buf.length, limit - text.length())))
+                > 0) {
+          text.append(buf, 0, n);
+        }
+        String setter = name.startsWith("setN") ? "setNString" : "setString";
+        return new Call(
+            PreparedStatement.class.getMethod(setter, int.class, String.class),
+            new Object[] {args[0], text.toString()});
+      }
+      if (name.equals("setUnicodeStream")) {
+        throw Errors.unsupported("setUnicodeStream cannot be bound to a write of a ScalarDB table");
+      }
+      InputStream in = (InputStream) value;
+      byte[] bytes = limit < 0 ? in.readAllBytes() : in.readNBytes((int) limit);
+      return name.equals("setAsciiStream")
+          ? new Call(
+              PreparedStatement.class.getMethod("setString", int.class, String.class),
+              new Object[] {args[0], new String(bytes, StandardCharsets.US_ASCII)})
+          : new Call(
+              PreparedStatement.class.getMethod("setBytes", int.class, byte[].class),
+              new Object[] {args[0], bytes});
+    } catch (IOException e) {
+      throw new SQLException("the parameter's stream could not be read", "22000", e);
+    } catch (NoSuchMethodException e) {
+      throw new AssertionError(e);
+    }
+  }
+
   /** Whether the arguments after a statement's text ask for generated keys. */
   private static boolean asksForGeneratedKeys(Object[] args) {
     if (args.length != 2) {
@@ -335,6 +393,8 @@ public final class Proxies {
     volatile boolean unwrapped;
     // the update count of the last write the driver ran itself, -1 once read past; null otherwise
     @Nullable Long writeCount;
+    // the driver's statement a write is running, which cancel() reaches from another thread
+    volatile @Nullable Statement runningWrite;
 
     @Override
     void handedOut() {
@@ -372,9 +432,19 @@ public final class Proxies {
         parameters.clear();
         return forward(vendor(), method, args);
       }
+      boolean takesSql = args != null && args.length > 0 && args[0] instanceof String;
       if (name.startsWith("execute") || name.equals("addBatch")) {
-        owner.requireNotRollbackOnly();
+        if (!(takesSql && name.startsWith("execute"))) {
+          owner.requireNotRollbackOnly(); // a statement's text is checked once it is routed
+        }
         writeCount = null;
+      }
+      if (name.equals("cancel")) {
+        Statement running = runningWrite;
+        if (running != null) {
+          running.cancel(); // the driver's statement of a write, not the idle vendor one (136)
+          return null;
+        }
       }
       if (writeCount != null) {
         switch (name) {
@@ -391,17 +461,22 @@ public final class Proxies {
             break;
         }
       }
-      Router.Route write = prepared == null ? null : prepared;
-      if (write != null && write.write != null) {
+      if (prepared != null && prepared.write != null) {
         if (name.equals("addBatch")) {
           throw Errors.unsupported("a write of a ScalarDB table cannot be batched yet");
+        }
+        if (name.equals("executeBatch") || name.equals("executeLargeBatch")) {
+          // nothing can be added, so the batch is empty (133)
+          return name.equals("executeBatch") ? new int[0] : new long[0];
         }
         if (name.startsWith("set")
             && args != null
             && args.length >= 2
             && args[0] instanceof Integer) {
-          Object r = forward(vendor(), method, args); // kept for getParameterMetaData
-          parameters.put((Integer) args[0], new Call(method, args));
+          // read each value once: the write binds it into several statements (131)
+          Call c = buffered(method, args);
+          Object r = forward(vendor(), c.method, c.args); // kept for getParameterMetaData
+          parameters.put((Integer) args[0], c);
           return r;
         }
       }
@@ -434,7 +509,6 @@ public final class Proxies {
               new ParameterHandler(created(vendor(), method, args), split));
         }
       }
-      boolean takesSql = args != null && args.length > 0 && args[0] instanceof String;
       if (takesSql && name.equals("addBatch")) {
         Router.Route route = owner.route((String) args[0]);
         if (route.write != null) {
@@ -454,6 +528,9 @@ public final class Proxies {
       Object[] routed = args;
       if (takesSql && name.startsWith("execute")) {
         Router.Route route = owner.route((String) args[0]);
+        if (route.kind != SqlAst.Kind.ROLLBACK && route.kind != SqlAst.Kind.ROLLBACK_TO_SAVEPOINT) {
+          owner.requireNotRollbackOnly();
+        }
         if (route.write != null) {
           return runWrite(name, args, route);
         }
@@ -469,6 +546,12 @@ public final class Proxies {
         return runWrite(name, args, route);
       } else if (prepared != null && name.startsWith("execute")) {
         Router.Route route = owner.current(prepared);
+        if (route.write != null) {
+          // its text would run as written, outside the write's protocol (130)
+          throw Errors.unsupported(
+              "the statement now writes a ScalarDB table, which it did not when it was prepared;"
+                  + " prepare it again");
+        }
         if (!route.sql.equals(prepared.sql)) {
           if (!route.countsOnly) {
             // the vendor statement holds the old text
@@ -493,6 +576,11 @@ public final class Proxies {
         try {
           for (Router.Route entry : entries) {
             Router.Route now = owner.current(entry);
+            if (now.write != null) {
+              throw Errors.unsupported(
+                  "a batched statement now writes a ScalarDB table, which it did not when it was"
+                      + " added");
+            }
             if (!now.sql.equals(entry.sql)) {
               if (!now.countsOnly) {
                 throw Errors.unsupported(
@@ -534,26 +622,50 @@ public final class Proxies {
       if (!prepared && asksForGeneratedKeys(args)) {
         throw Errors.unsupported("a write of a ScalarDB table cannot return generated keys yet");
       }
+      // an execute closes the statement's current result set
+      ResultSet open = vendor().getResultSet();
+      if (open != null) {
+        open.close();
+      }
       long count =
           Writes.run(
               owner.vendor,
               Objects.requireNonNull(route.write),
-              (ps, position, placeholder) -> {
-                Call c = prepared ? parameters.get(placeholder) : null;
-                if (c == null) {
-                  throw new SQLException("no value is bound to parameter " + placeholder, "07001");
+              new Writes.Context() {
+                @Override
+                public void bind(PreparedStatement ps, int position, int placeholder)
+                    throws SQLException {
+                  Call c = prepared ? parameters.get(placeholder) : null;
+                  if (c == null) {
+                    throw new SQLException(
+                        "no value is bound to parameter " + placeholder, "07001");
+                  }
+                  Object[] at = c.args.clone();
+                  at[0] = position;
+                  try {
+                    forward(ps, c.method, at);
+                  } catch (SQLException | RuntimeException e) {
+                    throw e;
+                  } catch (Throwable t) {
+                    throw new SQLException(t);
+                  }
                 }
-                Object[] at = c.args.clone();
-                at[0] = position;
-                try {
-                  forward(ps, c.method, at);
-                } catch (SQLException | RuntimeException e) {
-                  throw e;
-                } catch (Throwable t) {
-                  throw new SQLException(t);
+
+                @Override
+                public int queryTimeout() throws SQLException {
+                  return vendor().getQueryTimeout();
                 }
-              },
-              () -> owner.rollbackOnly = true);
+
+                @Override
+                public void running(@Nullable Statement s) {
+                  runningWrite = s;
+                }
+
+                @Override
+                public void rollbackOnly() {
+                  owner.rollbackOnly = true;
+                }
+              });
       writeCount = count;
       switch (name) {
         case "executeUpdate":

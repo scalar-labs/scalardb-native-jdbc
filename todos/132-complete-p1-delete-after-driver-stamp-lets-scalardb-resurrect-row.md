@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "132"
 tags: [code-review, correctness, writes, tombstone]
@@ -32,9 +32,11 @@ driver-deleted key of an imported table, taken over by a later INSERT.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] The probe's interleavings end with Z's commit failing and the row deleted, both variants.
+- [x] The probe's interleavings end with Z's commit failing and the row deleted, both variants.
 
 ## Work Log
 
@@ -42,3 +44,8 @@ driver-deleted key of an imported table, taken over by a later INSERT.
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- An imported table's DELETE stamps the metadata row (version + 1) instead of deleting it; a row without one gets the stamp from its data row before the DELETE. Design 4.3 step 3 and 4.5 updated. Test "132" (update then delete, the stale ScalarDB update fails); the older test now expects the tombstone on the imported table.

@@ -3597,28 +3597,8 @@ public final class SqlAst {
 
   /** The statement's text from {@code first} to {@code last}, or null when it cannot be located. */
   private @Nullable String sourceText(Token first, Token last) {
-    if (source.indexOf('\t') >= 0) {
-      return null; // the parser counts a tab as more than one column
-    }
-    List<Integer> lineStarts = new ArrayList<>();
-    lineStarts.add(0);
-    for (int i = 0; i < source.length(); i++) {
-      char ch = source.charAt(i);
-      if (ch == '\n'
-          || (ch == '\r' && (i + 1 == source.length() || source.charAt(i + 1) != '\n'))) {
-        lineStarts.add(i + 1);
-      }
-    }
-    if (first.beginLine < 1 || last.endLine > lineStarts.size() || first.beginLine > last.endLine) {
-      return null;
-    }
-    int b = lineStarts.get(first.beginLine - 1) + first.beginColumn - 1;
-    int e = lineStarts.get(last.endLine - 1) + last.endColumn;
-    if (b < 0 || e > source.length() || b >= e) {
-      return null;
-    }
-    String text = source.substring(b, e);
-    return text.startsWith(first.image) && text.endsWith(last.image) ? text : null;
+    int[] s = span(first, last);
+    return s == null ? null : source.substring(s[0], s[1]);
   }
 
   private boolean sameAlias(Table q, TableRef r) {

@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import com.scalar.db.nativejdbc.catalog.Layout;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.SqlAst;
@@ -9,10 +10,15 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
 import java.sql.SQLTransactionRollbackException;
 import java.sql.Savepoint;
+import java.sql.Statement;
+import java.sql.Types;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -32,6 +38,240 @@ import org.jspecify.annotations.Nullable;
 final class Writes {
 
   private Writes() {}
+
+  /** What a run needs from the statement that runs it. */
+  interface Context {
+    /** Binds the application's value of one of its placeholders to a driver statement. */
+    void bind(PreparedStatement ps, int position, int placeholder) throws SQLException;
+
+    /** The statement's query timeout in seconds, 0 for none. */
+    int queryTimeout() throws SQLException;
+
+    /** The driver statement now running, which {@code cancel()} reaches; null when done. */
+    void running(@Nullable Statement s);
+
+    /** Marks the application's transaction rollback-only after an abort (4.4). */
+    void rollbackOnly();
+  }
+
+  /** An abort the driver decides (4.4). */
+  static final class Aborted extends SQLTransactionRollbackException {
+    private static final long serialVersionUID = 1L;
+
+    Aborted(String reason) {
+      super(reason + "; roll the transaction back and retry it", "40001");
+    }
+  }
+
+  /** A value the driver binds itself, by role. */
+  private enum Slot {
+    TX_ID,
+    NOW
+  }
+
+  /** A driver statement: its text, and per placeholder an application placeholder or a slot. */
+  static final class Step {
+    final String sql;
+    final List<?> binds;
+
+    Step(String sql, List<?> binds) {
+      this.sql = sql;
+      this.binds = List.copyOf(binds);
+    }
+  }
+
+  /** The statements of one write. */
+  abstract static class Plan {
+    final Names n;
+
+    Plan(Names n) {
+      this.n = n;
+    }
+
+    abstract long apply(Run run) throws SQLException;
+
+    /** The texts of the statements planned ahead, for tests; the CAS is chosen per key. */
+    abstract List<String> sql();
+  }
+
+  /**
+   * Plans a write statement, or says why the driver cannot run it yet.
+   *
+   * @param engine the engine
+   * @param shape the statement's single-table shape
+   * @param t the ScalarDB table it writes
+   * @param tables the tables the statement names, for the refusal's message
+   * @return the plan
+   * @throws SQLException 0AN01 for a write the driver cannot run yet
+   */
+  static Plan plan(Engine engine, StatementShape shape, TableInfo t, String tables)
+      throws SQLException {
+    SqlAst ast = shape.ast();
+    String source = ast.source();
+    List<Integer> all = ast.placeholdersIn(0, source.length());
+    if (all == null) {
+      throw refused(tables, "only ? placeholders are supported in a write of a ScalarDB table");
+    }
+    if (shape.returning()) {
+      throw refused(tables, "RETURNING on a ScalarDB table is not supported yet");
+    }
+    Names n = new Names(engine, t);
+    return shape.kind() == StatementShape.Kind.INSERT
+        ? insertPlan(shape, t, n, all, tables)
+        : keyedPlan(shape, t, n, all, tables);
+  }
+
+  private static Plan keyedPlan(
+      StatementShape shape, TableInfo t, Names n, List<Integer> all, String tables)
+      throws SQLException {
+    Engine engine = n.engine;
+    SqlAst ast = shape.ast();
+    String source = ast.source();
+    for (String c : shape.setColumns()) {
+      for (String k : t.keyColumns()) {
+        if (engine.columnKey(c).equals(engine.columnKey(k))) {
+          throw refused(tables, "an UPDATE of a key column of a ScalarDB table is not supported");
+        }
+      }
+    }
+    Expression where = shape.where();
+    int[] span = where == null ? null : ast.span(where);
+    int end = ast.end();
+    List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
+    if ((where != null && span == null) || inWhere == null || end < 0) {
+      throw refused(tables, "the statement's text cannot be rewritten");
+    }
+    for (SqlAst.ColumnRef c : ast.columnRefs()) {
+      SqlAst.TableRef q = c.qualifier();
+      if (q != null && q.schema() != null) {
+        throw refused(tables, "a column qualified by a schema in a write of a ScalarDB table");
+      }
+    }
+    SqlAst.TableRef ref = shape.table();
+    String exposed = ref.hasAlias() ? Objects.requireNonNull(ref.alias()) : ref.name();
+    // the keys and their metadata, the committed images as a read at this level sees them: the
+    // data table's key, the metadata table's own (CHAR(n) is varchar there), and the anchor
+    List<String> picked = new ArrayList<>();
+    for (String k : t.keyColumns()) {
+      picked.add(exposed + "." + engine.quote(k) + " AS " + engine.quote(k));
+    }
+    String keys =
+        "SELECT "
+            + n.columns("d")
+            + ", "
+            + n.columns("m")
+            + ", m."
+            + n.txId
+            + ", m."
+            + n.txVersion
+            + ", m."
+            + n.txState
+            + " FROM (SELECT "
+            + String.join(", ", picked)
+            + " FROM "
+            + n.view
+            + " "
+            + exposed
+            + (span == null ? "" : " WHERE " + source.substring(span[0], span[1]))
+            + ") d LEFT JOIN "
+            + n.meta
+            + " m ON "
+            + n.keyJoin("m", "d");
+    // the user's statement for one key: the predicate re-applied, the key appended, both right
+    // after the clause they extend, never at the end of the text where a comment may run on
+    String keyed = n.keyEquals();
+    String dml =
+        span == null
+            ? source.substring(0, end) + " WHERE " + keyed + source.substring(end)
+            : source.substring(0, span[0])
+                + "("
+                + source.substring(span[0], span[1])
+                + ") AND ("
+                + keyed
+                + ")"
+                + source.substring(span[1]);
+    dml = onDataTable(engine, ast, t, dml);
+    if (dml == null) {
+      throw refused(tables, "the statement's text cannot be rewritten");
+    }
+    return new KeyedPlan(
+        n,
+        shape.kind() == StatementShape.Kind.DELETE,
+        t.layout() == Layout.DECOUPLED_IMPORTED,
+        new Step(keys, inWhere),
+        new Step(dml, all),
+        where != null);
+  }
+
+  private static Plan insertPlan(
+      StatementShape shape, TableInfo t, Names n, List<Integer> all, String tables)
+      throws SQLException {
+    Engine engine = n.engine;
+    SqlAst ast = shape.ast();
+    String source = ast.source();
+    List<List<Expression>> rows = shape.insertKeyValues(t.keyColumns());
+    if (rows == null) {
+      throw refused(
+          tables,
+          "an INSERT into a ScalarDB table must list its columns and give every key column as a"
+              + " value or a placeholder; a key the database generates is not supported yet");
+    }
+    List<String> values = new ArrayList<>();
+    List<Object> valueBinds = new ArrayList<>();
+    List<String> match = new ArrayList<>();
+    List<Object> matchBinds = new ArrayList<>();
+    for (List<Expression> row : rows) {
+      List<String> keyValues = new ArrayList<>();
+      List<String> terms = new ArrayList<>();
+      for (int i = 0; i < row.size(); i++) {
+        int[] span = ast.span(row.get(i));
+        List<Integer> inside = span == null ? null : ast.placeholdersIn(span[0], span[1]);
+        if (span == null || inside == null) {
+          throw refused(tables, "the statement's text cannot be rewritten");
+        }
+        String text = source.substring(span[0], span[1]);
+        keyValues.add(text);
+        valueBinds.addAll(inside);
+        terms.add(engine.quote(t.keyColumns().get(i)) + " = " + text);
+        matchBinds.addAll(inside);
+      }
+      values.add("(" + String.join(", ", keyValues) + ", ?, 3, 1, ?, ?)");
+      valueBinds.addAll(List.of(Slot.TX_ID, Slot.NOW, Slot.NOW));
+      match.add("(" + String.join(" AND ", terms) + ")");
+    }
+    String keyMatch = "(" + String.join(" OR ", match) + ")";
+    String meta = n.insertStamp("VALUES " + String.join(", ", values));
+    // a metadata row with no data row is an orphan, a tombstone: taken over in place (4.5)
+    String takeOver =
+        n.stamp("COALESCE(" + n.txVersion + ", 0) + 1")
+            + keyMatch
+            + " AND "
+            + n.txId
+            + " IS DISTINCT FROM ? AND "
+            + n.committed();
+    List<Object> takeOverBinds = new ArrayList<>(List.of(Slot.TX_ID, Slot.NOW, Slot.NOW));
+    takeOverBinds.addAll(matchBinds);
+    takeOverBinds.add(Slot.TX_ID);
+    String inFlight =
+        "SELECT COUNT(*) FROM "
+            + n.meta
+            + " WHERE "
+            + keyMatch
+            + " AND "
+            + n.txState
+            + " IN (1, 2)";
+    String insert = onDataTable(engine, ast, t, source);
+    if (insert == null) {
+      throw refused(tables, "the statement's text cannot be rewritten");
+    }
+    return new InsertPlan(
+        n,
+        new Step(insert, all),
+        new Step(meta, valueBinds),
+        new Step(takeOver, takeOverBinds),
+        new Step(inFlight, matchBinds),
+        rows.size());
+  }
 
   /**
    * The user's text with the table named by its data table, which a created table's name, a view,
@@ -58,624 +298,120 @@ final class Writes {
     return Errors.unsupported(reason + tables);
   }
 
-  /** Binds the application's value of one of its placeholders to a driver statement. */
-  interface Binder {
-    void bind(PreparedStatement ps, int position, int placeholder) throws SQLException;
-  }
-
-  /** A value the driver binds itself, by role. */
-  private enum Slot {
-    TX_ID,
-    NOW
-  }
-
-  /** A driver statement: its text, and per placeholder an application placeholder or a slot. */
-  private static final class Step {
-    final String sql;
-    final List<Object> binds;
-
-    Step(String sql, List<Object> binds) {
-      this.sql = sql;
-      this.binds = List.copyOf(binds);
-    }
-  }
-
-  /** The statements of one write, and what its run needs to know of the table. */
-  static final class Plan {
-    private final StatementShape.Kind kind;
-    private final Engine engine;
-    private final TableInfo table;
-    // UPDATE and DELETE: the keys with their metadata; the user's statement for one key, the key's
-    // values bound after the application's placeholders; whether it re-applies a predicate
-    private final @Nullable Step keys;
-    private final @Nullable Step dml;
-    private final boolean predicate;
-    // INSERT: the user's statement, the metadata rows, the take-over of orphans, the in-flight test
-    private final @Nullable Step insert;
-    private final @Nullable Step metaInsert;
-    private final @Nullable Step takeOver;
-    private final @Nullable Step inFlight;
-    private final int rows;
-
-    private Plan(
-        StatementShape.Kind kind,
-        Engine engine,
-        TableInfo table,
-        @Nullable Step keys,
-        @Nullable Step dml,
-        boolean predicate,
-        @Nullable Step insert,
-        @Nullable Step metaInsert,
-        @Nullable Step takeOver,
-        @Nullable Step inFlight,
-        int rows) {
-      this.kind = kind;
-      this.engine = engine;
-      this.table = table;
-      this.keys = keys;
-      this.dml = dml;
-      this.predicate = predicate;
-      this.insert = insert;
-      this.metaInsert = metaInsert;
-      this.takeOver = takeOver;
-      this.inFlight = inFlight;
-      this.rows = rows;
-    }
-
-    /** The texts of the statements the plan runs, the CAS aside, which is chosen per key. */
-    List<String> sql() {
-      List<String> out = new ArrayList<>();
-      for (Step s : new Step[] {keys, dml, insert, metaInsert, takeOver, inFlight}) {
-        if (s != null) {
-          out.add(s.sql);
-        }
-      }
-      return out;
-    }
-  }
-
-  /**
-   * Plans a write statement, or says why the driver cannot run it yet.
-   *
-   * @param engine the engine
-   * @param shape the statement's single-table shape
-   * @param t the ScalarDB table it writes
-   * @param tables the tables the statement names, for the refusal's message
-   * @return the plan
-   * @throws SQLException 0AN01 for a write the driver cannot run yet
-   */
-  static Plan plan(Engine engine, StatementShape shape, TableInfo t, String tables)
-      throws SQLException {
-    SqlAst ast = shape.ast();
-    String source = ast.source();
-    List<Integer> all = ast.placeholdersIn(0, source.length());
-    if (all == null) {
-      throw refused(tables, "only ? placeholders are supported in a write of a ScalarDB table");
-    }
-    if (shape.returning()) {
-      throw refused(tables, "RETURNING on a ScalarDB table is not supported yet");
-    }
-    Names n = new Names(engine, t);
-    if (shape.kind() == StatementShape.Kind.INSERT) {
-      return insertPlan(engine, shape, t, n, all, tables);
-    }
-    for (String c : shape.setColumns()) {
-      for (String k : t.keyColumns()) {
-        if (engine.columnKey(c).equals(engine.columnKey(k))) {
-          throw refused(tables, "an UPDATE of a key column of a ScalarDB table is not supported");
-        }
-      }
-    }
-    Expression where = shape.where();
-    int[] span = where == null ? null : ast.span(where);
-    int end = ast.end();
-    List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
-    if ((where != null && (span == null || inWhere == null)) || end < 0) {
-      throw refused(tables, "the statement's text cannot be rewritten");
-    }
-    for (SqlAst.ColumnRef c : ast.columnRefs()) {
-      SqlAst.TableRef q = c.qualifier();
-      if (q != null && q.schema() != null) {
-        throw refused(tables, "a column qualified by a schema in a write of a ScalarDB table");
-      }
-    }
-    SqlAst.TableRef ref = shape.table();
-    String exposed = ref.hasAlias() ? Objects.requireNonNull(ref.alias()) : ref.name();
-    // the keys and their metadata: the committed images, as a read at this level sees them
-    StringBuilder keys = new StringBuilder("SELECT ");
-    for (String k : t.keyColumns()) {
-      keys.append("d.").append(engine.quote(k)).append(", ");
-    }
-    keys.append("m.")
-        .append(n.txId)
-        .append(", m.")
-        .append(n.txVersion)
-        .append(", m.")
-        .append(n.txState)
-        .append(", m.")
-        .append(engine.quote(t.keyColumns().get(0)))
-        .append(" FROM (SELECT ");
-    List<String> picked = new ArrayList<>();
-    for (String k : t.keyColumns()) {
-      picked.add(exposed + "." + engine.quote(k) + " AS " + engine.quote(k));
-    }
-    keys.append(String.join(", ", picked))
-        .append(" FROM ")
-        .append(n.view)
-        .append(" ")
-        .append(exposed);
-    if (span != null) {
-      keys.append(" WHERE ").append(source, span[0], span[1]);
-    }
-    keys.append(") d LEFT JOIN ").append(n.meta).append(" m ON ").append(n.keyJoin("m", "d"));
-    // the user's statement for one key: the predicate re-applied, the key appended
-    String keyed = n.keyEquals("");
-    String dml =
-        span == null
-            ? source.substring(0, end) + " WHERE " + keyed + source.substring(end)
-            : source.substring(0, span[0])
-                + "("
-                + source.substring(span[0], span[1])
-                + ") AND ("
-                + keyed
-                + ")"
-                + source.substring(span[1]);
-    dml = onDataTable(engine, ast, t, dml);
-    if (dml == null) {
-      throw refused(tables, "the statement's text cannot be rewritten");
-    }
-    return new Plan(
-        shape.kind(),
-        engine,
-        t,
-        new Step(keys.toString(), new ArrayList<>(Objects.requireNonNull(inWhere))),
-        new Step(dml, new ArrayList<>(all)),
-        where != null,
-        null,
-        null,
-        null,
-        null,
-        0);
-  }
-
-  private static Plan insertPlan(
-      Engine engine, StatementShape shape, TableInfo t, Names n, List<Integer> all, String tables)
-      throws SQLException {
-    SqlAst ast = shape.ast();
-    String source = ast.source();
-    List<List<Expression>> rows = shape.insertKeyValues(t.keyColumns());
-    if (rows == null) {
-      throw refused(
-          tables,
-          "an INSERT into a ScalarDB table must list its columns and give every key column as a"
-              + " value or a placeholder; a key the database generates is not supported yet");
-    }
-    StringBuilder meta =
-        new StringBuilder("INSERT INTO ")
-            .append(n.meta)
-            .append(" (")
-            .append(n.keyList)
-            .append(", ")
-            .append(n.txId)
-            .append(", ")
-            .append(n.txState)
-            .append(", ")
-            .append(n.txVersion)
-            .append(", ")
-            .append(n.preparedAt)
-            .append(", ")
-            .append(n.committedAt)
-            .append(") VALUES ");
-    List<Object> metaBinds = new ArrayList<>();
-    StringBuilder match = new StringBuilder();
-    List<Object> matchBinds = new ArrayList<>();
-    for (int r = 0; r < rows.size(); r++) {
-      List<String> values = new ArrayList<>();
-      List<String> terms = new ArrayList<>();
-      for (int i = 0; i < rows.get(r).size(); i++) {
-        Expression e = rows.get(r).get(i);
-        int[] span = ast.span(e);
-        List<Integer> inside = span == null ? null : ast.placeholdersIn(span[0], span[1]);
-        if (span == null || inside == null) {
-          throw refused(tables, "the statement's text cannot be rewritten");
-        }
-        String text = source.substring(span[0], span[1]);
-        values.add(text);
-        metaBinds.addAll(inside);
-        terms.add(engine.quote(t.keyColumns().get(i)) + " = " + text);
-        matchBinds.addAll(inside);
-      }
-      meta.append(r == 0 ? "(" : ", (")
-          .append(String.join(", ", values))
-          .append(", ?, 3, 1, ?, ?)");
-      metaBinds.add(Slot.TX_ID);
-      metaBinds.add(Slot.NOW);
-      metaBinds.add(Slot.NOW);
-      match.append(r == 0 ? "(" : " OR (").append(String.join(" AND ", terms)).append(")");
-    }
-    meta.append(" ON CONFLICT DO NOTHING");
-    // a metadata row with no data row is an orphan, a tombstone: taken over in place (4.5)
-    String takeOver =
-        "UPDATE "
-            + n.meta
-            + " SET "
-            + n.txId
-            + " = ?, "
-            + n.txState
-            + " = 3, "
-            + n.txVersion
-            + " = COALESCE("
-            + n.txVersion
-            + ", 0) + 1, "
-            + n.preparedAt
-            + " = ?, "
-            + n.committedAt
-            + " = ? WHERE ("
-            + match
-            + ") AND "
-            + n.txId
-            + " IS DISTINCT FROM ? AND COALESCE("
-            + n.txState
-            + ", 3) = 3";
-    List<Object> takeOverBinds = new ArrayList<>(List.of(Slot.TX_ID, Slot.NOW, Slot.NOW));
-    takeOverBinds.addAll(matchBinds);
-    takeOverBinds.add(Slot.TX_ID);
-    String inFlight =
-        "SELECT COUNT(*) FROM " + n.meta + " WHERE (" + match + ") AND " + n.txState + " IN (1, 2)";
-    String insert = onDataTable(engine, ast, t, source);
-    if (insert == null) {
-      throw refused(tables, "the statement's text cannot be rewritten");
-    }
-    return new Plan(
-        StatementShape.Kind.INSERT,
-        engine,
-        t,
-        null,
-        null,
-        false,
-        new Step(insert, new ArrayList<>(all)),
-        new Step(meta.toString(), metaBinds),
-        new Step(takeOver, takeOverBinds),
-        new Step(inFlight, matchBinds),
-        rows.size());
-  }
-
   /**
    * Runs a write: in a transaction of its own in autocommit mode (4.4), otherwise in the
    * application's, which a driver-decided abort marks rollback-only.
    *
    * @param vendor the vendor connection
    * @param plan the plan
-   * @param binder binds the application's values
-   * @param rollbackOnly marks the application's transaction rollback-only
+   * @param context the statement that runs it
    * @return the update count
-   * @throws SQLException a database error, or {@code 40001} for an abort the driver decides
+   * @throws SQLException a database error, a timeout, or {@code 40001} for an abort the driver
+   *     decides
    */
-  static long run(Connection vendor, Plan plan, Binder binder, Runnable rollbackOnly)
-      throws SQLException {
+  // ponytail: autocommit is off on the vendor connection while the write runs; another thread
+  // sharing the connection then joins its transaction, as with any JDBC transaction
+  static long run(Connection vendor, Plan plan, Context context) throws SQLException {
     boolean auto = vendor.getAutoCommit();
     if (auto) {
       vendor.setAutoCommit(false);
     }
+    long count;
     try {
-      long count =
-          plan.kind == StatementShape.Kind.INSERT
-              ? insert(vendor, plan, binder)
-              : updateOrDelete(vendor, plan, binder);
+      count = plan.apply(new Run(vendor, context));
       if (auto) {
         vendor.commit();
       }
-      return count;
     } catch (SQLException | RuntimeException e) {
       if (auto) {
         try {
           vendor.rollback();
+          vendor.setAutoCommit(true);
         } catch (SQLException r) {
-          e.addSuppressed(r);
+          e.addSuppressed(r); // the write's own failure is the one to report
         }
       } else if (e instanceof Aborted) {
-        rollbackOnly.run();
+        context.rollbackOnly();
       }
       throw e;
     } finally {
-      if (auto) {
-        vendor.setAutoCommit(true);
-      }
+      context.running(null);
     }
+    if (auto) {
+      vendor.setAutoCommit(true);
+    }
+    return count;
   }
 
-  /** An abort the driver decides (4.4). */
-  static final class Aborted extends SQLTransactionRollbackException {
-    private static final long serialVersionUID = 1L;
+  /** One run of a plan: its stamp, its deadline, and the driver statements it prepares. */
+  static final class Run {
+    final Connection v;
+    final Context context;
+    final String txId = UUID.randomUUID().toString();
+    final long now = System.currentTimeMillis();
+    final long deadline; // System.nanoTime(), or 0 without a timeout
 
-    Aborted(String reason) {
-      super(reason + "; roll the transaction back and retry it", "40001");
+    Run(Connection v, Context context) throws SQLException {
+      this.v = v;
+      this.context = context;
+      int timeout = context.queryTimeout();
+      this.deadline = timeout <= 0 ? 0 : System.nanoTime() + timeout * 1_000_000_000L;
     }
-  }
 
-  private static long updateOrDelete(Connection v, Plan plan, Binder binder) throws SQLException {
-    Names n = new Names(plan.engine, plan.table);
-    int width = plan.table.keyColumns().size();
-    List<Object[]> keys = new ArrayList<>();
-    List<Object[]> anchors = new ArrayList<>(); // tx_id, tx_version, tx_state, has a metadata row
-    Step select = Objects.requireNonNull(plan.keys);
-    try (PreparedStatement ps = prepare(v, select, binder, null);
-        ResultSet rs = ps.executeQuery()) {
-      while (rs.next()) {
-        Object[] key = new Object[width];
-        for (int i = 0; i < width; i++) {
-          key[i] = rs.getObject(i + 1);
+    /** A driver statement with what is left of the timeout, reachable by {@code cancel()}. */
+    PreparedStatement prepare(String sql) throws SQLException {
+      PreparedStatement ps = v.prepareStatement(sql);
+      try {
+        if (deadline != 0) {
+          long left = deadline - System.nanoTime();
+          if (left <= 0) {
+            throw new SQLTimeoutException("the statement's query timeout passed", "57014");
+          }
+          ps.setQueryTimeout((int) Math.max(1, (left + 999_999_999L) / 1_000_000_000L));
         }
-        Object state = rs.getObject(width + 3);
-        if (state != null
-            && (((Number) state).intValue() == 1 || ((Number) state).intValue() == 2)) {
-          throw new Aborted(
-              "a row the statement writes is being written by a ScalarDB transaction");
-        }
-        keys.add(key);
-        anchors.add(
-            new Object[] {
-              rs.getString(width + 1),
-              rs.getObject(width + 2),
-              state,
-              rs.getObject(width + 4) != null
-            });
-      }
-    }
-    String txId = UUID.randomUUID().toString();
-    long now = System.currentTimeMillis();
-    long total = 0;
-    Step dml = Objects.requireNonNull(plan.dml);
-    for (int r = 0; r < keys.size(); r++) {
-      Object[] key = keys.get(r);
-      int written;
-      try (PreparedStatement ps = prepare(v, dml, binder, key)) {
-        written = ps.executeUpdate();
-      }
-      if (written == 0) {
-        skipOrAbort(v, n, key, plan.predicate);
-        continue;
-      }
-      if (written != 1) {
-        throw new Aborted("a key matched " + written + " rows");
-      }
-      if (cas(v, n, plan.kind, key, anchors.get(r), txId, now) != 1) {
-        throw new Aborted("a row the statement writes changed after it was read");
-      }
-      total++;
-    }
-    return total;
-  }
-
-  /** Step 2's zero-row rule: a row that stopped matching is skipped, anything else aborts. */
-  private static void skipOrAbort(Connection v, Names n, Object[] key, boolean predicate)
-      throws SQLException {
-    String sql =
-        "SELECT (SELECT COUNT(*) FROM "
-            + n.data
-            + " WHERE "
-            + n.keyEquals("")
-            + "), (SELECT "
-            + n.txState
-            + " FROM "
-            + n.meta
-            + " WHERE "
-            + n.keyEquals("")
-            + ")";
-    long rows;
-    Object state;
-    try (PreparedStatement ps = v.prepareStatement(sql)) {
-      bindKey(ps, 1, key);
-      bindKey(ps, key.length + 1, key);
-      try (ResultSet rs = ps.executeQuery()) {
-        rs.next();
-        rows = rs.getLong(1);
-        state = rs.getObject(2);
-      }
-    }
-    if (state != null && (((Number) state).intValue() == 1 || ((Number) state).intValue() == 2)) {
-      throw new Aborted("a row the statement writes went in flight in a ScalarDB transaction");
-    }
-    if (rows == 0) {
-      throw new Aborted("a row the statement writes was deleted after it was read");
-    }
-    if (!predicate) {
-      throw new Aborted("a row the statement writes did not take the write");
-    }
-  }
-
-  /** Step 3: the CAS on the key's metadata, or the stamp of a row without (4.4, 4.5). */
-  private static int cas(
-      Connection v,
-      Names n,
-      StatementShape.Kind kind,
-      Object[] key,
-      Object[] anchor,
-      String txId,
-      long now)
-      throws SQLException {
-    String seenId = (String) anchor[0];
-    Object seenVersion = anchor[1];
-    boolean hasMeta = (Boolean) anchor[3];
-    if (seenId != null) {
-      String versionTerm = seenVersion == null ? " IS NULL" : " = ?";
-      String sql =
-          kind == StatementShape.Kind.DELETE
-              ? "DELETE FROM "
-                  + n.meta
-                  + " WHERE "
-                  + n.keyEquals("")
-                  + " AND "
-                  + n.txId
-                  + " = ? AND "
-                  + n.txVersion
-                  + versionTerm
-                  + " AND "
-                  + n.txState
-                  + " = 3"
-              : "UPDATE "
-                  + n.meta
-                  + " SET "
-                  + n.txId
-                  + " = ?, "
-                  + n.txVersion
-                  + " = COALESCE("
-                  + n.txVersion
-                  + ", 0) + 1, "
-                  + n.txState
-                  + " = 3, "
-                  + n.preparedAt
-                  + " = ?, "
-                  + n.committedAt
-                  + " = ? WHERE "
-                  + n.keyEquals("")
-                  + " AND "
-                  + n.txId
-                  + " = ? AND "
-                  + n.txVersion
-                  + versionTerm
-                  + " AND "
-                  + n.txState
-                  + " = 3";
-      try (PreparedStatement ps = v.prepareStatement(sql)) {
-        int i = 1;
-        if (kind != StatementShape.Kind.DELETE) {
-          ps.setString(i++, txId);
-          ps.setLong(i++, now);
-          ps.setLong(i++, now);
-        }
-        i = bindKey(ps, i, key);
-        ps.setString(i++, seenId);
-        if (seenVersion != null) {
-          ps.setObject(i, seenVersion);
-        }
-        return ps.executeUpdate();
-      }
-    }
-    // NULL or no metadata: the stamp of I5 at version 1, kept as the tombstone after a DELETE
-    String sql =
-        hasMeta
-            ? "UPDATE "
-                + n.meta
-                + " SET "
-                + n.txId
-                + " = ?, "
-                + n.txVersion
-                + " = 1, "
-                + n.txState
-                + " = 3, "
-                + n.preparedAt
-                + " = ?, "
-                + n.committedAt
-                + " = ? WHERE "
-                + n.keyEquals("")
-                + " AND "
-                + n.txId
-                + " IS NULL AND COALESCE("
-                + n.txState
-                + ", 3) = 3"
-            : "INSERT INTO "
-                + n.meta
-                + " ("
-                + n.txId
-                + ", "
-                + n.preparedAt
-                + ", "
-                + n.committedAt
-                + ", "
-                + n.keyList
-                + ", "
-                + n.txVersion
-                + ", "
-                + n.txState
-                + ") VALUES (?, ?, ?, "
-                + String.join(", ", Collections.nCopies(key.length, "?"))
-                + ", 1, 3) ON CONFLICT DO NOTHING";
-    try (PreparedStatement ps = v.prepareStatement(sql)) {
-      ps.setString(1, txId);
-      ps.setLong(2, now);
-      ps.setLong(3, now);
-      bindKey(ps, 4, key);
-      return ps.executeUpdate();
-    }
-  }
-
-  private static long insert(Connection v, Plan plan, Binder binder) throws SQLException {
-    long inserted;
-    Savepoint sp = v.setSavepoint();
-    try (PreparedStatement ps = prepare(v, Objects.requireNonNull(plan.insert), binder, null)) {
-      inserted = ps.executeUpdate();
-    } catch (SQLException e) {
-      if (!"23505".equals(e.getSQLState())) {
+        context.running(ps);
+        return ps;
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
         throw e;
       }
-      // the transaction goes on, as on the engines where a failed statement does not end it
-      v.rollback(sp);
-      try (PreparedStatement ps = prepare(v, Objects.requireNonNull(plan.inFlight), binder, null);
-          ResultSet rs = ps.executeQuery()) {
-        rs.next();
-        if (rs.getLong(1) > 0) {
-          Aborted a = new Aborted("a key the statement inserts is being written by ScalarDB");
-          a.addSuppressed(e);
-          throw a;
+    }
+
+    /** A step prepared and bound: its binds, then the key's values, if any. */
+    PreparedStatement prepare(Step step, Object @Nullable [] key) throws SQLException {
+      PreparedStatement ps = prepare(step.sql);
+      try {
+        int i = 1;
+        for (Object b : step.binds) {
+          if (b == Slot.TX_ID) {
+            ps.setString(i, txId);
+          } else if (b == Slot.NOW) {
+            ps.setLong(i, now);
+          } else {
+            context.bind(ps, i, (Integer) b);
+          }
+          i++;
         }
-      }
-      throw e; // the application's duplicate
-    }
-    v.releaseSavepoint(sp);
-    String txId = UUID.randomUUID().toString();
-    long now = System.currentTimeMillis();
-    int stamped;
-    try (PreparedStatement ps =
-        prepare(v, Objects.requireNonNull(plan.metaInsert), binder, null, txId, now)) {
-      stamped = ps.executeUpdate();
-    }
-    if (stamped < plan.rows) {
-      int taken;
-      try (PreparedStatement ps =
-          prepare(v, Objects.requireNonNull(plan.takeOver), binder, null, txId, now)) {
-        taken = ps.executeUpdate();
-      }
-      if (stamped + taken != plan.rows) {
-        throw new Aborted("a key the statement inserts has metadata in flight");
-      }
-    }
-    return inserted;
-  }
-
-  private static PreparedStatement prepare(
-      Connection v, Step step, Binder binder, Object @Nullable [] key) throws SQLException {
-    return prepare(v, step, binder, key, "", 0);
-  }
-
-  /** The step prepared and bound: its binds, then the key's values, if any. */
-  private static PreparedStatement prepare(
-      Connection v, Step step, Binder binder, Object @Nullable [] key, String txId, long now)
-      throws SQLException {
-    PreparedStatement ps = v.prepareStatement(step.sql);
-    try {
-      int i = 1;
-      for (Object b : step.binds) {
-        if (b == Slot.TX_ID) {
-          ps.setString(i, txId);
-        } else if (b == Slot.NOW) {
-          ps.setLong(i, now);
-        } else {
-          binder.bind(ps, i, (Integer) b);
+        if (key != null) {
+          bind(ps, i, key);
         }
-        i++;
+        return ps;
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
+        throw e;
       }
-      if (key != null) {
-        bindKey(ps, i, key);
-      }
-      return ps;
-    } catch (SQLException | RuntimeException e) {
-      ps.close();
-      throw e;
+    }
+
+    /** Sets the stamp of I5: the transaction id and twice the time, from {@code at}. */
+    int stamp(PreparedStatement ps, int at) throws SQLException {
+      ps.setString(at, txId);
+      ps.setLong(at + 1, now);
+      ps.setLong(at + 2, now);
+      return at + 3;
     }
   }
 
-  private static int bindKey(PreparedStatement ps, int from, Object[] key) throws SQLException {
+  private static int bind(PreparedStatement ps, int from, Object[] key) throws SQLException {
     int i = from;
     for (Object k : key) {
       ps.setObject(i++, k);
@@ -683,19 +419,311 @@ final class Writes {
     return i;
   }
 
-  /** The table's names, quoted, and the metadata columns. */
-  private static final class Names {
+  /** One key of an UPDATE or DELETE, and the metadata step 1 read for it. */
+  private static final class Row {
+    final Object[] key; // the data table's
+    final Object @Nullable [] metaKey; // the metadata table's, null without a metadata row
+    final @Nullable String txId;
+    final @Nullable Object version;
+
+    Row(
+        Object[] key,
+        Object @Nullable [] metaKey,
+        @Nullable String txId,
+        @Nullable Object version) {
+      this.key = key;
+      this.metaKey = metaKey;
+      this.txId = txId;
+      this.version = version;
+    }
+
+    /** Whether the metadata read again is still the anchor: the committed value did not move. */
+    boolean sameAs(Object @Nullable [] metaKey, @Nullable String txId, @Nullable Object version) {
+      return (this.metaKey == null) == (metaKey == null)
+          && Objects.equals(this.txId, txId)
+          && Objects.equals(
+              this.version == null ? null : ((Number) this.version).longValue(),
+              version == null ? null : ((Number) version).longValue());
+    }
+  }
+
+  /** Reads a key value so that it binds back unchanged: a local time is not shifted by the zone. */
+  private static Object @Nullable [] readKey(ResultSet rs, int from, int width)
+      throws SQLException {
+    Object[] key = new Object[width];
+    for (int i = 0; i < width; i++) {
+      int c = from + i;
+      switch (rs.getMetaData().getColumnType(c)) {
+        case Types.TIMESTAMP:
+          key[i] = rs.getObject(c, LocalDateTime.class);
+          break;
+        case Types.TIME:
+          key[i] = rs.getObject(c, LocalTime.class);
+          break;
+        case Types.TIMESTAMP_WITH_TIMEZONE:
+          key[i] = rs.getObject(c, OffsetDateTime.class);
+          break;
+        default:
+          key[i] = rs.getObject(c);
+      }
+    }
+    return key[0] == null ? null : key;
+  }
+
+  private static boolean inFlight(@Nullable Object state) {
+    return state != null && (((Number) state).intValue() == 1 || ((Number) state).intValue() == 2);
+  }
+
+  /** UPDATE and DELETE (4.3): per key, the user's statement first, the CAS second. */
+  private static final class KeyedPlan extends Plan {
+    final boolean delete;
+    final boolean imported;
+    final Step keys;
+    final Step dml;
+    final boolean predicate;
+
+    KeyedPlan(Names n, boolean delete, boolean imported, Step keys, Step dml, boolean predicate) {
+      super(n);
+      this.delete = delete;
+      this.imported = imported;
+      this.keys = keys;
+      this.dml = dml;
+      this.predicate = predicate;
+    }
+
+    @Override
+    List<String> sql() {
+      return List.of(keys.sql, dml.sql);
+    }
+
+    @Override
+    long apply(Run run) throws SQLException {
+      int width = n.keyColumns.size();
+      List<Row> rows = new ArrayList<>();
+      try (PreparedStatement ps = run.prepare(keys, null);
+          ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          if (inFlight(rs.getObject(2 * width + 3))) {
+            throw new Aborted(
+                "a row the statement writes is being written by a ScalarDB transaction");
+          }
+          rows.add(
+              new Row(
+                  Objects.requireNonNull(readKey(rs, 1, width)),
+                  readKey(rs, width + 1, width),
+                  rs.getString(2 * width + 1),
+                  rs.getObject(2 * width + 2)));
+        }
+      }
+      long total = 0;
+      for (Row row : rows) {
+        if (delete && row.metaKey == null) {
+          // the tombstone needs the key as the metadata table spells it, from the data row
+          // ponytail: written before the DELETE, metadata before data; a ScalarDB prepare of this
+          // never-backfilled row at the same moment can deadlock, which the database breaks
+          if (insertStamp(run, row) != 1) {
+            throw new Aborted("a row the statement writes was given metadata after it was read");
+          }
+        }
+        int written;
+        try (PreparedStatement ps = run.prepare(dml, row.key)) {
+          written = ps.executeUpdate();
+        }
+        if (written == 0) {
+          skipOrAbort(run, row);
+          continue;
+        }
+        if (written != 1) {
+          throw new Aborted("a key matched " + written + " rows");
+        }
+        if (!(delete && row.metaKey == null) && cas(run, row) != 1) {
+          throw new Aborted("a row the statement writes changed after it was read");
+        }
+        total++;
+      }
+      return total;
+    }
+
+    /**
+     * Step 2's zero-row rule: a row whose committed value moved stopped matching and is skipped;
+     * one still at the anchor matched, so the statement saw an image in flight, and aborts.
+     */
+    private void skipOrAbort(Run run, Row row) throws SQLException {
+      int width = n.keyColumns.size();
+      try (PreparedStatement ps =
+          run.prepare(
+              "SELECT "
+                  + n.columns("m")
+                  + ", m."
+                  + n.txId
+                  + ", m."
+                  + n.txVersion
+                  + ", m."
+                  + n.txState
+                  + " FROM "
+                  + n.data
+                  + " d LEFT JOIN "
+                  + n.meta
+                  + " m ON "
+                  + n.keyJoin("m", "d")
+                  + " WHERE "
+                  + n.keyEquals("d"))) {
+        bind(ps, 1, row.key);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (!rs.next()) {
+            throw new Aborted("a row the statement writes was deleted after it was read");
+          }
+          if (inFlight(rs.getObject(width + 3))) {
+            throw new Aborted(
+                "a row the statement writes went in flight in a ScalarDB transaction");
+          }
+          if (!predicate
+              || row.sameAs(
+                  readKey(rs, 1, width), rs.getString(width + 1), rs.getObject(width + 2))) {
+            throw new Aborted("a row the statement writes showed a value in flight");
+          }
+        }
+      }
+    }
+
+    /**
+     * Step 3: the CAS on the key's metadata (4.3), the stamp of a row without (4.4); on an imported
+     * table a DELETE keeps the metadata row as a tombstone (4.5).
+     */
+    private int cas(Run run, Row row) throws SQLException {
+      Object[] metaKey = row.metaKey;
+      if (metaKey == null) {
+        return insertStamp(run, row);
+      }
+      String keyed = n.keyEquals("") + " AND " + n.committed();
+      if (row.txId == null) {
+        try (PreparedStatement ps =
+            run.prepare(n.stamp("1") + keyed + " AND " + n.txId + " IS NULL")) {
+          bind(ps, run.stamp(ps, 1), metaKey);
+          return ps.executeUpdate();
+        }
+      }
+      String anchored =
+          keyed
+              + " AND "
+              + n.txId
+              + " = ? AND "
+              + n.txVersion
+              + (row.version == null ? " IS NULL" : " = ?");
+      boolean remove = delete && !imported;
+      try (PreparedStatement ps =
+          run.prepare(
+              remove
+                  ? "DELETE FROM " + n.meta + " WHERE " + anchored
+                  : n.stamp("COALESCE(" + n.txVersion + ", 0) + 1") + anchored)) {
+        int i = bind(ps, remove ? 1 : run.stamp(ps, 1), metaKey);
+        ps.setString(i++, row.txId);
+        if (row.version != null) {
+          ps.setObject(i, row.version);
+        }
+        return ps.executeUpdate();
+      }
+    }
+
+    /** The stamp of a row without a metadata row, the key copied from its data row. */
+    private int insertStamp(Run run, Row row) throws SQLException {
+      try (PreparedStatement ps =
+          run.prepare(
+              n.insertStamp(
+                  "SELECT "
+                      + n.columns("d")
+                      + ", ?, 3, 1, ?, ? FROM "
+                      + n.data
+                      + " d WHERE "
+                      + n.keyEquals("d")))) {
+        bind(ps, run.stamp(ps, 1), row.key);
+        return ps.executeUpdate();
+      }
+    }
+  }
+
+  /** INSERT (4.3): the user's statement, then the metadata rows, taking over orphans (4.5). */
+  private static final class InsertPlan extends Plan {
+    final Step insert;
+    final Step metaInsert;
+    final Step takeOver;
+    final Step inFlight;
+    final int rows;
+
+    InsertPlan(Names n, Step insert, Step metaInsert, Step takeOver, Step inFlight, int rows) {
+      super(n);
+      this.insert = insert;
+      this.metaInsert = metaInsert;
+      this.takeOver = takeOver;
+      this.inFlight = inFlight;
+      this.rows = rows;
+    }
+
+    @Override
+    List<String> sql() {
+      return List.of(insert.sql, metaInsert.sql, takeOver.sql, inFlight.sql);
+    }
+
+    @Override
+    long apply(Run run) throws SQLException {
+      long inserted;
+      Savepoint sp = run.v.setSavepoint();
+      try {
+        try (PreparedStatement ps = run.prepare(insert, null)) {
+          inserted = ps.executeUpdate();
+        } catch (SQLException e) {
+          if (!"23505".equals(e.getSQLState())) {
+            throw e;
+          }
+          // the transaction goes on, as on the engines where a failed statement does not end it
+          run.v.rollback(sp);
+          try (PreparedStatement ps = run.prepare(inFlight, null);
+              ResultSet rs = ps.executeQuery()) {
+            rs.next();
+            if (rs.getLong(1) > 0) {
+              Aborted a = new Aborted("a key the statement inserts is being written by ScalarDB");
+              a.addSuppressed(e);
+              throw a;
+            }
+          }
+          throw e; // the application's duplicate
+        }
+      } finally {
+        try {
+          run.v.releaseSavepoint(sp);
+        } catch (SQLException ignored) {
+          // after another failure the transaction is aborted, and its end releases it
+        }
+      }
+      int stamped;
+      try (PreparedStatement ps = run.prepare(metaInsert, null)) {
+        stamped = ps.executeUpdate();
+      }
+      if (stamped < rows) {
+        int taken;
+        try (PreparedStatement ps = run.prepare(takeOver, null)) {
+          taken = ps.executeUpdate();
+        }
+        if (stamped + taken != rows) {
+          throw new Aborted("a key the statement inserts has metadata in flight");
+        }
+      }
+      return inserted;
+    }
+  }
+
+  /** The table's names, quoted, and the clauses built from them. */
+  static final class Names {
+    final Engine engine;
+    final List<String> keyColumns;
     final String data;
     final String meta;
     final String view;
-    final String keyList;
     final String txId;
     final String txState;
     final String txVersion;
     final String preparedAt;
     final String committedAt;
-    private final Engine engine;
-    private final List<String> keyColumns;
 
     Names(Engine engine, TableInfo t) {
       this.engine = engine;
@@ -704,11 +732,6 @@ final class Writes {
       this.data = ns + engine.quote(t.dataTable());
       this.meta = ns + engine.quote(Objects.requireNonNull(t.metadataTable(), "metadata table"));
       this.view = ns + engine.quote(t.readView(engine));
-      List<String> quoted = new ArrayList<>();
-      for (String k : keyColumns) {
-        quoted.add(engine.quote(k));
-      }
-      this.keyList = String.join(", ", quoted);
       this.txId = engine.quote("tx_id");
       this.txState = engine.quote("tx_state");
       this.txVersion = engine.quote("tx_version");
@@ -716,7 +739,21 @@ final class Writes {
       this.committedAt = engine.quote("tx_committed_at");
     }
 
-    /** {@code k1 = ? AND k2 = ?}, each column qualified by {@code q} when it is not empty. */
+    /** The key columns, each qualified by {@code q} when it is not empty. */
+    String columns(String q) {
+      List<String> out = new ArrayList<>();
+      for (String k : keyColumns) {
+        out.add((q.isEmpty() ? "" : q + ".") + engine.quote(k));
+      }
+      return String.join(", ", out);
+    }
+
+    /** {@code k1 = ? AND k2 = ?}. */
+    String keyEquals() {
+      return keyEquals("");
+    }
+
+    /** {@code q.k1 = ? AND q.k2 = ?}, unqualified when {@code q} is empty. */
     String keyEquals(String q) {
       List<String> terms = new ArrayList<>();
       for (String k : keyColumns) {
@@ -732,6 +769,51 @@ final class Writes {
         terms.add(a + "." + engine.quote(k) + " = " + b + "." + engine.quote(k));
       }
       return String.join(" AND ", terms);
+    }
+
+    /** A committed metadata row, NULL state included (the deemed-committed rule). */
+    String committed() {
+      return "COALESCE(" + txState + ", 3) = 3";
+    }
+
+    /** The stamp of I5 at {@code version}, its three values bound first, up to the WHERE. */
+    String stamp(String version) {
+      return "UPDATE "
+          + meta
+          + " SET "
+          + txId
+          + " = ?, "
+          + preparedAt
+          + " = ?, "
+          + committedAt
+          + " = ?, "
+          + txState
+          + " = 3, "
+          + txVersion
+          + " = "
+          + version
+          + " WHERE ";
+    }
+
+    /** A metadata row per key from {@code rows}: the key, then the stamp's three values. */
+    String insertStamp(String rows) {
+      return "INSERT INTO "
+          + meta
+          + " ("
+          + columns("")
+          + ", "
+          + txId
+          + ", "
+          + txState
+          + ", "
+          + txVersion
+          + ", "
+          + preparedAt
+          + ", "
+          + committedAt
+          + ") "
+          + rows
+          + " ON CONFLICT DO NOTHING";
     }
   }
 }

@@ -71,7 +71,7 @@ class WritesTest {
     String view = Engine.POSTGRESQL.quote(Engine.POSTGRESQL.readViewName("t"));
     assertThat(sql.get(0))
         .isEqualTo(
-            "SELECT d.\"id\", m.\"tx_id\", m.\"tx_version\", m.\"tx_state\", m.\"id\" FROM (SELECT"
+            "SELECT d.\"id\", m.\"id\", m.\"tx_id\", m.\"tx_version\", m.\"tx_state\" FROM (SELECT"
                 + " t.\"id\" AS \"id\" FROM \"ns\"."
                 + view
                 + " t WHERE x = ? OR id > 3) d LEFT JOIN \"ns\".\"t_meta\" m ON m.\"id\" = d.\"id\"");

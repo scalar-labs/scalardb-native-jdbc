@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "133"
 tags: [code-review, correctness, jdbc, writes]
@@ -25,9 +25,11 @@ Handle `*Batch` before the write branch: an empty array, as an empty batch retur
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] `executeBatch()` on a prepared write returns `int[0]` and writes nothing.
+- [x] `executeBatch()` on a prepared write returns `int[0]` and writes nothing.
 
 ## Work Log
 
@@ -35,3 +37,8 @@ Handle `*Batch` before the write branch: an empty array, as an empty batch retur
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- executeBatch/executeLargeBatch on a prepared write return an empty array without running. Test "133".

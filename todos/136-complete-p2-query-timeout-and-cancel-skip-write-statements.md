@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "136"
 tags: [code-review, jdbc, writes]
@@ -27,9 +27,11 @@ statement; keep the running driver statement in a volatile field that `cancel()`
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] The probe's write fails with a timeout or cancel error near 1 s.
+- [x] The probe's write fails with a timeout or cancel error near 1 s.
 
 ## Work Log
 
@@ -37,3 +39,8 @@ statement; keep the running driver statement in a volatile field that `cancel()`
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- Writes.Run gives each driver statement the rest of the statement's query timeout and publishes the running statement, which cancel() reaches. Test "136" (timeout of 1 s against a 4 s lock fails within 3 s, autocommit restored).

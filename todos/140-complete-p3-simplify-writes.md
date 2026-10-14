@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "140"
 tags: [code-review, quality, simplification]
@@ -33,9 +33,11 @@ Do it together with the fixes of 130-138, which touch the same code.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] `:driver:check` and the integration suite pass; WritesTest unchanged in substance.
+- [x] `:driver:check` and the integration suite pass; WritesTest unchanged in substance.
 
 ## Work Log
 
@@ -43,3 +45,8 @@ Do it together with the fixes of 130-138, which touch the same code.
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- Writes split into KeyedPlan and InsertPlan with a Row per key, a Run holding the stamp and deadline, Names.stamp/insertStamp/committed shared; SqlAst.sourceText reuses span (its tab guard dropped: tabs count one column through the driver's parse); Proxies' identity ternary gone. Kept: the tables parameter of Writes.plan, since Outcome's factories are package-private to sql.

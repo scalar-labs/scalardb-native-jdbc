@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "135"
 tags: [code-review, correctness, writes, postgresql]
@@ -27,9 +27,11 @@ table's in the DML; or cast the bound value to the metadata column's type there.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] UPDATE and DELETE work on a CHAR(n)-keyed imported table.
+- [x] UPDATE and DELETE work on a CHAR(n)-keyed imported table.
 
 ## Work Log
 
@@ -37,3 +39,8 @@ table's in the DML; or cast the bound value to the metadata column's type there.
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- S1 returns the metadata table's own key; metadata statements bind it, and a missing metadata row is inserted with INSERT ... SELECT from the data row. Test "135" (CHAR(4) key).

@@ -177,7 +177,9 @@ class WriteIntegrationTest {
     try (Connection v = e.open()) {
       assertThat(rows(v, "SELECT tx_state, tx_version FROM " + t.meta + " WHERE id = 10"))
           .containsExactly("3/2");
-      assertThat(rows(v, "SELECT COUNT(*) FROM " + t.meta + " WHERE id = 12")).containsExactly("0");
+      // a DELETE on an imported table keeps the metadata row as a tombstone (4.5, todo 132)
+      assertThat(rows(v, "SELECT COUNT(*) FROM " + t.meta + " WHERE id = 12"))
+          .containsExactly(t.sql.equals("wr.imp") ? "1" : "0");
     }
     assertThat(scalarDbX(tm, t, 10)).contains("P");
     assertThat(scalarDbX(tm, t, 12)).isEmpty();
@@ -348,6 +350,212 @@ class WriteIntegrationTest {
           .containsExactly("3/2");
     }
     assertThat(scalarDbX(tm, t, 32)).contains("again");
+  }
+
+  /** The findings of the 4a review (todos 130-138), each asserting the fixed behaviour. */
+  @ParameterizedTest
+  @MethodSource("engines")
+  void reviewFindings(Engines e) throws Exception {
+    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4a)");
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          "CREATE SCHEMA rpl",
+          "CREATE SCHEMA rsd",
+          "CREATE SCHEMA rf",
+          "CREATE TABLE rpl.t (id INT PRIMARY KEY, x TEXT)",
+          "INSERT INTO rpl.t VALUES (1, 'plain')",
+          "CREATE TABLE rsd.t (id INT PRIMARY KEY, x TEXT)",
+          "INSERT INTO rsd.t VALUES (1, 'scalardb')",
+          "CREATE TABLE rf.imp (id INT PRIMARY KEY, x TEXT, b BYTEA)",
+          "INSERT INTO rf.imp VALUES (60, 'a', NULL), (70, 'a', NULL), (80, 'a', NULL),"
+              + " (85, 'a', NULL)",
+          "CREATE TABLE rf.ch (k CHAR(4) PRIMARY KEY, x TEXT)",
+          "INSERT INTO rf.ch VALUES ('ab', 'a')",
+          "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN AS $$ BEGIN PERFORM pg_sleep(3);"
+              + " RETURN v = 'a'; END $$ LANGUAGE plpgsql VOLATILE");
+    }
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace("rsd", true);
+      admin.createNamespace("rf", true);
+      admin.importTable("rsd", "t", DECOUPLED, Map.of());
+      admin.importTable("rf", "imp", DECOUPLED, Map.of());
+      admin.importTable("rf", "ch", DECOUPLED, Map.of());
+    }
+    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog,
+                  c,
+                  t -> t.namespace().equals("rsd") || t.namespace().equals("rf"),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    TableInfo imp = catalog.lookup(List.of(), "rf", "imp");
+    Table t =
+        new Table(
+            "rf.imp", "rf." + imp.metadataTable(), Objects.requireNonNull(imp.virtualTable()));
+    String sdMeta = "rsd." + catalog.lookup(List.of(), "rsd", "t").metadataTable();
+    String chMeta = "rf." + catalog.lookup(List.of(), "rf", "ch").metadataTable();
+
+    // 130: a prepared plain write that comes to name a ScalarDB table is refused, not run as text
+    try (Connection d = e.openDriver();
+        Connection v = e.open()) {
+      d.setSchema("rpl");
+      PreparedStatement ps = d.prepareStatement("UPDATE t SET x = ? WHERE id = ?");
+      ps.setString(1, "p");
+      ps.setInt(2, 1);
+      ps.executeUpdate();
+      d.setSchema("rsd");
+      ps.setString(1, "raw");
+      assertThatThrownBy(ps::executeUpdate).hasMessageContaining("prepare it again");
+      assertThat(rows(v, "SELECT x FROM rsd.t WHERE id = 1")).containsExactly("scalardb");
+      assertThat(rows(v, "SELECT tx_version FROM " + sdMeta + " WHERE id = 1"))
+          .containsExactly("1");
+    }
+    // 131: streams are read once and bound whole into every statement of the write
+    try (Connection d = e.openDriver();
+        Connection v = e.open()) {
+      PreparedStatement ps = d.prepareStatement("INSERT INTO rf.imp (id, x, b) VALUES (?, ?, ?)");
+      ps.setInt(1, 90);
+      ps.setCharacterStream(2, new java.io.StringReader("hello"));
+      ps.setBinaryStream(3, new java.io.ByteArrayInputStream(new byte[] {1, 2, 3}));
+      assertThat(ps.executeUpdate()).isEqualTo(1);
+      ps = d.prepareStatement("UPDATE rf.imp SET x = ? WHERE id IN (60, 90)");
+      ps.setCharacterStream(1, new java.io.StringReader("streamed-and-more"), 8);
+      assertThat(ps.executeUpdate()).isEqualTo(2);
+      assertThat(rows(v, "SELECT id, x, length(b) FROM rf.imp WHERE id IN (60, 90) ORDER BY id"))
+          .containsExactly("60/streamed/null", "90/streamed/3");
+      e.execute(v, "UPDATE rf.imp SET x = 'a' WHERE id = 60");
+    }
+    try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
+      // 132: an UPDATE then a DELETE of a row without metadata keep a tombstone (imported table)
+      try (Connection v = e.open()) {
+        e.execute(v, "INSERT INTO rf.imp (id, x) VALUES (50, 'n')");
+      }
+      DistributedTransaction z = tm.begin();
+      z.get(
+          Get.newBuilder()
+              .namespace("rf")
+              .table(t.scalarDbName)
+              .partitionKey(Key.ofInt("id", 50))
+              .build());
+      try (Connection d = e.openDriver()) {
+        d.createStatement().executeUpdate("UPDATE rf.imp SET x = 'u' WHERE id = 50");
+        d.createStatement().executeUpdate("DELETE FROM rf.imp WHERE id = 50");
+      }
+      z.update(
+          Update.newBuilder()
+              .namespace("rf")
+              .table(t.scalarDbName)
+              .partitionKey(Key.ofInt("id", 50))
+              .textValue("x", "back")
+              .build());
+      assertThatThrownBy(z::commit).isInstanceOf(TransactionException.class);
+      assertThat(scalarDbX(tm, t, 50)).isEmpty();
+      try (Connection v = e.open()) {
+        assertThat(rows(v, "SELECT tx_state, tx_version FROM " + t.meta + " WHERE id = 50"))
+            .containsExactly("3/2");
+      }
+    }
+    // 133: executeBatch on a prepared write is an empty batch
+    try (Connection d = e.openDriver();
+        Connection v = e.open()) {
+      PreparedStatement ps = d.prepareStatement("UPDATE rf.imp SET x = ? WHERE id = ?");
+      ps.setString(1, "batch");
+      ps.setInt(2, 80);
+      assertThat(ps.executeBatch()).isEmpty();
+      assertThat(rows(v, "SELECT x FROM rf.imp WHERE id = 80")).containsExactly("a");
+    }
+    // 135: a CHAR(n) key is matched in the metadata table as it is stored there
+    try (Connection d = e.openDriver();
+        Connection v = e.open()) {
+      assertThat(d.createStatement().executeUpdate("UPDATE rf.ch SET x = 'z' WHERE x = 'a'"))
+          .isEqualTo(1);
+      assertThat(rows(v, "SELECT tx_version FROM " + chMeta)).containsExactly("2");
+    }
+    // 136: the query timeout bounds the write's own statements
+    try (Connection lock = e.open();
+        Connection d = e.openDriver()) {
+      lock.setAutoCommit(false);
+      rows(lock, "SELECT x FROM rf.imp WHERE id = 70 FOR UPDATE");
+      Statement st = d.createStatement();
+      st.setQueryTimeout(1);
+      long t0 = System.nanoTime();
+      assertThatThrownBy(() -> st.executeUpdate("UPDATE rf.imp SET x = 't' WHERE id = 70"))
+          .isInstanceOf(SQLException.class);
+      assertThat((System.nanoTime() - t0) / 1_000_000).isLessThan(3000);
+      lock.rollback();
+      assertThat(d.getAutoCommit()).isTrue();
+    }
+    // 137: SQL ROLLBACK ends rollback-only; a write closes the statement's earlier result set
+    try (TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();
+        Connection d = e.openDriver()) {
+      TwoPhaseCommitTransaction held = tpc.begin();
+      held.update(
+          Update.newBuilder()
+              .namespace("rf")
+              .table(t.scalarDbName)
+              .partitionKey(Key.ofInt("id", 85))
+              .textValue("x", "held")
+              .build());
+      held.prepare();
+      try {
+        d.setAutoCommit(false);
+        assertThatThrownBy(
+                () -> d.createStatement().executeUpdate("UPDATE rf.imp SET x = 'w' WHERE id = 85"))
+            .isInstanceOf(SQLTransactionRollbackException.class);
+        d.createStatement().execute("ROLLBACK");
+        assertThat(rows(d, "SELECT x FROM rf.imp WHERE id = 80")).containsExactly("a");
+        d.setAutoCommit(true);
+      } finally {
+        held.rollback();
+      }
+      Statement st = d.createStatement();
+      ResultSet rs = st.executeQuery("SELECT x FROM rf.imp WHERE id = 80");
+      st.executeUpdate("UPDATE rf.imp SET x = 'a' WHERE id = 80");
+      assertThat(rs.isClosed()).isTrue();
+    }
+    // 138: a metadata row with a tx_id and a NULL state is committed
+    try (Connection d = e.openDriver();
+        Connection v = e.open()) {
+      e.execute(v, "UPDATE " + t.meta + " SET tx_state = NULL WHERE id = 80");
+      assertThat(d.createStatement().executeUpdate("UPDATE rf.imp SET x = 'n' WHERE id = 80"))
+          .isEqualTo(1);
+    }
+    // 134: a prepare and rollback around the per-key UPDATE abort it, never skip the row
+    try (TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();
+        Connection d = e.openDriver();
+        Connection v = e.open()) {
+      java.util.concurrent.CompletableFuture<Object> write =
+          java.util.concurrent.CompletableFuture.supplyAsync(
+              () -> {
+                try {
+                  return d.createStatement()
+                      .executeUpdate("UPDATE rf.imp SET x = 'drv' WHERE id = 60 AND rf.gate(x)");
+                } catch (SQLException ex) {
+                  return ex;
+                }
+              });
+      Thread.sleep(1000); // the keys are read, the gate sleeping
+      TwoPhaseCommitTransaction tx = tpc.begin();
+      tx.update(
+          Update.newBuilder()
+              .namespace("rf")
+              .table(t.scalarDbName)
+              .partitionKey(Key.ofInt("id", 60))
+              .textValue("x", "held")
+              .build());
+      tx.prepare();
+      Thread.sleep(3000); // the per-key UPDATE reads the image in flight
+      tx.rollback();
+      assertThat(write.join()).isInstanceOf(SQLTransactionRollbackException.class);
+      assertThat(rows(v, "SELECT x FROM rf.imp WHERE id = 60")).containsExactly("a");
+    }
   }
 
   private static Optional<String> scalarDbX(DistributedTransactionManager tm, Table t, int id)

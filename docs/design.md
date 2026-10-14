@@ -1025,8 +1025,8 @@ SAVEPOINT. On MySQL catch error 1062; the transaction survives it. Do not use `I
 turns data errors such as a NOT NULL violation into warnings. The `T` insert decides the classification.
 If it failed, read `T_meta.tx_state` for `k`: state 3 or NULL is an application duplicate; state 1 or 2
 is an in-flight ScalarDB insert or delete, a retryable conflict. If it succeeded and the `T_meta` insert
-collided, the metadata row is an **orphan**, a tombstone left by a driver DELETE of a metadata-less row
-(4.4) or by a native delete; take it over with the CAS of step 3 on its current `(tx_id, tx_version)`,
+collided, the metadata row is an **orphan**, a tombstone left by a driver DELETE on an imported table
+(4.5) or by a native delete; take it over with the CAS of step 3 on its current `(tx_id, tx_version)`,
 or on `tx_id IS NULL`, writing the stamp of I5 with `tx_version + 1`, as the CAS does.
 An orphan is invisible to `rc_T`, `cc_T` and `T_scalardb`, which start from `T`, and a ScalarDB insert
 overwrites it, since its metadata put on an imported table is unconditional. A serial or auto-increment key is obtained from the `T` insert with `RETURNING` or
@@ -1073,9 +1073,9 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
    For a DELETE the CAS is the conditional delete itself:
    `DELETE FROM T_meta WHERE k = :k AND tx_id = :seen_id AND tx_version = :seen_version AND tx_state = 3`.
    The `tx_id`/`tx_version` terms carry the anchor; `tx_state = 3` refuses in-flight rows. For DELETE the
-   `T` row goes in step 2 and the `T_meta` row here, in the same transaction, **except** when the row had
-   no metadata or NULL metadata: then the DELETE leaves a stamped state 3 metadata row behind as a
-   tombstone (4.5). Without it, a ScalarDB transaction that read the row as deemed committed would prepare
+   `T` row goes in step 2 and the `T_meta` row here, in the same transaction, **except** on an imported
+   table: there the DELETE leaves a stamped state 3 metadata row behind as a tombstone (4.5), the CAS
+   stamping it instead of deleting it. Without it, a ScalarDB transaction that read the row as deemed committed would prepare
    it with "metadata does not exist", succeed, and resurrect the deleted row, on commit or on rollback
    alike; the tombstone makes that prepare fail.
 4. The same row written again in the same transaction: no second CAS. The lock is held and the version was
@@ -1162,11 +1162,16 @@ the old row, and an aborted transaction has changed the database. Both outcomes 
 update is not a blind write: every ScalarDB Put and Update is conditioned on a read, explicit or the
 implicit pre-read, so there is no interleaving in which the outcome is acceptable.
 
-**The rule.** When the driver deletes a row that has no metadata row, or one whose metadata is all NULL,
-it writes the stamp of I5 into a metadata row anyway, fresh `tx_id`, state 3, version 1, timestamps,
-`before_*` NULL, and deletes only the data row. The metadata row stays behind without a data row: the
-tombstone. ScalarDB's stale update now finds that a metadata row exists, its "insert if none exists"
-fails, and it aborts, as first-committer-wins requires.
+**The rule.** When the driver deletes a row of an imported table, it writes the stamp of I5 into the
+row's metadata row, fresh `tx_id`, state 3, version + 1 (1 for a row that had no metadata row or NULL
+metadata), timestamps, `before_*` untouched, and deletes only the data row. The metadata row stays
+behind without a data row: the tombstone. ScalarDB's stale update now finds that a metadata row exists
+with another `tx_id`, its "insert if none exists" or its `tx_id` condition fails, and it aborts, as
+first-committer-wins requires. Every deleted row keeps one, not only a row without metadata at the
+time of the DELETE: a ScalarDB transaction may have read the row before an earlier driver write gave
+it metadata, and a deleted metadata row would answer its "insert if none exists" (todo 132). On a
+created table a DELETE removes the metadata row with the data row: ScalarDB always wrote metadata
+there, so no transaction can hold a NULL anchor for it.
 
 **What the rows look like**, for key 42 on an imported table `T(id, x)`:
 
@@ -1205,9 +1210,8 @@ same thing, and ScalarDB tolerates it for the reasons above. The tombstone creat
 **The driver's side.** The driver's own INSERT of the key must expect the tombstone: its data insert
 succeeds, its metadata insert collides, and the collision means "reuse this row", so the driver updates
 the tombstone in place with the new write's stamp through the CAS of 4.3 instead of reporting a
-duplicate key (4.3, INSERT). The case arises only on imported tables and only for rows the backfill has
-not reached; once every row has a real `tx_id`, a deleted row's metadata row is deleted with it, because
-ScalarDB's condition for such a row is `tx_id = <value>`, which a missing row fails on its own.
+duplicate key (4.3, INSERT). The case arises only on imported tables, where every driver DELETE leaves
+a tombstone; the cost is one metadata row per deleted key until the key is inserted again.
 
 ### 4.6 ORM compatibility
 

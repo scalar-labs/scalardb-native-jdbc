@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "134"
 tags: [code-review, correctness, writes, interleaving]
@@ -29,9 +29,11 @@ when the version moved.
 
 ## Recommended Action
 
+Option 1.
+
 ## Acceptance Criteria
 
-- [ ] The probe's interleaving aborts with 40001 (or writes the row), never returns 0.
+- [x] The probe's interleaving aborts with 40001 (or writes the row), never returns 0.
 
 ## Work Log
 
@@ -39,3 +41,8 @@ when the version moved.
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - Fixed
+
+**By:** Claude Code
+- skipOrAbort reads the key's metadata again from the data row; at the anchored version (same tx_id and version) a zero-row DML aborts with 40001, only a moved version skips. Test "134" (prepare and rollback around the per-key UPDATE, widened with a sleeping predicate).
