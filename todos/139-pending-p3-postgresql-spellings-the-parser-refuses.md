@@ -30,7 +30,8 @@ its first tokens; the write spellings when an application needs them.
 
 ## Acceptance Criteria
 
-- [ ] `SET search_path TO x` runs and marks the session changed.
+- [x] `SET search_path TO x` runs and marks the session changed.
+- [ ] The write spellings, when an application needs them.
 
 ## Work Log
 
@@ -38,3 +39,10 @@ its first tokens; the write spellings when an application needs them.
 
 **By:** Claude Code
 - From the review of cd135be (milestone 4a).
+
+### 2026-10-14 - SET ... TO
+
+**By:** Claude Code
+- On PostgreSQL, `SqlAst.analyze` reads `SET [SESSION | LOCAL] name TO value` as `SET name = value`
+  (the two characters swapped in place, every offset kept); SqlAstTest and RoutingIntegrationTest
+  cover it. The write spellings stay open; they are refused safely.

@@ -33,8 +33,8 @@ Option 1.
 ## Acceptance Criteria
 
 - [x] The NULL-state row is written (WriteIntegrationTest "138").
-- [ ] A TIMESTAMP key in a DST gap is written: fixed by reading `LocalDateTime`, not tested (the JVM
-      zone would have to have DST).
+- [x] A TIMESTAMP key in a DST gap is written (WriteIntegrationTest "138", the JVM zone set to
+      America/New_York around the write).
 
 ## Work Log
 
@@ -47,3 +47,8 @@ Option 1.
 
 **By:** Claude Code
 - Both CAS forms use COALESCE(tx_state, 3) = 3; TIMESTAMP, TIME and TIMESTAMP WITH TIME ZONE keys are read as LocalDateTime, LocalTime, OffsetDateTime. Test "138" for the NULL state; the DST case is not tested (needs the JVM zone).
+
+### 2026-10-14 - DST case tested
+
+**By:** Claude Code
+- The test switches the JVM's default zone around one write of a key at 2020-03-08 02:30.

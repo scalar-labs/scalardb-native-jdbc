@@ -372,6 +372,8 @@ class WriteIntegrationTest {
               + " (85, 'a', NULL)",
           "CREATE TABLE rf.ch (k CHAR(4) PRIMARY KEY, x TEXT)",
           "INSERT INTO rf.ch VALUES ('ab', 'a')",
+          "CREATE TABLE rf.ts (k TIMESTAMP PRIMARY KEY, x TEXT)",
+          "INSERT INTO rf.ts VALUES ('2020-03-08 02:30:00', 'a')",
           "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN AS $$ BEGIN PERFORM pg_sleep(3);"
               + " RETURN v = 'a'; END $$ LANGUAGE plpgsql VOLATILE");
     }
@@ -383,6 +385,7 @@ class WriteIntegrationTest {
       admin.importTable("rsd", "t", DECOUPLED, Map.of());
       admin.importTable("rf", "imp", DECOUPLED, Map.of());
       admin.importTable("rf", "ch", DECOUPLED, Map.of());
+      admin.importTable("rf", "ts", DECOUPLED, Map.of());
     }
     Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     try (Connection c = e.open()) {
@@ -526,6 +529,15 @@ class WriteIntegrationTest {
       e.execute(v, "UPDATE " + t.meta + " SET tx_state = NULL WHERE id = 80");
       assertThat(d.createStatement().executeUpdate("UPDATE rf.imp SET x = 'n' WHERE id = 80"))
           .isEqualTo(1);
+    }
+    // 138: a TIMESTAMP key in the JVM zone's spring-forward gap binds back unchanged
+    java.util.TimeZone zone = java.util.TimeZone.getDefault();
+    java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("America/New_York"));
+    try (Connection d = e.openDriver()) {
+      assertThat(d.createStatement().executeUpdate("UPDATE rf.ts SET x = 'z' WHERE x = 'a'"))
+          .isEqualTo(1);
+    } finally {
+      java.util.TimeZone.setDefault(zone);
     }
     // 134: a prepare and rollback around the per-key UPDATE abort it, never skip the row
     try (TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();

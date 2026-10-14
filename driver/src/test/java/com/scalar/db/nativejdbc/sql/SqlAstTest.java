@@ -417,6 +417,23 @@ class SqlAstTest {
   }
 
   @Test
+  void setTo_isTheSessionStatementItSpells_onPostgresql() {
+    for (String sql :
+        List.of(
+            "SET search_path TO app, public",
+            "set SESSION search_path to \"App\"",
+            "/* c */ SET LOCAL statement_timeout TO '5s'",
+            "SET my.var TO DEFAULT")) {
+      SqlAst ast = SqlAst.analyze(sql, Engine.POSTGRESQL, true).get();
+      assertThat(ast.kind()).as(sql).isEqualTo(SqlAst.Kind.SESSION);
+      assertThat(ast.source()).as(sql).hasSameSizeAs(sql);
+    }
+    // only the statement's own TO
+    assertThat(SqlAst.setToAsEquals("SELECT 'SET a TO b'")).isEqualTo("SELECT 'SET a TO b'");
+    assertThat(SqlAst.setToAsEquals("SET a = 'TO b'")).isEqualTo("SET a = 'TO b'");
+  }
+
+  @Test
   void transactionControl_hasItsOwnKinds() {
     assertThat(parse("COMMIT").kind()).isEqualTo(SqlAst.Kind.COMMIT);
     assertThat(parse("ROLLBACK").kind()).isEqualTo(SqlAst.Kind.ROLLBACK);

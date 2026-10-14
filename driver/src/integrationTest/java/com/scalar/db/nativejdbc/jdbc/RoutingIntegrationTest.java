@@ -221,7 +221,7 @@ class RoutingIntegrationTest {
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM s")) {
         assertThat(rs.next()).isTrue(); // the plain m1plain.s
       }
-      st.execute("SET search_path = m1");
+      st.execute("SET search_path TO m1"); // the spelling with TO too (todo 139)
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
       c.setSchema("m1plain");
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM s")) {
@@ -229,7 +229,7 @@ class RoutingIntegrationTest {
       }
       // a SET inside a transaction that is rolled back is undone, and so is the driver's view
       c.setAutoCommit(false);
-      st.execute("SET LOCAL search_path = m1");
+      st.execute("SET LOCAL search_path TO m1");
       assertThat(outcome(() -> st.executeQuery("SELECT x FROM s"))).isEqualTo("read scalardb");
       c.rollback();
       c.setAutoCommit(true);

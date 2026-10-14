@@ -20,6 +20,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.AnalyticExpression;
 import net.sf.jsqlparser.expression.ConnectByRootOperator;
@@ -282,17 +284,31 @@ public final class SqlAst {
             return t;
           });
 
+  // SET [SESSION | LOCAL] name TO value, which PostgreSQL also spells with = and the parser only so
+  private static final Pattern SET_TO =
+      Pattern.compile(
+          "^(?:\\s|/\\*.*?\\*/|--[^\\n]*\\n)*SET\\s+(?:(?:SESSION|LOCAL)\\s+)?"
+              + "(?:\"[^\"]*\"|[\\w.$]+)\\s+(TO)(?=[\\s'\"]|$)",
+          Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+  /** PostgreSQL's {@code SET name TO value} as {@code SET name = value}, every offset kept. */
+  static String setToAsEquals(String sql) {
+    Matcher m = SET_TO.matcher(sql);
+    return m.find() ? sql.substring(0, m.start(1)) + "= " + sql.substring(m.end(1)) : sql;
+  }
+
   /**
    * Parses one statement as {@link #parse(String, Engine, boolean)} does, and says why when it
    * refuses it.
    *
-   * @param sql the statement
+   * @param text the statement
    * @param engine the engine whose identifier rules apply
    * @param doubleQuotesQuoteIdentifiers whether {@code "x"} quotes an identifier in the session
    * @return the AST, or the reason it was refused
    */
   public static Outcome<SqlAst> analyze(
-      String sql, Engine engine, boolean doubleQuotesQuoteIdentifiers) {
+      String text, Engine engine, boolean doubleQuotesQuoteIdentifiers) {
+    String sql = engine == Engine.POSTGRESQL ? setToAsEquals(text) : text;
     Statement stmt;
     try {
       // parseStatements, not parse: the latter silently keeps only the first of "a; b"
