@@ -47,6 +47,53 @@ The zip bundles the PostgreSQL, MariaDB (also used for MySQL), SQL Server and Or
 Java 11 or later. `BEGIN`, `COMMIT` and `ROLLBACK` work as in psql, `\dt` marks ScalarDB tables, and
 `\?` lists the commands.
 
+## Getting started
+
+The driver serves ScalarDB tables in the decoupled layout: created, or imported, with
+`transaction-metadata-decoupling` set to `true`. ScalarDB itself needs
+`scalar.db.jdbc.isolation_level=REPEATABLE_READ` (or `SERIALIZABLE`) to create or import them.
+
+Before the driver serves a table, an operator with DDL privileges runs the setup once. It creates the
+in-flight index and the read view, and on an imported table writes the row metadata ScalarDB has not.
+It is re-runnable, and is run again after a table is added:
+
+```java
+String url = "jdbc:postgresql://host:5432/db";
+try (Connection c = DriverManager.getConnection(url, "admin", password)) {
+  Catalog catalog = new Catalog(Engine.POSTGRESQL, Catalog.DEFAULT_METADATA_SCHEMA,
+      () -> DriverManager.getConnection(url, "admin", password));
+  for (Setup.Result r : Setup.run(catalog, c)) {
+    System.out.println(r);
+  }
+}
+```
+
+`Catalog`, `Engine` and `Setup` are in `com.scalar.db.nativejdbc.catalog`, `.engine` and `.setup`.
+`Setup.run(catalog, c, which, backfillWait, grantees)` chooses the tables, and grants SELECT on the
+read views to the application's users. The application then needs the driver jar, JSQLParser 5.4,
+slf4j-api and its vendor driver on the classpath, and connects with `jdbc:scalardb-native:postgresql:...`.
+
+## Preview scope (3.19.0-alpha.1)
+
+Certified: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line.
+
+- Reads of ScalarDB tables work on all five engines; writes run on PostgreSQL only. Any other isolation
+  level, and ScalarDB's classic layout, are refused with SQLState `0AN01`.
+- A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
+  `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
+- A write that would lose an update, against a ScalarDB transaction or another driver transaction,
+  fails with `40001` and leaves the transaction rollback-only: roll back and retry it. A query
+  timeout or a cancel during a write does the same.
+- A transaction checks, when it writes a row, that the row is unchanged since it read it. Rows
+  returned through a RIGHT or FULL JOIN, a derived table, a CTE or a UNION are read committed, but are
+  not checked this way.
+- A statement on a ScalarDB table that the driver cannot parse or rewrite is refused with `0AN01`, not
+  run as written. A read-only connection cannot write ScalarDB tables (`25006`).
+- A statement text the connection has seen costs the driver a few microseconds; a new text costs
+  about 0.1 ms, and 0.6-0.8 ms on PostgreSQL, which also asks the server for its plan
+  (docs/benchmarks/read-overhead.md).
+- Not on Maven Central during the preview: the jar is attached to the GitHub release.
+
 ## Compatibility
 
 | Driver version | ScalarDB line | Engines |

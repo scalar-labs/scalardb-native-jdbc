@@ -25,6 +25,18 @@ mavenPublishing {
     }
 }
 
+// A bug report can name the build from the jar; the module name stays as the package's when the
+// driver is on the module path.
+tasks.jar {
+    manifest {
+        attributes(
+            "Implementation-Title" to "ScalarDB Native JDBC",
+            "Implementation-Version" to project.version.toString(),
+            "Automatic-Module-Name" to "com.scalar.db.nativejdbc",
+        )
+    }
+}
+
 dependencies {
     implementation(libs.jsqlparser)
     implementation(libs.slf4j.api)
