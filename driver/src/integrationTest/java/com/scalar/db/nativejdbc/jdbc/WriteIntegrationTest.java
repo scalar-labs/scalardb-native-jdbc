@@ -839,6 +839,18 @@ class WriteIntegrationTest {
         assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
         d.setReadOnly(false);
       }
+      // one that cannot be prepared again, since the application unwrapped it, is refused rather
+      // than read without anchors
+      d.setAutoCommit(true);
+      try (PreparedStatement ps = d.prepareStatement(join + "?")) {
+        ps.unwrap(Class.forName("org.postgresql.PGStatement")); // the vendor statement
+        d.setAutoCommit(false);
+        ps.setInt(1, 7);
+        assertThatThrownBy(ps::executeQuery)
+            .isInstanceOf(SQLException.class)
+            .hasMessageContaining("prepare it again");
+        d.rollback();
+      }
       // the application's columns only
       try (ResultSet rs = d.createStatement().executeQuery(join + "1")) {
         assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);

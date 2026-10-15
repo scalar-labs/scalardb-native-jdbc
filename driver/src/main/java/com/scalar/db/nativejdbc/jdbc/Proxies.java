@@ -636,6 +636,11 @@ public final class Proxies {
           }
           if (canPrepareAgain(prepared, route)) {
             prepareAgain(route);
+          } else if (route.anchored != null && prepared.anchored == null) {
+            // the old text reads no versions: its rows would anchor nothing, silently
+            throw Errors.unsupported(
+                "the statement was prepared outside a transaction and cannot be prepared again"
+                    + " here, where its reads anchor the writes that follow; prepare it again");
           } else {
             // the old form returns the same rows; checked again after the new route's interval
             route = Router.keepText(prepared, route);
