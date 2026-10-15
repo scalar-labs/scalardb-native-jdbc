@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "154"
 tags: [code-review, correctness, jdbc, writes]
@@ -35,7 +35,7 @@ Refuse items with placeholders, schema-qualified columns or function calls.
 
 ## Acceptance Criteria
 
-- [ ] The three forms return what native PostgreSQL returns, or are refused with 0AN01.
+- [x] The three forms return what native PostgreSQL returns, or are refused with 0AN01.
 
 ## Work Log
 
@@ -43,3 +43,8 @@ Refuse items with placeholders, schema-qualified columns or function calls.
 
 **By:** Claude Code
 - From the review of d7be4f0 (milestone 4c).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- The statement's own RETURNING rows are its result as the database returned them (a scrollable statement), the appended keys hidden; the re-read serves generated keys only. Test: a placeholder and a table-qualified column in RETURNING.

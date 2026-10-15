@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "149"
 tags: [code-review, correctness, jdbc, locking]
@@ -35,7 +35,7 @@ statement's snapshot updates T, so EPQ and the post-lock check cover it.
 
 ## Acceptance Criteria
 
-- [ ] A deterministic test: the row goes in flight between the check and the lock; the read waits or aborts, never returns nothing.
+- [x] A deterministic test: the row goes in flight between the check and the lock; the read waits or aborts, never returns nothing.
 
 ## Work Log
 
@@ -43,3 +43,8 @@ statement's snapshot updates T, so EPQ and the post-lock check cover it.
 
 **By:** Claude Code
 - From the review of cdfc58a (milestone 4c).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- LockPlan checks the rows in flight again after the lock statement; a match releases the attempt's locks (savepoint) and waits or aborts. Test: a pausing predicate opens the window, a ScalarDB prepare lands in it, the read aborts (it returned nothing before).

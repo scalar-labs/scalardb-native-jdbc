@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "148"
 tags: [code-review, correctness, jdbc, writes]
@@ -34,7 +34,7 @@ Choose by `getColumnTypeName(c)`: `timestamptz` -> OffsetDateTime, `timestamp` -
 
 ## Acceptance Criteria
 
-- [ ] INSERT, UPDATE, DELETE, an anchored read and a locking read of a TIMESTAMPTZ-keyed table succeed (integration test).
+- [x] INSERT, UPDATE, DELETE, an anchored read and a locking read of a TIMESTAMPTZ-keyed table succeed (integration test).
 
 ## Work Log
 
@@ -42,3 +42,8 @@ Choose by `getColumnTypeName(c)`: `timestamptz` -> OffsetDateTime, `timestamp` -
 
 **By:** Claude Code
 - From the review of d7be4f0 and f56c8d1 (milestone 4c).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- readKey picks the type by the column's type name: timestamptz as OffsetDateTime, timetz as OffsetTime. Test: a TIMESTAMPTZ-keyed imported table, INSERT (now() and a literal), UPDATE, a locking read, an anchored read and a DELETE.

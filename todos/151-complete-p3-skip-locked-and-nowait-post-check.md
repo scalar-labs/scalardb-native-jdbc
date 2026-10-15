@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "151"
 tags: [code-review, correctness, jdbc, locking]
@@ -31,7 +31,7 @@ filtered rather than the scrollable result as is. Under NOWAIT throw 55P03.
 
 ## Acceptance Criteria
 
-- [ ] Under SKIP LOCKED a row prepared after the snapshot is skipped, the transaction usable; under NOWAIT the error is 55P03.
+- [x] Under SKIP LOCKED a row prepared after the snapshot is skipped, the transaction usable; under NOWAIT the error is 55P03.
 
 ## Work Log
 
@@ -39,3 +39,8 @@ filtered rather than the scrollable result as is. Under NOWAIT throw 55P03.
 
 **By:** Claude Code
 - From the review of cdfc58a (milestone 4c).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- A row found in flight under the lock rolls the attempt back to its savepoint and reads again: at once under SKIP LOCKED, which then skips it; 55P03 under NOWAIT. Test: the queue read with a prepare landing after its snapshot returns the next row.

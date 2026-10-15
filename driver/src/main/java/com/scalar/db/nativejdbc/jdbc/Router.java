@@ -32,6 +32,7 @@ import java.util.TreeSet;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.statement.select.ForMode;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -214,14 +215,22 @@ final class Router {
     /** The number of key columns. */
     final int keys;
 
+    private final int hidden;
+
     Anchored(String table, int keys) {
+      this(table, keys, keys + 2);
+    }
+
+    /** Columns the driver appended that are hidden only, not recorded: {@code hidden} of them. */
+    Anchored(String table, int keys, int hidden) {
       this.table = table;
       this.keys = keys;
+      this.hidden = hidden;
     }
 
     /** The hidden trailing columns: the key's, then {@code tx_id} and {@code tx_version}. */
     int hidden() {
-      return keys + 2;
+      return hidden;
     }
   }
 
@@ -522,7 +531,7 @@ final class Router {
     return scalarDb.containsKey(ref) ? ref : null;
   }
 
-  private static String exposed(SqlAst.TableRef ref) {
+  static String exposed(SqlAst.TableRef ref) {
     return ref.hasAlias() ? Objects.requireNonNull(ref.alias()) : ref.name();
   }
 
@@ -580,6 +589,11 @@ final class Router {
               + tables);
     }
     StatementShape shape = StatementShape.of(ast).orElseThrow();
+    if (shape.lockMode() == ForMode.KEY_SHARE) {
+      // a ScalarDB prepare writes the row with a non-key UPDATE, which KEY SHARE does not block
+      throw Errors.unsupported(
+          "FOR KEY SHARE does not hold off ScalarDB's writes; use FOR SHARE" + tables);
+    }
     for (SqlAst.ColumnRef c : ast.columnRefs()) {
       SqlAst.TableRef q = c.qualifier();
       if (q != null && q.schema() != null) {
@@ -621,26 +635,25 @@ final class Router {
         new Writes.LockPlan(
             n, new Writes.Step(text.sql(), text.parameterSources()), inFlight, shape.noWait());
     return new Route(
-            sql,
-            sql,
-            false,
-            false,
-            false,
-            SqlAst.Kind.SELECT,
-            isolation,
-            session.generation(),
-            catalog.generation(),
-            catalog.trustedUntil(),
-            null,
-            ast.parameterCount(),
-            0,
-            false,
-            List.of(),
-            false,
-            false,
-            plan,
-            null)
-        .anchored(new Anchored(n.table, n.keyColumns.size()));
+        sql,
+        sql,
+        false,
+        false,
+        false,
+        SqlAst.Kind.SELECT,
+        isolation,
+        session.generation(),
+        catalog.generation(),
+        catalog.trustedUntil(),
+        null,
+        ast.parameterCount(),
+        0,
+        false,
+        List.of(),
+        false,
+        false,
+        plan,
+        null);
   }
 
   /** The version lookups' alias for the metadata table, which an anchored read must not use. */

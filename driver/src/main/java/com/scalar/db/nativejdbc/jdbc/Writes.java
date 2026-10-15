@@ -9,6 +9,7 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLTimeoutException;
 import java.sql.SQLTransactionRollbackException;
@@ -19,9 +20,11 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.OffsetTime;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import net.sf.jsqlparser.expression.Expression;
@@ -52,23 +55,26 @@ final class Writes {
     /** How long the key read waits for a row in flight to settle, zero to abort at once (6). */
     Duration inflightWait();
 
+    /** Whether the application cancelled the statement, which a wait between statements checks. */
+    boolean cancelled();
+
     /** The driver statement now running, which {@code cancel()} reaches; null when done. */
     void running(@Nullable Statement s);
-
-    /** Marks the application's transaction rollback-only after an abort (4.4). */
-    void rollbackOnly();
 
     /** The versions the transaction read, the anchors of its writes (4.2). */
     Anchors anchors();
 
-    /** Records a key an INSERT wrote, in its data table's spelling, for {@link #returned}. */
-    void inserted(Object[] key);
+    /** Records the version a locking read found under its lock, as a read in the transaction. */
+    void anchor(String table, Object[] key, Anchors.Version version);
+
+    /** Records the keys an INSERT wrote, for {@link #returned}. */
+    void inserted(Keys keys);
 
     /**
-     * Hands over a locking read's rows, its statement closed with them, and the version of each row
-     * it locked, read under the lock.
+     * Hands over the statement's rows, their statement closed with them, the last {@code hidden}
+     * columns the driver's own.
      */
-    void locked(ResultSet rows, List<Object[]> keys, List<Anchors.Version> versions);
+    void rows(ResultSet rows, int hidden);
   }
 
   /** An abort the driver decides (4.4). */
@@ -102,11 +108,6 @@ final class Writes {
     /** The items of the statement's own {@code RETURNING} clause, or null without one. */
     @Nullable String returning() {
       return null;
-    }
-
-    /** Whether it is an INSERT, whose rows {@link #returned} reads back. */
-    boolean inserts() {
-      return false;
     }
 
     /** Whether the statement's result is rows: its own {@code RETURNING}, or a locking read's. */
@@ -175,7 +176,7 @@ final class Writes {
       }
     }
     SqlAst.TableRef ref = shape.table();
-    String exposed = ref.hasAlias() ? Objects.requireNonNull(ref.alias()) : ref.name();
+    String exposed = Router.exposed(ref);
     // the keys and their metadata, the committed images as a read at this level sees them: the
     // data table's key, the metadata table's own (CHAR(n) is varchar there), and the anchor
     List<String> picked = new ArrayList<>();
@@ -289,12 +290,7 @@ final class Writes {
               matchBinds);
     }
     SqlAst.TableRef ref = shape.table();
-    return new InsertPlan(
-        n,
-        new Step(insert, all),
-        inFlight,
-        returning,
-        ref.hasAlias() ? Objects.requireNonNull(ref.alias()) : ref.name());
+    return new InsertPlan(n, new Step(insert, all), inFlight, returning, Router.exposed(ref));
   }
 
   /**
@@ -327,23 +323,6 @@ final class Writes {
     void run() throws SQLException;
   }
 
-  /**
-   * Runs a write: in a transaction of its own in autocommit mode (4.4), otherwise in the
-   * application's, which a driver-decided abort marks rollback-only.
-   *
-   * @param vendor the vendor connection
-   * @param plan the plan
-   * @param context the statement that runs it
-   * @return the update count
-   * @throws SQLException a database error, a timeout, or {@code 40001} for an abort the driver
-   *     decides
-   */
-  static long run(Connection vendor, Plan plan, Context context) throws SQLException {
-    long[] count = {0};
-    within(vendor, context, () -> count[0] = apply(vendor, plan, context));
-    return count[0];
-  }
-
   /** Applies a plan in the transaction {@link #within} keeps. */
   static long apply(Connection vendor, Plan plan, Context context) throws SQLException {
     try {
@@ -354,12 +333,18 @@ final class Writes {
   }
 
   /**
-   * Runs writes, a batch of them or one, as {@link #run} runs one: in a transaction of their own in
-   * autocommit mode, all or none.
+   * Runs writes, one or a batch: in a transaction of their own in autocommit mode (4.4), all or
+   * none; otherwise in the application's, which a driver-decided abort marks rollback-only.
+   *
+   * @param vendor the vendor connection
+   * @param rollbackOnly marks the application's transaction rollback-only
+   * @param work the writes
+   * @throws SQLException a database error, a timeout, or {@code 40001} for an abort the driver
+   *     decides
    */
   // ponytail: autocommit is off on the vendor connection while the write runs; another thread
   // sharing the connection then joins its transaction, as with any JDBC transaction
-  static void within(Connection vendor, Context context, Work work) throws SQLException {
+  static void within(Connection vendor, Runnable rollbackOnly, Work work) throws SQLException {
     boolean auto = vendor.getAutoCommit();
     if (auto) {
       vendor.setAutoCommit(false);
@@ -378,7 +363,7 @@ final class Writes {
           e.addSuppressed(r); // the write's own failure is the one to report
         }
       } else if (e instanceof Aborted) {
-        context.rollbackOnly();
+        rollbackOnly.run();
       }
       throw e;
     }
@@ -407,8 +392,36 @@ final class Writes {
       return prepare(sql, false);
     }
 
+    /** Ends the statement when the application cancelled it or its timeout passed. */
+    void checkCancelled() throws SQLException {
+      if (context.cancelled()) {
+        throw new SQLException("the statement was cancelled", "57014");
+      }
+      if (deadline != 0 && deadline - System.nanoTime() <= 0) {
+        throw new SQLTimeoutException("the statement's query timeout passed", "57014");
+      }
+    }
+
+    /**
+     * Waits the poll interval of the bounded wait (section 6), or aborts once {@code until} has
+     * passed.
+     */
+    void sleep(long until, String reason) throws SQLException {
+      if (System.nanoTime() - until >= 0) {
+        throw new Aborted(reason);
+      }
+      try {
+        Thread.sleep(20);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new Aborted("the wait for a row in flight was interrupted");
+      }
+      checkCancelled();
+    }
+
     /** As {@link #prepare(String)}; a scrollable one's rows can be read twice. */
     PreparedStatement prepare(String sql, boolean scrollable) throws SQLException {
+      checkCancelled();
       PreparedStatement ps =
           scrollable
               ? v.prepareStatement(
@@ -435,7 +448,7 @@ final class Writes {
       return prepare(step, key, false);
     }
 
-    private PreparedStatement prepare(Step step, Object @Nullable [] key, boolean scrollable)
+    PreparedStatement prepare(Step step, Object @Nullable [] key, boolean scrollable)
         throws SQLException {
       PreparedStatement ps = prepare(step.sql, scrollable);
       try {
@@ -470,6 +483,56 @@ final class Writes {
     return i;
   }
 
+  private static int bindAll(PreparedStatement ps, int from, List<Object[]> keys)
+      throws SQLException {
+    int i = from;
+    for (Object[] key : keys) {
+      i = bind(ps, i, key);
+    }
+    return i;
+  }
+
+  /** At most this many keys are bound in one statement, under PostgreSQL's 65,535 parameters. */
+  private static final int CHUNK = 1000;
+
+  /** Keys read from a result set, and the types of their columns to cast them back to (150). */
+  static final class Keys {
+    final List<Object[]> rows = new ArrayList<>();
+    final List<String> types = new ArrayList<>();
+
+    /** Reads the key starting at column {@code from}, its types with the first. */
+    void read(ResultSet rs, int from, int width) throws SQLException {
+      if (types.isEmpty()) {
+        ResultSetMetaData md = rs.getMetaData();
+        for (int i = 0; i < width; i++) {
+          types.add(castable(md.getColumnTypeName(from + i)));
+        }
+      }
+      rows.add(Objects.requireNonNull(readKey(rs, from, width)));
+    }
+
+    /** A type name PostgreSQL's driver reports, as a cast takes it: serial is int4's default. */
+    private static String castable(String type) {
+      switch (type) {
+        case "serial":
+          return "int4";
+        case "bigserial":
+          return "int8";
+        case "smallserial":
+          return "int2";
+        default:
+          return type;
+      }
+    }
+
+    void addAll(Keys other) {
+      if (types.isEmpty()) {
+        types.addAll(other.types);
+      }
+      rows.addAll(other.rows);
+    }
+  }
+
   /** One key of an UPDATE or DELETE, and the metadata step 1 read for it. */
   private static final class Row {
     final Object[] key; // the data table's
@@ -501,9 +564,20 @@ final class Writes {
   /** Reads a key value so that it binds back unchanged: a local time is not shifted by the zone. */
   static Object @Nullable [] readKey(ResultSet rs, int from, int width) throws SQLException {
     Object[] key = new Object[width];
+    ResultSetMetaData md = rs.getMetaData();
     for (int i = 0; i < width; i++) {
       int c = from + i;
-      switch (rs.getMetaData().getColumnType(c)) {
+      // PostgreSQL's driver reports timestamptz as TIMESTAMP and timetz as TIME (todo 148)
+      String name = md.getColumnTypeName(c);
+      if ("timestamptz".equalsIgnoreCase(name)) {
+        key[i] = rs.getObject(c, OffsetDateTime.class);
+        continue;
+      }
+      if ("timetz".equalsIgnoreCase(name)) {
+        key[i] = rs.getObject(c, OffsetTime.class);
+        continue;
+      }
+      switch (md.getColumnType(c)) {
         case Types.TIMESTAMP:
           key[i] = rs.getObject(c, LocalDateTime.class);
           break;
@@ -548,7 +622,8 @@ final class Writes {
 
     @Override
     long apply(Run run) throws SQLException {
-      List<Row> rows = settledKeys(run);
+      List<String> types = new ArrayList<>();
+      List<Row> rows = settledKeys(run, types);
       // first-updater-wins (4.3 step 1): a key this transaction read must still be at that version
       Anchors anchors = run.context.anchors();
       for (Row row : rows) {
@@ -562,7 +637,7 @@ final class Writes {
           // the tombstone needs the key as the metadata table spells it, from the data row
           // ponytail: written before the DELETE, metadata before data; a ScalarDB prepare of this
           // never-backfilled row at the same moment can deadlock, which the database breaks
-          if (stampFromData(run, n, List.<Object[]>of(row.key)) != 1) {
+          if (stampFromData(run, n, one(row.key, types)) != 1) {
             throw new Aborted("a row the statement writes was given metadata after it was read");
           }
           anchors.wrote(run.txId); // the stamp stays if the DELETE then matches nothing
@@ -578,7 +653,7 @@ final class Writes {
         if (written != 1) {
           throw new Aborted("a key matched " + written + " rows");
         }
-        if (!(delete && row.metaKey == null) && cas(run, row) != 1) {
+        if (!(delete && row.metaKey == null) && cas(run, row, types) != 1) {
           throw new Aborted("a row the statement writes changed after it was read");
         }
         anchors.wrote(run.txId);
@@ -594,7 +669,7 @@ final class Writes {
      */
     // ponytail: polls the whole key read every 20 ms; a per-key poll of T_meta if a wait on a
     // large predicate measures heavy
-    private List<Row> settledKeys(Run run) throws SQLException {
+    private List<Row> settledKeys(Run run, List<String> types) throws SQLException {
       int width = n.keyColumns.size();
       long until = System.nanoTime() + run.context.inflightWait().toNanos();
       while (true) {
@@ -602,6 +677,11 @@ final class Writes {
         boolean held = false;
         try (PreparedStatement ps = run.prepare(keys, null);
             ResultSet rs = ps.executeQuery()) {
+          if (types.isEmpty()) {
+            for (int i = 1; i <= width; i++) {
+              types.add(Keys.castable(rs.getMetaData().getColumnTypeName(i)));
+            }
+          }
           while (rs.next()) {
             held |= inFlight(rs.getObject(2 * width + 3));
             rows.add(
@@ -615,11 +695,7 @@ final class Writes {
         if (!held) {
           return rows;
         }
-        if (System.nanoTime() - until >= 0) {
-          throw new Aborted(
-              "a row the statement writes is being written by a ScalarDB transaction");
-        }
-        sleep();
+        run.sleep(until, "a row the statement writes is being written by a ScalarDB transaction");
       }
     }
 
@@ -629,24 +705,7 @@ final class Writes {
      */
     private void skipOrAbort(Run run, Row row) throws SQLException {
       int width = n.keyColumns.size();
-      try (PreparedStatement ps =
-          run.prepare(
-              "SELECT "
-                  + n.columns("m")
-                  + ", m."
-                  + n.txId
-                  + ", m."
-                  + n.txVersion
-                  + ", m."
-                  + n.txState
-                  + " FROM "
-                  + n.data
-                  + " d LEFT JOIN "
-                  + n.meta
-                  + " m ON "
-                  + n.keyJoin("m", "d")
-                  + " WHERE "
-                  + n.keyEquals("d"))) {
+      try (PreparedStatement ps = run.prepare(n.withMeta("m", n.keyEquals("d")))) {
         bind(ps, 1, row.key);
         try (ResultSet rs = ps.executeQuery()) {
           if (!rs.next()) {
@@ -669,10 +728,10 @@ final class Writes {
      * Step 3: the CAS on the key's metadata (4.3), the stamp of a row without (4.4); on an imported
      * table a DELETE keeps the metadata row as a tombstone (4.5).
      */
-    private int cas(Run run, Row row) throws SQLException {
+    private int cas(Run run, Row row, List<String> types) throws SQLException {
       Object[] metaKey = row.metaKey;
       if (metaKey == null) {
-        return stampFromData(run, n, List.<Object[]>of(row.key));
+        return stampFromData(run, n, one(row.key, types));
       }
       String keyed = n.keyEquals("") + " AND " + n.committed();
       if (row.txId == null) {
@@ -705,31 +764,42 @@ final class Writes {
     }
   }
 
+  /** One key as {@link Keys}. */
+  private static Keys one(Object[] key, List<String> types) {
+    Keys k = new Keys();
+    k.types.addAll(types);
+    k.rows.add(key);
+    return k;
+  }
+
   /**
    * The stamp of keys without a metadata row, each key copied from its data row: the metadata table
    * spells some types otherwise (CHAR(n) is varchar there).
    */
-  private static int stampFromData(Run run, Names n, List<Object[]> keys) throws SQLException {
-    try (PreparedStatement ps =
-        run.prepare(
-            n.insertStamp(
-                "SELECT "
-                    + n.columns("d")
-                    + ", ?, 3, 1, ?, ? FROM "
-                    + n.data
-                    + " d WHERE "
-                    + n.anyKey("d", keys.size())))) {
-      int i = run.stamp(ps, 1);
-      for (Object[] key : keys) {
-        i = bind(ps, i, key);
+  private static int stampFromData(Run run, Names n, Keys keys) throws SQLException {
+    int stamped = 0;
+    for (int from = 0; from < keys.rows.size(); from += CHUNK) {
+      List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
+      try (PreparedStatement ps =
+          run.prepare(
+              n.insertStamp(
+                  "SELECT "
+                      + n.columns("d")
+                      + ", ?, 3, 1, ?, ? FROM "
+                      + n.data
+                      + " d WHERE "
+                      + n.keyIn("d", keys.types, chunk.size())))) {
+        bindAll(ps, run.stamp(ps, 1), chunk);
+        stamped += ps.executeUpdate();
       }
-      return ps.executeUpdate();
     }
+    return stamped;
   }
 
   /**
    * INSERT (4.3): the user's statement, which returns the keys it wrote, then their metadata rows,
-   * taking over orphans (4.5).
+   * taking over orphans (4.5). With its own {@code RETURNING}, its rows are the statement's result,
+   * the appended keys hidden.
    */
   private static final class InsertPlan extends Plan {
     final Step insert;
@@ -752,44 +822,46 @@ final class Writes {
     }
 
     @Override
-    boolean inserts() {
-      return true;
-    }
-
-    @Override
     List<String> sql() {
       return inFlight == null ? List.of(insert.sql) : List.of(insert.sql, inFlight.sql);
     }
 
+    @SuppressFBWarnings(
+        value = "OBL_UNSATISFIED_OBLIGATION",
+        justification = "the rows are handed to the application, closed with their statement")
     @Override
     long apply(Run run) throws SQLException {
       int width = n.keyColumns.size();
-      List<Object[]> keys = new ArrayList<>();
+      Keys keys = new Keys();
+      PreparedStatement ps = null;
+      ResultSet rs;
       Savepoint sp = run.v.setSavepoint();
       try {
-        try (PreparedStatement ps = run.prepare(insert, null);
-            ResultSet rs = ps.executeQuery()) {
-          int from = rs.getMetaData().getColumnCount() - width + 1;
-          while (rs.next()) {
-            keys.add(Objects.requireNonNull(readKey(rs, from, width)));
-          }
-        } catch (SQLException e) {
-          if (!"23505".equals(e.getSQLState()) || inFlight == null) {
-            throw e;
-          }
-          // the transaction goes on, as on the engines where a failed statement does not end it
-          run.v.rollback(sp);
-          try (PreparedStatement ps = run.prepare(inFlight, null);
-              ResultSet rs = ps.executeQuery()) {
-            rs.next();
-            if (rs.getLong(1) > 0) {
-              Aborted a = new Aborted("a key the statement inserts is being written by ScalarDB");
-              a.addSuppressed(e);
-              throw a;
-            }
-          }
-          throw e; // the application's duplicate
+        ps = run.prepare(insert, null, returning != null);
+        rs = ps.executeQuery();
+        int from = rs.getMetaData().getColumnCount() - width + 1;
+        while (rs.next()) {
+          keys.read(rs, from, width);
         }
+      } catch (SQLException e) {
+        if (ps != null) {
+          ps.close();
+        }
+        if (!"23505".equals(e.getSQLState()) || inFlight == null) {
+          throw e;
+        }
+        // the transaction goes on, as on the engines where a failed statement does not end it
+        run.v.rollback(sp);
+        try (PreparedStatement check = run.prepare(inFlight, null);
+            ResultSet r = check.executeQuery()) {
+          r.next();
+          if (r.getLong(1) > 0) {
+            Aborted a = new Aborted("a key the statement inserts is being written by ScalarDB");
+            a.addSuppressed(e);
+            throw a;
+          }
+        }
+        throw e; // the application's duplicate
       } finally {
         try {
           run.v.releaseSavepoint(sp);
@@ -797,13 +869,33 @@ final class Writes {
           // after another failure the transaction is aborted, and its end releases it
         }
       }
-      if (keys.isEmpty()) {
-        return 0;
+      try {
+        stamp(run, keys);
+        run.context.anchors().wrote(run.txId);
+        run.context.inserted(keys);
+        if (returning != null) {
+          rs.beforeFirst();
+          ps.closeOnCompletion();
+          run.context.rows(rs, width);
+        } else {
+          ps.close();
+        }
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
+        throw e;
       }
+      return keys.rows.size();
+    }
+
+    private void stamp(Run run, Keys keys) throws SQLException {
       int stamped = stampFromData(run, n, keys);
-      if (stamped < keys.size()) {
-        // a metadata row with no data row is an orphan, a tombstone: taken over in place (4.5)
-        int taken;
+      if (stamped == keys.rows.size()) {
+        return;
+      }
+      // a metadata row with no data row is an orphan, a tombstone: taken over in place (4.5)
+      int taken = 0;
+      for (int from = 0; from < keys.rows.size(); from += CHUNK) {
+        List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
         try (PreparedStatement ps =
             run.prepare(
                 n.stamp("COALESCE(" + n.txVersion + ", 0) + 1")
@@ -811,28 +903,19 @@ final class Writes {
                     + n.data
                     + " d WHERE "
                     + n.keyJoin(n.meta, "d")
-                    + " AND ("
-                    + n.anyKey("d", keys.size())
-                    + ")) AND "
+                    + " AND "
+                    + n.keyIn("d", keys.types, chunk.size())
+                    + ") AND "
                     + n.txId
                     + " IS DISTINCT FROM ? AND "
                     + n.committed())) {
-          int i = run.stamp(ps, 1);
-          for (Object[] key : keys) {
-            i = bind(ps, i, key);
-          }
-          ps.setString(i, run.txId);
-          taken = ps.executeUpdate();
-        }
-        if (stamped + taken != keys.size()) {
-          throw new Aborted("a key the statement inserts has metadata in flight");
+          ps.setString(bindAll(ps, run.stamp(ps, 1), chunk), run.txId);
+          taken += ps.executeUpdate();
         }
       }
-      run.context.anchors().wrote(run.txId);
-      for (Object[] key : keys) {
-        run.context.inserted(key);
+      if (stamped + taken != keys.rows.size()) {
+        throw new Aborted("a key the statement inserts has metadata in flight");
       }
-      return keys.size();
     }
   }
 
@@ -843,7 +926,7 @@ final class Writes {
    * @param plan the write
    * @param request the argument after the statement's text: a flag, column names or indexes
    * @return the items, or null when none are asked for
-   * @throws SQLException 0AN01 for keys by column index or from an UPDATE or DELETE
+   * @throws SQLException 0AN01 for keys by column index or from anything but an INSERT
    */
   static @Nullable String keysAsked(Plan plan, Object request) throws SQLException {
     String items;
@@ -861,54 +944,51 @@ final class Writes {
     } else {
       items = Integer.valueOf(Statement.RETURN_GENERATED_KEYS).equals(request) ? "*" : null;
     }
-    if (items != null && !plan.inserts()) {
-      throw Errors.unsupported(
-          "generated keys from an UPDATE or DELETE of a ScalarDB table are not supported");
+    if (items != null && !(plan instanceof InsertPlan)) {
+      throw Errors.unsupported("generated keys are returned by an INSERT of a ScalarDB table only");
     }
     return items;
   }
 
   /**
-   * The rows INSERTs wrote, read back in the order they were written: the result of the statement's
-   * own {@code RETURNING}, or the generated keys the application asked for.
+   * The generated keys INSERTs wrote, read back in the order they were written, as a batch's are.
    *
    * @param vendor the vendor connection, in the writes' transaction
    * @param plan an INSERT's plan
-   * @param items the select list: the {@code RETURNING} items, {@code *}, or column names
+   * @param items the select list: {@code *}, or column names
    * @param keys the keys written, in order
    * @return the rows, its statement closed with it
    * @throws SQLException a database error
    */
-  // ponytail: two placeholders per key column and row; a batch of tens of thousands of rows
-  // passes PostgreSQL's limit of 65,535
-  static ResultSet returned(Connection vendor, Plan plan, String items, List<Object[]> keys)
+  // ponytail: one placeholder per key column and row; a batch of more than 65,535 rows fails
+  static ResultSet returned(Connection vendor, Plan plan, String items, Keys keys)
       throws SQLException {
     Names n = plan.n;
     String q = ((InsertPlan) plan).exposed;
-    StringBuilder order = new StringBuilder("CASE");
-    for (int i = 0; i < keys.size(); i++) {
-      order.append(" WHEN ").append(n.keyEquals(q)).append(" THEN ").append(i);
-    }
     String sql =
-        "SELECT "
-            + items
-            + " FROM "
-            + n.data
-            + " AS "
-            + q
-            + (keys.isEmpty() ? " WHERE FALSE" : " WHERE " + n.anyKey(q, keys.size()))
-            + (keys.size() < 2 ? "" : " ORDER BY " + order + " END");
+        keys.rows.isEmpty()
+            ? "SELECT "
+                + (items.equals("*") ? q + ".*" : items)
+                + " FROM "
+                + n.data
+                + " AS "
+                + q
+                + " WHERE FALSE"
+            : "SELECT "
+                + (items.equals("*") ? q + ".*" : items)
+                + " FROM "
+                + n.data
+                + " AS "
+                + q
+                + " JOIN "
+                + n.keyValues(keys.types, keys.rows.size())
+                + " ON "
+                + n.keyJoinValues(q)
+                + " ORDER BY u."
+                + n.engine.quote(Names.ORDINAL);
     PreparedStatement ps = vendor.prepareStatement(sql);
     try {
-      int i = 1;
-      for (Object[] key : keys) {
-        i = bind(ps, i, key);
-      }
-      if (keys.size() >= 2) {
-        for (Object[] key : keys) {
-          i = bind(ps, i, key);
-        }
-      }
+      bindAll(ps, 1, keys.rows);
       ResultSet rs = ps.executeQuery();
       ps.closeOnCompletion();
       return rs;
@@ -922,10 +1002,12 @@ final class Writes {
    * A user's {@code FOR UPDATE} or {@code FOR SHARE} of one ScalarDB table (design 4.2): the
    * committed rows locked, a row in flight treated as one another transaction holds. Unless the
    * clause skips locked rows, a row in flight that the predicate matches fails a {@code NOWAIT}
-   * with {@code 55P03}, and otherwise waits the bounded wait of section 6, then aborts. Each locked
-   * row's metadata is read again under the lock: PostgreSQL re-checks a row updated since the
-   * statement began against the metadata table as the statement began, so a row a ScalarDB prepare
-   * wrote meanwhile would pass as committed; it aborts the read instead.
+   * with {@code 55P03}, and otherwise waits the bounded wait of section 6, then aborts; the check
+   * is made again after the lock, for a row that went in flight before the lock statement began
+   * (todo 149). Each locked row's metadata is read again under the lock: PostgreSQL re-checks a row
+   * updated since the statement began against the metadata table as the statement began, so a row a
+   * ScalarDB prepare wrote meanwhile would pass as committed. Each attempt runs under a savepoint,
+   * whose rollback releases its locks before the next.
    */
   static final class LockPlan extends Plan {
     final Step lock;
@@ -949,93 +1031,97 @@ final class Writes {
       return inFlight == null ? List.of(lock.sql) : List.of(inFlight.sql, lock.sql);
     }
 
+    @SuppressFBWarnings(
+        value = "OBL_UNSATISFIED_OBLIGATION",
+        justification = "the rows are handed to the application, closed with their statement")
     @Override
     long apply(Run run) throws SQLException {
-      if (inFlight != null) {
-        long until = System.nanoTime() + run.context.inflightWait().toNanos();
-        while (true) {
-          try (PreparedStatement ps = run.prepare(inFlight, null);
-              ResultSet rs = ps.executeQuery()) {
-            if (!rs.next()) {
-              break;
-            }
-          }
-          if (noWait) {
-            throw new SQLException(
-                "could not lock a row: a ScalarDB transaction is writing it", "55P03");
-          }
-          if (System.nanoTime() - until >= 0) {
-            throw new Aborted(
-                "a row the statement locks is being written by a ScalarDB transaction");
-          }
-          sleep();
-        }
-      }
       int width = n.keyColumns.size();
-      PreparedStatement ps = run.prepare(lock, null, true);
-      try {
-        ResultSet rs = ps.executeQuery();
-        // the key, then the two version lookups the anchored read appends
-        int from = rs.getMetaData().getColumnCount() - width - 1;
-        List<Object[]> keys = new ArrayList<>();
-        while (rs.next()) {
-          keys.add(Objects.requireNonNull(readKey(rs, from, width)));
-        }
-        List<Anchors.Version> versions = new ArrayList<>();
-        List<Object[]> locked = new ArrayList<>();
-        if (!keys.isEmpty()) {
-          try (PreparedStatement check =
-              run.prepare(
-                  "SELECT "
-                      + n.columns("d")
-                      + ", m."
-                      + n.txId
-                      + ", m."
-                      + n.txVersion
-                      + ", m."
-                      + n.txState
-                      + " FROM "
-                      + n.data
-                      + " d LEFT JOIN "
-                      + n.meta
-                      + " m ON "
-                      + n.keyJoin("m", "d")
-                      + " WHERE "
-                      + n.anyKey("d", keys.size()))) {
-            int i = 1;
-            for (Object[] key : keys) {
-              i = bind(check, i, key);
-            }
-            try (ResultSet m = check.executeQuery()) {
-              while (m.next()) {
-                if (inFlight(m.getObject(width + 3))) {
-                  throw new Aborted(
-                      "a row the statement locks went in flight in a ScalarDB transaction");
-                }
-                locked.add(Objects.requireNonNull(readKey(m, 1, width)));
-                versions.add(new Anchors.Version(m.getString(width + 1), m.getObject(width + 2)));
-              }
-            }
+      long until = System.nanoTime() + run.context.inflightWait().toNanos();
+      String held = "a row the statement locks is being written by a ScalarDB transaction";
+      for (int attempt = 0; ; attempt++) {
+        while (inFlight != null && matchesInFlight(run)) {
+          if (noWait) {
+            throw new SQLException("could not lock a row: " + held, "55P03");
           }
+          run.sleep(until, held);
         }
-        rs.beforeFirst();
-        ps.closeOnCompletion();
-        run.context.locked(rs, locked, versions);
-        return keys.size();
-      } catch (SQLException | RuntimeException e) {
+        Savepoint sp = run.v.setSavepoint();
+        PreparedStatement ps = run.prepare(lock, null, true);
+        try {
+          ResultSet rs = ps.executeQuery();
+          // the key, then the two version lookups the anchored read appends
+          int from = rs.getMetaData().getColumnCount() - width - 1;
+          Keys keys = new Keys();
+          while (rs.next()) {
+            keys.read(rs, from, width);
+          }
+          List<Anchors.Version> versions = new ArrayList<>();
+          boolean settled =
+              (inFlight == null || !matchesInFlight(run)) && lockedVersions(run, keys, versions);
+          if (settled) {
+            run.v.releaseSavepoint(sp);
+            for (int i = 0; i < keys.rows.size(); i++) {
+              run.context.anchor(n.table, keys.rows.get(i), versions.get(i));
+            }
+            rs.beforeFirst();
+            ps.closeOnCompletion();
+            run.context.rows(rs, width + 2);
+            return keys.rows.size();
+          }
+        } catch (SQLException | RuntimeException e) {
+          ps.close();
+          throw e;
+        }
+        // a row went in flight around the lock: release this attempt's locks and read again,
+        // a skipping read at once, since its rows in flight are now left out (todo 151)
         ps.close();
-        throw e;
+        run.v.rollback(sp);
+        if (noWait) {
+          throw new SQLException("could not lock a row: " + held, "55P03");
+        }
+        if (inFlight == null && attempt >= 10) {
+          throw new Aborted(held);
+        }
       }
     }
-  }
 
-  /** The poll interval of the bounded wait (section 6). */
-  private static void sleep() throws SQLException {
-    try {
-      Thread.sleep(20);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw new Aborted("the wait for a row in flight was interrupted");
+    private boolean matchesInFlight(Run run) throws SQLException {
+      try (PreparedStatement ps = run.prepare(Objects.requireNonNull(inFlight), null);
+          ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    }
+
+    /**
+     * The version of each locked key, read under the lock, in the keys' order; false when one is in
+     * flight.
+     */
+    private boolean lockedVersions(Run run, Keys keys, List<Anchors.Version> versions)
+        throws SQLException {
+      int width = n.keyColumns.size();
+      Map<List<Object>, Anchors.Version> found = new HashMap<>();
+      for (int from = 0; from < keys.rows.size(); from += CHUNK) {
+        List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
+        try (PreparedStatement ps =
+            run.prepare(n.withMeta("d", n.keyIn("d", keys.types, chunk.size())))) {
+          bindAll(ps, 1, chunk);
+          try (ResultSet m = ps.executeQuery()) {
+            while (m.next()) {
+              if (inFlight(m.getObject(width + 3))) {
+                return false;
+              }
+              found.put(
+                  Anchors.key(Objects.requireNonNull(readKey(m, 1, width))),
+                  new Anchors.Version(m.getString(width + 1), m.getObject(width + 2)));
+            }
+          }
+        }
+      }
+      for (Object[] key : keys.rows) {
+        versions.add(found.getOrDefault(Anchors.key(key), new Anchors.Version(null, null)));
+      }
+      return true;
     }
   }
 
@@ -1092,9 +1178,79 @@ final class Writes {
       return String.join(" AND ", terms);
     }
 
-    /** {@code (q.k1 = ? AND q.k2 = ?) OR ...}, {@code count} times. */
-    String anyKey(String q, int count) {
-      return String.join(" OR ", Collections.nCopies(count, "(" + keyEquals(q) + ")"));
+    /** The ordinal column of {@link #keyValues}. */
+    static final String ORDINAL = "scalardb_native_n";
+
+    /**
+     * {@code count} keys as a table {@code u}, each value cast to its column's type, so that the
+     * key compares as the column does (a CHAR(n) key with its padding): {@code (VALUES (0, CAST(?
+     * AS t)), ...) u(scalardb_native_n, scalardb_native_k0, ...)}.
+     */
+    String keyValues(List<String> types, int count) {
+      List<String> casts = new ArrayList<>();
+      List<String> names = new ArrayList<>(List.of(engine.quote(ORDINAL)));
+      for (int i = 0; i < types.size(); i++) {
+        casts.add("CAST(? AS " + types.get(i) + ")");
+        names.add(engine.quote("scalardb_native_k" + i));
+      }
+      List<String> rows = new ArrayList<>();
+      for (int i = 0; i < count; i++) {
+        rows.add("(" + i + ", " + String.join(", ", casts) + ")");
+      }
+      return "(VALUES " + String.join(", ", rows) + ") u(" + String.join(", ", names) + ")";
+    }
+
+    /** The key columns of {@code q} equal to those of {@link #keyValues}'s {@code u}. */
+    String keyJoinValues(String q) {
+      List<String> terms = new ArrayList<>();
+      for (int i = 0; i < keyColumns.size(); i++) {
+        terms.add(
+            q
+                + "."
+                + engine.quote(keyColumns.get(i))
+                + " = u."
+                + engine.quote("scalardb_native_k" + i));
+      }
+      return String.join(" AND ", terms);
+    }
+
+    /** {@code (q.k1, q.k2) IN (SELECT ... FROM <keyValues>)}, the keys bound in order. */
+    String keyIn(String q, List<String> types, int count) {
+      List<String> cols = new ArrayList<>();
+      for (int i = 0; i < types.size(); i++) {
+        cols.add("u." + engine.quote("scalardb_native_k" + i));
+      }
+      return "("
+          + columns(q)
+          + ") IN (SELECT "
+          + String.join(", ", cols)
+          + " FROM "
+          + keyValues(types, count)
+          + ")";
+    }
+
+    /**
+     * {@code SELECT keys, m.tx_id, m.tx_version, m.tx_state FROM data d LEFT JOIN meta m ... WHERE
+     * where}: a key, the data table's or the metadata table's ({@code keyQualifier} d or m), and
+     * its metadata.
+     */
+    String withMeta(String keyQualifier, String where) {
+      return "SELECT "
+          + columns(keyQualifier)
+          + ", m."
+          + txId
+          + ", m."
+          + txVersion
+          + ", m."
+          + txState
+          + " FROM "
+          + data
+          + " d LEFT JOIN "
+          + meta
+          + " m ON "
+          + keyJoin("m", "d")
+          + " WHERE "
+          + where;
     }
 
     /** The key columns of {@code a} equal to those of {@code b}. */

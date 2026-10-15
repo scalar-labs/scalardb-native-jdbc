@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "156"
 tags: [code-review, simplicity]
@@ -39,7 +39,7 @@ Apply the items above, behaviour unchanged; after 148-155, which touch the same 
 
 ## Acceptance Criteria
 
-- [ ] The items applied; check and the integration tests green.
+- [x] The items applied; check and the integration tests green.
 
 ## Work Log
 
@@ -47,3 +47,8 @@ Apply the items above, behaviour unchanged; after 148-155, which touch the same 
 
 **By:** Claude Code
 - From the simplicity review of milestone 4c.
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- Writes.run and Plan.inserts gone; within takes the rollback-only action; one sleep(until, reason) for both waits; bindAll; Names.withMeta; the locking route carries no anchor; one handler for the driver's rows; the Locked holder replaced by Out; Router.exposed reused. writeReturns stays volatile (SpotBugs).

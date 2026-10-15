@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "153"
 tags: [code-review, correctness, jdbc, writes]
@@ -31,7 +31,7 @@ write goes ahead once the row settles. The same holds for a locking read's wait.
 
 ## Acceptance Criteria
 
-- [ ] A cancel during the wait ends the statement with 57014 and nothing is written.
+- [x] A cancel during the wait ends the statement with 57014 and nothing is written.
 
 ## Work Log
 
@@ -39,3 +39,8 @@ write goes ahead once the row settles. The same holds for a locking read's wait.
 
 **By:** Claude Code
 - From the review of f56c8d1 (milestone 4c).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- cancel() sets a flag the wait and every driver statement check; 57014. Test: a cancel during the wait, the row unchanged.

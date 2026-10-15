@@ -386,11 +386,10 @@ public final class Proxies {
         || Integer.valueOf(Statement.RETURN_GENERATED_KEYS).equals(args[1]);
   }
 
-  /** A locking read's rows and what it locked, handed over by {@link Writes.Context#locked}. */
-  private static final class Locked {
+  /** The rows a write or a locking read returns, handed over by {@link Writes.Context#rows}. */
+  private static final class Out {
     @Nullable ResultSet rows;
-    List<Object[]> keys = List.of();
-    List<Anchors.Version> versions = List.of();
+    int hidden;
   }
 
   /** A recorded call, replayed on a statement prepared again. */
@@ -427,7 +426,10 @@ public final class Proxies {
     // writeReturns, otherwise the generated keys; keysAsked, the ones asked for at prepare
     @Nullable ResultSet writeResult;
     volatile boolean writeReturns;
+    @Nullable ResultSet writeKeys;
     @Nullable String keysAsked;
+    // set by cancel(), which a write's wait between its statements checks (todo 153)
+    volatile boolean cancelled;
     // the driver's statement a write is running, which cancel() reaches from another thread
     volatile @Nullable Statement runningWrite;
     // the last execute's anchored read, whose result sets hide and record the versions, and whether
@@ -479,16 +481,20 @@ public final class Proxies {
           owner.requireNotRollbackOnly(); // a statement's text is checked once it is routed
         }
         writeCount = null;
-        ResultSet rows = writeResult;
-        writeResult = null;
-        if (rows != null) {
-          rows.close();
+        cancelled = false;
+        for (ResultSet rows : new ResultSet[] {writeResult, writeKeys}) {
+          writeResult = null;
+          writeKeys = null;
+          if (rows != null) {
+            rows.close();
+          }
         }
       }
-      if (name.equals("getGeneratedKeys") && writeResult != null) {
-        return writeResult;
+      if (name.equals("getGeneratedKeys") && writeKeys != null) {
+        return writeKeys;
       }
       if (name.equals("cancel")) {
+        cancelled = true;
         Statement running = runningWrite;
         if (running != null) {
           running.cancel(); // the driver's statement of a write, not the idle vendor one (136)
@@ -498,11 +504,8 @@ public final class Proxies {
       if (writeCount != null) {
         switch (name) {
           case "getUpdateCount":
-            return writeReturns ? -1 : (int) Math.min(writeCount, Integer.MAX_VALUE);
+            return (int) Math.min(writeCount, Integer.MAX_VALUE);
           case "getLargeUpdateCount":
-            if (writeReturns) {
-              return -1L;
-            }
             return writeCount;
           case "getResultSet":
             return writeReturns ? writeResult : null;
@@ -510,6 +513,9 @@ public final class Proxies {
             if (writeReturns && writeResult != null) {
               writeResult.close();
               writeResult = null;
+              if (writeKeys != null && writeKeys.isClosed()) {
+                writeKeys = null; // they were the same rows
+              }
             }
             writeCount = -1L;
             writeReturns = false;
@@ -696,11 +702,7 @@ public final class Proxies {
                   + " UPDATE");
         }
       }
-      if (name.equals("getMetaData")
-          && prepared != null
-          && prepared.anchored != null
-          && prepared.write == null) {
-        // the vendor statement holds the anchored text; a locking read's holds the application's
+      if (name.equals("getMetaData") && prepared != null && prepared.anchored != null) {
         Object md = forward(vendor(), method, args);
         return md == null
             ? null
@@ -741,76 +743,42 @@ public final class Proxies {
         Object proxy, String name, @Nullable Object[] args, Router.Route route)
         throws SQLException {
       Writes.Plan plan = Objects.requireNonNull(route.write);
-      String own = plan.returning();
       if (name.equals("executeQuery") && !plan.returnsRows()) {
         throw new SQLException("the statement returns no result set", "02000");
       }
-      // a locking read anchors its rows as an anchored read does, in a transaction only
-      boolean recording = !owner.vendor.getAutoCommit() && !owner.vendor.isReadOnly();
-      long epoch = owner.anchors.epoch();
-      boolean prepared = args == null || args.length == 0 || !(args[0] instanceof String);
-      String items =
-          own != null
-              ? own
-              : prepared
-                  ? keysAsked
-                  : asksForGeneratedKeys(args) ? Writes.keysAsked(plan, args[1]) : null;
+      boolean bound = args == null || args.length == 0 || !(args[0] instanceof String);
+      String keys =
+          bound ? keysAsked : asksForGeneratedKeys(args) ? Writes.keysAsked(plan, args[1]) : null;
       // an execute closes the statement's current result set
       ResultSet open = vendor().getResultSet();
       if (open != null) {
         open.close();
       }
-      List<Object[]> keys = new ArrayList<>();
-      Locked locked = new Locked();
-      Writes.Context context = writeContext(prepared ? parameters : null, keys, locked);
+      Writes.Keys inserted = new Writes.Keys();
+      Out out = new Out();
+      Writes.Context context = writeContext(bound ? parameters : null, inserted, out);
       long[] count = {0};
-      ResultSet[] rows = {null};
       try {
         Writes.within(
             owner.vendor,
-            context,
+            () -> owner.rollbackOnly = true,
             () -> {
               count[0] = Writes.apply(owner.vendor, plan, context);
-              if (items != null) {
-                rows[0] = Writes.returned(owner.vendor, plan, items, keys);
+              if (keys != null && out.rows == null) {
+                out.rows = Writes.returned(owner.vendor, plan, keys, inserted);
               }
             });
       } catch (SQLException | RuntimeException e) {
-        for (ResultSet r : new ResultSet[] {rows[0], locked.rows}) {
-          if (r != null) {
-            r.close();
-          }
+        if (out.rows != null) {
+          out.rows.close();
         }
         throw e;
       }
-      writeCount = count[0];
       writeReturns = plan.returnsRows();
-      ResultSet lockedRows = locked.rows;
-      if (lockedRows != null) {
-        if (recording) {
-          for (int i = 0; i < locked.keys.size(); i++) {
-            owner.anchors.read(epoch, plan.n.table, locked.keys.get(i), locked.versions.get(i));
-          }
-        }
-        writeResult =
-            (ResultSet)
-                proxy(
-                    ResultSet.class,
-                    new AnchoredHandler(
-                        lockedRows,
-                        connection,
-                        (Statement) proxy,
-                        new Router.Anchored(plan.n.table, plan.n.keyColumns.size()),
-                        null,
-                        epoch));
-      } else {
-        writeResult =
-            rows[0] == null
-                ? null
-                : (ResultSet)
-                    proxy(
-                        ResultSet.class, new ChildHandler(rows[0], connection, (Statement) proxy));
-      }
+      writeCount = writeReturns ? -1L : count[0];
+      writeResult = out.rows == null ? null : driverRows(proxy, plan, out.rows, out.hidden);
+      // with its own RETURNING, the generated keys asked for are its rows, as pgjdbc returns them
+      writeKeys = keys == null ? null : writeResult;
       switch (name) {
         case "executeQuery":
           return writeResult;
@@ -824,31 +792,39 @@ public final class Proxies {
     }
 
     /**
-     * What a write needs from this statement, its values bound from {@code parameters}, the keys it
-     * inserts added to {@code inserted}.
+     * The rows the driver read for the application, the last {@code hidden} columns its own;
+     * closing them closes the statement when the application asked for that (todo 155).
+     */
+    private ResultSet driverRows(Object proxy, Writes.Plan plan, ResultSet rows, int hidden)
+        throws SQLException {
+      AnchoredHandler h =
+          new AnchoredHandler(
+              rows,
+              connection,
+              (Statement) proxy,
+              new Router.Anchored(plan.n.table, plan.n.keyColumns.size(), hidden),
+              null,
+              0);
+      h.closesStatement = vendor().isCloseOnCompletion();
+      return (ResultSet) proxy(ResultSet.class, h);
+    }
+
+    /**
+     * What a write needs from this statement: its values bound from {@code parameters}, the keys it
+     * inserts added to {@code inserted}, the rows it returns handed to {@code out}.
      */
     private Writes.Context writeContext(
-        @Nullable Map<Integer, Call> parameters,
-        @Nullable List<Object[]> inserted,
-        @Nullable Locked locked) {
+        @Nullable Map<Integer, Call> parameters, Writes.Keys inserted, @Nullable Out out) {
+      // a locking read anchors its rows as an anchored read does, in a transaction only
+      boolean recording;
+      try {
+        recording = !owner.vendor.getAutoCommit() && !owner.vendor.isReadOnly();
+      } catch (SQLException e) {
+        recording = false;
+      }
+      boolean records = recording;
+      long epoch = owner.anchors.epoch();
       return new Writes.Context() {
-        @Override
-        public void locked(ResultSet rows, List<Object[]> keys, List<Anchors.Version> versions) {
-          if (locked == null) {
-            throw new IllegalStateException("a locking read run as a batch entry");
-          }
-          locked.rows = rows;
-          locked.keys = keys;
-          locked.versions = versions;
-        }
-
-        @Override
-        public void inserted(Object[] key) {
-          if (inserted != null) {
-            inserted.add(key);
-          }
-        }
-
         @Override
         public void bind(PreparedStatement ps, int position, int placeholder) throws SQLException {
           Call c = parameters == null ? null : parameters.get(placeholder);
@@ -877,18 +853,39 @@ public final class Proxies {
         }
 
         @Override
+        public boolean cancelled() {
+          return cancelled;
+        }
+
+        @Override
         public void running(@Nullable Statement s) {
           runningWrite = s;
         }
 
         @Override
-        public void rollbackOnly() {
-          owner.rollbackOnly = true;
+        public Anchors anchors() {
+          return owner.anchors;
         }
 
         @Override
-        public Anchors anchors() {
-          return owner.anchors;
+        public void anchor(String table, Object[] key, Anchors.Version version) {
+          if (records) {
+            owner.anchors.read(epoch, table, key, version);
+          }
+        }
+
+        @Override
+        public void inserted(Writes.Keys keys) {
+          inserted.addAll(keys);
+        }
+
+        @Override
+        public void rows(ResultSet rows, int hidden) {
+          if (out == null) {
+            throw new IllegalStateException("rows from a batch entry");
+          }
+          out.rows = rows;
+          out.hidden = hidden;
         }
       };
     }
@@ -923,33 +920,35 @@ public final class Proxies {
       }
       long[] counts = new long[size];
       int[] done = {0};
-      List<Object[]> inserted = new ArrayList<>();
-      ResultSet[] rows = {null};
+      Writes.Keys inserted = new Writes.Keys();
+      Writes.Plan[] last = {null};
+      Out out = new Out();
       try {
         Writes.within(
             owner.vendor,
-            writeContext(null, null, null),
+            () -> owner.rollbackOnly = true,
             () -> {
-              Writes.Plan last = null;
               for (int i = 0; i < size; i++) {
                 Router.Route route = routes.apply(i);
                 if (route.write != null) {
-                  last = route.write;
+                  last[0] = route.write;
                   counts[i] =
                       Writes.apply(
-                          owner.vendor, last, writeContext(parameters.apply(i), inserted, null));
+                          owner.vendor,
+                          route.write,
+                          writeContext(parameters.apply(i), inserted, null));
                 } else {
                   counts[i] = runPlain(route);
                 }
                 done[0]++;
               }
-              if (keys != null && last != null) {
-                rows[0] = Writes.returned(owner.vendor, last, keys, inserted);
+              if (keys != null && last[0] != null) {
+                out.rows = Writes.returned(owner.vendor, last[0], keys, inserted);
               }
             });
       } catch (SQLException e) {
-        if (rows[0] != null) {
-          rows[0].close();
+        if (out.rows != null) {
+          out.rows.close();
         }
         BatchUpdateException b =
             new BatchUpdateException(
@@ -963,19 +962,15 @@ public final class Proxies {
       }
       writeCount = -1L; // no update count of its own, as after a vendor batch
       writeReturns = false;
-      writeResult =
-          rows[0] == null
-              ? null
-              : (ResultSet)
-                  proxy(ResultSet.class, new ChildHandler(rows[0], connection, (Statement) proxy));
+      writeKeys = out.rows == null ? null : driverRows(proxy, last[0], out.rows, 0);
       if (name.equals("executeLargeBatch")) {
         return counts;
       }
-      int[] out = new int[size];
+      int[] ints = new int[size];
       for (int i = 0; i < size; i++) {
-        out[i] = (int) Math.min(counts[i], Integer.MAX_VALUE);
+        ints[i] = (int) Math.min(counts[i], Integer.MAX_VALUE);
       }
-      return out;
+      return ints;
     }
 
     /** Runs a batch entry that is not a write of a ScalarDB table, as the vendor batch would. */
@@ -1111,6 +1106,8 @@ public final class Proxies {
     final @Nullable Anchors anchors;
     final long epoch;
     int visible = -1;
+    // closing the rows closes the statement: a driver's rows under closeOnCompletion (todo 155)
+    boolean closesStatement;
 
     AnchoredHandler(
         Object vendor,
@@ -1142,6 +1139,15 @@ public final class Proxies {
           return connection;
         case "getStatement":
           return statement;
+        case "close":
+          {
+            Object r = forward(target, method, args);
+            if (closesStatement) {
+              closesStatement = false;
+              statement.close();
+            }
+            return r;
+          }
         case "getMetaData":
           return proxy(
               java.sql.ResultSetMetaData.class,

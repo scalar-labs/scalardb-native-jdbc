@@ -51,7 +51,7 @@ final class Anchors {
   private long epoch;
 
   /** A key's values as a map key: arrays by content. */
-  private static List<Object> key(Object[] values) {
+  static List<Object> key(Object[] values) {
     List<Object> out = new ArrayList<>(values.length);
     for (Object v : values) {
       out.add(v instanceof byte[] ? ByteBuffer.wrap(((byte[]) v).clone()) : v);

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "155"
 tags: [code-review, jdbc, api]
@@ -37,7 +37,7 @@ table is replaced; word the refusal for any non-INSERT.
 
 ## Acceptance Criteria
 
-- [ ] Each item behaves as pgjdbc does, or is refused with a fitting message.
+- [x] Each item behaves as pgjdbc does, or is refused with a fitting message.
 
 ## Work Log
 
@@ -45,3 +45,8 @@ table is replaced; word the refusal for any non-INSERT.
 
 **By:** Claude Code
 - From the review of d7be4f0 and cdfc58a (milestone 4c).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- Closing a driver's rows closes the statement under closeOnCompletion; getGeneratedKeys returns rows only when keys were asked; FOR UPDATE OF a table renamed with its own name as alias is accepted; the keys refusal says INSERT only. Tests for the first three.

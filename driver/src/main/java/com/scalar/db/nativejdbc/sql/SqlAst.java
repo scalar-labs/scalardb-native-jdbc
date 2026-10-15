@@ -1193,13 +1193,14 @@ public final class SqlAst {
 
   /**
    * Whether {@code FOR UPDATE OF} names a table the plan renames by its name rather than by an
-   * alias: the target would then name a table no longer in the statement.
+   * alias, and gives no alias of that name: the target would then name a table no longer in the
+   * statement.
    */
   private boolean lockTargetIsRenamed(Rewrite plan) {
     for (Table target : forUpdateTables) {
       String name = key(engine, target.getName());
       for (TableRef r : plan.tables.keySet()) {
-        if (!r.hasAlias() && name.equals(key(engine, r.name()))) {
+        if (!r.hasAlias() && !plan.aliases.containsKey(r) && name.equals(key(engine, r.name()))) {
           return true;
         }
       }

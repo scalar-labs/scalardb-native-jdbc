@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "152"
 tags: [code-review, correctness, jdbc, locking]
@@ -34,7 +34,7 @@ Refuse FOR KEY SHARE.
 
 ## Acceptance Criteria
 
-- [ ] Under the driver's FOR KEY SHARE a ScalarDB delete of the row waits until the driver's transaction ends.
+- [x] Under the driver's FOR KEY SHARE a ScalarDB delete of the row waits until the driver's transaction ends.
 
 ## Work Log
 
@@ -42,3 +42,8 @@ Refuse FOR KEY SHARE.
 
 **By:** Claude Code
 - From the review of cdfc58a (milestone 4c).
+
+### 2026-10-15 - Fixed
+
+**By:** Claude Code
+- FOR KEY SHARE is refused with 0AN01, pointing at FOR SHARE. Test.
