@@ -59,5 +59,7 @@ Option 1 as proposed.
   and CommitConflictException. Anything else fails the schedule with its step, as before.
 - Commits are asserted per side per table, besides some commit per schedule.
 - The full run passes with the narrower classes, so no other exception occurred.
-- Not done: a run with the driver reading after images, to show the schedules now catch it; that
-  needs a temporary edit of the driver source.
+- Mutation check (reverted), the fixed scenarios skipped so that only the schedules ran: with the
+  in-flight copies reading the after image instead of the before image, the schedules fail at
+  seed 3 (READ_COMMITTED, imported table, row 101: expected 3, was 4). With the rollbacks after
+  prepare turned off, the same mutation passes all 20 seeds: the old schedules missed it.

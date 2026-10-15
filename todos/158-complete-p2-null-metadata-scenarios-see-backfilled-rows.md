@@ -30,7 +30,7 @@ precondition (`tx_state IS NULL`); after the rollback assert tx_id, tx_version a
 ## Acceptance Criteria
 
 - [x] Both scenarios assert NULL metadata before they run.
-- [ ] With the NULL-as-committed rule broken, the test fails.
+- [x] With the NULL-as-committed rule broken, the test fails.
 
 ## Recommended Action
 
@@ -49,5 +49,7 @@ Option 1, deleting the metadata rows of ids 8 and 11 after the backfill.
 - The imported table's scenarios delete the metadata of ids 8 and 11 first, as a row inserted
   behind the driver's back; they assert no metadata row for 11, and NULL tx_id, tx_state and
   tx_version for 8 after ScalarDB's rollback (they held the backfill stamp before). Both pass.
-- Not done: a run with the NULL-as-committed rule broken; that needs a temporary edit of the
-  driver source.
+- Mutation check (reverted): with `COALESCE(tx_state, 3) = 3` turned into `tx_state = 3` in the CAS,
+  the view and the LEFT JOIN copy, the test fails at "the NULL-pair CAS" (expected 1, was 0). The
+  read assertion before it still passes: on PostgreSQL the committed copy excludes rows in flight
+  with NOT EXISTS over tx_state IN (1, 2), which a NULL state passes by construction.
