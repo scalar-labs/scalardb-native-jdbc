@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "163"
 tags: [code-review, docs, sql]
@@ -33,10 +33,11 @@ when a split route gets a vendor syntax error at prepare.
 
 ## Acceptance Criteria
 
-- [ ] The docs say what actually runs where.
+- [x] The docs say what actually runs where.
 
 ## Recommended Action
 
+Option 1.
 
 ## Work Log
 
@@ -44,3 +45,10 @@ when a split route gets a vendor syntax error at prepare.
 
 **By:** Claude Code
 - From the end-of-first-deliverable review of 14f48e2..e3ff66a.
+
+### 2026-10-16 - Fixed
+
+**By:** Claude Code
+- design.md section 1, proxy-step.md milestone 6 and the `parses()` Javadoc: the checks run where
+  assertions are enabled for the driver's classes, which includes an application's tests by
+  default, and a copy that fails throws AssertionError there; elsewhere the database rejects it.

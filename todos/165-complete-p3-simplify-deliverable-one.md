@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "165"
 tags: [code-review, simplicity]
@@ -22,10 +22,11 @@ dependencies: []
 
 ## Acceptance Criteria
 
-- [ ] The same tests pass; no behaviour change.
+- [x] The same tests pass; no behaviour change.
 
 ## Recommended Action
 
+All items.
 
 ## Work Log
 
@@ -33,3 +34,13 @@ dependencies: []
 
 **By:** Claude Code
 - From the end-of-first-deliverable review of 14f48e2..e3ff66a.
+
+### 2026-10-16 - Fixed
+
+**By:** Claude Code
+- Router: the anchored tables and key widths are collected in the loop that builds the names; one
+  `anchored(...)` call.
+- InterleavingIntegrationTest: Table is a record; no ids list; `v()` and `update()` helpers; the
+  counts in one loop (with todo 162's restructuring into `run()`).
+- RouteCostBenchmark: ordered shape array, one formatted DDL, the TTL inline.
+- WriteIntegrationTest.anchorsFromJoins: `assertAborts` replaces seven copies.

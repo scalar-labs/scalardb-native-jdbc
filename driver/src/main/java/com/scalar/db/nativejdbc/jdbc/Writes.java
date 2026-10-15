@@ -346,6 +346,11 @@ final class Writes {
   // ponytail: autocommit is off on the vendor connection while the write runs; another thread
   // sharing the connection then joins its transaction, as with any JDBC transaction
   static void within(Connection vendor, Runnable rollbackOnly, Work work) throws SQLException {
+    if (vendor.isReadOnly()) {
+      // a read-only transaction records no anchors, so its writes would be lost updates where the
+      // vendor lets them through, as pgjdbc's readOnlyMode=ignore does (todo 160)
+      throw new SQLException("a read-only connection cannot write a ScalarDB table", "25006");
+    }
     boolean auto = vendor.getAutoCommit();
     if (auto) {
       vendor.setAutoCommit(false);
@@ -1084,6 +1089,7 @@ final class Writes {
         // a skipping read at once, since its rows in flight are now left out (todo 151)
         ps.close();
         run.v.rollback(sp);
+        run.v.releaseSavepoint(sp); // or each attempt leaves a subtransaction open (todo 161)
         if (noWait) {
           throw new SQLException("could not lock a row: " + held, "55P03");
         }

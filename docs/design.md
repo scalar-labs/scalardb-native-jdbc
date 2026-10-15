@@ -192,9 +192,12 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   reuses one under the same checks as a prepared statement's route (below), so a text an ORM repeats
   is parsed again only when the session, the catalog or an in-flight count it depends on has moved
   (todo 008). JSQLParser parses on a shared pool of daemon threads, not a new thread per parse. A
-  new text is parsed once: the split read's copies are parsed again only in the tests, where Java
-  assertions are on, since the emitter separates any two tokens that could fuse and two more parses
-  were most of the cost of a statement the cache does not hold.
+  new text is parsed once: the split read's copies are parsed again only where Java assertions are
+  enabled for the driver's classes, since the emitter separates any two tokens that could fuse and
+  two more parses were most of the cost of a statement the cache does not hold. That is the driver's
+  tests, and by default an application's tests too (Gradle and Maven Surefire enable assertions),
+  where a copy the parser cannot read throws an `AssertionError`; with assertions off it reaches the
+  database, which fails it with a syntax error.
 - **Connection methods**: `setTransactionIsolation` is forwarded and selects the level of section 5
   (`TRANSACTION_REPEATABLE_READ` is SNAPSHOT; `READ_UNCOMMITTED` is refused; section 5 maps the
   constants per engine). The driver sets READ COMMITTED at connect, because vendor defaults differ, with

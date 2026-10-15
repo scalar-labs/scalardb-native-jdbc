@@ -840,8 +840,13 @@ final class Router {
     // the versions cost lookups per row, read only where they are recorded
     List<SqlAst.TableRef> anchored = anchoring ? anchorable : List.of();
     IdentityHashMap<SqlAst.TableRef, Writes.Names> anchorNames = new IdentityHashMap<>();
+    List<String> anchorTables = new ArrayList<>();
+    List<Integer> keys = new ArrayList<>();
     for (SqlAst.TableRef r : anchored) {
-      anchorNames.put(r, new Writes.Names(engine, Objects.requireNonNull(scalarDb.get(r))));
+      Writes.Names n = new Writes.Names(engine, Objects.requireNonNull(scalarDb.get(r)));
+      anchorNames.put(r, n);
+      anchorTables.add(n.table);
+      keys.add(n.keyColumns.size());
     }
     SqlAst.SplitText text =
         SplitRead.emit(
@@ -868,17 +873,8 @@ final class Router {
               recheckAt,
               chosen,
               true);
-      if (!anchorable.isEmpty() && anchored.isEmpty()) {
-        r = r.anchored(null, false);
-      } else if (!anchored.isEmpty()) {
-        List<String> anchorTables = new ArrayList<>();
-        List<Integer> keys = new ArrayList<>();
-        for (SqlAst.TableRef a : anchored) {
-          Writes.Names n = Objects.requireNonNull(anchorNames.get(a));
-          anchorTables.add(n.table);
-          keys.add(n.keyColumns.size());
-        }
-        r = r.anchored(new Anchored(anchorTables, keys), true);
+      if (!anchorable.isEmpty()) {
+        r = r.anchored(anchoring ? new Anchored(anchorTables, keys) : null, anchoring);
       }
       return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
           ? r.with(r.sql, r.parameterSources, r.perRow, false, true)

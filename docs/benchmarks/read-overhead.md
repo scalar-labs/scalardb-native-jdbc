@@ -937,8 +937,16 @@ about 1-5 ms once per text and connection.
 **Parsed once (milestone 6, 2026-10-15)**: the split's copies are no longer parsed again outside
 the tests. The leading blanks above inflated the parse, so it is measured again with
 `bench/RouteCostBenchmark` on four small tables, a new text differing by an alias. A key lookup
-miss is 84 µs on SQL Server and 104 µs on MySQL; the full table is in docs/plans/proxy-step.md,
-milestone 6.
+miss is 84-94 µs on SQL Server and 104-161 µs on MySQL over two runs; the full table is in
+docs/plans/proxy-step.md, milestone 6. As above, catalog reads, name resolution and the server calls
+the driver caches are warm after the first repetition, so a statement whose tables the connection
+has not resolved yet costs more than the table shows.
+
+Assertions are off in every jar in that run (`-Dnativejdbc.bench=true`); the figures before were
+taken with Gradle's default, on in every jar. An A/B on the same code, MySQL / SQL Server /
+PostgreSQL key lookup, new text: all off 161 / 94 / 603 µs, the vendor drivers' on and the driver's
+off 153 / 93 / 591, all on (the two parses back) 264 / 198 / 728. The vendors' own assertions cost
+nothing measurable; the two parses are the difference.
 
 ## LEFT JOINs and subqueries through the driver (milestone 3c, 2026-10-14)
 

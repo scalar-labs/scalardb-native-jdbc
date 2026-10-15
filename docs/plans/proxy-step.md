@@ -400,7 +400,8 @@ driver transaction through the driver's JDBC URL and a ScalarDB transaction thro
 - **Done (2026-10-15)**. The route cache of todo 008 (2026-10-14) already met the first two items:
   it keeps the last 256 texts per connection, and the parser runs on a shared pool. What remained
   was a miss. It is now parsed once: the two parses that checked the split read's first and last
-  copies run only where Java assertions are on, which is in the tests. All engines' integration
+  copies run only where Java assertions are enabled: the tests, the driver's and by default an
+  application's. All engines' integration
   tests pass with them as asserts, so no tested shape relied on them to fall back to the views.
   `bench/RouteCostBenchmark` measures prepareStatement on four small tables. A new text there now
   differs from the last by an alias, not by leading blanks, which had the parser's lexer skipping
@@ -413,8 +414,13 @@ driver transaction through the driver's JDBC URL and a ScalarDB transaction thro
   | 4 tables, key lookup | 6 / 264 / 458 (724) | 0 / 9 / 270 (576) | 0 / 1 / 819 (1469) |
 
   A hit stays under 10 µs except on MySQL, where Connector/J's own prepare scans the longer split
-  text. A miss for the key lookup is under 150 µs. On PostgreSQL a new text also asks the server
-  for the plain statement's plan (design 4.2), most of its 0.7-0.8 ms. Not done: parsing on the
+  text. A miss for the key lookup is under 150 µs on SQL Server (84-94 µs over two runs); on MySQL
+  it measured 104 and 161 µs, at the limit; PostgreSQL, MariaDB and Oracle are not under it. On
+  PostgreSQL a new text also asks the server for the plain statement's plan (design 4.2); the
+  driver's own work is about 0.1 ms on the other engines, so the plan check is likely most of
+  PostgreSQL's 0.6-0.8 ms, though it is not timed apart. The "was" figures ran with assertions on in
+  every jar; an A/B shows the vendor drivers' assertions cost nothing measurable
+  (docs/benchmarks/read-overhead.md). Not done: parsing on the
   caller's thread, which would save about 9 µs a parse and lose JSQLParser's timeout.
 
 End of the first deliverable: commit, review with `/ce:review`, and a preview build for PostgreSQL at

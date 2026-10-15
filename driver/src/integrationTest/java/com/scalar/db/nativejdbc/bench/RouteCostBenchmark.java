@@ -33,17 +33,20 @@ import org.junit.jupiter.params.provider.MethodSource;
 class RouteCostBenchmark {
 
   // {n}: an alias that differs from one new text to the next, as Hibernate's generated ones do
-  private static final Map<String, String> SHAPES =
-      Map.of(
-          "key lookup",
-          "select c{n}.id,c{n}.name,c{n}.region from rc.c c{n} where c{n}.id=?",
-          "key JOIN FK, two tables",
-          "select o{n}.id,o{n}.total,c1_0.name from rc.o o{n} join rc.c c1_0"
-              + " on c1_0.id=o{n}.customer_id where o{n}.id=?",
-          "4 tables, key lookup",
-          "select o{n}.id,c.name,i.qty,p.title from rc.o o{n} join rc.c c on c.id=o{n}.customer_id"
-              + " join rc.i i on i.order_id=o{n}.id join rc.p p on p.id=i.product_id"
-              + " where o{n}.id=?");
+  private static final String[][] SHAPES = {
+    {"key lookup", "select c{n}.id,c{n}.name,c{n}.region from rc.c c{n} where c{n}.id=?"},
+    {
+      "key JOIN FK, two tables",
+      "select o{n}.id,o{n}.total,c1_0.name from rc.o o{n} join rc.c c1_0"
+          + " on c1_0.id=o{n}.customer_id where o{n}.id=?"
+    },
+    {
+      "4 tables, key lookup",
+      "select o{n}.id,c.name,i.qty,p.title from rc.o o{n} join rc.c c on c.id=o{n}.customer_id"
+          + " join rc.i i on i.order_id=o{n}.id join rc.p p on p.id=i.product_id"
+          + " where o{n}.id=?"
+    }
+  };
 
   static List<Engines> engines() {
     return Engines.selected();
@@ -61,15 +64,10 @@ class RouteCostBenchmark {
           e.createSchema("rc"),
           "CREATE TABLE rc.c (id " + n + " PRIMARY KEY, name VARCHAR(20), region VARCHAR(20))",
           "CREATE TABLE rc.o (id " + n + " PRIMARY KEY, customer_id " + n + ", total " + n + ")",
-          "CREATE TABLE rc.i (id "
-              + n
-              + " PRIMARY KEY, order_id "
-              + n
-              + ", product_id "
-              + n
-              + ", qty "
-              + n
-              + ")",
+          String.format(
+              Locale.ROOT,
+              "CREATE TABLE rc.i (id %1$s PRIMARY KEY, order_id %1$s, product_id %1$s, qty %1$s)",
+              n),
           "CREATE TABLE rc.p (id " + n + " PRIMARY KEY, title VARCHAR(20))");
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
@@ -87,6 +85,9 @@ class RouteCostBenchmark {
                   catalog, c, t -> t.namespace().equals(rc), Duration.ofMinutes(1), List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
+    // the driver's own catalog TTL, not the tests' 0, which reads the catalog on every route
+    Properties ttl = new Properties();
+    ttl.setProperty("scalardbnative.catalogTtlMs", String.valueOf(Catalog.DEFAULT_TTL.toMillis()));
     StringBuilder out =
         new StringBuilder(
             "\n"
@@ -94,28 +95,20 @@ class RouteCostBenchmark {
                 + ": prepareStatement, median µs of 1,000 after 300 warm-up\n\n"
                 + "| shape | vendor | driver, same text | driver, new text |\n|---|---|---|---|\n");
     try (Connection vendor = e.open();
-        Connection driver = e.openDriver(defaultCatalogTtl())) {
-      for (String shape :
-          List.of("key lookup", "key JOIN FK, two tables", "4 tables, key lookup")) {
-        String sql = SHAPES.get(shape);
+        Connection driver = e.openDriver(ttl)) {
+      for (String[] shape : SHAPES) {
+        String sql = shape[1];
         out.append(
             String.format(
                 Locale.ROOT,
                 "| %s | %d | %d | %d |%n",
-                shape,
+                shape[0],
                 micros(vendor, sql, false),
                 micros(driver, sql, false),
                 micros(driver, sql, true)));
       }
     }
     System.out.println(out);
-  }
-
-  /** The driver's own catalog TTL, not the tests' 0, which reads the catalog on every route. */
-  private static Properties defaultCatalogTtl() {
-    Properties p = new Properties();
-    p.setProperty("scalardbnative.catalogTtlMs", String.valueOf(Catalog.DEFAULT_TTL.toMillis()));
-    return p;
   }
 
   /**

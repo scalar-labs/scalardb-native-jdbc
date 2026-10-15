@@ -1092,9 +1092,10 @@ public final class SqlAst {
   /**
    * Whether the parser reads {@code sql}: two tokens may only have fused into one if it does not. A
    * replacement on SQL Server is bracket-quoted (Engine.quote), which quotes a name whatever
-   * QUOTED_IDENTIFIER says. A split read's copies are checked only where assertions are enabled, in
-   * the tests: two more parses would be most of the cost of a statement the route cache does not
-   * hold (todo 008), and the emitter separates every pair of tokens that could fuse.
+   * QUOTED_IDENTIFIER says. A split read's copies are checked only where assertions are enabled, as
+   * in tests, an application's too: two more parses would be most of the cost of a statement the
+   * route cache does not hold (todo 008), and the emitter separates every pair of tokens that could
+   * fuse. A copy that fails throws an AssertionError there; elsewhere the database rejects it.
    */
   private boolean parses(String sql) {
     try {

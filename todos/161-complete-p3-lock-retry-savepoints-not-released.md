@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "161"
 tags: [code-review, performance, jdbc, locking]
@@ -21,10 +21,11 @@ Locks are released correctly; past 64 subtransactions PostgreSQL slows down (sub
 
 ## Acceptance Criteria
 
-- [ ] No savepoint is left behind by a retried locking read.
+- [x] No savepoint is left behind by a retried locking read.
 
 ## Recommended Action
 
+Option 1.
 
 ## Work Log
 
@@ -32,3 +33,9 @@ Locks are released correctly; past 64 subtransactions PostgreSQL slows down (sub
 
 **By:** Claude Code
 - From the end-of-first-deliverable review of 14f48e2..e3ff66a.
+
+### 2026-10-16 - Fixed
+
+**By:** Claude Code
+- `releaseSavepoint(sp)` after the rollback to it in `LockPlan.apply`'s retry path. No test of its
+  own: the retry tests of todo 151 run the path.

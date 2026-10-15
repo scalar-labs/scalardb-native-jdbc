@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "162"
 tags: [code-review, testing, interleaving]
@@ -31,12 +31,13 @@ dependencies: []
 
 ## Acceptance Criteria
 
-- [ ] A forced assertion failure mid-schedule is reported, not hung.
-- [ ] A failure message names the actor, the step and the trace.
-- [ ] The one-statement scenario proves the read was in progress before the rollback.
+- [x] A forced assertion failure mid-schedule is reported, not hung.
+- [x] A failure message names the actor, the step and the trace.
+- [x] The one-statement scenario proves the read was in progress before the rollback.
 
 ## Recommended Action
 
+All but the cross-system assertion.
 
 ## Work Log
 
@@ -44,3 +45,18 @@ dependencies: []
 
 **By:** Claude Code
 - From the end-of-first-deliverable review of 14f48e2..e3ff66a.
+
+### 2026-10-16 - Fixed
+
+**By:** Claude Code
+- Actors are named (d0, d1 also as ApplicationName; s2, s3); every failure carries the schedule's
+  steps (actor:step, blocked, committed, aborted, rolled back); the blocked diagnostic shows
+  application_name and closes its connection.
+- A driver actor closes with `Connection.abort`, so a statement blocked on another actor's lock no
+  longer holds the failure back. Checked by treating 40001 as a fault for one run (reverted): it
+  failed in 42 s with "seed 1, d0 step 1" and its steps.
+- The one-statement scenario waits until a backend is in `PgSleep` before the rollback; SKIP LOCKED
+  uses `succeedsWithin` with its rule; the class Javadoc says write and read skew are out of reach;
+  the SpotBugs justification no longer claims schedules replay exactly.
+- Not done: asserting aborts between the two systems; the per-side commits and aborts of todo 159
+  and the mutation checks cover the cases that matter.

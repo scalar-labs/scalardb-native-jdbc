@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "164"
 tags: [code-review, performance, docs, testing]
@@ -31,10 +31,11 @@ engine; measure or soften the EXPLAIN claim; restore the cold-path note.
 
 ## Acceptance Criteria
 
-- [ ] The docs and todo 008 state per-engine results and what the numbers include.
+- [x] The docs and todo 008 state per-engine results and what the numbers include.
 
 ## Recommended Action
 
+Option 1.
 
 ## Work Log
 
@@ -42,3 +43,14 @@ engine; measure or soften the EXPLAIN claim; restore the cold-path note.
 
 **By:** Claude Code
 - From the end-of-first-deliverable review of 14f48e2..e3ff66a.
+
+### 2026-10-16 - Fixed
+
+**By:** Claude Code
+- build.gradle.kts: assertions are off only for `-Dnativejdbc.bench=true`.
+- A/B on the same code (MySQL / SQL Server / PostgreSQL key lookup, new text, µs): all off
+  161 / 94 / 603, vendors on and driver off 153 / 93 / 591, all on 264 / 198 / 728. The vendors'
+  assertions cost nothing measurable, so the before/after figures differ by the two parses.
+- MySQL measured 104 and 161 µs in two runs: todo 008's criterion now says it holds on SQL Server,
+  MySQL is at the limit, PostgreSQL is not under it. The PostgreSQL plan-check claim is now an
+  estimate from the other engines; read-overhead.md has the cold-path note back and the A/B.

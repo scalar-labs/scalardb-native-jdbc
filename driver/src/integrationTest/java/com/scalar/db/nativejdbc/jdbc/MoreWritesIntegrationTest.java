@@ -146,6 +146,7 @@ class MoreWritesIntegrationTest {
         lockingReads(e, tm, tpc, t);
         reviewFindings(e, tpc, t);
         timeoutMidWrite(e, tpc, t);
+        readOnlyWrite(e, t);
       }
       timestamptzKeys(e);
       largeLockingRead(e);
@@ -681,6 +682,24 @@ class MoreWritesIntegrationTest {
           .containsExactly("a", "b");
     } finally {
       pool.shutdownNow();
+    }
+  }
+
+  /** 160: a read-only connection reads without anchors, so it writes nothing, enforced or not. */
+  private static void readOnlyWrite(Engines e, Table t) throws Exception {
+    Properties ignore = new Properties();
+    ignore.setProperty("readOnlyMode", "ignore");
+    try (Connection d = e.openDriver(ignore)) {
+      d.setAutoCommit(false);
+      d.setReadOnly(true);
+      rows(d, "SELECT x FROM " + t.sql + " WHERE id = 1");
+      assertThatThrownBy(
+              () ->
+                  d.createStatement()
+                      .executeUpdate("UPDATE " + t.sql + " SET x = 'r' WHERE id = 1"))
+          .extracting("SQLState")
+          .isEqualTo("25006");
+      d.rollback();
     }
   }
 

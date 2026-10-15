@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "160"
 tags: [code-review, correctness, jdbc, anchors]
@@ -27,10 +27,11 @@ vendor setting.
 
 ## Acceptance Criteria
 
-- [ ] The probe gets 25006, never 1.
+- [x] The probe gets 25006, never 1.
 
 ## Recommended Action
 
+Option 1.
 
 ## Work Log
 
@@ -38,3 +39,11 @@ vendor setting.
 
 **By:** Claude Code
 - From the end-of-first-deliverable review of 14f48e2..e3ff66a.
+
+### 2026-10-16 - Fixed
+
+**By:** Claude Code
+- `Writes.within` refuses a write of a ScalarDB table on a read-only connection with 25006, before
+  anything runs; a locking read goes through it too, as PostgreSQL refuses FOR UPDATE there.
+- Test: MoreWritesIntegrationTest.readOnlyWrite (readOnlyMode=ignore); without the fix the update
+  succeeded.

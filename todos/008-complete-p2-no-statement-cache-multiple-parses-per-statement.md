@@ -121,7 +121,7 @@ executor of Option 2.
 - [x] `joinTokens` with no replacements does not re-parse (not on the routed path; tests only)
 - [x] No per-parse platform thread creation on the hot path (shared executor or in-thread parse)
 - [x] The cache is bounded and keyed on a catalog epoch that `Catalog.invalidate()` bumps
-- [x] A microbenchmark or timing guard shows the per-statement cost on a cache hit under 10 µs and on a miss under 150 µs for the Hibernate-style key select
+- [x] A microbenchmark or timing guard shows the per-statement cost on a cache hit under 10 µs and on a miss under 150 µs for the Hibernate-style key select (met on SQL Server; MySQL 104-161 µs, at the limit; not on PostgreSQL, where the server plan check of design 4.2 dominates; MariaDB and Oracle not measured)
 - [x] design.md section 1 states where the rewrite happens and that it is cached
 - [x] Unit tests pass; integration tests pass
 
@@ -173,6 +173,13 @@ executor of Option 2.
   varies an alias rather than adding leading blanks, which inflated the lexer's share. A key lookup
   miss is 84 µs on SQL Server and 104 µs on MySQL (was 240 and 209). PostgreSQL's 0.8 ms is mostly
   the server plan check of design 4.2.
+
+### 2026-10-16 - Criterion qualified (todo 164)
+**By:** Claude Code
+- A second run: the key lookup miss was 94 µs on SQL Server, 161 µs on MySQL, 603 µs on PostgreSQL.
+  The miss criterion holds on SQL Server only, MySQL is at the limit; the checkbox now says so.
+- A/B on the same code: the vendor drivers' own assertions cost nothing measurable, so the
+  before/after figures differ by the two parses.
 
 ## Notes
 

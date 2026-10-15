@@ -831,10 +831,7 @@ class WriteIntegrationTest {
           assertThat(rs.next()).isTrue();
         }
         scalarDbSet(tm, ch, 6, "scalardb");
-        assertThatThrownBy(
-                () -> d.createStatement().executeUpdate("UPDATE aj.c SET x = 'd' WHERE id = 6"))
-            .isInstanceOf(SQLTransactionRollbackException.class);
-        d.rollback();
+        assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 6");
         d.setReadOnly(true);
         assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
         d.setReadOnly(false);
@@ -874,16 +871,10 @@ class WriteIntegrationTest {
       // a LEFT JOIN: the preserved row of an unmatched parent, and the nullable side's rows
       assertThat(rows(d, leftJoin + "4")).containsExactly("4/null");
       scalarDbSet(tm, p, 4, "scalardb");
-      assertThatThrownBy(
-              () -> d.createStatement().executeUpdate("UPDATE aj.p SET x = 'd' WHERE id = 4"))
-          .isInstanceOf(SQLTransactionRollbackException.class);
-      d.rollback();
+      assertAborts(d, "UPDATE aj.p SET x = 'd' WHERE id = 4");
       assertThat(rows(d, leftJoin + "2")).containsExactly("2/2");
       other.createStatement().executeUpdate("UPDATE aj.c SET x = 'o' WHERE id = 2");
-      assertThatThrownBy(
-              () -> d.createStatement().executeUpdate("UPDATE aj.c SET x = 'd' WHERE id = 2"))
-          .isInstanceOf(SQLTransactionRollbackException.class);
-      d.rollback();
+      assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 2");
       // ORDER BY and LIMIT on top of the copies
       assertThat(
               rows(
@@ -892,26 +883,17 @@ class WriteIntegrationTest {
                       + " ORDER BY p.id DESC LIMIT 1"))
           .containsExactly("5");
       scalarDbSet(tm, ch, 5, "scalardb");
-      assertThatThrownBy(
-              () -> d.createStatement().executeUpdate("UPDATE aj.c SET x = 'd' WHERE id = 5"))
-          .isInstanceOf(SQLTransactionRollbackException.class);
-      d.rollback();
+      assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 5");
       // a self-join anchors the rows of both references
       assertThat(rows(d, "SELECT b.id FROM aj.p a JOIN aj.p b ON b.id = a.id + 1 WHERE a.id = 6"))
           .containsExactly("7");
       scalarDbSet(tm, p, 7, "scalardb");
-      assertThatThrownBy(
-              () -> d.createStatement().executeUpdate("UPDATE aj.p SET x = 'd' WHERE id = 7"))
-          .isInstanceOf(SQLTransactionRollbackException.class);
-      d.rollback();
+      assertAborts(d, "UPDATE aj.p SET x = 'd' WHERE id = 7");
       // an IN subquery over the key: the outer table is anchored, the subquery's returns no row
       assertThat(rows(d, "SELECT x FROM aj.p WHERE id IN (SELECT id FROM aj.c WHERE id = 2)"))
           .containsExactly("a");
       scalarDbSet(tm, p, 2, "scalardb");
-      assertThatThrownBy(
-              () -> d.createStatement().executeUpdate("UPDATE aj.p SET x = 'd' WHERE id = 2"))
-          .isInstanceOf(SQLTransactionRollbackException.class);
-      d.rollback();
+      assertAborts(d, "UPDATE aj.p SET x = 'd' WHERE id = 2");
       // a nullable row read in flight is anchored on its before image: a ScalarDB rollback keeps
       // it valid, a commit does not
       for (boolean commit : new boolean[] {false, true}) {
@@ -938,15 +920,20 @@ class WriteIntegrationTest {
         }
         String update = "UPDATE aj.c SET x = 'd' WHERE id = " + id;
         if (commit) {
-          assertThatThrownBy(() -> d.createStatement().executeUpdate(update))
-              .isInstanceOf(SQLTransactionRollbackException.class);
-          d.rollback();
+          assertAborts(d, update);
         } else {
           assertThat(d.createStatement().executeUpdate(update)).isEqualTo(1);
           d.commit();
         }
       }
     }
+  }
+
+  /** The update aborts on an anchor, and the transaction is rolled back for the next case. */
+  private static void assertAborts(Connection d, String update) throws SQLException {
+    assertThatThrownBy(() -> d.createStatement().executeUpdate(update))
+        .isInstanceOf(SQLTransactionRollbackException.class);
+    d.rollback();
   }
 
   /** The findings of the 4b review (todos 141-145), each asserting the fixed behaviour. */
