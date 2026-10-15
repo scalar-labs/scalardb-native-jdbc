@@ -145,6 +145,7 @@ class MoreWritesIntegrationTest {
         inFlightWait(e, tpc, t);
         lockingReads(e, tm, tpc, t);
         reviewFindings(e, tpc, t);
+        timeoutMidWrite(e, tpc, t);
       }
       timestamptzKeys(e);
       largeLockingRead(e);
@@ -629,6 +630,57 @@ class MoreWritesIntegrationTest {
       assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 62")).containsExactly("c");
     } finally {
       one.shutdownNow();
+    }
+  }
+
+  /**
+   * 157: a timeout the driver raises after one key's DML, before its CAS or the next key, leaves a
+   * transaction the application cannot commit.
+   */
+  private static void timeoutMidWrite(Engines e, TwoPhaseCommitTransactionManager tpc, Table t)
+      throws Exception {
+    Properties waits = new Properties();
+    waits.setProperty("scalardbnative.inflightWaitMs", "20000");
+    ExecutorService pool = Executors.newCachedThreadPool();
+    try (Connection d = e.openDriver(waits);
+        Connection locker = e.open();
+        Statement st = d.createStatement()) {
+      st.executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (80, 'a')");
+      st.executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (81, 'b')");
+      // the wait for 81 to settle uses most of the timeout; the DML of 80 then waits on a plain
+      // lock past it, within the 1 s the vendor statement was given
+      TwoPhaseCommitTransaction held = prepared(tpc, t, 81, "p");
+      locker.setAutoCommit(false);
+      rows(locker, "SELECT x FROM " + t.sql + " WHERE id = 80 FOR UPDATE");
+      Future<?> settle =
+          pool.submit(
+              () -> {
+                Thread.sleep(1500);
+                held.rollback();
+                return null;
+              });
+      Future<?> unlock =
+          pool.submit(
+              () -> {
+                Thread.sleep(2200);
+                locker.commit();
+                return null;
+              });
+      d.setAutoCommit(false);
+      st.setQueryTimeout(2);
+      assertThatThrownBy(
+              () -> st.executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id IN (80, 81)"))
+          .extracting("SQLState")
+          .isEqualTo("57014");
+      settle.get(5, TimeUnit.SECONDS);
+      unlock.get(5, TimeUnit.SECONDS);
+      assertThatThrownBy(d::commit).isInstanceOf(SQLTransactionRollbackException.class);
+      d.rollback();
+      d.setAutoCommit(true);
+      assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id IN (80, 81) ORDER BY id"))
+          .containsExactly("a", "b");
+    } finally {
+      pool.shutdownNow();
     }
   }
 

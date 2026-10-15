@@ -334,7 +334,8 @@ final class Writes {
 
   /**
    * Runs writes, one or a batch: in a transaction of their own in autocommit mode (4.4), all or
-   * none; otherwise in the application's, which a driver-decided abort marks rollback-only.
+   * none; otherwise in the application's, which a driver-decided abort, a timeout or a cancel marks
+   * rollback-only.
    *
    * @param vendor the vendor connection
    * @param rollbackOnly marks the application's transaction rollback-only
@@ -362,7 +363,13 @@ final class Writes {
         } catch (SQLException r) {
           e.addSuppressed(r); // the write's own failure is the one to report
         }
-      } else if (e instanceof Aborted) {
+      } else if (e instanceof Aborted
+          || e instanceof RuntimeException
+          || "57014".equals(((SQLException) e).getSQLState())) {
+        // a timeout or a cancel the driver raises itself can come between a key's DML and its
+        // stamp, in a transaction the vendor would still commit (todo 157)
+        // ponytail: a vendor error part way relies on PostgreSQL ending the transaction; a
+        // savepoint per write on the engines where a failed statement does not
         rollbackOnly.run();
       }
       throw e;

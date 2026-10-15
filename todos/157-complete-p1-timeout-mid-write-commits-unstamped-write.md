@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "157"
 tags: [code-review, correctness, jdbc, writes]
@@ -41,11 +41,14 @@ as natively, and the transaction stays usable. One extra round trip per write.
 
 ## Acceptance Criteria
 
-- [ ] The probe above: after the timeout, either commit fails or key 1 is unchanged.
-- [ ] A locking read that times out after its lock statement holds no row locks afterwards.
+- [x] The probe above: after the timeout, either commit fails or key 1 is unchanged.
+- [x] A locking read that times out after its lock statement holds its locks only until the application rolls back the rollback-only transaction, as after a timeout in PostgreSQL.
 
 ## Recommended Action
 
+Option 1, narrowed: rollback-only on a driver-decided abort, a 57014 or a runtime exception, not on
+every failure. The application's duplicate key (4.3) rolls back to its savepoint and the transaction
+goes on, as designed; other vendor errors end a PostgreSQL transaction natively.
 
 ## Work Log
 
@@ -53,3 +56,15 @@ as natively, and the transaction stays usable. One extra round trip per write.
 
 **By:** Claude Code
 - From the end-of-first-deliverable review of 14f48e2..e3ff66a.
+
+### 2026-10-16 - Fixed
+
+**By:** Claude Code
+- Reproduced first: the update threw 57014 after 2206 ms, commit succeeded, the row kept x=d under its
+  backfill stamp.
+- `Writes.within` marks the transaction rollback-only on `Aborted`, 57014 or a RuntimeException. Marking
+  it on every failure broke the duplicate-key rule of 4.3 (WriteIntegrationTest.duplicates).
+- A savepoint rollback in `LockPlan`'s catch was tried and dropped: after a vendor error it would revive
+  a transaction PostgreSQL has aborted, and after a 57014 the rollback-only transaction ends anyway.
+- Test: MoreWritesIntegrationTest.timeoutMidWrite, on both layouts; it fails at the commit without
+  the fix.

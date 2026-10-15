@@ -1125,7 +1125,9 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   `40001`, fails every further statement and `commit()` with the same exception, and forwards
   `rollback()`. The driver enforces this on every engine: a driver-decided abort is not a database
   error, so even PostgreSQL, which does this natively only after a failed statement, would otherwise
-  accept further statements and a commit.
+  accept further statements and a commit. A query timeout or a cancel the driver raises itself during
+  a write marks the transaction the same way (it throws `57014`): it can come between a key's write
+  and its stamp, which would otherwise commit unstamped.
 - **NULL or missing metadata.** If step 1 finds a metadata row with `tx_id IS NULL`, which a ScalarDB
   rollback over a row that had no metadata leaves behind with `tx_state` NULL as well (fact 2), the anchor
   has a NULL `tx_id` and a version of NULL or 0, which the CAS ignores: its condition is
