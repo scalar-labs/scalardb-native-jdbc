@@ -84,7 +84,8 @@ final class Router {
 
     /**
      * Whether this route differs from the one it replaces only in how a committed copy excludes its
-     * rows in flight, which the counts decide: either text returns the same rows.
+     * rows in flight, which the counts decide, or in whether it reads its rows' versions: either
+     * text returns the same rows.
      */
     final boolean countsOnly;
 
@@ -109,6 +110,12 @@ final class Router {
     /** A read whose rows carry their versions in hidden trailing columns, or null. */
     final @Nullable Anchored anchored;
 
+    /**
+     * For a read that anchors its rows where they are recorded, whether it was decided where they
+     * are: in a transaction on a connection that is not read-only; null for any other statement.
+     */
+    final @Nullable Boolean anchoring;
+
     private Route(
         String source,
         String sql,
@@ -128,7 +135,9 @@ final class Router {
         boolean parallel,
         boolean plansParallel,
         Writes.@Nullable Plan write,
-        @Nullable Anchored anchored) {
+        @Nullable Anchored anchored,
+        @Nullable Boolean anchoring) {
+      this.anchoring = anchoring;
       this.parallel = parallel;
       this.plansParallel = plansParallel;
       this.write = write;
@@ -150,8 +159,11 @@ final class Router {
       this.catalogGeneration = catalogGeneration;
     }
 
-    /** This route, its rows carrying their versions as {@code a} describes, or none. */
-    Route anchored(@Nullable Anchored a) {
+    /**
+     * This route, its rows carrying their versions as {@code a} describes, or none, decided with
+     * {@code anchoring} as {@link #anchoring} says.
+     */
+    Route anchored(@Nullable Anchored a, @Nullable Boolean anchoring) {
       return new Route(
           source,
           sql,
@@ -171,7 +183,8 @@ final class Router {
           parallel,
           plansParallel,
           write,
-          a);
+          a,
+          anchoring);
     }
 
     /** This route with another statement text and what goes with it. */
@@ -200,7 +213,8 @@ final class Router {
           parallel,
           plansParallel,
           write,
-          anchored);
+          anchored,
+          anchoring);
     }
   }
 
@@ -346,11 +360,11 @@ final class Router {
   String nativeSql(Connection vendor, String sql) throws SQLException {
     lock.lock();
     try {
-      Route r = routes.get(sql);
+      Route r = routes.get(key(vendor, sql));
       if (r == null) {
         probes = false;
         try {
-          r = decide(vendor, sql, null);
+          r = decide(vendor, sql, null, null);
         } catch (SQLException e) {
           r = null;
         } finally {
@@ -376,9 +390,10 @@ final class Router {
   Route route(Connection vendor, String sql) throws SQLException {
     lock.lock();
     try {
-      Route cached = routes.get(sql);
-      Route r = cached == null ? decide(vendor, sql, null) : current(vendor, cached);
-      routes.put(sql, r);
+      String key = key(vendor, sql);
+      Route cached = routes.get(key);
+      Route r = cached == null ? decide(vendor, sql, null, null) : current(vendor, cached);
+      routes.put(key, r);
       return r;
     } finally {
       lock.unlock();
@@ -389,7 +404,11 @@ final class Router {
    * Routes a statement from its text, as {@link #route}; with {@code forcedPerRow}, the per-row
    * choices of a split read are those instead of the counts'.
    */
-  private Route decide(Connection vendor, String sql, @Nullable List<Integer> forcedPerRow)
+  private Route decide(
+      Connection vendor,
+      String sql,
+      @Nullable List<Integer> forcedPerRow,
+      @Nullable Boolean forcedAnchoring)
       throws SQLException {
     if (passthrough) {
       if (!vendor.getAutoCommit()) {
@@ -439,7 +458,13 @@ final class Router {
       return write(sql, ast, scalarDb);
     }
     if (!scalarDb.isEmpty()) {
-      return read(vendor, sql, ast, scalarDb, forcedPerRow);
+      return read(
+          vendor,
+          sql,
+          ast,
+          scalarDb,
+          forcedPerRow,
+          forcedAnchoring != null ? forcedAnchoring : anchoring(vendor));
     }
     boolean changesSession = kind != SqlAst.Kind.SELECT && kind != SqlAst.Kind.DML;
     boolean changesNames = kind == SqlAst.Kind.DDL || kind == SqlAst.Kind.TRUNCATE;
@@ -509,6 +534,7 @@ final class Router {
         false,
         false,
         plan,
+        null,
         null);
   }
 
@@ -556,6 +582,22 @@ final class Router {
       }
     }
     return out;
+  }
+
+  /**
+   * Whether a read's anchors would be recorded: in a transaction, on a connection that is not
+   * read-only (todo 146); a read routed elsewhere reads no versions.
+   */
+  private static boolean anchoring(Connection vendor) throws SQLException {
+    return !vendor.getAutoCommit() && !vendor.isReadOnly();
+  }
+
+  /**
+   * The route cache's key: the text, per anchoring mode, so that a text read both in and out of
+   * transactions keeps a route for each.
+   */
+  private static String key(Connection vendor, String sql) throws SQLException {
+    return anchoring(vendor) ? sql : "\0" + sql;
   }
 
   /** Whether the version lookups' own alias would capture the row's key (todo 144). */
@@ -685,6 +727,7 @@ final class Router {
         false,
         false,
         plan,
+        null,
         null);
   }
 
@@ -701,7 +744,8 @@ final class Router {
       String sql,
       SqlAst ast,
       IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb,
-      @Nullable List<Integer> forcedPerRow)
+      @Nullable List<Integer> forcedPerRow,
+      boolean anchoring)
       throws SQLException {
     Set<String> names = new TreeSet<>();
     for (TableInfo t : scalarDb.values()) {
@@ -792,7 +836,9 @@ final class Router {
         }
       }
     }
-    List<SqlAst.TableRef> anchored = anchorable(ast, split);
+    List<SqlAst.TableRef> anchorable = anchorable(ast, split);
+    // the versions cost lookups per row, read only where they are recorded
+    List<SqlAst.TableRef> anchored = anchoring ? anchorable : List.of();
     IdentityHashMap<SqlAst.TableRef, Writes.Names> anchorNames = new IdentityHashMap<>();
     for (SqlAst.TableRef r : anchored) {
       anchorNames.put(r, new Writes.Names(engine, Objects.requireNonNull(scalarDb.get(r))));
@@ -822,7 +868,9 @@ final class Router {
               recheckAt,
               chosen,
               true);
-      if (!anchored.isEmpty()) {
+      if (!anchorable.isEmpty() && anchored.isEmpty()) {
+        r = r.anchored(null, false);
+      } else if (!anchored.isEmpty()) {
         List<String> anchorTables = new ArrayList<>();
         List<Integer> keys = new ArrayList<>();
         for (SqlAst.TableRef a : anchored) {
@@ -830,7 +878,7 @@ final class Router {
           anchorTables.add(n.table);
           keys.add(n.keyColumns.size());
         }
-        r = r.anchored(new Anchored(anchorTables, keys));
+        r = r.anchored(new Anchored(anchorTables, keys), true);
       }
       return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
           ? r.with(r.sql, r.parameterSources, r.perRow, false, true)
@@ -891,6 +939,7 @@ final class Router {
         perRow,
         false,
         plansParallel,
+        null,
         null,
         null);
   }
@@ -1170,7 +1219,7 @@ final class Router {
   static Route keepText(Route kept, Route now) {
     // the kept text's hidden columns, not the new route's (todo 144)
     return now.with(kept.sql, kept.parameterSources, kept.perRow, false, kept.parallel)
-        .anchored(kept.anchored);
+        .anchored(kept.anchored, kept.anchoring);
   }
 
   /**
@@ -1223,17 +1272,23 @@ final class Router {
               && !catalog.hasPassed(prepared.trustedUntil)
               && prepared.passthrough == passthrough
               && prepared.isolation == isolation
-              && (!prepared.passthrough || vendor.getAutoCommit());
+              && (!prepared.passthrough || vendor.getAutoCommit())
+              && (prepared.anchoring == null || prepared.anchoring == anchoring(vendor));
       if (unchanged && (prepared.recheckAt == 0 || System.nanoTime() - prepared.recheckAt < 0)) {
         return prepared;
       }
-      Route now = decide(vendor, prepared.source, null);
-      if (now.sql.equals(prepared.sql) || now.perRow.equals(prepared.perRow)) {
+      Route now = decide(vendor, prepared.source, null, null);
+      if (now.sql.equals(prepared.sql)
+          || (now.perRow.equals(prepared.perRow)
+              && Objects.equals(now.anchoring, prepared.anchoring))) {
         return now;
       }
-      // the per-row choices moved: is that all that moved? It is when only the counts were due
+      // the per-row choices or the anchors moved: is that all that moved? It is when only the
+      // counts were due
       if (!unchanged
-          && !decide(vendor, prepared.source, prepared.perRow).sql.equals(prepared.sql)) {
+          && !decide(vendor, prepared.source, prepared.perRow, prepared.anchoring)
+              .sql
+              .equals(prepared.sql)) {
         return now;
       }
       return now.with(now.sql, now.parameterSources, now.perRow, true, now.parallel);

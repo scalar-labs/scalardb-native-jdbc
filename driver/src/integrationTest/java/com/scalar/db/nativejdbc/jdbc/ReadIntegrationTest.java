@@ -378,7 +378,9 @@ class ReadIntegrationTest {
         boolean perRow = engine == Engine.MYSQL || engine == Engine.MARIADB;
         assertThat(ps.toString().equals(before)).isEqualTo(!perRow);
         try (Connection vendor = e.open()) {
+          vendor.setAutoCommit(false); // in a transaction, where anchors are recorded
           String sql = new Router(engine, catalog, new Session(engine)).route(vendor, byKey).sql;
+          vendor.rollback();
           if (engine == Engine.POSTGRESQL) {
             assertThat(sql).contains("scalardb_native_x"); // a key read anchors its row (4b)
           } else {

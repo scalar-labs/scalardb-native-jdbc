@@ -748,7 +748,10 @@ union as a derived table.
   for every table joined in the top-level FROM clause, a LEFT JOIN's nullable side included: those of
   the table's piece in that copy, NULL for its unmatched piece, which anchors nothing. A table only in
   a subquery returns no row and takes no anchor, nor does any table of a grouped or DISTINCT read,
-  nor a read through `rc_T`. A
+  nor a read through `rc_T`. The versions cost two lookups per anchored table and row, up to 11x
+  on a join of 150k rows, so a read takes them only where they are recorded: in a transaction, on a
+  connection that is not read-only. A statement prepared in the other mode is prepared again when it
+  runs; either text returns the same rows. A
   user `SELECT ... FOR UPDATE` or `FOR SHARE` of one table, read row by row, reads the **first arm
   alone**: the statement as written over the first arm's derived table, its locking clause, `NOWAIT`
   and `SKIP LOCKED` included, which on PostgreSQL locks the rows of `T` only, the in-flight check

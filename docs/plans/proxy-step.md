@@ -353,6 +353,10 @@ other engines keep refusing them with `0AN01`.
   join, the preserved and nullable sides of a LEFT JOIN, ORDER BY and LIMIT on top of the copies, a
   self-join, and a nullable row read in flight anchored on its before image. Still not anchored: a
   table only in a subquery, whose rows are not returned, and grouped and DISTINCT reads.
+  The version lookups cost 1.0-1.6x on small joins and up to 11x on a join of 150k rows, which
+  autocommit and read-only reads paid for nothing; a read now takes them only in a transaction on
+  a connection that is not read-only, the route cache keeps a route per mode, and a statement
+  prepared in the other mode is prepared again when it runs.
 
 ### Milestone 5: interleaving tests
 

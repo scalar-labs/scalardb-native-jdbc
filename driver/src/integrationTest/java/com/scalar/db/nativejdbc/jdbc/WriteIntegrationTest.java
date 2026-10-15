@@ -819,7 +819,26 @@ class WriteIntegrationTest {
         TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();
         Connection d = e.openDriver();
         Connection other = e.openDriver()) {
-      d.setAutoCommit(false);
+      // versions are read only where they are recorded: not in autocommit, nor read-only
+      assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
+      // prepared in autocommit, run in a transaction: prepared again, it anchors
+      try (PreparedStatement ps = d.prepareStatement(join + "?")) {
+        d.setAutoCommit(false);
+        assertThat(d.nativeSQL(join + "1")).contains("scalardb_native_meta");
+        ps.setInt(1, 6);
+        try (ResultSet rs = ps.executeQuery()) {
+          assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);
+          assertThat(rs.next()).isTrue();
+        }
+        scalarDbSet(tm, ch, 6, "scalardb");
+        assertThatThrownBy(
+                () -> d.createStatement().executeUpdate("UPDATE aj.c SET x = 'd' WHERE id = 6"))
+            .isInstanceOf(SQLTransactionRollbackException.class);
+        d.rollback();
+        d.setReadOnly(true);
+        assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
+        d.setReadOnly(false);
+      }
       // the application's columns only
       try (ResultSet rs = d.createStatement().executeQuery(join + "1")) {
         assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);

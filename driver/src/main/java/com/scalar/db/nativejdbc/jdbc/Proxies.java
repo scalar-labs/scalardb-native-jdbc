@@ -211,8 +211,10 @@ public final class Proxies {
             StatementHandler h =
                 new StatementHandler((Statement) created(vendor, method, routed), me, this, route);
             h.keysAsked = keys;
-            // only a route that depends on the in-flight counts is ever prepared again
-            if (method.getName().equals("prepareStatement") && route.recheckAt != 0) {
+            // only a route that depends on the in-flight counts, or on whether its anchors are
+            // recorded, is ever prepared again
+            if (method.getName().equals("prepareStatement")
+                && (route.recheckAt != 0 || route.anchoring != null)) {
               h.preparedWith = method;
               h.preparedArgs = args.clone();
             }
