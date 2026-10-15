@@ -208,8 +208,21 @@ public enum Engines {
 
   /** ScalarDB's Consensus Commit on this database, for its transaction managers. */
   public TransactionFactory scalarDb() throws SQLException {
+    return scalarDb(new Properties());
+  }
+
+  /**
+   * ScalarDB's Consensus Commit on this database with extra properties.
+   *
+   * @param extra the properties added to those of {@link #scalarDb()}, such as Consensus Commit's
+   *     isolation level
+   * @return the factory
+   * @throws SQLException if the database does not start
+   */
+  public TransactionFactory scalarDb(Properties extra) throws SQLException {
     Started s = started();
     Properties p = new Properties();
+    p.putAll(extra);
     p.setProperty("scalar.db.storage", "jdbc");
     p.setProperty("scalar.db.contact_points", s.url);
     p.setProperty("scalar.db.username", s.username);

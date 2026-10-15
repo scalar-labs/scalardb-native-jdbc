@@ -32,10 +32,14 @@ import java.sql.SQLTransactionRollbackException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Random;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -43,6 +47,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -69,8 +74,14 @@ class InterleavingIntegrationTest {
   private static final Map<String, String> DECOUPLED =
       Map.of("transaction-metadata-decoupling", "true");
 
+  /** Consensus Commit's isolation levels the ScalarDB side runs at, a table pair for each. */
+  private static final List<String> ISOLATIONS = List.of("READ_COMMITTED", "SNAPSHOT");
+
   /** The counters of the randomized schedules. */
   private static final int[] COUNTERS = {100, 101};
+
+  /** The accounts of the randomized transfers, 100 each to start with. */
+  private static final int[] ACCOUNTS = {200, 201, 202, 203};
 
   static List<Engines> engines() {
     return Engines.selected();
@@ -97,50 +108,64 @@ class InterleavingIntegrationTest {
       e.execute(
           c,
           "CREATE SCHEMA il",
-          "CREATE TABLE il.imp (id INT PRIMARY KEY, x TEXT, v INT)",
-          // rows without metadata, as an imported table has them
-          "INSERT INTO il.imp SELECT g, 'a', 0 FROM generate_series(1, 12) g",
-          "INSERT INTO il.imp VALUES (100, 'a', 0), (101, 'a', 0)",
           // run once per statement, after its snapshot: opens a window inside one read
           "CREATE FUNCTION il.pause() RETURNS BOOLEAN AS 'SELECT pg_sleep(1) IS NOT NULL'"
               + " LANGUAGE sql VOLATILE");
+      for (String isolation : ISOLATIONS) {
+        String imp = "il.imp_" + isolation.toLowerCase(Locale.ROOT);
+        e.execute(
+            c,
+            "CREATE TABLE " + imp + " (id INT PRIMARY KEY, x TEXT, v INT)",
+            // rows without metadata, as an imported table has them
+            "INSERT INTO " + imp + " SELECT g, 'a', 0 FROM generate_series(1, 12) g",
+            "INSERT INTO "
+                + imp
+                + " SELECT g, 'a', 0 FROM unnest(ARRAY"
+                + Arrays.toString(COUNTERS)
+                + ") g",
+            "INSERT INTO "
+                + imp
+                + " SELECT g, 'a', 100 FROM unnest(ARRAY"
+                + Arrays.toString(ACCOUNTS)
+                + ") g");
+      }
     }
-    TransactionFactory scalarDb = e.scalarDb();
-    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+    try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace("il", true);
-      admin.importTable("il", "imp", DECOUPLED, Map.of());
-      admin.createTable(
-          "il",
-          "made",
-          TableMetadata.newBuilder()
-              .addColumn("id", DataType.INT)
-              .addColumn("x", DataType.TEXT)
-              .addColumn("v", DataType.INT)
-              .addPartitionKey("id")
-              .build(),
-          DECOUPLED);
+      for (String isolation : ISOLATIONS) {
+        String suffix = "_" + isolation.toLowerCase(Locale.ROOT);
+        admin.importTable("il", "imp" + suffix, DECOUPLED, Map.of());
+        admin.createTable(
+            "il",
+            "made" + suffix,
+            TableMetadata.newBuilder()
+                .addColumn("id", DataType.INT)
+                .addColumn("x", DataType.TEXT)
+                .addColumn("v", DataType.INT)
+                .addPartitionKey("id")
+                .build(),
+            DECOUPLED);
+      }
     }
-    try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
-      DistributedTransaction tx = tm.begin();
-      List<Integer> ids = new ArrayList<>();
-      for (int i = 1; i <= 12; i++) {
-        ids.add(i);
+    try (DistributedTransactionManager tm = e.scalarDb().getTransactionManager()) {
+      for (String isolation : ISOLATIONS) {
+        DistributedTransaction tx = tm.begin();
+        List<Integer> ids = new ArrayList<>();
+        for (int i = 1; i <= 12; i++) {
+          ids.add(i);
+        }
+        for (int id : COUNTERS) {
+          ids.add(id);
+        }
+        for (int id : ids) {
+          tx.insert(made(isolation, id, 0));
+        }
+        for (int id : ACCOUNTS) {
+          tx.insert(made(isolation, id, 100));
+        }
+        tx.commit();
       }
-      for (int id : COUNTERS) {
-        ids.add(id);
-      }
-      for (int id : ids) {
-        tx.insert(
-            Insert.newBuilder()
-                .namespace("il")
-                .table("made")
-                .partitionKey(Key.ofInt("id", id))
-                .textValue("x", "a")
-                .intValue("v", 0)
-                .build());
-      }
-      tx.commit();
     }
     Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     try (Connection c = e.open()) {
@@ -149,26 +174,47 @@ class InterleavingIntegrationTest {
                   catalog, c, t -> t.namespace().equals("il"), Duration.ofMinutes(1), List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
-    TableInfo imp = catalog.lookup(List.of(), "il", "imp");
-    List<Table> tables =
-        List.of(
-            new Table("il.imp", Objects.requireNonNull(imp.virtualTable()), true),
-            new Table("il.made", "made", false));
-    try (DistributedTransactionManager tm = scalarDb.getTransactionManager();
-        TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager()) {
-      for (Table t : tables) {
-        scenarios(e, tm, tpc, t);
-        int[] aborted = new int[2];
-        for (long seed = 1; seed <= 20; seed++) {
-          int[] each = counters(e, tpc, t, seed);
-          aborted[0] += each[0];
-          aborted[1] += each[1];
+    for (String isolation : ISOLATIONS) {
+      String suffix = "_" + isolation.toLowerCase(Locale.ROOT);
+      TableInfo imp = catalog.lookup(List.of(), "il", "imp" + suffix);
+      List<Table> tables =
+          List.of(
+              new Table("il.imp" + suffix, Objects.requireNonNull(imp.virtualTable()), true),
+              new Table("il.made" + suffix, "made" + suffix, false));
+      Properties scalarDb = new Properties();
+      scalarDb.setProperty("scalar.db.consensus_commit.isolation_level", isolation);
+      TransactionFactory factory = e.scalarDb(scalarDb);
+      try (DistributedTransactionManager tm = factory.getTransactionManager();
+          TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+        for (Table t : tables) {
+          String at = "ScalarDB " + isolation + ", " + t.sql;
+          scenarios(e, tm, tpc, t);
+          int[] aborted = new int[2];
+          for (long seed = 1; seed <= 20; seed++) {
+            int[] counters =
+                schedule(e, tpc, t, InterleavingIntegrationTest::counter, COUNTERS, at, seed);
+            int[] transfers =
+                schedule(e, tpc, t, InterleavingIntegrationTest::transfer, ACCOUNTS, at, seed);
+            for (int side = 0; side < 2; side++) {
+              aborted[side] += counters[side] + transfers[side];
+            }
+          }
+          // the schedules prove something only if both sides run into conflicts
+          assertThat(aborted[0]).as("%s: driver aborts", at).isPositive();
+          assertThat(aborted[1]).as("%s: ScalarDB aborts", at).isPositive();
         }
-        // the schedules prove something only if both sides run into conflicts
-        assertThat(aborted[0]).as("driver aborts").isPositive();
-        assertThat(aborted[1]).as("ScalarDB aborts").isPositive();
       }
     }
+  }
+
+  private static Insert made(String isolation, int id, int v) {
+    return Insert.newBuilder()
+        .namespace("il")
+        .table("made_" + isolation.toLowerCase(Locale.ROOT))
+        .partitionKey(Key.ofInt("id", id))
+        .textValue("x", "a")
+        .intValue("v", v)
+        .build();
   }
 
   /** The rows of design section 9 that apply to READ COMMITTED, one by one. */
@@ -321,27 +367,56 @@ class InterleavingIntegrationTest {
     }
   }
 
+  /** Increments one of the counters. */
+  private static int[][] counter(Random random) {
+    return new int[][] {{COUNTERS[random.nextInt(COUNTERS.length)]}, {1}};
+  }
+
+  /** Moves an amount from one account to another, the two in a random order. */
+  private static int[][] transfer(Random random) {
+    int from = random.nextInt(ACCOUNTS.length);
+    int to = (from + 1 + random.nextInt(ACCOUNTS.length - 1)) % ACCOUNTS.length;
+    int amount = 1 + random.nextInt(5);
+    return random.nextBoolean()
+        ? new int[][] {{ACCOUNTS[from], ACCOUNTS[to]}, {-amount, amount}}
+        : new int[][] {{ACCOUNTS[to], ACCOUNTS[from]}, {amount, -amount}};
+  }
+
   /**
-   * One randomized schedule: two driver connections and two ScalarDB transaction streams each
-   * increment a random counter five times, three steps per transaction (read, write, commit for the
-   * driver; read and write, prepare, commit for ScalarDB). The steps run one at a time in an order
-   * drawn from {@code seed}; a step that blocks on a lock lets the others run. Every committed
-   * increment must be in the final values: a lost update in either direction breaks the sum.
+   * One randomized schedule: two driver connections, one of them with the bounded wait, and two
+   * ScalarDB two-phase streams each run five transactions of {@code workload} over {@code rows}. A
+   * transaction reads each of its rows and writes it back changed by its delta: the driver reads
+   * every row, writes every row, then commits; ScalarDB reads and writes each row, prepares, then
+   * commits. The steps run one at a time in an order drawn from {@code seed}; a step that blocks on
+   * a lock lets the others run. Each row must end changed by exactly the deltas of the transactions
+   * that committed: a lost update in either direction, or half a transfer, breaks it.
+   *
+   * @return the aborts, the driver's then ScalarDB's
    */
-  private static int[] counters(Engines e, TwoPhaseCommitTransactionManager tpc, Table t, long seed)
+  private static int[] schedule(
+      Engines e,
+      TwoPhaseCommitTransactionManager tpc,
+      Table t,
+      Function<Random, int[][]> workload,
+      int[] rows,
+      String at,
+      long seed)
       throws Exception {
+    String where = at + ", seed " + seed;
     Random random = new Random(seed);
-    int[] start = values(e, t);
+    int[] start = values(e, t, rows);
     List<Actor> actors = new ArrayList<>();
     try {
-      for (int i = 0; i < 2; i++) {
-        actors.add(new DriverActor(e.openDriver(), t));
-        actors.add(new ScalarDbActor(tpc, t));
-      }
+      Properties waits = new Properties();
+      waits.setProperty("scalardbnative.inflightWaitMs", "2000");
+      actors.add(new DriverActor(e.openDriver(waits), t));
+      actors.add(new DriverActor(e.openDriver(), t));
+      actors.add(new ScalarDbActor(tpc, t));
+      actors.add(new ScalarDbActor(tpc, t));
       while (true) {
         for (Actor a : actors) {
           if (a.running != null && a.running.isDone()) {
-            a.finish(seed);
+            a.finish(where);
           }
         }
         List<Actor> ready = new ArrayList<>();
@@ -363,8 +438,7 @@ class InterleavingIntegrationTest {
           while (actors.stream().noneMatch(a -> a.running != null && a.running.isDone())) {
             if (System.nanoTime() > deadline) {
               throw new AssertionError(
-                  "seed "
-                      + seed
+                  where
                       + ": every actor is blocked: "
                       + rows(
                           e.open(),
@@ -377,7 +451,9 @@ class InterleavingIntegrationTest {
         }
         Actor a = ready.get(random.nextInt(ready.size()));
         if (a.step == 0) {
-          a.row = COUNTERS[random.nextInt(COUNTERS.length)];
+          int[][] tx = workload.apply(random);
+          a.rows = tx[0];
+          a.deltas = tx[1];
         }
         int step = a.step;
         a.running =
@@ -400,19 +476,23 @@ class InterleavingIntegrationTest {
           // blocked, or done: the loop's next pass tells
         }
       }
-      int[] end = values(e, t);
+      int[] end = values(e, t, rows);
       int committed = 0;
-      for (int i = 0; i < COUNTERS.length; i++) {
-        int increments = 0;
+      for (int i = 0; i < rows.length; i++) {
+        int expected = 0;
         for (Actor a : actors) {
-          increments += a.committed[i];
-          committed += a.committed[i];
+          expected += a.committed.getOrDefault(rows[i], 0);
         }
         assertThat(end[i] - start[i])
-            .as("seed %d, counter %d: every committed increment, and nothing else", seed, i)
-            .isEqualTo(increments);
+            .as(
+                "%s, row %d: the deltas of the committed transactions, and nothing else",
+                where, rows[i])
+            .isEqualTo(expected);
       }
-      assertThat(committed).as("seed %d: some transaction commits", seed).isPositive();
+      for (Actor a : actors) {
+        committed += a.commits;
+      }
+      assertThat(committed).as("%s: some transaction commits", where).isPositive();
       int[] aborted = new int[2];
       for (Actor a : actors) {
         aborted[a instanceof DriverActor ? 0 : 1] += a.aborted;
@@ -428,14 +508,21 @@ class InterleavingIntegrationTest {
   /** One side of a randomized schedule, on a thread of its own. */
   private abstract static class Actor implements AutoCloseable {
     final ExecutorService thread = Executors.newSingleThreadExecutor();
-    final int[] committed = new int[COUNTERS.length];
+
+    /** The deltas of the committed transactions, per row. */
+    final Map<Integer, Integer> committed = new HashMap<>();
+
     int left = 5;
-    int step;
-    int row;
+    int commits;
     int aborted;
+    int step;
+    int[] rows = {};
+    int[] deltas = {};
     @Nullable Future<?> running;
 
-    /** Runs step 0, 1 or 2 of the transaction on {@link #row}; step 2 commits. */
+    /** The steps of one transaction over {@link #rows}; the last commits. */
+    abstract int steps();
+
     abstract void run(int step) throws Exception;
 
     abstract void rollback() throws Exception;
@@ -443,24 +530,23 @@ class InterleavingIntegrationTest {
     /** Whether the step failed as an abort the application retries, not as a fault. */
     abstract boolean aborts(Throwable cause);
 
-    void finish(long seed) throws Exception {
+    void finish(String where) throws Exception {
       Future<?> done = Objects.requireNonNull(running);
       running = null;
       try {
         done.get();
-        if (step < 2) {
+        if (step < steps() - 1) {
           step++;
           return;
         }
-        for (int i = 0; i < COUNTERS.length; i++) {
-          if (COUNTERS[i] == row) {
-            committed[i]++;
-          }
+        for (int i = 0; i < rows.length; i++) {
+          committed.merge(rows[i], deltas[i], Integer::sum);
         }
+        commits++;
       } catch (ExecutionException ex) {
         Throwable cause = Objects.requireNonNull(ex.getCause());
         if (!aborts(cause)) {
-          throw new AssertionError("seed " + seed + ", step " + step, cause);
+          throw new AssertionError(where + ", step " + step, cause);
         }
         aborted++;
       }
@@ -477,7 +563,7 @@ class InterleavingIntegrationTest {
   private static final class DriverActor extends Actor {
     final Connection d;
     final Table t;
-    int value;
+    int[] values = {};
 
     DriverActor(Connection d, Table t) throws SQLException {
       this.d = d;
@@ -486,16 +572,28 @@ class InterleavingIntegrationTest {
     }
 
     @Override
+    int steps() {
+      return 2 * rows.length + 1;
+    }
+
+    @Override
     void run(int step) throws Exception {
+      int n = rows.length;
       if (step == 0) {
-        value = Integer.parseInt(rows(d, "SELECT v FROM " + t.sql + " WHERE id = " + row).get(0));
-      } else if (step == 1) {
+        values = new int[n];
+      }
+      if (step < n) {
+        values[step] =
+            Integer.parseInt(
+                rows(d, "SELECT v FROM " + t.sql + " WHERE id = " + rows[step]).get(0));
+      } else if (step < 2 * n) {
+        int i = step - n;
         try (PreparedStatement ps =
             d.prepareStatement("UPDATE " + t.sql + " SET v = ? WHERE id = ?")) {
-          ps.setInt(1, value + 1);
-          ps.setInt(2, row);
+          ps.setInt(1, values[i] + deltas[i]);
+          ps.setInt(2, rows[i]);
           if (ps.executeUpdate() != 1) {
-            throw new IllegalStateException("the counter is gone");
+            throw new IllegalStateException("row " + rows[i] + " is gone");
           }
         }
       } else {
@@ -532,21 +630,30 @@ class InterleavingIntegrationTest {
     }
 
     @Override
+    int steps() {
+      return rows.length + 2;
+    }
+
+    @Override
     void run(int step) throws Exception {
+      int n = rows.length;
       if (step == 0) {
         tx = tpc.begin();
-        int value = tx.get(get(t, row)).orElseThrow().getInt("v");
+      }
+      TwoPhaseCommitTransaction tx = Objects.requireNonNull(this.tx);
+      if (step < n) {
+        int value = tx.get(get(t, rows[step])).orElseThrow().getInt("v");
         tx.update(
             Update.newBuilder()
                 .namespace("il")
                 .table(t.scalarDbName)
-                .partitionKey(Key.ofInt("id", row))
-                .intValue("v", value + 1)
+                .partitionKey(Key.ofInt("id", rows[step]))
+                .intValue("v", value + deltas[step])
                 .build());
-      } else if (step == 1) {
-        Objects.requireNonNull(tx).prepare();
+      } else if (step == n) {
+        tx.prepare();
       } else {
-        Objects.requireNonNull(tx).validate();
+        tx.validate();
         tx.commit();
       }
     }
@@ -563,13 +670,12 @@ class InterleavingIntegrationTest {
     }
   }
 
-  private static int[] values(Engines e, Table t) throws SQLException {
+  private static int[] values(Engines e, Table t, int[] rows) throws SQLException {
     try (Connection v = e.open()) {
-      int[] out = new int[COUNTERS.length];
-      for (int i = 0; i < COUNTERS.length; i++) {
+      int[] out = new int[rows.length];
+      for (int i = 0; i < rows.length; i++) {
         out[i] =
-            Integer.parseInt(
-                rows(v, "SELECT v FROM " + t.sql + " WHERE id = " + COUNTERS[i]).get(0));
+            Integer.parseInt(rows(v, "SELECT v FROM " + t.sql + " WHERE id = " + rows[i]).get(0));
       }
       return out;
     }

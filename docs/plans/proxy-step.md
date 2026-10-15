@@ -373,15 +373,19 @@ driver transaction through the driver's JDBC URL and a ScalarDB transaction thro
   that the final value equals the number of committed increments, which catches lost updates the fixed
   scenarios miss.
 - Every scenario names the design rule it proves, so a failure points at a rule.
-- **Done (2026-10-15)** on PostgreSQL, both decoupled layouts: `InterleavingIntegrationTest`. The fixed
-  scenarios cover each READ COMMITTED row of section 9 and the "why one statement" case, a ScalarDB
-  rollback landing while one read runs; the NULL-metadata and resurrection rows run on the imported
-  table only, where rows without metadata exist. The randomized part runs 20 seeded schedules per
-  layout. Two driver connections and two ScalarDB two-phase streams increment two counters, five
-  transactions each and three steps per transaction, one step at a time. A step that blocks on a
-  lock lets the others run, so a schedule replays only up to lock timing. The test asserts that both
-  sides abort somewhere, so that the schedules do conflict. With the anchors turned off, the counters
-  lose an increment at seed 1.
+- **Done (2026-10-15)** on PostgreSQL, both decoupled layouts: `InterleavingIntegrationTest`, run
+  once with ScalarDB's Consensus Commit at `READ_COMMITTED` and once at `SNAPSHOT`, each on its own
+  pair of tables. The fixed scenarios cover each READ COMMITTED row of section 9 and the "why one
+  statement" case, a ScalarDB rollback landing while one read runs; the NULL-metadata and
+  resurrection rows run on the imported table only, where rows without metadata exist. The
+  randomized part runs 20 seeded schedules per table of each workload: counters, a read and a write
+  of one row, and transfers between two of four accounts, written in a random order. The actors are
+  two driver connections, one with the bounded wait, and two ScalarDB two-phase streams, five
+  transactions each, run one step at a time. Each row must end changed by exactly the deltas of the
+  transactions that committed. A step that blocks on a lock lets the others run, so a schedule
+  replays only up to lock timing. About half the transactions abort on each side, and the test
+  asserts that both sides abort. With the anchors turned off, both workloads fail at seed 1.
+  SERIALIZABLE on the ScalarDB side comes with milestone 7.
 
 ### Milestone 6: parse once (todo 008)
 
