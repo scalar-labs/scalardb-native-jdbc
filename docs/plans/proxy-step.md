@@ -346,6 +346,13 @@ other engines keep refusing them with `0AN01`.
   ahead of the read, whose after image PostgreSQL's re-check would have returned as committed (the
   test fails without the second metadata read). Refused: a locking read of a join or a subquery.
   Milestone 4 is complete on PostgreSQL; joins in the anchors come next, then milestone 5.
+- **Joins in the anchors done (2026-10-15)**, on PostgreSQL: a read row by row anchors every table
+  joined in its top-level FROM clause, a LEFT JOIN's nullable side included, each copy appending
+  each table's key and version for its piece there; a NULL-extended row anchors nothing.
+  `WriteIntegrationTest.anchorsFromJoins` covers both layouts in one join: each side of an inner
+  join, the preserved and nullable sides of a LEFT JOIN, ORDER BY and LIMIT on top of the copies, a
+  self-join, and a nullable row read in flight anchored on its before image. Still not anchored: a
+  table only in a subquery, whose rows are not returned, and grouped and DISTINCT reads.
 
 ### Milestone 5: interleaving tests
 

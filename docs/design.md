@@ -743,9 +743,12 @@ union as a derived table.
   the **before image's identity**, `(before_tx_id, before_tx_version)`, never the in-flight writer's: a
   ScalarDB rollback restores exactly that pair, and a commit keeps the writer's `tx_id`, so the CAS of
   4.3 later matches if and only if the row is back at the version this transaction read. Anchoring on
-  the writer's pair would let the CAS succeed after the writer committed, a lost update. Every other
-  shape (joins, subqueries, a predicate that cannot be attributed to one table) takes the split read
-  below and no anchor. A
+  the writer's pair would let the CAS succeed after the writer committed, a lost update. A join takes
+  the split read below, and when it is read row by row, each copy appends the same key and version
+  for every table joined in the top-level FROM clause, a LEFT JOIN's nullable side included: those of
+  the table's piece in that copy, NULL for its unmatched piece, which anchors nothing. A table only in
+  a subquery returns no row and takes no anchor, nor does any table of a grouped or DISTINCT read,
+  nor a read through `rc_T`. A
   user `SELECT ... FOR UPDATE` or `FOR SHARE` of one table, read row by row, reads the **first arm
   alone**: the statement as written over the first arm's derived table, its locking clause, `NOWAIT`
   and `SKIP LOCKED` included, which on PostgreSQL locks the rows of `T` only, the in-flight check
@@ -1257,7 +1260,7 @@ like any other, with `isValid` forwarded.
 | `save` of an existing entity with `@Version` | `UPDATE ... WHERE id = ? AND version = ?` | key plus a condition: predicate DML on one key with the predicate re-applied; zero rows on a version mismatch, so Spring raises `OptimisticLockingFailureException` as expected; counts must mean rows matched (section 1, per-engine table) |
 | `deleteById` | DELETE by key | 4.3 |
 | `deleteAll` | DELETE with no WHERE | predicate DML with no predicate: one write per key, correct but slow on a large table; use passthrough or a truncate for that |
-| aggregate roots with child collections | separate per-table SELECTs by default; one joined SELECT with single-query loading enabled | per-table: two-arm form; joined: the split read with no anchor under READ COMMITTED, the coarse check under the other levels (4.2) |
+| aggregate roots with child collections | separate per-table SELECTs by default; one joined SELECT with single-query loading enabled | per-table: two-arm form; joined: the split read, anchoring every joined table, under READ COMMITTED, the coarse check under the other levels (4.2) |
 | `@Lock(PESSIMISTIC_WRITE)` | `FOR UPDATE` appended; on SQL Server a table hint, `WITH (UPDLOCK, ROWLOCK)` | the locking-clause rule (4.2); on SQL Server the table hint is stripped before parsing and re-applied as the separate locking re-read, because JSQLParser 5.4 does not parse `WITH (UPDLOCK, ROWLOCK)` (4.7); refused on the join shapes |
 | `insertAll`, batches | batched INSERT with generated keys | individual statements (4.4, Batches) |
 
@@ -1478,7 +1481,7 @@ between `T` and plain tables are the database's own.
 
 | Level | Between driver transactions | Against ScalarDB transactions |
 |---|---|---|
-| READ COMMITTED | the database's READ COMMITTED | each statement sees committed values only, no snapshot across statements; a write to a key this transaction read is first-updater-wins through the anchor, so a lost update becomes a `40001` abort, against driver and ScalarDB writers alike; reads that take no anchor (the `rc_T` shapes of 4.2) protect nothing, and a locking clause is refused on them; lock the keys first with an attributable `SELECT ... FOR UPDATE` |
+| READ COMMITTED | the database's READ COMMITTED | each statement sees committed values only, no snapshot across statements; a write to a key this transaction read is first-updater-wins through the anchor, so a lost update becomes a `40001` abort, against driver and ScalarDB writers alike; reads that take no anchor (subqueries, grouped and DISTINCT reads, the `rc_T` shapes of 4.2) protect nothing, and a locking clause is refused on them; lock the keys first with an attributable `SELECT ... FOR UPDATE` |
 | SNAPSHOT | the database's REPEATABLE READ / SNAPSHOT | consistent snapshot, ScalarDB transactions visible atomically, first-committer-wins; write skew possible, as snapshot isolation allows |
 | SERIALIZABLE | PostgreSQL's SERIALIZABLE; on MySQL, MariaDB and SQL Server the driver's own locking reads (4.2, section 5); on Oracle snapshot isolation plus the driver's `FOR UPDATE` reads (section 5, engine mapping) | serializable **if** the ScalarDB transaction runs at SERIALIZABLE; see the phantom limit below |
 

@@ -1188,14 +1188,17 @@ public final class Proxies {
               || name.equals("relative"))) {
         ResultSet rs = (ResultSet) target;
         int at = visible() + 1;
-        Object[] key = Writes.readKey(rs, at, anchored.keys);
-        if (key != null) {
-          anchors.read(
-              epoch,
-              anchored.table,
-              key,
-              new Anchors.Version(
-                  rs.getString(at + anchored.keys), rs.getObject(at + anchored.keys + 1)));
+        for (int t = 0; t < anchored.tables.size(); t++) {
+          int keys = anchored.keys.get(t);
+          Object[] key = Writes.readKey(rs, at, keys); // null on a LEFT JOIN's NULL-extended side
+          if (key != null) {
+            anchors.read(
+                epoch,
+                anchored.tables.get(t),
+                key,
+                new Anchors.Version(rs.getString(at + keys), rs.getObject(at + keys + 1)));
+          }
+          at += keys + 2;
         }
       }
       return result instanceof ResultSet

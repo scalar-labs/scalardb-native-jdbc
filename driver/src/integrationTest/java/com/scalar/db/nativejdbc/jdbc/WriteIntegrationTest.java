@@ -753,6 +753,171 @@ class WriteIntegrationTest {
     }
   }
 
+  /**
+   * A read of a join anchors each table it returns rows of, a LEFT JOIN's nullable side included
+   * (design 4.2).
+   */
+  @ParameterizedTest
+  @MethodSource("engines")
+  void anchorsFromJoins(Engines e) throws Exception {
+    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4)");
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          "CREATE SCHEMA aj",
+          "CREATE TABLE aj.p (id INT PRIMARY KEY, x TEXT)",
+          "INSERT INTO aj.p SELECT g, 'a' FROM generate_series(1, 9) g");
+    }
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace("aj", true);
+      admin.importTable("aj", "p", DECOUPLED, Map.of());
+      admin.createTable(
+          "aj",
+          "c",
+          TableMetadata.newBuilder()
+              .addColumn("id", DataType.INT)
+              .addColumn("pid", DataType.INT)
+              .addColumn("x", DataType.TEXT)
+              .addPartitionKey("id")
+              .build(),
+          DECOUPLED);
+    }
+    try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
+      DistributedTransaction tx = tm.begin();
+      for (int i = 1; i <= 9; i++) {
+        if (i != 4) { // parent 4 has no child
+          tx.insert(
+              Insert.newBuilder()
+                  .namespace("aj")
+                  .table("c")
+                  .partitionKey(Key.ofInt("id", i))
+                  .intValue("pid", i)
+                  .textValue("x", "c")
+                  .build());
+        }
+      }
+      tx.commit();
+    }
+    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog, c, t -> t.namespace().equals("aj"), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    TableInfo pInfo = catalog.lookup(List.of(), "aj", "p");
+    Table p =
+        new Table(
+            "aj.p", "aj." + pInfo.metadataTable(), Objects.requireNonNull(pInfo.virtualTable()));
+    Table ch = new Table("aj.c", "aj." + catalog.lookup(List.of(), "aj", "c").metadataTable(), "c");
+    String join = "SELECT p.x, c.x FROM aj.p p JOIN aj.c c ON c.pid = p.id WHERE p.id = ";
+    String leftJoin =
+        "SELECT p.id, c.id FROM aj.p p LEFT JOIN aj.c c ON c.pid = p.id WHERE p.id = ";
+    try (DistributedTransactionManager tm = scalarDb.getTransactionManager();
+        TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();
+        Connection d = e.openDriver();
+        Connection other = e.openDriver()) {
+      d.setAutoCommit(false);
+      // the application's columns only
+      try (ResultSet rs = d.createStatement().executeQuery(join + "1")) {
+        assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);
+        assertThat(rs.next()).isTrue();
+        assertThatThrownBy(() -> rs.getObject(3)).isInstanceOf(SQLException.class);
+      }
+      d.rollback();
+      // both tables of an inner join are anchored
+      for (Table t : List.of(p, ch)) {
+        int id = t == p ? 1 : 3;
+        assertThat(rows(d, join + id)).containsExactly("a/c");
+        scalarDbSet(tm, t, id, "scalardb");
+        assertThatThrownBy(
+                () ->
+                    d.createStatement()
+                        .executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id = " + id))
+            .as(t.sql)
+            .isInstanceOf(SQLTransactionRollbackException.class);
+        d.rollback();
+      }
+      // a LEFT JOIN: the preserved row of an unmatched parent, and the nullable side's rows
+      assertThat(rows(d, leftJoin + "4")).containsExactly("4/null");
+      scalarDbSet(tm, p, 4, "scalardb");
+      assertThatThrownBy(
+              () -> d.createStatement().executeUpdate("UPDATE aj.p SET x = 'd' WHERE id = 4"))
+          .isInstanceOf(SQLTransactionRollbackException.class);
+      d.rollback();
+      assertThat(rows(d, leftJoin + "2")).containsExactly("2/2");
+      other.createStatement().executeUpdate("UPDATE aj.c SET x = 'o' WHERE id = 2");
+      assertThatThrownBy(
+              () -> d.createStatement().executeUpdate("UPDATE aj.c SET x = 'd' WHERE id = 2"))
+          .isInstanceOf(SQLTransactionRollbackException.class);
+      d.rollback();
+      // ORDER BY and LIMIT on top of the copies
+      assertThat(
+              rows(
+                  d,
+                  "SELECT c.id FROM aj.p p JOIN aj.c c ON c.pid = p.id WHERE p.id IN (3, 5)"
+                      + " ORDER BY p.id DESC LIMIT 1"))
+          .containsExactly("5");
+      scalarDbSet(tm, ch, 5, "scalardb");
+      assertThatThrownBy(
+              () -> d.createStatement().executeUpdate("UPDATE aj.c SET x = 'd' WHERE id = 5"))
+          .isInstanceOf(SQLTransactionRollbackException.class);
+      d.rollback();
+      // a self-join anchors the rows of both references
+      assertThat(rows(d, "SELECT b.id FROM aj.p a JOIN aj.p b ON b.id = a.id + 1 WHERE a.id = 6"))
+          .containsExactly("7");
+      scalarDbSet(tm, p, 7, "scalardb");
+      assertThatThrownBy(
+              () -> d.createStatement().executeUpdate("UPDATE aj.p SET x = 'd' WHERE id = 7"))
+          .isInstanceOf(SQLTransactionRollbackException.class);
+      d.rollback();
+      // an IN subquery over the key: the outer table is anchored, the subquery's returns no row
+      assertThat(rows(d, "SELECT x FROM aj.p WHERE id IN (SELECT id FROM aj.c WHERE id = 2)"))
+          .containsExactly("a");
+      scalarDbSet(tm, p, 2, "scalardb");
+      assertThatThrownBy(
+              () -> d.createStatement().executeUpdate("UPDATE aj.p SET x = 'd' WHERE id = 2"))
+          .isInstanceOf(SQLTransactionRollbackException.class);
+      d.rollback();
+      // a nullable row read in flight is anchored on its before image: a ScalarDB rollback keeps
+      // it valid, a commit does not
+      for (boolean commit : new boolean[] {false, true}) {
+        int id = commit ? 9 : 8;
+        TwoPhaseCommitTransaction held = tpc.begin();
+        held.update(
+            Update.newBuilder()
+                .namespace("aj")
+                .table("c")
+                .partitionKey(Key.ofInt("id", id))
+                .textValue("x", "held")
+                .build());
+        held.prepare();
+        assertThat(
+                rows(
+                    d,
+                    "SELECT c.x FROM aj.p p LEFT JOIN aj.c c ON c.pid = p.id WHERE p.id = " + id))
+            .containsExactly("c");
+        if (commit) {
+          held.validate();
+          held.commit();
+        } else {
+          held.rollback();
+        }
+        String update = "UPDATE aj.c SET x = 'd' WHERE id = " + id;
+        if (commit) {
+          assertThatThrownBy(() -> d.createStatement().executeUpdate(update))
+              .isInstanceOf(SQLTransactionRollbackException.class);
+          d.rollback();
+        } else {
+          assertThat(d.createStatement().executeUpdate(update)).isEqualTo(1);
+          d.commit();
+        }
+      }
+    }
+  }
+
   /** The findings of the 4b review (todos 141-145), each asserting the fixed behaviour. */
   @ParameterizedTest
   @MethodSource("engines")
@@ -856,16 +1021,17 @@ class WriteIntegrationTest {
 
   private static void scalarDbSet(DistributedTransactionManager tm, Table t, int id, String x)
       throws TransactionException {
+    String namespace = t.sql.substring(0, t.sql.indexOf('.'));
     DistributedTransaction tx = tm.begin();
     tx.get(
         Get.newBuilder()
-            .namespace("an")
+            .namespace(namespace)
             .table(t.scalarDbName)
             .partitionKey(Key.ofInt("id", id))
             .build());
     tx.update(
         Update.newBuilder()
-            .namespace("an")
+            .namespace(namespace)
             .table(t.scalarDbName)
             .partitionKey(Key.ofInt("id", id))
             .textValue("x", x)

@@ -10,7 +10,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.function.Function;
+import java.util.function.BiFunction;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -57,8 +57,9 @@ final class SplitRead {
    * @param views the read view of each ScalarDB reference, already quoted, for those not split
    * @param perRow the references whose committed copies exclude their rows in flight row by row, on
    *     MySQL and MariaDB
-   * @param anchored the reference whose rows carry their versions, which reads its key too, or null
-   * @param extras what each copy appends to the select list for its piece of {@code anchored}
+   * @param anchored the references whose rows carry their versions, which read their keys too
+   * @param extras what each copy appends to the select list for each of {@code anchored}, given its
+   *     piece there
    * @param committedOnly whether to emit the committed copy alone, as a locking read takes it
    * @return the split read, or {@code null} to read through the views
    */
@@ -69,8 +70,8 @@ final class SplitRead {
       Map<SqlAst.TableRef, TableInfo> scalarDb,
       Map<SqlAst.TableRef, String> views,
       Set<SqlAst.TableRef> perRow,
-      SqlAst.@Nullable TableRef anchored,
-      @Nullable Function<SqlAst.Piece, List<String>> extras,
+      List<SqlAst.TableRef> anchored,
+      BiFunction<SqlAst.TableRef, SqlAst.Piece, List<String>> extras,
       boolean committedOnly) {
     Map<SqlAst.TableRef, SqlAst.Place> places = split.places();
     List<SqlAst.TableRef> refs = new ArrayList<>();
@@ -104,7 +105,7 @@ final class SplitRead {
     for (SqlAst.TableRef r : places.keySet()) {
       TableInfo t = Objects.requireNonNull(scalarDb.get(r));
       List<String> cols = columnsRead(ast, r, t);
-      if (r == anchored) {
+      if (anchored.contains(r)) {
         // the key, which the copies' versions are read by and the anchors keyed on
         List<String> withKey = new ArrayList<>();
         for (String c : t.dataColumns()) {
@@ -148,9 +149,11 @@ final class SplitRead {
 
             @Override
             public List<String> selectExtra() {
-              return extras == null || anchored == null
-                  ? List.of()
-                  : extras.apply(of.getOrDefault(anchored, SqlAst.Piece.COMMITTED));
+              List<String> out = new ArrayList<>();
+              for (SqlAst.TableRef r : anchored) {
+                out.addAll(extras.apply(r, of.getOrDefault(r, SqlAst.Piece.COMMITTED)));
+              }
+              return out;
             }
 
             @Override

@@ -1716,6 +1716,8 @@ public final class SqlAst {
     private final Map<TableRef, Subquery> subqueries = new IdentityHashMap<>();
     // the subqueries whose tables are split, whose WHERE clauses reach them
     private final List<PlainSelect> selects = new ArrayList<>();
+    // the references in the top-level FROM clause, whose rows the statement returns
+    private final Set<TableRef> joined = Collections.newSetFromMap(new IdentityHashMap<>());
 
     /**
      * Returns the references, in the order of the text, each with its place.
@@ -1724,6 +1726,18 @@ public final class SqlAst {
      */
     public Map<TableRef, Place> places() {
       return Collections.unmodifiableMap(places);
+    }
+
+    /**
+     * Returns whether a split reference is in the top-level FROM clause, so that each row of the
+     * result holds one of its rows, or NULLs on a LEFT JOIN's nullable side; an IN subquery's table
+     * split as {@link Place#INNER} is not.
+     *
+     * @param ref the reference
+     * @return whether the statement returns its rows
+     */
+    public boolean joined(TableRef ref) {
+      return joined.contains(ref);
     }
   }
 
@@ -1833,6 +1847,7 @@ public final class SqlAst {
         }
       }
     }
+    out.joined.addAll(found.keySet());
     List<Expression> conjuncts = new ArrayList<>();
     conjuncts(s.getWhere(), conjuncts);
     Map<Token, Integer> order = new IdentityHashMap<>();
