@@ -1080,8 +1080,8 @@ final class Writes {
         if (noWait) {
           throw new SQLException("could not lock a row: " + held, "55P03");
         }
-        if (inFlight == null && attempt >= 10) {
-          throw new Aborted(held);
+        if (attempt >= 10) {
+          throw new Aborted(held); // rows keep going in flight around the lock: bounded retries
         }
       }
     }
