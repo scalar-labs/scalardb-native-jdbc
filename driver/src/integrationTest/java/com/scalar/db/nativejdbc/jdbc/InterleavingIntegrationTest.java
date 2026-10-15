@@ -14,8 +14,11 @@ import com.scalar.db.api.TableMetadata;
 import com.scalar.db.api.TwoPhaseCommitTransaction;
 import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.api.Update;
+import com.scalar.db.exception.transaction.CommitConflictException;
+import com.scalar.db.exception.transaction.CrudConflictException;
+import com.scalar.db.exception.transaction.PreparationConflictException;
 import com.scalar.db.exception.transaction.TransactionException;
-import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
+import com.scalar.db.exception.transaction.ValidationConflictException;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
@@ -90,11 +93,13 @@ class InterleavingIntegrationTest {
   /** One ScalarDB table as the test reaches it: by SQL, and by ScalarDB's own name. */
   private static final class Table {
     final String sql;
+    final String meta;
     final String scalarDbName;
     final boolean imported;
 
-    Table(String sql, String scalarDbName, boolean imported) {
+    Table(String sql, String meta, String scalarDbName, boolean imported) {
       this.sql = sql;
+      this.meta = meta;
       this.scalarDbName = scalarDbName;
       this.imported = imported;
     }
@@ -179,8 +184,16 @@ class InterleavingIntegrationTest {
       TableInfo imp = catalog.lookup(List.of(), "il", "imp" + suffix);
       List<Table> tables =
           List.of(
-              new Table("il.imp" + suffix, Objects.requireNonNull(imp.virtualTable()), true),
-              new Table("il.made" + suffix, "made" + suffix, false));
+              new Table(
+                  "il.imp" + suffix,
+                  "il." + imp.metadataTable(),
+                  Objects.requireNonNull(imp.virtualTable()),
+                  true),
+              new Table(
+                  "il.made" + suffix,
+                  "il." + catalog.lookup(List.of(), "il", "made" + suffix).metadataTable(),
+                  "made" + suffix,
+                  false));
       Properties scalarDb = new Properties();
       scalarDb.setProperty("scalar.db.consensus_commit.isolation_level", isolation);
       TransactionFactory factory = e.scalarDb(scalarDb);
@@ -189,19 +202,23 @@ class InterleavingIntegrationTest {
         for (Table t : tables) {
           String at = "ScalarDB " + isolation + ", " + t.sql;
           scenarios(e, tm, tpc, t);
-          int[] aborted = new int[2];
+          int[] totals = new int[5];
           for (long seed = 1; seed <= 20; seed++) {
             int[] counters =
                 schedule(e, tpc, t, InterleavingIntegrationTest::counter, COUNTERS, at, seed);
             int[] transfers =
                 schedule(e, tpc, t, InterleavingIntegrationTest::transfer, ACCOUNTS, at, seed);
-            for (int side = 0; side < 2; side++) {
-              aborted[side] += counters[side] + transfers[side];
+            for (int i = 0; i < totals.length; i++) {
+              totals[i] += counters[i] + transfers[i];
             }
           }
-          // the schedules prove something only if both sides run into conflicts
-          assertThat(aborted[0]).as("%s: driver aborts", at).isPositive();
-          assertThat(aborted[1]).as("%s: ScalarDB aborts", at).isPositive();
+          // the schedules prove something only if both sides commit and run into conflicts, and
+          // some prepared ScalarDB transactions roll back
+          assertThat(totals[0]).as("%s: driver aborts", at).isPositive();
+          assertThat(totals[1]).as("%s: ScalarDB aborts", at).isPositive();
+          assertThat(totals[2]).as("%s: driver commits", at).isPositive();
+          assertThat(totals[3]).as("%s: ScalarDB commits", at).isPositive();
+          assertThat(totals[4]).as("%s: ScalarDB rollbacks after prepare", at).isPositive();
         }
       }
     }
@@ -302,15 +319,23 @@ class InterleavingIntegrationTest {
       assertThat(scalarDbX(tm, t, 7)).contains("a+");
 
       if (t.imported) {
+        // rows the backfill stamped: as one inserted behind the driver's back, without metadata
+        Connection v = e.open();
+        v.createStatement().executeUpdate("DELETE FROM " + t.meta + " WHERE id IN (8, 11)");
         // a ScalarDB rollback over a row without metadata leaves NULL metadata, read as committed
         held = prepared(tpc, t, 8, "s");
         held.rollback();
+        assertThat(rows(v, "SELECT tx_id, tx_state, tx_version FROM " + t.meta + " WHERE id = 8"))
+            .as("the rollback left NULL metadata")
+            .containsExactly("null/null/null");
         assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 8"))
             .as("NULL-metadata row vanishes: NULL tx_state read as 3")
             .containsExactly("a");
         assertThat(update(d, t, 8)).as("the NULL-pair CAS").isEqualTo(1);
 
         // a ScalarDB transaction read a row without metadata; the driver deletes it
+        assertThat(rows(v, "SELECT tx_id FROM " + t.meta + " WHERE id = 11")).isEmpty();
+        v.close();
         tx = tm.begin();
         assertThat(tx.get(get(t, 11))).isPresent();
         assertThat(d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id = 11"))
@@ -387,11 +412,13 @@ class InterleavingIntegrationTest {
    * ScalarDB two-phase streams each run five transactions of {@code workload} over {@code rows}. A
    * transaction reads each of its rows and writes it back changed by its delta: the driver reads
    * every row, writes every row, then commits; ScalarDB reads and writes each row, prepares, then
-   * commits. The steps run one at a time in an order drawn from {@code seed}; a step that blocks on
-   * a lock lets the others run. Each row must end changed by exactly the deltas of the transactions
-   * that committed: a lost update in either direction, or half a transfer, breaks it.
+   * commits, or rolls back one time in four. The steps run one at a time in an order drawn from
+   * {@code seed}; a step that blocks on a lock lets the others run. Each row must end changed by
+   * exactly the deltas of the transactions that committed: a lost update in either direction, or
+   * half a transfer, breaks it.
    *
-   * @return the aborts, the driver's then ScalarDB's
+   * @return the aborts, the driver's then ScalarDB's; the commits likewise; the ScalarDB
+   *     transactions rolled back after their prepare
    */
   private static int[] schedule(
       Engines e,
@@ -454,6 +481,8 @@ class InterleavingIntegrationTest {
           int[][] tx = workload.apply(random);
           a.rows = tx[0];
           a.deltas = tx[1];
+          // a prepared ScalarDB transaction that rolls back: a read of its after image is lost
+          a.abandon = a instanceof ScalarDbActor && random.nextInt(4) == 0;
         }
         int step = a.step;
         a.running =
@@ -493,11 +522,14 @@ class InterleavingIntegrationTest {
         committed += a.commits;
       }
       assertThat(committed).as("%s: some transaction commits", where).isPositive();
-      int[] aborted = new int[2];
+      int[] counts = new int[5];
       for (Actor a : actors) {
-        aborted[a instanceof DriverActor ? 0 : 1] += a.aborted;
+        int side = a instanceof DriverActor ? 0 : 1;
+        counts[side] += a.aborted;
+        counts[2 + side] += a.commits;
+        counts[4] += a.abandoned;
       }
-      return aborted;
+      return counts;
     } finally {
       for (Actor a : actors) {
         a.close();
@@ -515,6 +547,8 @@ class InterleavingIntegrationTest {
     int left = 5;
     int commits;
     int aborted;
+    int abandoned;
+    boolean abandon;
     int step;
     int[] rows = {};
     int[] deltas = {};
@@ -539,10 +573,14 @@ class InterleavingIntegrationTest {
           step++;
           return;
         }
-        for (int i = 0; i < rows.length; i++) {
-          committed.merge(rows[i], deltas[i], Integer::sum);
+        if (abandon) {
+          abandoned++;
+        } else {
+          for (int i = 0; i < rows.length; i++) {
+            committed.merge(rows[i], deltas[i], Integer::sum);
+          }
+          commits++;
         }
-        commits++;
       } catch (ExecutionException ex) {
         Throwable cause = Objects.requireNonNull(ex.getCause());
         if (!aborts(cause)) {
@@ -608,7 +646,9 @@ class InterleavingIntegrationTest {
 
     @Override
     boolean aborts(Throwable cause) {
-      return cause instanceof SQLException s && String.valueOf(s.getSQLState()).startsWith("40");
+      // a conflict the driver decides, or a deadlock PostgreSQL breaks; anything else is a fault
+      return cause instanceof SQLException s
+          && ("40001".equals(s.getSQLState()) || "40P01".equals(s.getSQLState()));
     }
 
     @Override
@@ -652,6 +692,8 @@ class InterleavingIntegrationTest {
                 .build());
       } else if (step == n) {
         tx.prepare();
+      } else if (abandon) {
+        tx.rollback();
       } else {
         tx.validate();
         tx.commit();
@@ -665,8 +707,11 @@ class InterleavingIntegrationTest {
 
     @Override
     boolean aborts(Throwable cause) {
-      return cause instanceof TransactionException
-          && !(cause instanceof UnknownTransactionStatusException);
+      // conflicts only (UncommittedRecordException is a CrudConflictException)
+      return cause instanceof CrudConflictException
+          || cause instanceof PreparationConflictException
+          || cause instanceof ValidationConflictException
+          || cause instanceof CommitConflictException;
     }
   }
 

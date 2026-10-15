@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "159"
 tags: [code-review, testing, interleaving]
@@ -34,12 +34,13 @@ dependencies: []
 
 ## Acceptance Criteria
 
-- [ ] Some ScalarDB transactions roll back after prepare in every workload.
+- [x] Some ScalarDB transactions roll back after prepare in every workload.
 - [ ] An unexpected exception class fails the schedule with its actor and step.
-- [ ] Both sides commit at least once per workload.
+- [x] Both sides commit at least once per workload.
 
 ## Recommended Action
 
+Option 1 as proposed.
 
 ## Work Log
 
@@ -47,3 +48,16 @@ dependencies: []
 
 **By:** Claude Code
 - From the end-of-first-deliverable review of 14f48e2..e3ff66a.
+
+### 2026-10-16 - Fixed
+
+**By:** Claude Code
+- One in four ScalarDB transactions (drawn from the seed) rolls back at its last step, after its
+  prepare, and counts neither as a commit nor as an abort; at least one must happen per table.
+- The driver's aborts are 40001 and 40P01 only; ScalarDB's are CrudConflictException (which
+  UncommittedRecordException extends), PreparationConflictException, ValidationConflictException
+  and CommitConflictException. Anything else fails the schedule with its step, as before.
+- Commits are asserted per side per table, besides some commit per schedule.
+- The full run passes with the narrower classes, so no other exception occurred.
+- Not done: a run with the driver reading after images, to show the schedules now catch it; that
+  needs a temporary edit of the driver source.

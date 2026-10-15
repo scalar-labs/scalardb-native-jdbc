@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "158"
 tags: [code-review, testing, interleaving]
@@ -29,11 +29,12 @@ precondition (`tx_state IS NULL`); after the rollback assert tx_id, tx_version a
 
 ## Acceptance Criteria
 
-- [ ] Both scenarios assert NULL metadata before they run.
+- [x] Both scenarios assert NULL metadata before they run.
 - [ ] With the NULL-as-committed rule broken, the test fails.
 
 ## Recommended Action
 
+Option 1, deleting the metadata rows of ids 8 and 11 after the backfill.
 
 ## Work Log
 
@@ -41,3 +42,12 @@ precondition (`tx_state IS NULL`); after the rollback assert tx_id, tx_version a
 
 **By:** Claude Code
 - From the end-of-first-deliverable review of 14f48e2..e3ff66a.
+
+### 2026-10-16 - Fixed
+
+**By:** Claude Code
+- The imported table's scenarios delete the metadata of ids 8 and 11 first, as a row inserted
+  behind the driver's back; they assert no metadata row for 11, and NULL tx_id, tx_state and
+  tx_version for 8 after ScalarDB's rollback (they held the backfill stamp before). Both pass.
+- Not done: a run with the NULL-as-committed rule broken; that needs a temporary edit of the
+  driver source.
