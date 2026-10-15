@@ -934,6 +934,12 @@ it scans for placeholders. A new text costs two parses, the statement and its fi
 text. On PostgreSQL a new text also asks the server for the plain statement's plan (design 4.2),
 about 1-5 ms once per text and connection.
 
+**Parsed once (milestone 6, 2026-10-15)**: the split's copies are no longer parsed again outside
+the tests. The leading blanks above inflated the parse, so it is measured again with
+`bench/RouteCostBenchmark` on four small tables, a new text differing by an alias. A key lookup
+miss is 84 µs on SQL Server and 104 µs on MySQL; the full table is in docs/plans/proxy-step.md,
+milestone 6.
+
 ## LEFT JOINs and subqueries through the driver (milestone 3c, 2026-10-14)
 
 The driver now splits a ScalarDB table on the nullable side of a LEFT JOIN, in an IN or EXISTS

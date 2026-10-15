@@ -245,18 +245,18 @@ public enum Engines {
   /**
    * Opens a connection through the driver with extra connect properties.
    *
-   * @param extra the properties added to the user, password and catalog TTL of {@link
-   *     #openDriver()}
+   * @param extra the properties added to the user and password of {@link #openDriver()}, a catalog
+   *     TTL among them replacing its 0
    * @return the connection
    * @throws SQLException if the driver refuses it
    */
   public Connection openDriver(Properties extra) throws SQLException {
     Started s = started();
     Properties p = new Properties();
+    p.setProperty("scalardbnative.catalogTtlMs", "0");
     p.putAll(extra);
     p.setProperty("user", s.username);
     p.setProperty("password", s.password);
-    p.setProperty("scalardbnative.catalogTtlMs", "0");
     return DriverManager.getConnection(
         "jdbc:scalardb-native:" + s.url.substring("jdbc:".length()), p);
   }

@@ -1092,7 +1092,9 @@ public final class SqlAst {
   /**
    * Whether the parser reads {@code sql}: two tokens may only have fused into one if it does not. A
    * replacement on SQL Server is bracket-quoted (Engine.quote), which quotes a name whatever
-   * QUOTED_IDENTIFIER says.
+   * QUOTED_IDENTIFIER says. A split read's copies are checked only where assertions are enabled, in
+   * the tests: two more parses would be most of the cost of a statement the route cache does not
+   * hold (todo 008), and the emitter separates every pair of tokens that could fuse.
    */
   private boolean parses(String sql) {
     try {
@@ -2869,9 +2871,9 @@ public final class SqlAst {
         }
         texts.add(e.text());
       }
-      return parses(texts.get(0)) && (lastCopy == 0 || parses(texts.get(lastCopy)))
-          ? checked(String.join(" UNION ALL ", texts), sources)
-          : null;
+      assert parses(texts.get(0)) && (lastCopy == 0 || parses(texts.get(lastCopy)))
+          : texts.get(lastCopy);
+      return checked(String.join(" UNION ALL ", texts), sources);
     }
     Lift lift = grouping != null ? liftGrouped(s, grouping) : lift(s, columns);
     if (lift == null) {
@@ -2953,10 +2955,9 @@ public final class SqlAst {
     String head =
         "SELECT " + (prefixText.isEmpty() ? "" : prefixText + " ") + top.text() + " FROM (";
     String end = (") v " + tail.text()).strip();
-    if (!parses(head + texts.get(0) + end)
-        || (lastCopy != 0 && !parses(head + texts.get(lastCopy) + end))) {
-      return null;
-    }
+    assert parses(head + texts.get(0) + end)
+            && (lastCopy == 0 || parses(head + texts.get(lastCopy) + end))
+        : head + texts.get(lastCopy) + end;
     return checked(head + String.join(" UNION ALL ", texts) + end, sources);
   }
 
@@ -3121,9 +3122,9 @@ public final class SqlAst {
   /**
    * The split read, if its text holds exactly the placeholders it was emitted with, which a comment
    * swallowing a copy would break, and no more than the engine takes. Without a comment in the
-   * statement, the copies repeat its tokens, as the first copy parsed, around the driver's own
-   * fragments, which hold no placeholder: lexing the whole text, most of an uncached route's time
-   * (todo 008), would only count what was emitted.
+   * statement, the copies repeat its tokens around the driver's own fragments, which hold no
+   * placeholder: lexing the whole text, most of an uncached route's time (todo 008), would only
+   * count what was emitted.
    */
   private @Nullable SplitText checked(String sql, List<Integer> sources) {
     // SQL Server takes 2100 parameters; the others' protocols 65535

@@ -397,6 +397,25 @@ driver transaction through the driver's JDBC URL and a ScalarDB transaction thro
   per-call thread.
 - **Acceptance**: a benchmark in the repository; a cache hit costs well under 10 µs, a miss stays under
   150 µs for the Hibernate-style key lookup measured in the review (about 340 µs today).
+- **Done (2026-10-15)**. The route cache of todo 008 (2026-10-14) already met the first two items:
+  it keeps the last 256 texts per connection, and the parser runs on a shared pool. What remained
+  was a miss. It is now parsed once: the two parses that checked the split read's first and last
+  copies run only where Java assertions are on, which is in the tests. All engines' integration
+  tests pass with them as asserts, so no tested shape relied on them to fall back to the views.
+  `bench/RouteCostBenchmark` measures prepareStatement on four small tables. A new text there now
+  differs from the last by an alias, not by leading blanks, which had the parser's lexer skipping
+  up to 1,300 spaces. Median µs, vendor / same text / new text:
+
+  | shape | MySQL | SQL Server | PostgreSQL |
+  |---|---|---|---|
+  | key lookup | 13 / 25 / 104 (was 209) | 5 / 2 / 84 (was 240) | 1 / 4 / 782 (was 1052) |
+  | key JOIN FK, two tables | 5 / 40 / 152 (301) | 0 / 2 / 106 (271) | 0 / 1 / 689 (891) |
+  | 4 tables, key lookup | 6 / 264 / 458 (724) | 0 / 9 / 270 (576) | 0 / 1 / 819 (1469) |
+
+  A hit stays under 10 µs except on MySQL, where Connector/J's own prepare scans the longer split
+  text. A miss for the key lookup is under 150 µs. On PostgreSQL a new text also asks the server
+  for the plain statement's plan (design 4.2), most of its 0.7-0.8 ms. Not done: parsing on the
+  caller's thread, which would save about 9 µs a parse and lose JSQLParser's timeout.
 
 End of the first deliverable: commit, review with `/ce:review`, and a preview build for PostgreSQL at
 READ COMMITTED.
