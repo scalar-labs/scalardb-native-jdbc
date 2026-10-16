@@ -1274,8 +1274,8 @@ like any other, with `isValid` forwarded.
 
 | What the repository does | Statement shape | Rule |
 |---|---|---|
-| `findById`, `findAll`, derived queries, `Pageable` | single-table SELECT with quoted, qualified, aliased columns, `IN (...)`, `ORDER BY`, and paging in the dialect's own spelling, `LIMIT`/`OFFSET` or SQL Server's `OFFSET ... FETCH` | attributable: the two-arm form, ordering and paging re-emitted as given on top (4.2) |
-| `count()`, `existsById` | single-table aggregate | the two-arm form with the aggregate on top (4.2) |
+| `findById`, `findAll`, derived queries, `Pageable` | single-table SELECT with quoted, qualified, aliased columns, `IN (...)`, `ORDER BY`, and paging in the dialect's own spelling, `LIMIT`/`OFFSET` or SQL Server's `OFFSET ... FETCH` | attributable: the two-arm form, ordering and paging re-emitted as given on top (4.2); at SNAPSHOT and SERIALIZABLE a page past the first, with its `OFFSET`, takes the per-table check |
+| `count()`, `existsById` | single-table aggregate | the two-arm form with the aggregate on top (4.2); at SNAPSHOT and SERIALIZABLE the per-table check |
 | `save` of a new entity | INSERT with generated keys, `RETURN_GENERATED_KEYS` or key column names | `getGeneratedKeys` served from the `T` insert, key reused for `T_meta` (4.3) |
 | `save` of an existing entity with `@Version` | `UPDATE ... WHERE id = ? AND version = ?` | key plus a condition: predicate DML on one key with the predicate re-applied; zero rows on a version mismatch, so Spring raises `OptimisticLockingFailureException` as expected; counts must mean rows matched (section 1, per-engine table) |
 | `deleteById` | DELETE by key | 4.3 |
@@ -1407,20 +1407,32 @@ One setting, the native connection's isolation level, selects everything else.
     validation is needed (`canOnePhaseCommit`).
   - **`S`'s writes.** The driver sees them only in state 3, after the record commit. Before that it
     reads the prepared row and aborts (4.2), or fails the CAS (4.3).
-  - **A `D` inside `S`'s window**, between its first read and its validation, either touches nothing of
-    `S`, and moves out of the window, or conflicts with it: it aborts on a prepared row or at the CAS; or
+  - **A `D` inside `S`'s window**, between its first read and its validation, either has no direct
+    conflict with `S`, or conflicts with it: it aborts on a prepared row or at the CAS; or
     its committed write to `S`'s read set fails `S`'s validation; or it read something `Sp` wrote and wrote
     something a validation read `Sv` missed. The last is `Sv -rw-> D -rw-> Sp` with `Sp` committed
     before `Sv` took its snapshot, the dangerous structure SSI aborts, also when `Sv` is read-only. A
     phantom is that case, `D`'s read covering the range `Sp` inserts into, and so is write skew.
-  - **A read-only `S`** has no `Sp`. Each item it read is unchanged from its read to its validation, and
-    every read precedes every validation, so the read set is constant between its last read and its
-    first validation read, and `S` is placed there. This step has the least margin of the argument.
+  - **A read-only `S`** has no `Sp`. Take the serial order SSI gives the storage transactions. Each
+    validation `Sv(x)` read the version `Sr(x)` read, so every writer of `x` is ordered before `Sr(x)`
+    or after `Sv(x)`. `S` fits at one point unless a writer `W` of some `y`, ordered after `Sv(y)`,
+    precedes a writer `W'` of some `x` ordered before `Sr(x)`. `W'` committed before `Sr(x)` took its
+    snapshot, so before every validation began. Where `W -rw-> W'` directly, `Sv(y) -rw-> W -rw-> W'`
+    with `W'` committed first and before `Sv(y)`'s snapshot is the dangerous structure, which
+    PostgreSQL aborts also when `Sv(y)` is read-only.
+  - **What is assumed.** The cases above are direct conflicts. A chain through third transactions, in
+    the window or between `W` and `W'`, rests on SSI's theorem applied with `S`'s storage transactions
+    as if they were one: every cycle has a dangerous structure that SSI aborts. `S`'s reads, prepare and
+    validations are separate storage transactions, so this is an argument, not a proof; the read-only
+    step has the least margin. With ScalarDB's two-phase commit, every participant on the database
+    prepares in its own storage transaction, and the argument assumes every prepare commits before any
+    validation begins, which holds when the application validates only after every participant
+    prepared, as the interface's order of calls asks.
 
-  `SerializableIntegrationTest` checks it: a phantom, write skew and Fekete's read-only anomaly, at five
-  timings around ScalarDB's prepare and validation, with a native SERIALIZABLE transaction in the
-  driver's part. With ScalarDB's storage at REPEATABLE READ the same schedules commit each anomaly,
-  because SSI does not see ScalarDB's statements; at SERIALIZABLE the driver aborts with `40001` or
+  `SerializableIntegrationTest` checks it: a phantom, write skew and Fekete's read-only anomaly, at
+  seven timings around ScalarDB's prepare and validation, the driver reading row by row, through a join
+  and through the per-table check, with a native SERIALIZABLE transaction in the driver's part.
+  With ScalarDB's storage at REPEATABLE READ the same schedules commit each anomaly, because SSI does not see ScalarDB's statements; at SERIALIZABLE the driver aborts with `40001` or
   ScalarDB's validation fails. The cost is SSI's false positives on both sides, ScalarDB's own reads
   included, more so where PostgreSQL coarsens its predicate locks to pages or relations.
 - **Why SERIALIZABLE holds on the other engines.** The driver is strict two-phase locking on rows: shared on read, exclusive
@@ -1546,7 +1558,8 @@ between `T` and plain tables are the database's own.
   ScalarDB: write skew, phantoms and the read-only anomaly all commit (section 5). The driver cannot
   read ScalarDB's configuration, so this is a documented requirement, not a check.
 - **Recency in one failure path.** A ScalarDB record commit that failed after the coordinator write leaves
-  rows in state 1; the driver returns the before image (READ COMMITTED) or retries (other levels) until
+  rows in state 1; with ScalarDB's storage connections at SERIALIZABLE on PostgreSQL, SSI's false
+  positives make such failures more frequent, since ScalarDB logs and ignores them; the driver returns the before image (READ COMMITTED) or retries (other levels) until
   recovery runs, although ScalarDB told its client "committed". On Oracle this path is not rare: at the
   SERIALIZABLE level that ScalarDB requires there for decoupled tables, a hard parse reads `SYS.USER$` at
   the transaction's snapshot, every logon writes the user's last login time into `USER$`, and the read then
@@ -1680,6 +1693,14 @@ retries.
     like `T_data`; the session state the proxy captures is the schemas and the double-quote setting;
     "the parser can interpret" is defined without a node-type list, and executable comment forms are
     refused (4.1).
+15. Milestone 7 (2026-10-16) and its review: on PostgreSQL, SNAPSHOT and SERIALIZABLE read row by row
+    with each row's state where every ScalarDB table returns rows, aborting on a row in flight, and
+    take the per-table check elsewhere: a subquery's table, an aggregate, an outer join, an `OFFSET`, a
+    scrollable result set. The check runs before the read wherever it falls in the transaction, once per
+    table, not as the transaction's first statement as items 11 and 12 had it. SERIALIZABLE there is
+    PostgreSQL's SSI with ScalarDB's storage connections at SERIALIZABLE, without read locks (section
+    5). A write aborts on a row in flight its predicate matches by either image; Oracle refuses
+    SERIALIZABLE.
 
 ## References in ScalarDB (`core/src/main/java/com/scalar/db`; verified on `v3.19.1` and on the 4.0 line, identical in every cited behaviour)
 
@@ -1688,7 +1709,15 @@ retries.
 - `transaction/consensuscommit/CommitMutationComposer.java`, `RollbackMutationComposer.java`,
   `OnePhaseCommitMutationComposer.java`: before image set to NULL.
 - `transaction/consensuscommit/TransactionResult.java`, `hasBeforeImage`.
-- `transaction/consensuscommit/Snapshot.java`, `isChanged`: validation compares `tx_id`.
+- `transaction/consensuscommit/Snapshot.java`, `isChanged`: validation compares `tx_id`;
+  `toSerializable`: one validation read per get and scan, run in parallel.
+- `transaction/consensuscommit/CommitHandler.java`, `commit`: prepare, then validation, then the
+  coordinator write and the record commit; `TransactionContext.isValidationRequired`: SERIALIZABLE
+  only, read-only transactions included.
+- `transaction/consensuscommit/ParticipantCommitHandler.java`, `canOnePhaseCommit`: off when
+  validation is required; `validateRecords`.
+- `storage/jdbc/JdbcDatabase.java`, `get` and `scan`: each a storage transaction of its own at
+  `scalar.db.jdbc.isolation_level`.
 - `transaction/consensuscommit/ConsensusCommitUtils.java`, `convertConjunctions`, and
   `CrudHandler.requiresBeforeIndexCheck`: ScalarDB's own before-image read and its index split.
 - `transaction/consensuscommit/RecoveryHandler.java`, `RecoveryExecutor.java` and

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "176"
 tags: [code-review, documentation]
@@ -39,3 +39,17 @@ Edit the sections as listed.
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Section 5: the read-only step argued through SSI's serial order (direct case: the dangerous structure
+  `Sv(y) -rw-> W -rw-> W'`); a "What is assumed" item states that chains through third transactions rest
+  on SSI's theorem applied as if S were one transaction, and that with two-phase commit every prepare
+  precedes every validation; the window bullet says "no direct conflict"; the test description updated.
+- Section 7: SSI false positives make failed record commits, the recency path, more frequent.
+- 4.6: OFFSET pages, count() and existsById take the per-table check at the snapshot levels.
+- Section 10: item 15 records milestone 7 and supersedes "the first statement" of items 11-12 on
+  PostgreSQL.
+- References: Snapshot.toSerializable, CommitHandler.commit, TransactionContext.isValidationRequired,
+  ParticipantCommitHandler.canOnePhaseCommit/validateRecords, JdbcDatabase.get/scan.
