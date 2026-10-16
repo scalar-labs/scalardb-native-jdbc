@@ -428,9 +428,12 @@ READ COMMITTED.
 
 ### Milestone 7: SNAPSHOT and SERIALIZABLE on PostgreSQL
 
-The detector form of 4.2, abort on any in-flight row; `FOR SHARE` in the first arm for SERIALIZABLE; the
-coarse path with `LOCK TABLE` as the first statement, and its `40001` when it is not; the anchors and the
-CAS unchanged. The interleaving tests gain the write-skew and phantom rows of section 9.
+The detector form of 4.2, abort on any in-flight row; SERIALIZABLE as PostgreSQL's SERIALIZABLE with no
+read locks and the coarse check without a table lock, SSI doing the work with ScalarDB's storage
+connections at SERIALIZABLE (design section 5); the anchors and the CAS unchanged.
+`SerializableIntegrationTest` already checks that premise with a native transaction in the driver's part;
+milestone 7 adds the same scenarios through the driver, and the interleaving tests gain the write-skew,
+phantom and read-only rows of section 9.
 
 ### Milestone 8: the other engines
 

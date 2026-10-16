@@ -215,7 +215,7 @@ public enum Engines {
    * ScalarDB's Consensus Commit on this database with extra properties.
    *
    * @param extra the properties added to those of {@link #scalarDb()}, such as Consensus Commit's
-   *     isolation level
+   *     isolation level or the storage's
    * @return the factory
    * @throws SQLException if the database does not start
    */
@@ -228,7 +228,9 @@ public enum Engines {
     p.setProperty("scalar.db.username", s.username);
     p.setProperty("scalar.db.password", s.password);
     p.setProperty("scalar.db.transaction_manager", "consensus-commit");
-    p.setProperty("scalar.db.jdbc.isolation_level", isolation());
+    p.setProperty(
+        "scalar.db.jdbc.isolation_level",
+        extra.getProperty("scalar.db.jdbc.isolation_level", isolation()));
     // a few idle connections per pool, not ScalarDB's 20, so that the managers the test classes
     // open stay within PostgreSQL's 100 connections
     p.setProperty("scalar.db.jdbc.connection_pool.min_idle", "2");
