@@ -89,6 +89,8 @@ class SnapshotIntegrationTest {
       try (Statement st = c.createStatement()) {
         // a commit that fails: its duplicate is found at COMMIT
         st.execute("CREATE SCHEMA IF NOT EXISTS sn_plain");
+        // a unique constraint besides the key, on rows v > 100 only
+        st.execute("CREATE UNIQUE INDEX IF NOT EXISTS u_v_unique ON sn.u_data (v) WHERE v > 100");
         st.execute(
             "CREATE TABLE IF NOT EXISTS sn_plain.c (id INT, CONSTRAINT c_pk PRIMARY KEY (id)"
                 + " DEFERRABLE INITIALLY DEFERRED)");
@@ -204,6 +206,21 @@ class SnapshotIntegrationTest {
             .isEqualTo("23505");
       }
       d.rollback();
+      // a key the statement repeats, or another unique constraint, is the application's duplicate
+      // too, never retried (todo 178)
+      for (String sql :
+          List.of(
+              "INSERT INTO sn.t (id, x, v) VALUES (90, 'p', 0), (90, 'q', 0)",
+              "INSERT INTO sn.u (id, x, v) VALUES (91, 'p', 101), (92, 'q', 101)")) {
+        try (Statement st = d.createStatement()) {
+          assertThatThrownBy(() -> st.executeUpdate(sql))
+              .as("%s: %s", at, sql)
+              .isInstanceOf(SQLException.class)
+              .extracting(ex -> ((SQLException) ex).getSQLState())
+              .isEqualTo("23505");
+        }
+        d.rollback();
+      }
 
       // in autocommit an abort leaves the connection usable (todo 169)
       held = prepared(tpc, "t", 9, "b");
@@ -214,6 +231,21 @@ class SnapshotIntegrationTest {
           .as("%s: the next autocommit read", at)
           .containsExactly("a");
       d.setAutoCommit(false);
+      // ... also when its rows are fetched after autocommit went off (todo 180)
+      held = prepared(tpc, "t", 11, "b");
+      d.setAutoCommit(true);
+      try (Statement st = d.createStatement()) {
+        st.execute("SELECT x FROM sn.t WHERE id = 11");
+        d.setAutoCommit(false);
+        assertThatThrownBy(() -> rows(st.getResultSet()))
+            .as("%s: rows fetched later", at)
+            .isInstanceOf(SQLTransactionRollbackException.class);
+      }
+      held.rollback();
+      assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 12"))
+          .as("%s: the transaction after it", at)
+          .containsExactly("a");
+      d.rollback();
 
       // a commit that fails ends the transaction, whose checks go with it (todo 170)
       assertThat(rows(d, "SELECT COUNT(*) FROM sn.u")).containsExactly("20");
@@ -226,6 +258,19 @@ class SnapshotIntegrationTest {
       assertAborts(d, "SELECT COUNT(*) FROM sn.u WHERE x = 'a'", at + ": after a failed commit");
       d.rollback();
       held.rollback();
+
+      // passthrough may set the level in SQL; the driver follows the session (todo 184)
+      d.setAutoCommit(true);
+      d.setClientInfo("scalardbnative.passthrough", "true");
+      try (Statement st = d.createStatement()) {
+        st.execute("SELECT set_config('default_transaction_isolation', 'read committed', false)");
+      }
+      d.setClientInfo("scalardbnative.passthrough", "false");
+      assertThat(d.nativeSQL("SELECT x FROM sn.t WHERE id = 1"))
+          .as("%s: read as READ COMMITTED after passthrough", at)
+          .doesNotContain("\"scalardb_native_meta\".\"tx_state\"");
+      d.setTransactionIsolation(level);
+      d.setAutoCommit(false);
 
       // a result set whose rows are checked one by one is not handed out unchecked (todo 175)
       try (Statement st = d.createStatement();
@@ -251,7 +296,8 @@ class SnapshotIntegrationTest {
           List.of(
               "SELECT set_config('default_transaction_isolation', 'read committed', false)",
               "RESET ALL",
-              "RESET default_transaction_isolation")) {
+              "RESET default_transaction_isolation",
+              "RESET \"default_transaction_isolation\"")) {
         assertThatThrownBy(() -> rows(d, sql))
             .as("%s: %s", at, sql)
             .isInstanceOf(SQLException.class)

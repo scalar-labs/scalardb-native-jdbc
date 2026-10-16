@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "184"
 tags: [code-review, jdbc, docs]
@@ -34,3 +34,10 @@ Document it next to passthrough in design 4.1 and the README.
 
 **By:** Claude Code
 - From the review of milestone 7 and its fixes, d4949c0..322bd32.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Router.ran: after a passthrough statement whose text mentions isolation, set_config, RESET or
+  DISCARD, the level is read back from the session (Option 1). Design 1 (driver properties) says so;
+  SnapshotIntegrationTest covers set_config through passthrough.

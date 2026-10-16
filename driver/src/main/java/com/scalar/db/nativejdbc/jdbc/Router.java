@@ -1317,6 +1317,9 @@ final class Router {
     return lower.contains("max_parallel_workers_per_gather") || RESETS_ALL.matcher(lower).find();
   }
 
+  private static final Pattern SETS_LEVEL =
+      Pattern.compile("isolation|set_config|\\b(reset|discard)\\b");
+
   private static final Pattern RESETS_ALL = Pattern.compile("\\b(reset|discard)\\s+all\\b");
 
   /** After a rollback, which undoes a SET made in the transaction. */
@@ -1465,6 +1468,16 @@ final class Router {
       }
       if (route.changesNames) {
         catalog.invalidateResolutions();
+      }
+      if (route.passthrough
+          && engine == Engine.POSTGRESQL
+          && SETS_LEVEL.matcher(route.source.toLowerCase(Locale.ROOT)).find()) {
+        // passthrough may set the level, or reset it, in SQL: follow the session (todo 184)
+        try {
+          isolation = vendor.getTransactionIsolation();
+        } catch (SQLException e) {
+          // the connection failed; its next statement reports it
+        }
       }
     } finally {
       lock.unlock();

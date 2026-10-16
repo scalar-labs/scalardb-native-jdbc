@@ -4153,12 +4153,14 @@ public final class SqlAst {
 
   /** Whether a setting, as SET, RESET or set_config names it, is part of the transaction mode. */
   private static boolean setsTransactionMode(String setting) {
+    // PostgreSQL takes a quoted name as well (todo 179)
     String name =
-        setting
-            .strip()
-            .toLowerCase(Locale.ROOT)
-            .replaceFirst("^@@", "")
-            .replaceFirst("^(session|local|global)\\.", "");
+        unquoted(
+            setting
+                .strip()
+                .toLowerCase(Locale.ROOT)
+                .replaceFirst("^@@", "")
+                .replaceFirst("^(session|local|global)\\.", ""));
     return name.equals("autocommit")
         || name.equals("completion_type")
         || name.equals("implicit_transactions")

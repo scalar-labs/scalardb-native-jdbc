@@ -22,6 +22,7 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -288,14 +289,17 @@ final class Writes {
     // flight (4.3); a generated one is the application's duplicate
     Step inFlight = null;
     Step committed = null;
+    Step repeats = null;
     List<List<Expression>> rows = shape.insertKeyValues(t.keyColumns());
     if (rows != null) {
       List<String> match = new ArrayList<>();
       List<String> matchData = new ArrayList<>();
+      List<String> tuples = new ArrayList<>();
       List<Integer> matchBinds = new ArrayList<>();
       for (List<Expression> row : rows) {
         List<String> terms = new ArrayList<>();
         List<String> termsData = new ArrayList<>();
+        List<String> values = new ArrayList<>();
         for (int i = 0; i < row.size(); i++) {
           int[] span = ast.span(row.get(i));
           List<Integer> inside = span == null ? null : ast.placeholdersIn(span[0], span[1]);
@@ -305,10 +309,27 @@ final class Writes {
           String k = engine.quote(t.keyColumns().get(i));
           terms.add(k + " = " + source.substring(span[0], span[1]));
           termsData.add("d." + k + " = " + source.substring(span[0], span[1]));
+          values.add(source.substring(span[0], span[1]));
           matchBinds.addAll(inside);
         }
         match.add("(" + String.join(" AND ", terms) + ")");
         matchData.add("(" + String.join(" AND ", termsData) + ")");
+        tuples.add("(" + String.join(", ", values) + ")");
+      }
+      if (snapshot && rows.size() > 1) {
+        // a key the statement itself repeats is the application's duplicate (todo 178)
+        List<String> columns = new ArrayList<>();
+        for (int i = 1; i <= t.keyColumns().size(); i++) {
+          columns.add("column" + i);
+        }
+        repeats =
+            new Step(
+                "SELECT 1 FROM (VALUES "
+                    + String.join(", ", tuples)
+                    + ") v GROUP BY "
+                    + String.join(", ", columns)
+                    + " HAVING COUNT(*) > 1",
+                matchBinds);
       }
       if (snapshot) {
         // the snapshot cannot see a key written after it, which the duplicate came from: a key
@@ -343,7 +364,7 @@ final class Writes {
     }
     SqlAst.TableRef ref = shape.table();
     return new InsertPlan(
-        n, new Step(insert, all), inFlight, committed, returning, Router.exposed(ref));
+        n, new Step(insert, all), inFlight, committed, repeats, returning, Router.exposed(ref));
   }
 
   /**
@@ -891,6 +912,8 @@ final class Writes {
     final @Nullable Step inFlight;
     // at SNAPSHOT and SERIALIZABLE, the keys committed in the snapshot
     final @Nullable Step committed;
+    // at those levels, for several rows: whether the statement repeats a key
+    final @Nullable Step repeats;
     final @Nullable String returning;
     final String exposed;
 
@@ -899,12 +922,14 @@ final class Writes {
         Step insert,
         @Nullable Step inFlight,
         @Nullable Step committed,
+        @Nullable Step repeats,
         @Nullable String returning,
         String exposed) {
       super(n);
       this.insert = insert;
       this.inFlight = inFlight;
       this.committed = committed;
+      this.repeats = repeats;
       this.returning = returning;
       this.exposed = exposed;
     }
@@ -916,7 +941,13 @@ final class Writes {
 
     @Override
     List<String> sql() {
-      return inFlight == null ? List.of(insert.sql) : List.of(insert.sql, inFlight.sql);
+      List<String> out = new ArrayList<>(List.of(insert.sql));
+      for (Step s : Arrays.asList(inFlight, committed, repeats)) {
+        if (s != null) {
+          out.add(s.sql);
+        }
+      }
+      return out;
     }
 
     @SuppressFBWarnings(
@@ -945,6 +976,9 @@ final class Writes {
         }
         // the transaction goes on, as on the engines where a failed statement does not end it
         run.v.rollback(sp);
+        if (!keyViolated(run, e)) {
+          throw e; // another unique constraint: the application's duplicate (todo 178)
+        }
         try (PreparedStatement check = run.prepare(inFlight, null);
             ResultSet r = check.executeQuery()) {
           r.next();
@@ -954,7 +988,7 @@ final class Writes {
             throw a;
           }
         }
-        if (committed != null) {
+        if (committed != null && !repeatsKey(run)) {
           try (PreparedStatement check = run.prepare(committed, null);
               ResultSet r = check.executeQuery()) {
             r.next();
@@ -989,6 +1023,57 @@ final class Writes {
         throw e;
       }
       return keys.rows.size();
+    }
+
+    /**
+     * Whether the duplicate is of the data table's primary key: the constraint pgjdbc reports, read
+     * without depending on pgjdbc; true when it cannot be told, as before.
+     */
+    private boolean keyViolated(Run run, SQLException e) throws SQLException {
+      String constraint;
+      try {
+        Object message = e.getClass().getMethod("getServerErrorMessage").invoke(e);
+        constraint =
+            message == null
+                ? null
+                : (String) message.getClass().getMethod("getConstraint").invoke(message);
+      } catch (ReflectiveOperationException | ClassCastException ex) {
+        constraint = null;
+      }
+      if (constraint == null) {
+        return true;
+      }
+      try (PreparedStatement ps =
+          run.v.prepareStatement(
+              "SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(?) AND contype = 'p'"
+                  + " AND conname = ?")) {
+        ps.setString(1, n.data);
+        ps.setString(2, constraint);
+        try (ResultSet rs = ps.executeQuery()) {
+          return rs.next();
+        }
+      }
+    }
+
+    /**
+     * Whether the statement repeats a key; true when that cannot be told, so that a duplicate is
+     * never retried forever.
+     */
+    private boolean repeatsKey(Run run) throws SQLException {
+      if (repeats == null) {
+        return false;
+      }
+      // the values' types are inferred without the table's: a mismatch fails, under a savepoint
+      Savepoint sp = run.v.setSavepoint();
+      try (PreparedStatement ps = run.prepare(repeats, null);
+          ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      } catch (SQLException e) {
+        run.v.rollback(sp);
+        return true;
+      } finally {
+        run.v.releaseSavepoint(sp);
+      }
     }
 
     private void stamp(Run run, Keys keys) throws SQLException {

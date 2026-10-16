@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "180"
 tags: [code-review, correctness, jdbc]
@@ -38,3 +38,9 @@ Bump the anchors epoch when autocommit goes off as well.
 
 **By:** Claude Code
 - From the review of milestone 7 and its fixes, d4949c0..322bd32.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Proxies: `inTransaction` is a statement field set at execute; the abort marks only the transaction
+  the execute ran in. SnapshotIntegrationTest covers execute, setAutoCommit(false), getResultSet.

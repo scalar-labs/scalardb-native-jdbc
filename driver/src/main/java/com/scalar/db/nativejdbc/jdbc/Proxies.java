@@ -444,6 +444,8 @@ public final class Proxies {
     Router.@Nullable Anchored anchored;
     boolean recording;
     long epoch;
+    // whether the last execute ran in a transaction
+    boolean inTransaction;
 
     @Override
     void handedOut() {
@@ -736,8 +738,12 @@ public final class Proxies {
           && vendor().getResultSetType() == ResultSet.TYPE_FORWARD_ONLY) {
         checked = null; // each row the application moves to is checked by its state
       }
-      // an abort marks the transaction the read ran in, not autocommit nor a later one (todo 169)
-      boolean inTransaction = !owner.vendor.getAutoCommit();
+      // an abort marks the transaction the read ran in, not autocommit nor a later one (todos
+      // 169, 180): as it was at the execute, which getResultSet may follow later
+      if (name.startsWith("execute")) {
+        inTransaction = !owner.vendor.getAutoCommit();
+      }
+      boolean marks = inTransaction;
       long at = epoch;
       // in autocommit the checks and the read share one snapshot in a transaction of their own,
       // its rows fetched whole, since its end closes a cursor
@@ -800,7 +806,7 @@ public final class Proxies {
                   recording ? owner.anchors : null,
                   epoch,
                   () -> {
-                    if (inTransaction && owner.anchors.epoch() == at) {
+                    if (marks && owner.anchors.epoch() == at) {
                       owner.rollbackOnly = true;
                     }
                   }));

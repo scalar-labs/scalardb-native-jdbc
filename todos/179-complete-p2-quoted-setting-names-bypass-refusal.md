@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "179"
 tags: [code-review, correctness, jdbc, sql]
@@ -35,3 +35,9 @@ add the quoted forms to SqlAstTest.
 
 **By:** Claude Code
 - From the review of milestone 7 and its fixes, d4949c0..322bd32.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- SqlAst.setsTransactionMode unquotes the name; SqlAstTest and SnapshotIntegrationTest cover the
+  quoted forms.

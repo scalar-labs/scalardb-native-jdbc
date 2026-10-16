@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "178"
 tags: [code-review, correctness, jdbc, isolation]
@@ -47,3 +47,11 @@ Re-read the key under READ COMMITTED semantics is not possible in the transactio
 
 **By:** Claude Code
 - From the review of milestone 7 and its fixes, d4949c0..322bd32.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Writes: only a duplicate of the data table's primary key (constraint name read from pgjdbc's
+  server message by reflection, matched in pg_constraint) is looked into; at the snapshot levels a
+  multi-row INSERT that repeats a key (VALUES ... GROUP BY ... HAVING COUNT(*) > 1, under a savepoint,
+  true when it cannot tell) keeps 23505. `InsertPlan.sql()` lists every step. Design 4.3 says so.

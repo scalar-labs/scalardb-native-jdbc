@@ -401,6 +401,9 @@ class SqlAstTest {
             "RESET ALL",
             "RESET default_transaction_isolation",
             "RESET transaction_isolation",
+            "RESET \"default_transaction_isolation\"",
+            "SET \"default_transaction_isolation\" = 'read committed'",
+            "SET SESSION \"transaction_isolation\" = 'read committed'",
             "SELECT set_config('default_transaction_isolation', 'read committed', false)",
             "SELECT pg_catalog.set_config('Transaction_Isolation', 'read committed', true)",
             "SELECT set_config(?, 'read committed', false)")) {
