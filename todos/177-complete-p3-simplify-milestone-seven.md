@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "177"
 tags: [code-review, quality, simplification]
@@ -35,3 +35,16 @@ Make the behavior-identical cuts; the test-fixture moves as a separate change.
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Route: `anchored`, `checked` and `with` share one private `copy`.
+- Router: `covers()` inlined; `checks()` through `SplitRead.meta`; `snapshot()` read once in `read()`;
+  `versions()`'s column list in one line; `Anchored.width()` used by Router and Proxies.
+- SplitRead: `none` and `afterImages` share a `columns` helper.
+- Engines.scalarDb: `putIfAbsent` for the storage isolation level.
+- Tests: `Rows.rows(Connection, String)`, `rows(PreparedStatement)`, `rows(ResultSet)` in testFixtures
+  replace the copies in seven test classes; SerializableIntegrationTest labels use String.format (f7ddd58).
+- Not done: the create-plus-Setup blocks differ per class (catalog reuse, results inspected, extra
+  tables), so a shared helper would not shrink them much.

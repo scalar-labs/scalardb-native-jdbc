@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -30,7 +31,6 @@ import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLTransactionRollbackException;
 import java.sql.Statement;
@@ -802,21 +802,5 @@ class InterleavingIntegrationTest {
     Optional<Result> r = tx.get(get(t, id));
     tx.commit();
     return r.map(x -> x.getText("x"));
-  }
-
-  private static List<String> rows(Connection c, String sql) throws SQLException {
-    try (Statement st = c.createStatement();
-        ResultSet rs = st.executeQuery(sql)) {
-      int n = rs.getMetaData().getColumnCount();
-      List<String> out = new ArrayList<>();
-      while (rs.next()) {
-        List<String> row = new ArrayList<>();
-        for (int i = 1; i <= n; i++) {
-          row.add(rs.getString(i));
-        }
-        out.add(String.join("/", row));
-      }
-      return out;
-    }
   }
 }

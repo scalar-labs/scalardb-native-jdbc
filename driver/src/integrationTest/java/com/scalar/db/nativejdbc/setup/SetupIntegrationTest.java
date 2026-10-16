@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc.setup;
 
+import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.api.DistributedTransactionAdmin;
@@ -18,7 +19,6 @@ import java.sql.SQLException;
 import java.sql.SQLTransientException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -247,16 +247,6 @@ class SetupIntegrationTest {
   }
 
   @SuppressFBWarnings(value = "SQL_INJECTION_JDBC", justification = "test queries from constants")
-  private static List<String> rows(Connection c, String sql) throws SQLException {
-    List<String> out = new ArrayList<>();
-    try (Statement st = c.createStatement();
-        ResultSet rs = st.executeQuery(sql)) {
-      while (rs.next()) {
-        out.add(rs.getString(1));
-      }
-    }
-    return out;
-  }
 
   /** What the driver does with a statement: its first value, or the SQLState it refused with. */
   private static String viaDriver(Engines e, String sql) throws SQLException {

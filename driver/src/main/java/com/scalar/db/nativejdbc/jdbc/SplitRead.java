@@ -284,11 +284,16 @@ final class SplitRead {
 
   /** No row, with the columns {@code read} of the table and their types. */
   private static String none(Engine engine, TableInfo t, List<String> read) {
+    return "(SELECT " + columns(engine, read) + " FROM " + data(engine, t) + " t WHERE 1 = 0)";
+  }
+
+  /** The columns {@code read} of the data table, aliased {@code t}. */
+  private static String columns(Engine engine, List<String> read) {
     List<String> cols = new ArrayList<>();
     for (String c : read) {
       cols.add("t." + engine.quote(c));
     }
-    return "(SELECT " + String.join(", ", cols) + " FROM " + data(engine, t) + " t WHERE 1 = 0)";
+    return String.join(", ", cols);
   }
 
   /** The before image of each of the table's rows in flight that has one, columns {@code read}. */
@@ -318,12 +323,8 @@ final class SplitRead {
 
   /** The after image of each of the table's rows in flight, columns {@code read}. */
   static String afterImages(Engine engine, TableInfo t, List<String> read) {
-    List<String> cols = new ArrayList<>();
-    for (String c : read) {
-      cols.add("t." + engine.quote(c));
-    }
     return "(SELECT "
-        + String.join(", ", cols)
+        + columns(engine, read)
         + " FROM "
         + data(engine, t)
         + " t JOIN "
@@ -339,7 +340,7 @@ final class SplitRead {
     return engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
   }
 
-  private static String meta(Engine engine, TableInfo t) {
+  static String meta(Engine engine, TableInfo t) {
     return engine.quote(t.namespace())
         + "."
         + engine.quote(Objects.requireNonNull(t.metadataTable(), "metadata table"));

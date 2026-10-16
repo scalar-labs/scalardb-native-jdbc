@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -26,7 +27,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -677,34 +677,5 @@ class ReadIntegrationTest {
         .partitionKey(key)
         .textValue(col, v)
         .build();
-  }
-
-  @SuppressFBWarnings(
-      value = "SQL_INJECTION_JDBC",
-      justification = "test queries written in the test sources")
-  private static List<String> rows(Connection c, String sql) throws SQLException {
-    try (Statement st = c.createStatement();
-        ResultSet rs = st.executeQuery(sql)) {
-      return rows(rs);
-    }
-  }
-
-  private static List<String> rows(PreparedStatement ps) throws SQLException {
-    try (ResultSet rs = ps.executeQuery()) {
-      return rows(rs);
-    }
-  }
-
-  private static List<String> rows(ResultSet rs) throws SQLException {
-    int n = rs.getMetaData().getColumnCount();
-    List<String> out = new ArrayList<>();
-    while (rs.next()) {
-      List<String> row = new ArrayList<>();
-      for (int i = 1; i <= n; i++) {
-        row.add(rs.getString(i));
-      }
-      out.add(String.join("/", row));
-    }
-    return out;
   }
 }

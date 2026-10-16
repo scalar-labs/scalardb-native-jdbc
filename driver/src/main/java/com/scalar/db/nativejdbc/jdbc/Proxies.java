@@ -1288,7 +1288,7 @@ public final class Proxies {
               || name.equals("absolute")
               || name.equals("relative"))) {
         ResultSet rs = (ResultSet) target;
-        int width = anchored.states ? 3 : 2;
+        int width = anchored.width();
         if (anchored.states) {
           // at SNAPSHOT and SERIALIZABLE a row in flight aborts the read (design 4.2)
           for (int t = 0, at = visible() + 1; t < anchored.tables.size(); t++) {

@@ -172,54 +172,12 @@ final class Router {
      * {@code anchoring} as {@link #anchoring} says.
      */
     Route anchored(@Nullable Anchored a, @Nullable Boolean anchoring) {
-      return new Route(
-          source,
-          sql,
-          changesSession,
-          changesNames,
-          passthrough,
-          kind,
-          isolation,
-          sessionGeneration,
-          catalogGeneration,
-          trustedUntil,
-          parameterSources,
-          parameters,
-          recheckAt,
-          countsOnly,
-          perRow,
-          parallel,
-          plansParallel,
-          write,
-          a,
-          anchoring,
-          checks);
+      return copy(sql, parameterSources, perRow, countsOnly, parallel, a, anchoring, checks);
     }
 
     /** This route, with the checks a read at SNAPSHOT or SERIALIZABLE runs first. */
     Route checked(List<String> checks) {
-      return new Route(
-          source,
-          sql,
-          changesSession,
-          changesNames,
-          passthrough,
-          kind,
-          isolation,
-          sessionGeneration,
-          catalogGeneration,
-          trustedUntil,
-          parameterSources,
-          parameters,
-          recheckAt,
-          countsOnly,
-          perRow,
-          parallel,
-          plansParallel,
-          write,
-          anchored,
-          anchoring,
-          checks);
+      return copy(sql, parameterSources, perRow, countsOnly, parallel, anchored, anchoring, checks);
     }
 
     /** This route with another statement text and what goes with it. */
@@ -229,6 +187,18 @@ final class Router {
         List<Integer> perRow,
         boolean countsOnly,
         boolean parallel) {
+      return copy(sql, parameterSources, perRow, countsOnly, parallel, anchored, anchoring, checks);
+    }
+
+    private Route copy(
+        String sql,
+        @Nullable List<Integer> parameterSources,
+        List<Integer> perRow,
+        boolean countsOnly,
+        boolean parallel,
+        @Nullable Anchored anchored,
+        @Nullable Boolean anchoring,
+        List<String> checks) {
       return new Route(
           source,
           sql,
@@ -278,7 +248,12 @@ final class Router {
       this.tables = tables;
       this.keys = keys;
       this.states = states;
-      this.hidden = keys.stream().mapToInt(k -> k + (states ? 3 : 2)).sum();
+      this.hidden = keys.stream().mapToInt(k -> k + width()).sum();
+    }
+
+    /** The columns each table appends after its key: the version, and the state with states. */
+    int width() {
+      return states ? 3 : 2;
     }
 
     /** Columns the driver appended that are hidden only, not recorded: {@code hidden} of them. */
@@ -670,10 +645,7 @@ final class Router {
       out.add(x + "." + engine.quote(k));
     }
     String prefix = piece == SqlAst.Piece.COMMITTED ? "" : "before_";
-    List<String> read = new ArrayList<>();
-    for (String c : List.of("tx_id", "tx_version")) {
-      read.add(prefix + c);
-    }
+    List<String> read = new ArrayList<>(List.of(prefix + "tx_id", prefix + "tx_version"));
     if (states) {
       read.add("tx_state"); // the row's own, also where the piece reads the before image
     }
@@ -834,6 +806,7 @@ final class Router {
       names.add(t.namespace() + "." + t.table());
     }
     String tables = " (" + String.join(", ", names) + ")";
+    boolean snapshot = snapshot();
     if (ast.kind() != SqlAst.Kind.SELECT) {
       throw Errors.unsupported(
           "only reads of ScalarDB tables are supported so far; writes and other statements come"
@@ -841,7 +814,7 @@ final class Router {
               + tables);
     }
     if (isolation != Connection.TRANSACTION_READ_COMMITTED
-        && !(snapshot() && engine == Engine.POSTGRESQL)) {
+        && !(snapshot && engine == Engine.POSTGRESQL)) {
       throw Errors.unsupported(
           "reads of ScalarDB tables run at READ COMMITTED, and at REPEATABLE READ or SERIALIZABLE"
               + " on PostgreSQL only so far; set one of those levels on the connection"
@@ -926,8 +899,8 @@ final class Router {
     // result does not return changes it where an outer join leaves a row unmatched, or an offset
     // skips rows: checked whole too
     boolean states =
-        snapshot()
-            && covers(anchorable, scalarDb.keySet())
+        snapshot
+            && scalarDb.keySet().stream().allMatch(r -> anchorable.stream().anyMatch(x -> x == r))
             && !split.places().containsValue(SqlAst.Place.NULLABLE)
             && !ast.skipsRows();
     // the versions cost lookups per row, read only where they are recorded
@@ -972,7 +945,7 @@ final class Router {
             r.anchored(
                 anchoring || states ? new Anchored(anchorTables, keys, states) : null, anchoring);
       }
-      if (snapshot()) {
+      if (snapshot) {
         // with states, run only for a scrollable result, whose moves pass over rows unchecked
         r = r.checked(checks(scalarDb));
       }
@@ -997,17 +970,7 @@ final class Router {
             0,
             List.of(),
             true);
-    return snapshot() ? r.checked(checks(scalarDb)) : r;
-  }
-
-  /** Whether {@code refs} holds each of {@code all}, by identity. */
-  private static boolean covers(List<SqlAst.TableRef> refs, Set<SqlAst.TableRef> all) {
-    for (SqlAst.TableRef r : all) {
-      if (refs.stream().noneMatch(x -> x == r)) {
-        return false;
-      }
-    }
-    return true;
+    return snapshot ? r.checked(checks(scalarDb)) : r;
   }
 
   /** Per ScalarDB table of a read, the check for a row in flight anywhere in it (design 4.2). */
@@ -1016,9 +979,7 @@ final class Router {
     for (TableInfo t : scalarDb.values()) {
       out.add(
           "SELECT 1 FROM "
-              + engine.quote(t.namespace())
-              + "."
-              + engine.quote(Objects.requireNonNull(t.metadataTable(), "metadata table"))
+              + SplitRead.meta(engine, t)
               + " WHERE "
               + engine.quote("tx_state")
               + " IN (1, 2) LIMIT 1");

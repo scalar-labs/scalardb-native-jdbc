@@ -1,5 +1,7 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import static com.scalar.db.nativejdbc.testing.Rows.rows;
+
 import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionAdmin;
 import com.scalar.db.api.DistributedTransactionManager;
@@ -456,34 +458,5 @@ class ReviewFindingsIntegrationTest {
         return out;
       }
     }
-  }
-
-  @SuppressFBWarnings(
-      value = "SQL_INJECTION_JDBC",
-      justification = "test queries written in the test sources")
-  private static List<String> rows(Connection c, String sql) throws SQLException {
-    try (Statement st = c.createStatement();
-        ResultSet rs = st.executeQuery(sql)) {
-      return rows(rs);
-    }
-  }
-
-  private static List<String> rows(PreparedStatement ps) throws SQLException {
-    try (ResultSet rs = ps.executeQuery()) {
-      return rows(rs);
-    }
-  }
-
-  private static List<String> rows(ResultSet rs) throws SQLException {
-    int n = rs.getMetaData().getColumnCount();
-    List<String> out = new ArrayList<>();
-    while (rs.next()) {
-      List<String> row = new ArrayList<>();
-      for (int i = 1; i <= n; i++) {
-        row.add(rs.getString(i));
-      }
-      out.add(String.join("/", row));
-    }
-    return out;
   }
 }

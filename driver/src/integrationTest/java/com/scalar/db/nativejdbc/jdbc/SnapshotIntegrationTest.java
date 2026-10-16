@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -379,22 +380,6 @@ class SnapshotIntegrationTest {
     DistributedTransaction tx = tm.begin();
     tx.update(update("t", id, x));
     tx.commit();
-  }
-
-  private static List<String> rows(Connection c, String sql) throws SQLException {
-    List<String> out = new ArrayList<>();
-    try (Statement st = c.createStatement();
-        ResultSet rs = st.executeQuery(sql)) {
-      int n = rs.getMetaData().getColumnCount();
-      while (rs.next()) {
-        List<String> row = new ArrayList<>();
-        for (int i = 1; i <= n; i++) {
-          row.add(rs.getString(i));
-        }
-        out.add(String.join("/", row));
-      }
-    }
-    return out;
   }
 
   private static Insert insert(String table, int id, String x) {
