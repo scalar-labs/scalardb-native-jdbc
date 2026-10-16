@@ -442,7 +442,8 @@ the per-engine table to `Engine` (insert collision, locking spellings, row limit
 retryable codes, the in-flight index form) and runs the full interleaving suite on its container. SQL
 Server adds the `READ_COMMITTED_SNAPSHOT` check at connect, and the token pass of 4.7 that strips its
 table hints before parsing; that pass must still refuse `NOLOCK` and `READUNCOMMITTED` on a ScalarDB
-table, so it detects them before stripping. Oracle maps SNAPSHOT and SERIALIZABLE as section 5 says.
+table, so it detects them before stripping. Oracle maps SNAPSHOT to its SERIALIZABLE and refuses the driver's SERIALIZABLE with `0AN01`, in
+`setTransactionIsolation` and in `DatabaseMetaData.supportsTransactionIsolationLevel`, as section 5 says.
 
 ### Milestone 9: tools and acceptance
 
