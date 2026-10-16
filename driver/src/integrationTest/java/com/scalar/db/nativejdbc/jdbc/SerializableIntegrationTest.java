@@ -14,7 +14,11 @@ import com.scalar.db.api.TableMetadata;
 import com.scalar.db.api.TwoPhaseCommitTransaction;
 import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.api.Update;
+import com.scalar.db.exception.transaction.CommitConflictException;
+import com.scalar.db.exception.transaction.CrudConflictException;
+import com.scalar.db.exception.transaction.PreparationConflictException;
 import com.scalar.db.exception.transaction.TransactionException;
+import com.scalar.db.exception.transaction.ValidationConflictException;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
@@ -55,11 +59,14 @@ class SerializableIntegrationTest {
   private enum Timing {
     S_FIRST(true, "s.read d.read s.prepare s.validate s.commit d.write d.commit"),
     D_WRITES_FIRST(true, "s.read d.read d.write s.prepare s.validate s.commit d.commit"),
-    // ScalarDB's validation sees the driver's commit
+    D_WRITES_IN_BETWEEN(true, "s.read d.read s.prepare d.write s.validate s.commit d.commit"),
+    D_WRITES_AFTER_VALIDATION(true, "s.read d.read s.prepare s.validate d.write d.commit s.commit"),
+    // not SSI's: ScalarDB's validation sees the driver's commit
     D_COMMITS_BEFORE_VALIDATION(
         false, "s.read d.read s.prepare d.write d.commit s.validate s.commit"),
+    // not SSI's: ScalarDB's validation sees the driver's commit
     D_FIRST(false, "s.read d.read d.write d.commit s.prepare s.validate s.commit"),
-    // the driver reads a prepared row
+    // not SSI's: the driver reads a prepared row and aborts
     IN_FLIGHT(false, "s.read s.prepare d.read d.write d.commit s.validate s.commit");
 
     final boolean needsSsi;
@@ -146,6 +153,22 @@ class SerializableIntegrationTest {
         }
       };
 
+  /** How the driver reads the group: each of the read paths of design 4.2. */
+  private enum Read {
+    // row by row
+    ROWS("SELECT id, v FROM sz.t WHERE g = ?"),
+    // row by row, through a join
+    JOIN("SELECT a.id, a.v FROM sz.t a JOIN sz.t b ON b.g = a.g AND b.id = a.id WHERE a.g = ?"),
+    // the per-table check: a table in a subquery
+    CHECKED("SELECT id, v FROM sz.t WHERE g = ? AND id IN (SELECT id FROM sz.t WHERE g = ?)");
+
+    final String sql;
+
+    Read(String sql) {
+      this.sql = sql;
+    }
+  }
+
   /** The driver's SNAPSHOT and SERIALIZABLE. */
   private static final int[] LEVELS = {
     Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE
@@ -197,42 +220,34 @@ class SerializableIntegrationTest {
               storage.equals("SERIALIZABLE") && level == Connection.TRANSACTION_SERIALIZABLE;
           String driver =
               level == Connection.TRANSACTION_SERIALIZABLE ? "SERIALIZABLE" : "SNAPSHOT";
-          for (Workload w : List.of(PHANTOM, WRITE_SKEW)) {
-            String name = w == PHANTOM ? "phantom" : "write skew";
-            for (Timing timing : Timing.values()) {
-              g++;
-              String at =
-                  "driver "
-                      + driver
-                      + ", storage "
-                      + storage
-                      + ", "
-                      + name
-                      + ", "
-                      + timing
-                      + ", group "
-                      + g;
-              seed(tm, g, w.seed());
-              String trace = run(e, tpc, level, w, g, timing);
-              boolean holds = w.holds(rows(e, g));
-              if (ssi || !timing.needsSsi) {
-                assertThat(holds).as("%s: the rule holds; steps: %s", at, trace).isTrue();
-                assertThat(trace).as("%s: one side commits", at).contains("commit ok");
-              } else {
-                assertThat(holds)
-                    .as("%s: the scenario reaches the anomaly; steps: %s", at, trace)
-                    .isFalse();
+          for (Read read : Read.values()) {
+            for (Workload w : List.of(PHANTOM, WRITE_SKEW)) {
+              String name = w == PHANTOM ? "phantom" : "write skew";
+              for (Timing timing : Timing.values()) {
+                g++;
+                String at =
+                    String.format(
+                        "driver %s, storage %s, %s read, %s, %s, group %d",
+                        driver, storage, read, name, timing, g);
+                seed(tm, g, w.seed());
+                String trace = run(e, tpc, level, read, w, g, timing);
+                boolean holds = w.holds(rows(e, g));
+                if (ssi || !timing.needsSsi) {
+                  assertThat(holds).as("%s: the rule holds; steps: %s", at, trace).isTrue();
+                  assertThat(trace).as("%s: one side commits", at).contains("commit ok");
+                } else {
+                  assertThat(holds)
+                      .as("%s: the scenario reaches the anomaly; steps: %s", at, trace)
+                      .isFalse();
+                }
               }
             }
           }
           g++;
           String at =
-              "driver "
-                  + driver
-                  + ", storage "
-                  + storage
-                  + ", read-only ScalarDB transaction, group "
-                  + g;
+              String.format(
+                  "driver %s, storage %s, read-only ScalarDB transaction, group %d",
+                  driver, storage, g);
           String trace = readOnly(e, tm, level, g);
           assertThat(trace.contains("anomaly"))
               .as("%s: %s; steps: %s", at, ssi ? "no anomaly" : "the anomaly", trace)
@@ -244,14 +259,20 @@ class SerializableIntegrationTest {
 
   /** Runs {@code timing}'s steps; returns them, each with how it ended. */
   private static String run(
-      Engines e, TwoPhaseCommitTransactionManager tpc, int level, Workload w, int g, Timing timing)
+      Engines e,
+      TwoPhaseCommitTransactionManager tpc,
+      int level,
+      Read read,
+      Workload w,
+      int g,
+      Timing timing)
       throws Exception {
     StringBuilder trace = new StringBuilder();
-    try (Native d = new Native(e.openDriver(), level)) {
+    try (Native d = new Native(e.openDriver(), level, read)) {
       TwoPhaseCommitTransaction s = tpc.begin();
       boolean dLive = true;
       boolean sLive = true;
-      Map<Integer, Integer> read = Map.of();
+      Map<Integer, Integer> seen = Map.of();
       for (String step : timing.steps) {
         if (step.startsWith("d.") ? !dLive : !sLive) {
           continue;
@@ -259,8 +280,8 @@ class SerializableIntegrationTest {
         trace.append(step).append(' ');
         try {
           switch (step) {
-            case "d.read" -> read = d.read(g);
-            case "d.write" -> w.d(d, g, read);
+            case "d.read" -> seen = d.read(g);
+            case "d.write" -> w.d(d, g, seen);
             case "d.commit" -> d.c.commit();
             case "s.read" -> w.s(s, g);
             case "s.prepare" -> s.prepare();
@@ -277,6 +298,9 @@ class SerializableIntegrationTest {
           d.c.rollback();
           dLive = false;
         } catch (TransactionException ex) {
+          if (!conflict(ex)) {
+            throw ex;
+          }
           trace.append("aborts ").append(ex.getClass().getSimpleName()).append(", ");
           rollback(s);
           sLive = false;
@@ -296,7 +320,7 @@ class SerializableIntegrationTest {
       throws Exception {
     seed(tm, g, new int[][] {{1, 0}, {2, 0}});
     StringBuilder trace = new StringBuilder();
-    try (Native d = new Native(e.openDriver(), level)) {
+    try (Native d = new Native(e.openDriver(), level, Read.ROWS)) {
       Map<Integer, Integer> read = d.read(g);
       DistributedTransaction deposit = tm.begin();
       int x = deposit.get(get(g, 1)).orElseThrow().getInt("v");
@@ -312,8 +336,11 @@ class SerializableIntegrationTest {
         seen = new int[] {rx, ry};
         trace.append("read-only sees ").append(rx).append('/').append(ry).append(", ");
       } catch (TransactionException ex) {
+        if (!conflict(ex)) {
+          throw ex;
+        }
         rollback(ro);
-        trace.append("read-only aborts, ");
+        trace.append("read-only aborts ").append(ex.getClass().getSimpleName()).append(", ");
       }
       boolean penalty = read.getOrDefault(1, 0) + read.getOrDefault(2, 0) < 10;
       try {
@@ -337,17 +364,21 @@ class SerializableIntegrationTest {
   /** A driver transaction at {@code level}, over the table's SQL name. */
   private static final class Native implements AutoCloseable {
     final Connection c;
+    final Read read;
 
-    Native(Connection c, int level) throws SQLException {
+    Native(Connection c, int level, Read read) throws SQLException {
       this.c = c;
+      this.read = read;
       c.setAutoCommit(false);
       c.setTransactionIsolation(level);
     }
 
     Map<Integer, Integer> read(int g) throws SQLException {
       Map<Integer, Integer> rows = new TreeMap<>();
-      try (PreparedStatement ps = c.prepareStatement("SELECT id, v FROM sz.t WHERE g = ?")) {
-        ps.setInt(1, g);
+      try (PreparedStatement ps = c.prepareStatement(read.sql)) {
+        for (int i = 1; i <= ps.getParameterMetaData().getParameterCount(); i++) {
+          ps.setInt(i, g);
+        }
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
             rows.put(rs.getInt(1), rs.getInt(2));
@@ -405,6 +436,14 @@ class SerializableIntegrationTest {
       tx.commit();
       return rows;
     }
+  }
+
+  /** Whether ScalarDB aborted for a conflict, not for any other failure. */
+  private static boolean conflict(TransactionException ex) {
+    return ex instanceof CrudConflictException
+        || ex instanceof PreparationConflictException
+        || ex instanceof ValidationConflictException
+        || ex instanceof CommitConflictException;
   }
 
   private static int sum(Map<Integer, Integer> rows) {

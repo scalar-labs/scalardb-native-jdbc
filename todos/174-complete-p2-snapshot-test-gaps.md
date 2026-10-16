@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "174"
 tags: [code-review, testing]
@@ -38,3 +38,13 @@ trace exactly and require conflict exceptions; add the two timings.
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Predicate writes, LEFT JOIN, OFFSET, scrollable and autocommit aborts: SnapshotIntegrationTest
+  (745cc84, bfe1b57).
+- SerializableIntegrationTest: every scenario runs through the three read paths (row by row, a join,
+  the per-table check); two more needs-SSI timings (D_WRITES_IN_BETWEEN, D_WRITES_AFTER_VALIDATION);
+  only ScalarDB's conflict exceptions count as aborts, in the scenarios and the read-only case; the
+  timings that do not test SSI are labeled.
