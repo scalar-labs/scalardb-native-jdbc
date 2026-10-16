@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "175"
 tags: [code-review, jdbc, quality]
@@ -35,3 +35,15 @@ inside the try with suppressed exceptions; nativeSql through current(); unwrap d
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Router.check takes the statement's query timeout.
+- A locking read's NOWAIT is dropped from the driver's in-flight handling at the snapshot levels: a row
+  in flight aborts with 40001 (the statement's own NOWAIT still applies to its lock).
+- Autocommit wrap: the fetch size is read before autocommit goes off and set inside the try; a failure
+  ending the own transaction is added as suppressed to the read's.
+- nativeSql routes a cached text through `current()`.
+- A result set checked row by row refuses unwrap to the vendor's (0AN01).
+- SnapshotIntegrationTest: NOWAIT, unwrap, nativeSQL across levels.

@@ -408,15 +408,15 @@ final class Router {
     lock.lock();
     try {
       Route r = routes.get(key(vendor, sql));
-      if (r == null) {
-        probes = false;
-        try {
-          r = decide(vendor, sql, null, null);
-        } catch (SQLException e) {
-          r = null;
-        } finally {
-          probes = true;
-        }
+      probes = false;
+      try {
+        // the cached route only while what it was decided under holds: another level reads
+        // another text
+        r = r == null ? decide(vendor, sql, null, null) : current(vendor, r);
+      } catch (SQLException e) {
+        r = null;
+      } finally {
+        probes = true;
       }
       return r == null || r.sql.equals(sql) ? vendor.nativeSQL(sql) : r.sql;
     } finally {
@@ -754,9 +754,14 @@ final class Router {
         shape.skipLocked()
             ? null // a row in flight is a locked row, skipped
             : inFlightStep(t, ref, ast, span, inWhere);
+    // at SNAPSHOT and SERIALIZABLE a row in flight aborts the transaction (section 6), NOWAIT or
+    // not
     Writes.Plan plan =
         new Writes.LockPlan(
-            n, new Writes.Step(text.sql(), text.parameterSources()), inFlight, shape.noWait());
+            n,
+            new Writes.Step(text.sql(), text.parameterSources()),
+            inFlight,
+            shape.noWait() && !snapshot());
     return new Route(
         sql,
         sql,
@@ -1038,10 +1043,11 @@ final class Router {
    *
    * @param vendor the vendor connection, in a transaction
    * @param route the read
+   * @param timeout the statement's query timeout in seconds, 0 for none
    * @throws SQLException {@code 40001} when a table has a row in flight
    */
   @SuppressFBWarnings(value = "SQL_INJECTION_JDBC", justification = "the driver's own statements")
-  void check(Connection vendor, Route route) throws SQLException {
+  void check(Connection vendor, Route route, int timeout) throws SQLException {
     for (String check : route.checks) {
       lock.lock();
       try {
@@ -1051,11 +1057,13 @@ final class Router {
       } finally {
         lock.unlock();
       }
-      try (Statement st = vendor.createStatement();
-          ResultSet rs = st.executeQuery(check)) {
-        if (rs.next()) {
-          throw new Writes.Aborted(
-              "a table the read reaches has a row a ScalarDB transaction is writing");
+      try (Statement st = vendor.createStatement()) {
+        st.setQueryTimeout(timeout);
+        try (ResultSet rs = st.executeQuery(check)) {
+          if (rs.next()) {
+            throw new Writes.Aborted(
+                "a table the read reaches has a row a ScalarDB transaction is writing");
+          }
         }
       }
       lock.lock();

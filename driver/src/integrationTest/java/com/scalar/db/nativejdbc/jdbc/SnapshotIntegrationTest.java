@@ -226,6 +226,25 @@ class SnapshotIntegrationTest {
       d.rollback();
       held.rollback();
 
+      // a result set whose rows are checked one by one is not handed out unchecked (todo 175)
+      try (Statement st = d.createStatement();
+          ResultSet rs = st.executeQuery("SELECT x FROM sn.t WHERE id = 1")) {
+        Class<?> vendor = Class.forName("org.postgresql.jdbc.PgResultSet");
+        assertThatThrownBy(() -> rs.unwrap(vendor))
+            .as("%s: unwrap", at)
+            .isInstanceOf(SQLException.class);
+      }
+      d.rollback();
+      // nativeSQL shows the text of the connection's level (todo 175)
+      String text = "SELECT x FROM sn.t WHERE id = 1";
+      String snapshotText = d.nativeSQL(text);
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      assertThat(d.nativeSQL(text))
+          .as("%s: nativeSQL at another level", at)
+          .isNotEqualTo(snapshotText);
+      d.setTransactionIsolation(level);
+      assertThat(d.nativeSQL(text)).as("%s: nativeSQL back", at).isEqualTo(snapshotText);
+
       // the transaction mode is not set in SQL (todo 172)
       for (String sql :
           List.of(
@@ -311,6 +330,9 @@ class SnapshotIntegrationTest {
       d.rollback();
       // a locking read aborts on it too, by its after image
       assertAborts(d, "SELECT id FROM sn.t WHERE x = 'b' FOR UPDATE", at + ": a locking read");
+      d.rollback();
+      // NOWAIT too: a row in flight aborts, it is not a lock to report (todo 175)
+      assertAborts(d, "SELECT id FROM sn.t WHERE id = 5 FOR UPDATE NOWAIT", at + ": NOWAIT");
       d.rollback();
       held.rollback();
 

@@ -138,8 +138,8 @@ public final class Proxies {
     abstract @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args)
         throws Throwable;
 
-    /** The application now holds the vendor object itself. */
-    void handedOut() {}
+    /** The application now holds the vendor object itself, or is refused it. */
+    void handedOut() throws SQLException {}
   }
 
   private static final class ConnectionHandler extends Handler {
@@ -742,18 +742,18 @@ public final class Proxies {
       // in autocommit the checks and the read share one snapshot in a transaction of their own,
       // its rows fetched whole, since its end closes a cursor
       boolean own = checked != null && owner.vendor.getAutoCommit();
-      int fetchSize = 0;
+      int fetchSize = own ? vendor().getFetchSize() : 0;
       if (own) {
         owner.vendor.setAutoCommit(false);
-        fetchSize = vendor().getFetchSize();
-        vendor().setFetchSize(0);
       }
-      boolean done = false;
       Object result;
       try {
+        if (own) {
+          vendor().setFetchSize(0);
+        }
         if (checked != null) {
           try {
-            owner.router.check(owner.vendor, checked);
+            owner.router.check(owner.vendor, checked, vendor().getQueryTimeout());
           } catch (Writes.Aborted e) {
             if (!own) {
               owner.rollbackOnly = true;
@@ -769,11 +769,18 @@ public final class Proxies {
             owner.ran(route);
           }
         }
-        done = true;
-      } finally {
+      } catch (Throwable e) {
         if (own) {
-          endOwn(done, fetchSize);
+          try {
+            endOwn(false, fetchSize);
+          } catch (SQLException f) {
+            e.addSuppressed(f); // the read's own failure is the one to report
+          }
         }
+        throw e;
+      }
+      if (own) {
+        endOwn(true, fetchSize);
       }
       if (!(result instanceof ResultSet)) {
         return result;
@@ -1206,6 +1213,16 @@ public final class Proxies {
       this.anchors = anchors;
       this.epoch = epoch;
       this.aborts = aborts;
+    }
+
+    @Override
+    void handedOut() throws SQLException {
+      if (anchored.states) {
+        // the vendor's rows would skip the check of each row's state
+        throw Errors.unsupported(
+            "a result set read at SNAPSHOT or SERIALIZABLE cannot be unwrapped: each row is checked"
+                + " as the application moves to it");
+      }
     }
 
     private int visible() throws SQLException {

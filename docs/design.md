@@ -405,7 +405,8 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   anything such an object hands back: a statement's connection, a result set's statement (null for a
   metadata result set), a metadata object's connection. `unwrap` to a vendor interface, such as
   `PGConnection`, returns the vendor's object, as JDBC requires; it is an escape hatch like passthrough,
-  since SQL run on it reaches the database unchecked. `unwrap(ScalarDbTables.class)` returns the
+  since SQL run on it reaches the database unchecked. A result set read at SNAPSHOT or SERIALIZABLE
+  whose rows are checked one by one (4.2) is not unwrapped: `0AN01`. `unwrap(ScalarDbTables.class)` returns the
   connection itself as the driver's one public interface of its own: given a table's stored schema and
   name it answers plain, ScalarDB, ScalarDB but not set up, or refused (ScalarDB's data, metadata or
   virtual table), from the catalog statements are routed by, so a tool such as the shell's `\dt` marks
@@ -772,7 +773,7 @@ union as a derived table.
   transaction holds, as a native lock would treat it: `SKIP LOCKED` skips it, the first arm leaving
   it out already; otherwise the driver first checks the predicate over the second arm, and a row
   there fails a `NOWAIT` with `55P03` and otherwise waits the bounded wait of section 6, then aborts
-  with `40001`; it is made again after the lock, for a row that went in flight before the lock
+  with `40001`, which at SNAPSHOT and SERIALIZABLE it does at once, `NOWAIT` or not; it is made again after the lock, for a row that went in flight before the lock
   statement began, which the first arm then leaves out unseen. That check ignores `ORDER BY ... LIMIT`, so a row in flight that the limit would not
   have reached waits or aborts too, conservatively. The second arm is never locked nor returned: a
   lock on its rows would block the ScalarDB commit, rollback or recovery that has to settle them, and
@@ -1021,7 +1022,8 @@ union as a derived table.
   the copy limit, an outer join, an OFFSET, a scrollable result set): under SNAPSHOT run a coarse check first, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) LIMIT 1` per
   ScalarDB table, abort if it returns a row, then run the READ COMMITTED read, split or through
   `rc_T`, which with no row in flight in the snapshot returns the committed rows. A table that passed
-  is not checked again in the transaction: its snapshot keeps it so. In autocommit the check and the
+  is not checked again in the transaction: its snapshot keeps it so. The checks run under the
+  statement's query timeout. In autocommit the check and the
   read run in a transaction of their own, its rows fetched whole, since its commit closes a cursor.
   Under SERIALIZABLE
   on PostgreSQL the sequence is the same, at the engine's SERIALIZABLE, and SSI covers the statement. On
