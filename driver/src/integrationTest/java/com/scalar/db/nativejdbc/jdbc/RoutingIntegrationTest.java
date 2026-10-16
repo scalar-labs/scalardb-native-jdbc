@@ -179,15 +179,15 @@ class RoutingIntegrationTest {
   }
 
   @Test
-  void aReadOfAScalarDbTable_isRefusedAtAnotherIsolationLevel_preparedOnesToo()
-      throws SQLException {
+  void aReadOfAScalarDbTable_isServedAtTheSnapshotLevels_preparedOnesToo() throws SQLException {
     seedDistinctRows();
     try (Connection c = connect();
         Statement st = c.createStatement();
         PreparedStatement ps = c.prepareStatement("SELECT x FROM m1.s")) {
       c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
-      assertRefused(() -> st.executeQuery("SELECT x FROM m1.s"), "0AN01", "READ COMMITTED");
-      assertRefused(ps::executeQuery, "0AN01", "READ COMMITTED");
+      assertThat(outcome(() -> st.executeQuery("SELECT x FROM m1.s"))).isEqualTo("read scalardb");
+      // routed again for the level: its rows carry their states (milestone 7)
+      assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
       c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
       assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
     }

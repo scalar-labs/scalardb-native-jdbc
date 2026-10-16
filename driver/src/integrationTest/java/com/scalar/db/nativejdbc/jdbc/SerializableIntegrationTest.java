@@ -18,7 +18,7 @@ import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
-import com.scalar.db.nativejdbc.catalog.TableInfo;
+import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
@@ -26,26 +26,21 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.HashMap;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.TreeMap;
-import java.util.UUID;
-import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * The premise of SERIALIZABLE on PostgreSQL (design section 5): with ScalarDB's storage connections
+ * SERIALIZABLE on PostgreSQL (design section 5): with the driver and ScalarDB's storage connections
  * at SERIALIZABLE, PostgreSQL's SSI breaks every cycle between a driver transaction and ScalarDB
  * transactions, including those row locks cannot: a phantom from a ScalarDB insert, write skew, and
- * a read-only ScalarDB transaction that sees a state no serial order gives. The driver does not run
- * SERIALIZABLE yet (milestone 7), so a native SERIALIZABLE transaction plays its part as 4.2 and
- * 4.3 describe it, without read locks: it reads committed rows only, aborts on a row in flight, and
- * writes the data row, then the metadata through the anchored CAS. Each scenario also runs with
- * ScalarDB's storage at REPEATABLE READ, where the timings that need SSI must end in the anomaly:
- * that shows the scenario reaches it.
+ * a read-only ScalarDB transaction that sees a state no serial order gives. Each scenario also runs
+ * with the driver at REPEATABLE READ, its SNAPSHOT, or ScalarDB's storage at REPEATABLE READ, where
+ * the timings that need SSI must end in the anomaly: that shows the scenario reaches it.
  */
 @SuppressFBWarnings(
     value = "SQL_INJECTION_JDBC",
@@ -151,6 +146,11 @@ class SerializableIntegrationTest {
         }
       };
 
+  /** The driver's SNAPSHOT and SERIALIZABLE. */
+  private static final int[] LEVELS = {
+    Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE
+  };
+
   static List<Engines> engines() {
     return Engines.selected();
   }
@@ -174,60 +174,80 @@ class SerializableIntegrationTest {
               .build(),
           Map.of("transaction-metadata-decoupling", "true"));
     }
-    TableInfo info =
-        new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open)
-            .lookup(List.of(), "sz", "t");
-    String data = "sz." + info.dataTable();
-    String meta = "sz." + info.metadataTable();
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
+                  c,
+                  t -> t.namespace().equals("sz"),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
     int g = 0;
     for (String storage : List.of("REPEATABLE_READ", "SERIALIZABLE")) {
-      boolean ssi = storage.equals("SERIALIZABLE");
       Properties p = new Properties();
       p.setProperty("scalar.db.consensus_commit.isolation_level", "SERIALIZABLE");
       p.setProperty("scalar.db.jdbc.isolation_level", storage);
       TransactionFactory factory = e.scalarDb(p);
       try (DistributedTransactionManager tm = factory.getTransactionManager();
           TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
-        for (Workload w : List.of(PHANTOM, WRITE_SKEW)) {
-          String name = w == PHANTOM ? "phantom" : "write skew";
-          for (Timing timing : Timing.values()) {
-            g++;
-            String at = "storage " + storage + ", " + name + ", " + timing + ", group " + g;
-            seed(tm, g, w.seed());
-            String trace = run(e, tpc, data, meta, w, g, timing);
-            boolean holds = w.holds(rows(e, g));
-            if (ssi || !timing.needsSsi) {
-              assertThat(holds).as("%s: the rule holds; steps: %s", at, trace).isTrue();
-              assertThat(trace).as("%s: one side commits", at).contains("commit ok");
-            } else {
-              assertThat(holds)
-                  .as("%s: the scenario reaches the anomaly; steps: %s", at, trace)
-                  .isFalse();
+        for (int level : LEVELS) {
+          boolean ssi =
+              storage.equals("SERIALIZABLE") && level == Connection.TRANSACTION_SERIALIZABLE;
+          String driver =
+              level == Connection.TRANSACTION_SERIALIZABLE ? "SERIALIZABLE" : "SNAPSHOT";
+          for (Workload w : List.of(PHANTOM, WRITE_SKEW)) {
+            String name = w == PHANTOM ? "phantom" : "write skew";
+            for (Timing timing : Timing.values()) {
+              g++;
+              String at =
+                  "driver "
+                      + driver
+                      + ", storage "
+                      + storage
+                      + ", "
+                      + name
+                      + ", "
+                      + timing
+                      + ", group "
+                      + g;
+              seed(tm, g, w.seed());
+              String trace = run(e, tpc, level, w, g, timing);
+              boolean holds = w.holds(rows(e, g));
+              if (ssi || !timing.needsSsi) {
+                assertThat(holds).as("%s: the rule holds; steps: %s", at, trace).isTrue();
+                assertThat(trace).as("%s: one side commits", at).contains("commit ok");
+              } else {
+                assertThat(holds)
+                    .as("%s: the scenario reaches the anomaly; steps: %s", at, trace)
+                    .isFalse();
+              }
             }
           }
+          g++;
+          String at =
+              "driver "
+                  + driver
+                  + ", storage "
+                  + storage
+                  + ", read-only ScalarDB transaction, group "
+                  + g;
+          String trace = readOnly(e, tm, level, g);
+          assertThat(trace.contains("anomaly"))
+              .as("%s: %s; steps: %s", at, ssi ? "no anomaly" : "the anomaly", trace)
+              .isEqualTo(!ssi);
         }
-        g++;
-        String at = "storage " + storage + ", read-only ScalarDB transaction, group " + g;
-        String trace = readOnly(e, tm, data, meta, g);
-        assertThat(trace.contains("anomaly"))
-            .as("%s: %s; steps: %s", at, ssi ? "no anomaly" : "the anomaly", trace)
-            .isEqualTo(!ssi);
       }
     }
   }
 
   /** Runs {@code timing}'s steps; returns them, each with how it ended. */
   private static String run(
-      Engines e,
-      TwoPhaseCommitTransactionManager tpc,
-      String data,
-      String meta,
-      Workload w,
-      int g,
-      Timing timing)
+      Engines e, TwoPhaseCommitTransactionManager tpc, int level, Workload w, int g, Timing timing)
       throws Exception {
     StringBuilder trace = new StringBuilder();
-    try (Native d = new Native(e.open(), data, meta)) {
+    try (Native d = new Native(e.openDriver(), level)) {
       TwoPhaseCommitTransaction s = tpc.begin();
       boolean dLive = true;
       boolean sLive = true;
@@ -272,12 +292,11 @@ class SerializableIntegrationTest {
    * 10; a read-only ScalarDB transaction reads both. If it sees x = 20 and y = 0 and the driver
    * still charged the penalty, no serial order fits.
    */
-  private static String readOnly(
-      Engines e, DistributedTransactionManager tm, String data, String meta, int g)
+  private static String readOnly(Engines e, DistributedTransactionManager tm, int level, int g)
       throws Exception {
     seed(tm, g, new int[][] {{1, 0}, {2, 0}});
     StringBuilder trace = new StringBuilder();
-    try (Native d = new Native(e.open(), data, meta)) {
+    try (Native d = new Native(e.openDriver(), level)) {
       Map<Integer, Integer> read = d.read(g);
       DistributedTransaction deposit = tm.begin();
       int x = deposit.get(get(g, 1)).orElseThrow().getInt("v");
@@ -315,87 +334,35 @@ class SerializableIntegrationTest {
     return trace.toString();
   }
 
-  /** The driver's part as milestone 7 will play it, on a native SERIALIZABLE transaction. */
+  /** A driver transaction at {@code level}, over the table's SQL name. */
   private static final class Native implements AutoCloseable {
     final Connection c;
-    final String data;
-    final String meta;
-    final String id = UUID.randomUUID().toString();
-    final Map<Integer, @Nullable String> anchors = new HashMap<>();
 
-    Native(Connection c, String data, String meta) throws SQLException {
+    Native(Connection c, int level) throws SQLException {
       this.c = c;
-      this.data = data;
-      this.meta = meta;
       c.setAutoCommit(false);
-      c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+      c.setTransactionIsolation(level);
     }
 
-    /** 4.2 at SERIALIZABLE without the read lock: committed rows, and an abort on one in flight. */
     Map<Integer, Integer> read(int g) throws SQLException {
       Map<Integer, Integer> rows = new TreeMap<>();
-      try (PreparedStatement ps =
-          c.prepareStatement(
-              "SELECT d.id, d.v, m.tx_id, m.tx_state FROM "
-                  + data
-                  + " d LEFT JOIN "
-                  + meta
-                  + " m ON m.g = d.g AND m.id = d.id WHERE d.g = ?")) {
+      try (PreparedStatement ps = c.prepareStatement("SELECT id, v FROM sz.t WHERE g = ?")) {
         ps.setInt(1, g);
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
-            int state = rs.getInt(4);
-            if (state == 1 || state == 2) {
-              throw new SQLException("a row in flight", "40001");
-            }
             rows.put(rs.getInt(1), rs.getInt(2));
-            anchors.put(rs.getInt(1), rs.getString(3));
           }
         }
       }
       return rows;
     }
 
-    /** 4.3's insert: the data row, then its committed metadata. */
     void insert(int g, int key, int v) throws SQLException {
-      execute("INSERT INTO " + data + " (g, id, v) VALUES (?, ?, ?)", g, key, v);
-      long now = System.currentTimeMillis();
-      try (PreparedStatement ps =
-          c.prepareStatement(
-              "INSERT INTO "
-                  + meta
-                  + " (g, id, tx_id, tx_state, tx_version, tx_prepared_at, tx_committed_at)"
-                  + " VALUES (?, ?, ?, 3, 1, ?, ?)")) {
-        ps.setInt(1, g);
-        ps.setInt(2, key);
-        ps.setString(3, id);
-        ps.setLong(4, now);
-        ps.setLong(5, now);
-        ps.executeUpdate();
-      }
+      execute("INSERT INTO sz.t (g, id, v) VALUES (?, ?, ?)", g, key, v);
     }
 
-    /** 4.3's update: the data row, then the CAS on the version read. */
     void update(int g, int key, int v) throws SQLException {
-      execute("UPDATE " + data + " SET v = ? WHERE g = ? AND id = ?", v, g, key);
-      long now = System.currentTimeMillis();
-      try (PreparedStatement ps =
-          c.prepareStatement(
-              "UPDATE "
-                  + meta
-                  + " SET tx_id = ?, tx_state = 3, tx_version = tx_version + 1,"
-                  + " tx_prepared_at = ?, tx_committed_at = ?"
-                  + " WHERE g = ? AND id = ? AND tx_id = ? AND COALESCE(tx_state, 3) = 3")) {
-        ps.setString(1, id);
-        ps.setLong(2, now);
-        ps.setLong(3, now);
-        ps.setInt(4, g);
-        ps.setInt(5, key);
-        ps.setString(6, anchors.get(key));
-        if (ps.executeUpdate() != 1) {
-          throw new SQLException("the CAS lost", "40001");
-        }
-      }
+      execute("UPDATE sz.t SET v = ? WHERE g = ? AND id = ?", v, g, key);
     }
 
     private void execute(String sql, int... values) throws SQLException {

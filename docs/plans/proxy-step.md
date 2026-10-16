@@ -431,9 +431,16 @@ READ COMMITTED.
 The detector form of 4.2, abort on any in-flight row; SERIALIZABLE as PostgreSQL's SERIALIZABLE with no
 read locks and the coarse check without a table lock, SSI doing the work with ScalarDB's storage
 connections at SERIALIZABLE (design section 5); the anchors and the CAS unchanged.
-`SerializableIntegrationTest` already checks that premise with a native transaction in the driver's part;
-milestone 7 adds the same scenarios through the driver, and the interleaving tests gain the write-skew,
-phantom and read-only rows of section 9.
+
+**Done (2026-10-16).** Reads where every ScalarDB table returns rows take the split read with whole
+committed copies and each row's `tx_state` hidden after its anchor columns, aborting on a row in flight
+as the application reaches it; other shapes check each table once per transaction, then run the READ
+COMMITTED read, in autocommit inside a transaction of their own. Writes and locking reads never wait at
+these levels, and a locking read also checks the after images. A prepared statement is prepared again
+when the level changes. `SerializableIntegrationTest` runs the phantom, write-skew and read-only
+scenarios through the driver at both levels, against ScalarDB's storage at REPEATABLE READ and at
+SERIALIZABLE; `SnapshotIntegrationTest` covers the aborts, the snapshot across statements,
+first-committer-wins and autocommit.
 
 ### Milestone 8: the other engines
 

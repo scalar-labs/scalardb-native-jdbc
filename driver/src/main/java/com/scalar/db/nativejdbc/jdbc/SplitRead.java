@@ -42,7 +42,12 @@ final class SplitRead {
      * A left join on the metadata table's key: SQL Server's copies with a table in flight, and on
      * MySQL and MariaDB a table reached through an index with many rows in flight.
      */
-    LEFT_JOIN
+    LEFT_JOIN,
+    /**
+     * None: every row as it is, those in flight with their after images, which then carry their
+     * state and abort the read (SNAPSHOT and SERIALIZABLE).
+     */
+    NONE
   }
 
   private SplitRead() {}
@@ -61,6 +66,8 @@ final class SplitRead {
    * @param extras what each copy appends to the select list for each of {@code anchored}, given its
    *     piece there
    * @param committedOnly whether to emit the committed copy alone, as a locking read takes it
+   * @param raw whether the committed copy keeps the rows in flight, as at SNAPSHOT and
+   *     SERIALIZABLE, where the states {@code extras} read abort on them
    * @return the split read, or {@code null} to read through the views
    */
   static SqlAst.@Nullable SplitText emit(
@@ -72,7 +79,8 @@ final class SplitRead {
       Set<SqlAst.TableRef> perRow,
       List<SqlAst.TableRef> anchored,
       BiFunction<SqlAst.TableRef, SqlAst.Piece, List<String>> extras,
-      boolean committedOnly) {
+      boolean committedOnly,
+      boolean raw) {
     Map<SqlAst.TableRef, SqlAst.Place> places = split.places();
     List<SqlAst.TableRef> refs = new ArrayList<>();
     List<List<SqlAst.Piece>> pieces = new ArrayList<>();
@@ -170,7 +178,9 @@ final class SplitRead {
                       engine,
                       t,
                       cols,
-                      perRow.contains(ref) || rowByRowUnderLimit ? Check.LEFT_JOIN : inCopy);
+                      raw
+                          ? Check.NONE
+                          : perRow.contains(ref) || rowByRowUnderLimit ? Check.LEFT_JOIN : inCopy);
               }
             }
           });
@@ -266,6 +276,8 @@ final class SplitRead {
             .append(txState)
             .append(", 3) = 3");
         break;
+      case NONE:
+        break;
     }
     return sql.append(")").toString();
   }
@@ -302,6 +314,25 @@ final class SplitRead {
         + " IS NOT NULL OR m."
         + engine.quote("before_tx_version")
         + " IS NOT NULL))";
+  }
+
+  /** The after image of each of the table's rows in flight, columns {@code read}. */
+  static String afterImages(Engine engine, TableInfo t, List<String> read) {
+    List<String> cols = new ArrayList<>();
+    for (String c : read) {
+      cols.add("t." + engine.quote(c));
+    }
+    return "(SELECT "
+        + String.join(", ", cols)
+        + " FROM "
+        + data(engine, t)
+        + " t JOIN "
+        + meta(engine, t)
+        + " m ON "
+        + keyJoin(engine, t, "m")
+        + " WHERE m."
+        + engine.quote("tx_state")
+        + " IN (1, 2))";
   }
 
   private static String data(Engine engine, TableInfo t) {

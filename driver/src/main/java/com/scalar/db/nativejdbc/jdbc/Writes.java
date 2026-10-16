@@ -606,7 +606,7 @@ final class Writes {
     return key[0] == null ? null : key;
   }
 
-  private static boolean inFlight(@Nullable Object state) {
+  static boolean inFlight(@Nullable Object state) {
     return state != null && (((Number) state).intValue() == 1 || ((Number) state).intValue() == 2);
   }
 

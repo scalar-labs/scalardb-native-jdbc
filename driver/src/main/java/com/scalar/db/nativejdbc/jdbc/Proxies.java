@@ -628,7 +628,10 @@ public final class Proxies {
                   + " prepare it again");
         }
         if (!route.sql.equals(prepared.sql)) {
-          if (!route.countsOnly) {
+          // another isolation level reads another form: at SNAPSHOT and SERIALIZABLE the rows
+          // carry their states, which the old text would not check
+          boolean level = route.isolation != prepared.isolation;
+          if (!route.countsOnly && !level) {
             // the vendor statement holds the old text
             throw Errors.unsupported(
                 "the statement now routes differently from when it was prepared; prepare it"
@@ -636,6 +639,10 @@ public final class Proxies {
           }
           if (canPrepareAgain(prepared, route)) {
             prepareAgain(route);
+          } else if (level) {
+            throw Errors.unsupported(
+                "the statement was prepared at another isolation level and cannot be prepared"
+                    + " again; prepare it again");
           } else if (route.anchored != null && prepared.anchored == null) {
             // the old text reads no versions: its rows would anchor nothing, silently
             throw Errors.unsupported(
@@ -717,13 +724,41 @@ public final class Proxies {
                 java.sql.ResultSetMetaData.class,
                 new HiddenColumns(md, prepared.anchored.hidden()));
       }
-      owner.router.beforeRun(owner.vendor, ran);
+      Router.Route checked = ran.size() == 1 && !ran.get(0).checks.isEmpty() ? ran.get(0) : null;
+      // in autocommit the checks and the read share one snapshot in a transaction of their own,
+      // its rows fetched whole, since its end closes a cursor
+      boolean own = checked != null && owner.vendor.getAutoCommit();
+      int fetchSize = 0;
+      if (own) {
+        owner.vendor.setAutoCommit(false);
+        fetchSize = vendor().getFetchSize();
+        vendor().setFetchSize(0);
+      }
+      boolean done = false;
       Object result;
       try {
-        result = forward(vendor(), method, routed);
+        if (checked != null) {
+          try {
+            owner.router.check(owner.vendor, checked);
+          } catch (Writes.Aborted e) {
+            if (!own) {
+              owner.rollbackOnly = true;
+            }
+            throw e;
+          }
+        }
+        owner.router.beforeRun(owner.vendor, ran);
+        try {
+          result = forward(vendor(), method, routed);
+        } finally {
+          for (Router.Route route : ran) {
+            owner.ran(route);
+          }
+        }
+        done = true;
       } finally {
-        for (Router.Route route : ran) {
-          owner.ran(route);
+        if (own) {
+          endOwn(done, fetchSize);
         }
       }
       if (!(result instanceof ResultSet)) {
@@ -742,7 +777,24 @@ public final class Proxies {
                   (Statement) proxy,
                   a,
                   recording ? owner.anchors : null,
-                  epoch));
+                  epoch,
+                  () -> owner.rollbackOnly = true));
+    }
+
+    /** Ends the transaction a checked read ran in, in autocommit, and restores autocommit. */
+    private void endOwn(boolean commit, int fetchSize) throws SQLException {
+      try {
+        if (commit) {
+          owner.vendor.commit();
+        } else {
+          owner.vendor.rollback();
+          owner.router.rolledBack();
+        }
+      } finally {
+        owner.router.transactionEnded();
+        owner.vendor.setAutoCommit(true);
+        vendor().setFetchSize(fetchSize);
+      }
     }
 
     /** Runs a write the driver plans, and answers as the vendor's statement would. */
@@ -811,7 +863,8 @@ public final class Proxies {
               (Statement) proxy,
               new Router.Anchored(plan.n.table, plan.n.keyColumns.size(), hidden),
               null,
-              0);
+              0,
+              () -> {});
       h.closesStatement = vendor().isCloseOnCompletion();
       return (ResultSet) proxy(ResultSet.class, h);
     }
@@ -856,7 +909,9 @@ public final class Proxies {
 
         @Override
         public Duration inflightWait() {
-          return owner.inflightWait;
+          // a fixed snapshot is not refreshed by waiting: at SNAPSHOT and SERIALIZABLE a row in
+          // flight aborts at once (design section 6)
+          return owner.router.snapshot() ? Duration.ZERO : owner.inflightWait;
         }
 
         @Override
@@ -1112,6 +1167,8 @@ public final class Proxies {
     final Router.Anchored anchored;
     final @Nullable Anchors anchors;
     final long epoch;
+    // marks the transaction rollback-only when a row in flight aborts the read
+    final Runnable aborts;
     int visible = -1;
     // closing the rows closes the statement: a driver's rows under closeOnCompletion (todo 155)
     boolean closesStatement;
@@ -1122,13 +1179,15 @@ public final class Proxies {
         Statement statement,
         Router.Anchored anchored,
         @Nullable Anchors anchors,
-        long epoch) {
+        long epoch,
+        Runnable aborts) {
       super(vendor);
       this.connection = connection;
       this.statement = statement;
       this.anchored = anchored;
       this.anchors = anchors;
       this.epoch = epoch;
+      this.aborts = aborts;
     }
 
     private int visible() throws SQLException {
@@ -1185,7 +1244,7 @@ public final class Proxies {
         }
       }
       Object result = forward(target, method, args);
-      if (anchors != null
+      if ((anchors != null || anchored.states)
           && Boolean.TRUE.equals(result)
           && (name.equals("next")
               || name.equals("previous")
@@ -1194,8 +1253,20 @@ public final class Proxies {
               || name.equals("absolute")
               || name.equals("relative"))) {
         ResultSet rs = (ResultSet) target;
-        int at = visible() + 1;
-        for (int t = 0; t < anchored.tables.size(); t++) {
+        int width = anchored.states ? 3 : 2;
+        if (anchored.states) {
+          // at SNAPSHOT and SERIALIZABLE a row in flight aborts the read (design 4.2)
+          for (int t = 0, at = visible() + 1; t < anchored.tables.size(); t++) {
+            int keys = anchored.keys.get(t);
+            if (Writes.inFlight(rs.getObject(at + keys + 2))) {
+              aborts.run();
+              throw new Writes.Aborted(
+                  "a row the read returns is being written by a ScalarDB transaction");
+            }
+            at += keys + width;
+          }
+        }
+        for (int t = 0, at = visible() + 1; anchors != null && t < anchored.tables.size(); t++) {
           int keys = anchored.keys.get(t);
           Object[] key = Writes.readKey(rs, at, keys); // null on a LEFT JOIN's NULL-extended side
           if (key != null) {
@@ -1205,7 +1276,7 @@ public final class Proxies {
                 key,
                 new Anchors.Version(rs.getString(at + keys), rs.getObject(at + keys + 1)));
           }
-          at += keys + 2;
+          at += keys + width;
         }
       }
       return result instanceof ResultSet

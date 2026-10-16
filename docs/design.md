@@ -787,19 +787,22 @@ union as a derived table.
   row; a user `FOR SHARE`, and on SQL Server any user locking clause, is taken as the separate
   primary-key re-read of the SERIALIZABLE bullet, since a shared lock through a covering index would
   not reach the row. A user locking clause on a join or a subquery is refused for now.
-- **SNAPSHOT**: the detector `P OR (tx_state IN (1,2) AND P_before)`, in the same two-arm form:
+- **SNAPSHOT**: the detector `P OR (tx_state IN (1,2) AND P_before)`: a row in flight that the read
+  would return, by its after image or its before image, aborts the transaction (section 6). Where every
+  ScalarDB table of the read returns rows, the tables the anchors of 4.2 cover, the read is the split
+  read with each committed copy **taken whole**, rows in flight included with their after images, and
+  each table's piece appending its row's `tx_state` after the anchor columns; the in-flight copies keep
+  the before images. Any row with `tx_state` 1 or 2 aborts the read as the application reaches it,
+  marking the transaction rollback-only. Rows in state 3, or with NULL metadata, are committed. A row
+  in flight that neither image brings into the result, past a row limit included, changes nothing
+  whichever image is true, so it does not abort. One table is the two-arm form:
   ```sql
-  SELECT <user columns>, tx_state FROM cc_T WHERE P                              -- index on T(x)
+  SELECT <user columns>, <anchor columns>, tx_state FROM T WHERE P                 -- index on T(x)
   UNION ALL
-  SELECT <user columns>, tx_state FROM cc_T
-  WHERE tx_state IN (1, 2) AND P_before AND NOT COALESCE(P, false);              -- in-flight index
+  SELECT <before_* columns>, <anchor columns>, tx_state FROM <in-flight copy> WHERE P_before
   ```
-  Any returned row with `COALESCE(tx_state, 3) <> 3` aborts the transaction (section 6). For a key
-  lookup `P_before` is just the key. Rows in state 3, or with NULL metadata, return their raw columns,
-  which are committed. `NOT COALESCE(P, false)` keeps the arms disjoint, so UNION ALL needs no dedup; on
-  SQL Server and Oracle, which have no boolean expression in this position, it is spelled
-  `CASE WHEN P THEN 1 ELSE 0 END = 0`. Plain `NOT (P)` is wrong: it drops the UNKNOWN rows the clause
-  exists for.
+  Every other shape, a subquery's or an expression's table, a grouped, aggregate or DISTINCT read,
+  one past the copy limit, takes the **per-table check** below.
 - **Why one statement, not two.** Under READ COMMITTED every statement has its own snapshot. A row in
   flight with `x = x2` and `before_x = x1` fails the `P` arm; if its writer rolls back before a second
   statement runs, the row is committed with `x = x1` and no before image, and fails the in-flight arm
@@ -1007,10 +1010,14 @@ union as a derived table.
   `LOCK IN SHARE MODE`. Oracle accepts `FOR UPDATE` on an outer-join view. A user locking clause on a
   shape that runs against `rc_T`, joins and subqueries, is refused, since the lock cannot be rewritten
   through an arbitrary join. Sections 7 and 9 rely on this rule wherever they say `FOR UPDATE`.
-- **Shapes where `P` cannot be attributed to one table** (joins, subqueries, and an aggregate, DISTINCT
-  or GROUP BY whose predicate spans tables; a single-table aggregate keeps the two-arm form):
-  under SNAPSHOT run a coarse check first, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) LIMIT 1` per
-  ScalarDB table, abort if it returns a row, then run the statement against `rc_T`. Under SERIALIZABLE
+- **The per-table check**, for the shapes the row-by-row detector of the SNAPSHOT bullet does not
+  cover (a table only in a subquery or an expression, an aggregate, DISTINCT or GROUP BY, a read past
+  the copy limit): under SNAPSHOT run a coarse check first, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) LIMIT 1` per
+  ScalarDB table, abort if it returns a row, then run the READ COMMITTED read, split or through
+  `rc_T`, which with no row in flight in the snapshot returns the committed rows. A table that passed
+  is not checked again in the transaction: its snapshot keeps it so. In autocommit the check and the
+  read run in a transaction of their own, its rows fetched whole, since its commit closes a cursor.
+  Under SERIALIZABLE
   on PostgreSQL the sequence is the same, at the engine's SERIALIZABLE, and SSI covers the statement. On
   MySQL, MariaDB and SQL Server the coarse check is instead a **locking read** of the in-flight index,
   `LOCK IN SHARE MODE` or `WITH (HOLDLOCK)`, whose gap or range lock blocks every later prepare on the
@@ -1473,7 +1480,8 @@ One setting, the native connection's isolation level, selects everything else.
   transaction may hold locks
   from earlier statements that the ScalarDB transaction it is waiting for needs for one of its own
   prepares.
-- **SNAPSHOT and SERIALIZABLE**: abort immediately with `40001`. A fixed snapshot cannot be refreshed by
+- **SNAPSHOT and SERIALIZABLE**: abort immediately with `40001`, reads, writes and locking reads alike;
+  `scalardbnative.inflightWaitMs` applies to READ COMMITTED only. A fixed snapshot cannot be refreshed by
   waiting. The retry helper may poll the meta row before re-running the transaction so the retry does not
   land on the same row.
 - **Who settles a row**: ScalarDB's own record commit (normal path, milliseconds); a later SNAPSHOT or

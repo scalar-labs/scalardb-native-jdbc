@@ -116,6 +116,12 @@ final class Router {
      */
     final @Nullable Boolean anchoring;
 
+    /**
+     * At SNAPSHOT and SERIALIZABLE, the checks for rows in flight a read runs first, once per table
+     * and transaction: a row aborts it (design 4.2); empty otherwise.
+     */
+    final List<String> checks;
+
     private Route(
         String source,
         String sql,
@@ -136,8 +142,10 @@ final class Router {
         boolean plansParallel,
         Writes.@Nullable Plan write,
         @Nullable Anchored anchored,
-        @Nullable Boolean anchoring) {
+        @Nullable Boolean anchoring,
+        List<String> checks) {
       this.anchoring = anchoring;
+      this.checks = List.copyOf(checks);
       this.parallel = parallel;
       this.plansParallel = plansParallel;
       this.write = write;
@@ -184,7 +192,34 @@ final class Router {
           plansParallel,
           write,
           a,
-          anchoring);
+          anchoring,
+          checks);
+    }
+
+    /** This route, with the checks a read at SNAPSHOT or SERIALIZABLE runs first. */
+    Route checked(List<String> checks) {
+      return new Route(
+          source,
+          sql,
+          changesSession,
+          changesNames,
+          passthrough,
+          kind,
+          isolation,
+          sessionGeneration,
+          catalogGeneration,
+          trustedUntil,
+          parameterSources,
+          parameters,
+          recheckAt,
+          countsOnly,
+          perRow,
+          parallel,
+          plansParallel,
+          write,
+          anchored,
+          anchoring,
+          checks);
     }
 
     /** This route with another statement text and what goes with it. */
@@ -214,7 +249,8 @@ final class Router {
           plansParallel,
           write,
           anchored,
-          anchoring);
+          anchoring,
+          checks);
     }
   }
 
@@ -230,23 +266,32 @@ final class Router {
     /** The number of key columns of each. */
     final List<Integer> keys;
 
+    /**
+     * Whether each table's columns end with the row's {@code tx_state}, at SNAPSHOT and
+     * SERIALIZABLE: a row in flight aborts the read (design 4.2).
+     */
+    final boolean states;
+
     private final int hidden;
 
-    Anchored(List<String> tables, List<Integer> keys) {
+    Anchored(List<String> tables, List<Integer> keys, boolean states) {
       this.tables = tables;
       this.keys = keys;
-      this.hidden = keys.stream().mapToInt(k -> k + 2).sum();
+      this.states = states;
+      this.hidden = keys.stream().mapToInt(k -> k + (states ? 3 : 2)).sum();
     }
 
     /** Columns the driver appended that are hidden only, not recorded: {@code hidden} of them. */
     Anchored(String table, int keys, int hidden) {
       this.tables = List.of(table);
       this.keys = List.of(keys);
+      this.states = false;
       this.hidden = hidden;
     }
 
     /**
-     * The hidden trailing columns: per table its key's, then {@code tx_id} and {@code tx_version}.
+     * The hidden trailing columns: per table its key's, then {@code tx_id} and {@code tx_version},
+     * then {@code tx_state} with {@link #states}.
      */
     int hidden() {
       return hidden;
@@ -308,6 +353,8 @@ final class Router {
   // false while nativeSQL decides a route: nothing runs on the connection (todo 127)
   private boolean probes = true;
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
+  // the checks for rows in flight the open transaction passed, in its snapshot
+  private final Set<String> passed = new HashSet<>();
 
   Router(Engine engine, Catalog catalog, Session session) {
     this.engine = engine;
@@ -495,10 +542,9 @@ final class Router {
       throw Errors.unsupported(
           "writes of ScalarDB tables are supported on PostgreSQL only so far" + tables);
     }
-    if (isolation != Connection.TRANSACTION_READ_COMMITTED) {
+    if (isolation != Connection.TRANSACTION_READ_COMMITTED && !snapshot()) {
       throw Errors.unsupported(
-          "writes of ScalarDB tables run at READ COMMITTED only so far; set that level on the"
-              + " connection"
+          "writes of ScalarDB tables run at READ COMMITTED, REPEATABLE READ or SERIALIZABLE"
               + tables);
     }
     Outcome<StatementShape> shape = StatementShape.classify(ast);
@@ -535,7 +581,8 @@ final class Router {
         false,
         plan,
         null,
-        null);
+        null,
+        List.of());
   }
 
   /**
@@ -614,7 +661,8 @@ final class Router {
    * row it returns, read by key for those rows only; a committed copy's {@code tx_id}, an in-flight
    * copy's before image's (design 4.2).
    */
-  private List<String> versions(SqlAst.TableRef ref, Writes.Names n, SqlAst.Piece piece) {
+  private List<String> versions(
+      SqlAst.TableRef ref, Writes.Names n, SqlAst.Piece piece, boolean states) {
     String x = exposed(ref);
     String m = engine.quote(META_ALIAS);
     List<String> out = new ArrayList<>();
@@ -622,12 +670,19 @@ final class Router {
       out.add(x + "." + engine.quote(k));
     }
     String prefix = piece == SqlAst.Piece.COMMITTED ? "" : "before_";
+    List<String> read = new ArrayList<>();
     for (String c : List.of("tx_id", "tx_version")) {
+      read.add(prefix + c);
+    }
+    if (states) {
+      read.add("tx_state"); // the row's own, also where the piece reads the before image
+    }
+    for (String c : read) {
       out.add(
           "(SELECT "
               + m
               + "."
-              + engine.quote(prefix + c)
+              + engine.quote(c)
               + " FROM "
               + n.meta
               + " "
@@ -685,8 +740,9 @@ final class Router {
             new IdentityHashMap<>(),
             Set.of(),
             List.of(ref),
-            (r, piece) -> versions(ref, n, piece),
-            true);
+            (r, piece) -> versions(ref, n, piece, false),
+            true,
+            false);
     Expression where = shape.where();
     int[] span = where == null ? null : ast.span(where);
     List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
@@ -697,14 +753,7 @@ final class Router {
     Writes.Step inFlight =
         shape.skipLocked()
             ? null // a row in flight is a locked row, skipped
-            : new Writes.Step(
-                "SELECT 1 FROM "
-                    + SplitRead.inFlight(engine, t, t.dataColumns())
-                    + " "
-                    + exposed(ref)
-                    + (span == null ? "" : " WHERE " + ast.source().substring(span[0], span[1]))
-                    + " LIMIT 1",
-                inWhere);
+            : inFlightStep(t, ref, ast, span, inWhere);
     Writes.Plan plan =
         new Writes.LockPlan(
             n, new Writes.Step(text.sql(), text.parameterSources()), inFlight, shape.noWait());
@@ -728,7 +777,35 @@ final class Router {
         false,
         plan,
         null,
-        null);
+        null,
+        List.of());
+  }
+
+  /**
+   * The check a locking read makes for rows in flight its predicate matches: by their before
+   * images, and at SNAPSHOT and SERIALIZABLE by their after images too, since a row in flight
+   * aborts there.
+   */
+  private Writes.Step inFlightStep(
+      TableInfo t, SqlAst.TableRef ref, SqlAst ast, int @Nullable [] span, List<Integer> inWhere) {
+    String where = span == null ? "" : " WHERE " + ast.source().substring(span[0], span[1]);
+    String sql =
+        "SELECT 1 FROM "
+            + SplitRead.inFlight(engine, t, t.dataColumns())
+            + " "
+            + exposed(ref)
+            + where;
+    List<Integer> binds = new ArrayList<>(inWhere);
+    if (snapshot()) {
+      sql +=
+          " UNION ALL SELECT 1 FROM "
+              + SplitRead.afterImages(engine, t, t.dataColumns())
+              + " "
+              + exposed(ref)
+              + where;
+      binds.addAll(inWhere);
+    }
+    return new Writes.Step(sql + " LIMIT 1", binds);
   }
 
   /** The version lookups' alias for the metadata table, which an anchored read must not use. */
@@ -758,10 +835,11 @@ final class Router {
               + " later"
               + tables);
     }
-    if (isolation != Connection.TRANSACTION_READ_COMMITTED) {
+    if (isolation != Connection.TRANSACTION_READ_COMMITTED
+        && !(snapshot() && engine == Engine.POSTGRESQL)) {
       throw Errors.unsupported(
-          "reads of ScalarDB tables run at READ COMMITTED only so far; set that level on the"
-              + " connection"
+          "reads of ScalarDB tables run at READ COMMITTED, and at REPEATABLE READ or SERIALIZABLE"
+              + " on PostgreSQL only so far; set one of those levels on the connection"
               + tables);
     }
     if (ast.hasLockingOrIntoClause()) {
@@ -837,8 +915,12 @@ final class Router {
       }
     }
     List<SqlAst.TableRef> anchorable = anchorable(ast, split);
+    // at SNAPSHOT and SERIALIZABLE a row in flight aborts the read: where every ScalarDB table
+    // returns rows, each row carries its state, read as it is rather than without the rows in
+    // flight; elsewhere each table is checked whole first (design 4.2)
+    boolean states = snapshot() && covers(anchorable, scalarDb.keySet());
     // the versions cost lookups per row, read only where they are recorded
-    List<SqlAst.TableRef> anchored = anchoring ? anchorable : List.of();
+    List<SqlAst.TableRef> anchored = anchoring || states ? anchorable : List.of();
     IdentityHashMap<SqlAst.TableRef, Writes.Names> anchorNames = new IdentityHashMap<>();
     List<String> anchorTables = new ArrayList<>();
     List<Integer> keys = new ArrayList<>();
@@ -857,8 +939,9 @@ final class Router {
             views,
             perRow,
             anchored,
-            (r, piece) -> versions(r, Objects.requireNonNull(anchorNames.get(r)), piece),
-            false);
+            (r, piece) -> versions(r, Objects.requireNonNull(anchorNames.get(r)), piece, states),
+            false,
+            states);
     if (text != null) {
       Route r =
           route(
@@ -874,7 +957,12 @@ final class Router {
               chosen,
               true);
       if (!anchorable.isEmpty()) {
-        r = r.anchored(anchoring ? new Anchored(anchorTables, keys) : null, anchoring);
+        r =
+            r.anchored(
+                anchoring || states ? new Anchored(anchorTables, keys, states) : null, anchoring);
+      }
+      if (snapshot() && !states) {
+        r = r.checked(checks(scalarDb));
       }
       return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
           ? r.with(r.sql, r.parameterSources, r.perRow, false, true)
@@ -884,18 +972,92 @@ final class Router {
     if (rewritten == null) {
       throw Errors.unsupported("the statement cannot be rewritten onto the read views" + tables);
     }
-    return route(
-        sql,
-        rewritten,
-        SqlAst.Kind.SELECT,
-        false,
-        false,
-        false,
-        null,
-        ast.parameterCount(),
-        0,
-        List.of(),
-        true);
+    Route r =
+        route(
+            sql,
+            rewritten,
+            SqlAst.Kind.SELECT,
+            false,
+            false,
+            false,
+            null,
+            ast.parameterCount(),
+            0,
+            List.of(),
+            true);
+    return snapshot() ? r.checked(checks(scalarDb)) : r;
+  }
+
+  /** Whether {@code refs} holds each of {@code all}, by identity. */
+  private static boolean covers(List<SqlAst.TableRef> refs, Set<SqlAst.TableRef> all) {
+    for (SqlAst.TableRef r : all) {
+      if (refs.stream().noneMatch(x -> x == r)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Per ScalarDB table of a read, the check for a row in flight anywhere in it (design 4.2). */
+  private List<String> checks(IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+    Set<String> out = new TreeSet<>();
+    for (TableInfo t : scalarDb.values()) {
+      out.add(
+          "SELECT 1 FROM "
+              + engine.quote(t.namespace())
+              + "."
+              + engine.quote(Objects.requireNonNull(t.metadataTable(), "metadata table"))
+              + " WHERE "
+              + engine.quote("tx_state")
+              + " IN (1, 2) LIMIT 1");
+    }
+    return List.copyOf(out);
+  }
+
+  /** Whether the connection runs at SNAPSHOT or SERIALIZABLE, which abort on a row in flight. */
+  boolean snapshot() {
+    lock.lock();
+    try {
+      return isolation == Connection.TRANSACTION_REPEATABLE_READ
+          || isolation == Connection.TRANSACTION_SERIALIZABLE;
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * Runs a read's checks for rows in flight, those its transaction has not passed yet: in one
+   * snapshot a table without rows in flight stays so (design 4.2).
+   *
+   * @param vendor the vendor connection, in a transaction
+   * @param route the read
+   * @throws SQLException {@code 40001} when a table has a row in flight
+   */
+  @SuppressFBWarnings(value = "SQL_INJECTION_JDBC", justification = "the driver's own statements")
+  void check(Connection vendor, Route route) throws SQLException {
+    for (String check : route.checks) {
+      lock.lock();
+      try {
+        if (passed.contains(check)) {
+          continue;
+        }
+      } finally {
+        lock.unlock();
+      }
+      try (Statement st = vendor.createStatement();
+          ResultSet rs = st.executeQuery(check)) {
+        if (rs.next()) {
+          throw new Writes.Aborted(
+              "a table the read reaches has a row a ScalarDB transaction is writing");
+        }
+      }
+      lock.lock();
+      try {
+        passed.add(check);
+      } finally {
+        lock.unlock();
+      }
+    }
   }
 
   private static boolean controlsTransaction(SqlAst.Kind kind) {
@@ -937,7 +1099,8 @@ final class Router {
         plansParallel,
         null,
         null,
-        null);
+        null,
+        List.of());
   }
 
   /**
@@ -1194,6 +1357,7 @@ final class Router {
   void transactionEnded() {
     lock.lock();
     try {
+      passed.clear();
       if (workersSetInTransaction) {
         sessionWorkers = -1;
         workersOff = null;
