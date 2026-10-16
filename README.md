@@ -87,6 +87,8 @@ Certified: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line.
 - A transaction checks, when it writes a row, that the row is unchanged since it read it. Rows
   returned through a RIGHT or FULL JOIN, a derived table, a CTE or a UNION are read committed, but are
   not checked this way.
+- Set the isolation level with `setTransactionIsolation` only. `SET`, `RESET` and `set_config` of
+  it are refused; a database function of your own that changes it is not detected, so don't.
 - A statement on a ScalarDB table that the driver cannot parse or rewrite is refused with `0AN01`, not
   run as written. A read-only connection cannot write ScalarDB tables (`25006`).
 - A statement text the connection has seen costs the driver a few microseconds; a new text costs

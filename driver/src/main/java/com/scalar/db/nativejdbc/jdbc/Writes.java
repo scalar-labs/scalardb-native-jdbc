@@ -128,10 +128,13 @@ final class Writes {
    * @param shape the statement's single-table shape
    * @param t the ScalarDB table it writes
    * @param tables the tables the statement names, for the refusal's message
+   * @param snapshot whether the connection runs at SNAPSHOT or SERIALIZABLE, where a row in flight
+   *     the predicate matches by its after image aborts too (design 4.2)
    * @return the plan
    * @throws SQLException 0AN01 for a write the driver cannot run yet
    */
-  static Plan plan(Engine engine, StatementShape shape, TableInfo t, String tables)
+  static Plan plan(
+      Engine engine, StatementShape shape, TableInfo t, String tables, boolean snapshot)
       throws SQLException {
     SqlAst ast = shape.ast();
     String source = ast.source();
@@ -145,12 +148,17 @@ final class Writes {
     }
     Names n = new Names(engine, t);
     return shape.kind() == StatementShape.Kind.INSERT
-        ? insertPlan(shape, t, n, all, tables)
-        : keyedPlan(shape, t, n, all, tables);
+        ? insertPlan(shape, t, n, all, tables, snapshot)
+        : keyedPlan(shape, t, n, all, tables, snapshot);
   }
 
   private static Plan keyedPlan(
-      StatementShape shape, TableInfo t, Names n, List<Integer> all, String tables)
+      StatementShape shape,
+      TableInfo t,
+      Names n,
+      List<Integer> all,
+      String tables,
+      boolean snapshot)
       throws SQLException {
     Engine engine = n.engine;
     SqlAst ast = shape.ast();
@@ -222,17 +230,36 @@ final class Writes {
     if (dml == null) {
       throw refused(tables, "the statement's text cannot be rewritten");
     }
+    // the keys read the committed images, whose rows in flight abort the write; at SNAPSHOT and
+    // SERIALIZABLE a row in flight only its after image matches aborts it too
+    Step afterImages =
+        snapshot
+            ? new Step(
+                "SELECT 1 FROM "
+                    + SplitRead.afterImages(engine, t, t.dataColumns())
+                    + " "
+                    + exposed
+                    + (span == null ? "" : " WHERE " + source.substring(span[0], span[1]))
+                    + " LIMIT 1",
+                inWhere)
+            : null;
     return new KeyedPlan(
         n,
         shape.kind() == StatementShape.Kind.DELETE,
         t.layout() == Layout.DECOUPLED_IMPORTED,
+        afterImages,
         new Step(keys, inWhere),
         new Step(dml, all),
         where != null);
   }
 
   private static Plan insertPlan(
-      StatementShape shape, TableInfo t, Names n, List<Integer> all, String tables)
+      StatementShape shape,
+      TableInfo t,
+      Names n,
+      List<Integer> all,
+      String tables,
+      boolean snapshot)
       throws SQLException {
     Engine engine = n.engine;
     SqlAst ast = shape.ast();
@@ -260,23 +287,48 @@ final class Writes {
     // the keys as written, when every row gives them: a duplicate is then told from a key in
     // flight (4.3); a generated one is the application's duplicate
     Step inFlight = null;
+    Step committed = null;
     List<List<Expression>> rows = shape.insertKeyValues(t.keyColumns());
     if (rows != null) {
       List<String> match = new ArrayList<>();
+      List<String> matchData = new ArrayList<>();
       List<Integer> matchBinds = new ArrayList<>();
       for (List<Expression> row : rows) {
         List<String> terms = new ArrayList<>();
+        List<String> termsData = new ArrayList<>();
         for (int i = 0; i < row.size(); i++) {
           int[] span = ast.span(row.get(i));
           List<Integer> inside = span == null ? null : ast.placeholdersIn(span[0], span[1]);
           if (span == null || inside == null) {
             throw refused(tables, "the statement's text cannot be rewritten");
           }
-          terms.add(
-              engine.quote(t.keyColumns().get(i)) + " = " + source.substring(span[0], span[1]));
+          String k = engine.quote(t.keyColumns().get(i));
+          terms.add(k + " = " + source.substring(span[0], span[1]));
+          termsData.add("d." + k + " = " + source.substring(span[0], span[1]));
           matchBinds.addAll(inside);
         }
         match.add("(" + String.join(" AND ", terms) + ")");
+        matchData.add("(" + String.join(" AND ", termsData) + ")");
+      }
+      if (snapshot) {
+        // the snapshot cannot see a key written after it, which the duplicate came from: a key
+        // committed in the snapshot is the application's duplicate, any other a conflict (4.3)
+        committed =
+            new Step(
+                "SELECT COUNT(*) FROM "
+                    + n.data
+                    + " d LEFT JOIN "
+                    + n.meta
+                    + " m ON "
+                    + n.keyJoin("m", "d")
+                    + " WHERE ("
+                    + String.join(" OR ", matchData)
+                    + ") AND (m."
+                    + n.txState
+                    + " IS NULL OR m."
+                    + n.txState
+                    + " = 3)",
+                matchBinds);
       }
       inFlight =
           new Step(
@@ -290,7 +342,8 @@ final class Writes {
               matchBinds);
     }
     SqlAst.TableRef ref = shape.table();
-    return new InsertPlan(n, new Step(insert, all), inFlight, returning, Router.exposed(ref));
+    return new InsertPlan(
+        n, new Step(insert, all), inFlight, committed, returning, Router.exposed(ref));
   }
 
   /**
@@ -614,14 +667,23 @@ final class Writes {
   private static final class KeyedPlan extends Plan {
     final boolean delete;
     final boolean imported;
+    final @Nullable Step afterImages;
     final Step keys;
     final Step dml;
     final boolean predicate;
 
-    KeyedPlan(Names n, boolean delete, boolean imported, Step keys, Step dml, boolean predicate) {
+    KeyedPlan(
+        Names n,
+        boolean delete,
+        boolean imported,
+        @Nullable Step afterImages,
+        Step keys,
+        Step dml,
+        boolean predicate) {
       super(n);
       this.delete = delete;
       this.imported = imported;
+      this.afterImages = afterImages;
       this.keys = keys;
       this.dml = dml;
       this.predicate = predicate;
@@ -629,11 +691,22 @@ final class Writes {
 
     @Override
     List<String> sql() {
-      return List.of(keys.sql, dml.sql);
+      return afterImages == null
+          ? List.of(keys.sql, dml.sql)
+          : List.of(afterImages.sql, keys.sql, dml.sql);
     }
 
     @Override
     long apply(Run run) throws SQLException {
+      if (afterImages != null) {
+        try (PreparedStatement ps = run.prepare(afterImages, null);
+            ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            throw new Aborted(
+                "a row the statement writes is being written by a ScalarDB transaction");
+          }
+        }
+      }
       List<String> types = new ArrayList<>();
       List<Row> rows = settledKeys(run, types);
       // first-updater-wins (4.3 step 1): a key this transaction read must still be at that version
@@ -816,14 +889,22 @@ final class Writes {
   private static final class InsertPlan extends Plan {
     final Step insert;
     final @Nullable Step inFlight;
+    // at SNAPSHOT and SERIALIZABLE, the keys committed in the snapshot
+    final @Nullable Step committed;
     final @Nullable String returning;
     final String exposed;
 
     InsertPlan(
-        Names n, Step insert, @Nullable Step inFlight, @Nullable String returning, String exposed) {
+        Names n,
+        Step insert,
+        @Nullable Step inFlight,
+        @Nullable Step committed,
+        @Nullable String returning,
+        String exposed) {
       super(n);
       this.insert = insert;
       this.inFlight = inFlight;
+      this.committed = committed;
       this.returning = returning;
       this.exposed = exposed;
     }
@@ -871,6 +952,17 @@ final class Writes {
             Aborted a = new Aborted("a key the statement inserts is being written by ScalarDB");
             a.addSuppressed(e);
             throw a;
+          }
+        }
+        if (committed != null) {
+          try (PreparedStatement check = run.prepare(committed, null);
+              ResultSet r = check.executeQuery()) {
+            r.next();
+            if (r.getLong(1) == 0) {
+              Aborted a = new Aborted("a key the statement inserts was written after the snapshot");
+              a.addSuppressed(e);
+              throw a;
+            }
           }
         }
         throw e; // the application's duplicate

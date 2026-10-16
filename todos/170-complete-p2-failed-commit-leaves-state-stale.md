@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "170"
 tags: [code-review, correctness, jdbc]
@@ -34,3 +34,9 @@ Run the end-of-transaction bookkeeping in a `finally`: a commit attempt always e
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Proxies: commit and setAutoCommit(true) end the transaction's bookkeeping in a `finally`.
+- SnapshotIntegrationTest covers it at both levels.

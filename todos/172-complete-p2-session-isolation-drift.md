@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "172"
 tags: [code-review, correctness, jdbc, isolation]
@@ -37,3 +37,10 @@ Re-read the level after a session statement and follow it.
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- SqlAst refuses set_config of a transaction setting or of a non-literal name, RESET ALL and RESET of a
+  transaction setting (Option 1). README: a user function that changes the level is not detected.
+- SnapshotIntegrationTest covers it at both levels.

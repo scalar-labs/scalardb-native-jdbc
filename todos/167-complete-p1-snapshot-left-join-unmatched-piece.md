@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "167"
 tags: [code-review, correctness, jdbc, isolation]
@@ -46,3 +46,9 @@ Give the unmatched piece the non-raw committed fragment and a hidden state for t
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Router: a read with a NULLABLE place takes the per-table check at the snapshot levels (Option 1).
+- SnapshotIntegrationTest covers it at both levels.

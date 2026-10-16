@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "166"
 tags: [code-review, correctness, jdbc, isolation]
@@ -51,3 +51,11 @@ Choose the keys through the detector form itself: raw `T` plus the before-image 
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Writes: at SNAPSHOT and SERIALIZABLE a KeyedPlan first runs the predicate over the after images
+  of the rows in flight (`SplitRead.afterImages`) and aborts with 40001 on a match; covers a key write
+  of a prepared insert. `Writes.plan` takes the level.
+- SnapshotIntegrationTest covers it at both levels.

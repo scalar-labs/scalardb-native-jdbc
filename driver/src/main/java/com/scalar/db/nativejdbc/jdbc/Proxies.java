@@ -260,11 +260,14 @@ public final class Proxies {
         case "commit":
           {
             requireNotRollbackOnly();
-            Object r = forward(vendor, method, args);
-            session.transactionEnded();
-            router.transactionEnded();
-            anchors.transactionEnded();
-            return r;
+            try {
+              return forward(vendor, method, args);
+            } finally {
+              // a commit that fails ends the transaction too, as SERIALIZABLE's 40001 (todo 170)
+              session.transactionEnded();
+              router.transactionEnded();
+              anchors.transactionEnded();
+            }
           }
         case "rollback":
           {
@@ -293,13 +296,15 @@ public final class Proxies {
             if (wasInTransaction && on) {
               requireNotRollbackOnly();
             }
-            Object r = forward(vendor, method, args);
-            if (wasInTransaction && on) {
-              session.transactionEnded();
-              router.transactionEnded();
-              anchors.transactionEnded();
+            try {
+              return forward(vendor, method, args);
+            } finally {
+              if (wasInTransaction && on) {
+                session.transactionEnded();
+                router.transactionEnded();
+                anchors.transactionEnded();
+              }
             }
-            return r;
           }
         case "setClientInfo":
           if (args[0] instanceof String) {
@@ -725,6 +730,15 @@ public final class Proxies {
                 new HiddenColumns(md, prepared.anchored.hidden()));
       }
       Router.Route checked = ran.size() == 1 && !ran.get(0).checks.isEmpty() ? ran.get(0) : null;
+      if (checked != null
+          && checked.anchored != null
+          && checked.anchored.states
+          && vendor().getResultSetType() == ResultSet.TYPE_FORWARD_ONLY) {
+        checked = null; // each row the application moves to is checked by its state
+      }
+      // an abort marks the transaction the read ran in, not autocommit nor a later one (todo 169)
+      boolean inTransaction = !owner.vendor.getAutoCommit();
+      long at = epoch;
       // in autocommit the checks and the read share one snapshot in a transaction of their own,
       // its rows fetched whole, since its end closes a cursor
       boolean own = checked != null && owner.vendor.getAutoCommit();
@@ -778,7 +792,11 @@ public final class Proxies {
                   a,
                   recording ? owner.anchors : null,
                   epoch,
-                  () -> owner.rollbackOnly = true));
+                  () -> {
+                    if (inTransaction && owner.anchors.epoch() == at) {
+                      owner.rollbackOnly = true;
+                    }
+                  }));
     }
 
     /** Ends the transaction a checked read ran in, in autocommit, and restores autocommit. */

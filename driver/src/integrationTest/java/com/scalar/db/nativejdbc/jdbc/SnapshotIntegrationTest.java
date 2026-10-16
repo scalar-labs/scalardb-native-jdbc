@@ -85,6 +85,13 @@ class SnapshotIntegrationTest {
                   Duration.ofMinutes(1),
                   List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
+      try (Statement st = c.createStatement()) {
+        // a commit that fails: its duplicate is found at COMMIT
+        st.execute("CREATE SCHEMA IF NOT EXISTS sn_plain");
+        st.execute(
+            "CREATE TABLE IF NOT EXISTS sn_plain.c (id INT, CONSTRAINT c_pk PRIMARY KEY (id)"
+                + " DEFERRABLE INITIALLY DEFERRED)");
+      }
     }
     for (int level :
         new int[] {Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE}) {
@@ -138,7 +145,100 @@ class SnapshotIntegrationTest {
       inserting.prepare();
       assertAborts(d, "SELECT id FROM sn.t WHERE x = 'new'", at + ": a prepared insert matches");
       d.rollback();
+      // a write of it, by key (todo 166)
+      assertWriteAborts(d, "UPDATE sn.t SET v = 9 WHERE id = 50", at + ": a key write of it");
+      d.rollback();
+      // an offset skips rows the result does not return, which still count (todo 168)
+      assertAborts(
+          d, "SELECT id FROM sn.t ORDER BY id DESC LIMIT 3 OFFSET 3", at + ": an offset over it");
+      d.rollback();
+      // a row limit alone needs the rows it returns only
+      assertThat(rows(d, "SELECT id FROM sn.t ORDER BY id LIMIT 2"))
+          .as("%s: a limit short of it", at)
+          .containsExactly("1", "2");
+      d.commit();
       inserting.rollback();
+
+      // an update in flight that only its after image matches: a write aborts (todo 166)
+      held = prepared(tpc, "t", 7, "b");
+      assertWriteAborts(d, "UPDATE sn.t SET v = 9 WHERE x = 'b'", at + ": its after image");
+      d.rollback();
+      assertWriteAborts(d, "DELETE FROM sn.t WHERE x = 'b'", at + ": a delete by its after image");
+      d.rollback();
+      // a scrollable result checks its tables whole, since a move passes over rows (todo 168)
+      try (Statement st =
+          d.createStatement(ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY)) {
+        assertThatThrownBy(() -> st.executeQuery("SELECT id FROM sn.t ORDER BY id").close())
+            .as("%s: a scrollable result", at)
+            .isInstanceOf(SQLTransactionRollbackException.class);
+      }
+      d.rollback();
+      held.rollback();
+
+      // an unmatched row of an outer join that a row in flight would match (todo 167)
+      TwoPhaseCommitTransaction matching = tpc.begin();
+      matching.insert(insert("u", 60, "a", 1));
+      matching.prepare();
+      assertAborts(
+          d,
+          "SELECT t.id FROM sn.t t LEFT JOIN sn.u u ON u.v = t.id WHERE u.id IS NULL AND t.id = 1",
+          at + ": an anti-join");
+      d.rollback();
+      matching.rollback();
+
+      // an insert of a key ScalarDB prepared after the snapshot is a conflict (todo 171)
+      rows(d, "SELECT x FROM sn.t WHERE id = 8");
+      inserting = tpc.begin();
+      inserting.insert(insert("t", 70, "s"));
+      inserting.prepare();
+      assertWriteAborts(
+          d, "INSERT INTO sn.t (id, x, v) VALUES (70, 'd', 0)", at + ": an insert of its key");
+      d.rollback();
+      inserting.rollback();
+      try (Statement st = d.createStatement()) {
+        assertThatThrownBy(() -> st.executeUpdate("INSERT INTO sn.t (id, x, v) VALUES (8, 'd', 0)"))
+            .as("%s: a committed key is the application's duplicate", at)
+            .isInstanceOf(SQLException.class)
+            .extracting(ex -> ((SQLException) ex).getSQLState())
+            .isEqualTo("23505");
+      }
+      d.rollback();
+
+      // in autocommit an abort leaves the connection usable (todo 169)
+      held = prepared(tpc, "t", 9, "b");
+      d.setAutoCommit(true);
+      assertAborts(d, "SELECT x FROM sn.t WHERE id = 9", at + ": an autocommit read of it");
+      held.rollback();
+      assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 9"))
+          .as("%s: the next autocommit read", at)
+          .containsExactly("a");
+      d.setAutoCommit(false);
+
+      // a commit that fails ends the transaction, whose checks go with it (todo 170)
+      assertThat(rows(d, "SELECT COUNT(*) FROM sn.u")).containsExactly("20");
+      try (Statement st = d.createStatement()) {
+        st.executeUpdate("INSERT INTO sn_plain.c VALUES (1)");
+        st.executeUpdate("INSERT INTO sn_plain.c VALUES (1)");
+      }
+      assertThatThrownBy(d::commit).isInstanceOf(SQLException.class);
+      held = prepared(tpc, "u", 3, "b");
+      assertAborts(d, "SELECT COUNT(*) FROM sn.u WHERE x = 'a'", at + ": after a failed commit");
+      d.rollback();
+      held.rollback();
+
+      // the transaction mode is not set in SQL (todo 172)
+      for (String sql :
+          List.of(
+              "SELECT set_config('default_transaction_isolation', 'read committed', false)",
+              "RESET ALL",
+              "RESET default_transaction_isolation")) {
+        assertThatThrownBy(() -> rows(d, sql))
+            .as("%s: %s", at, sql)
+            .isInstanceOf(SQLException.class)
+            .extracting(ex -> ((SQLException) ex).getSQLState())
+            .isEqualTo("0AN01");
+        d.rollback();
+      }
 
       // table by table: an aggregate or a subquery checks its tables whole first
       held = prepared(tpc, "u", 20, "b");
@@ -233,6 +333,17 @@ class SnapshotIntegrationTest {
         .isInstanceOf(SQLTransactionRollbackException.class);
   }
 
+  private static void assertWriteAborts(Connection d, String sql, String what) {
+    assertThatThrownBy(
+            () -> {
+              try (Statement st = d.createStatement()) {
+                st.executeUpdate(sql);
+              }
+            })
+        .as(what)
+        .isInstanceOf(SQLTransactionRollbackException.class);
+  }
+
   private static TwoPhaseCommitTransaction prepared(
       TwoPhaseCommitTransactionManager tpc, String table, int id, String x) throws Exception {
     TwoPhaseCommitTransaction tx = tpc.begin();
@@ -265,12 +376,16 @@ class SnapshotIntegrationTest {
   }
 
   private static Insert insert(String table, int id, String x) {
+    return insert(table, id, x, 0);
+  }
+
+  private static Insert insert(String table, int id, String x, int v) {
     return Insert.newBuilder()
         .namespace("sn")
         .table(table)
         .partitionKey(Key.ofInt("id", id))
         .textValue("x", x)
-        .intValue("v", 0)
+        .intValue("v", v)
         .build();
   }
 

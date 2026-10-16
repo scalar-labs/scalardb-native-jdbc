@@ -270,7 +270,10 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   statements included, since JSQLParser does not parse several of them), and `commit` or `rollback`
   after a `SET` inside the transaction (`SET LOCAL` reverts), including the commit `setAutoCommit(true)`
   makes; a rollback to a savepoint marks it too but keeps the transaction's record. PostgreSQL's
-  `set_config` counts as a `SET` wherever it appears, and a statement that fails counts as one that
+  `set_config` counts as a `SET` wherever it appears, and is refused for a transaction setting, or a
+  setting it does not name as a literal; `RESET ALL` and `RESET` of a transaction setting are refused,
+  since they revert the level `setTransactionIsolation` set. A function of the application's own that
+  calls `set_config` on the level is not seen: the README says not to, and a statement that fails counts as one that
   ran, since it may have taken effect first. DDL invalidates the catalog's resolutions. A prepared
   statement keeps its route only while the session, the catalog's resolutions, the passthrough
   setting and, for a passthrough statement, autocommit are as they were when it was prepared; when
@@ -795,7 +798,10 @@ union as a derived table.
   the before images. Any row with `tx_state` 1 or 2 aborts the read as the application reaches it,
   marking the transaction rollback-only. Rows in state 3, or with NULL metadata, are committed. A row
   in flight that neither image brings into the result, past a row limit included, changes nothing
-  whichever image is true, so it does not abort. One table is the two-arm form:
+  whichever image is true, so it does not abort. Two shapes break that and take the per-table check:
+  an outer join, where a row in flight decides whether a row comes back unmatched without being
+  returned itself, and an OFFSET, whose skipped rows count without being returned. A scrollable
+  result set runs the per-table check too, since its moves pass over rows. One table is the two-arm form:
   ```sql
   SELECT <user columns>, <anchor columns>, tx_state FROM T WHERE P                 -- index on T(x)
   UNION ALL
@@ -1012,7 +1018,7 @@ union as a derived table.
   through an arbitrary join. Sections 7 and 9 rely on this rule wherever they say `FOR UPDATE`.
 - **The per-table check**, for the shapes the row-by-row detector of the SNAPSHOT bullet does not
   cover (a table only in a subquery or an expression, an aggregate, DISTINCT or GROUP BY, a read past
-  the copy limit): under SNAPSHOT run a coarse check first, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) LIMIT 1` per
+  the copy limit, an outer join, an OFFSET, a scrollable result set): under SNAPSHOT run a coarse check first, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) LIMIT 1` per
   ScalarDB table, abort if it returns a row, then run the READ COMMITTED read, split or through
   `rc_T`, which with no row in flight in the snapshot returns the committed rows. A table that passed
   is not checked again in the transaction: its snapshot keeps it so. In autocommit the check and the
@@ -1068,7 +1074,8 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
    read. For a row read in flight under READ COMMITTED that identity is
    `(before_tx_id, before_tx_version)` (4.2). Under SNAPSHOT and SERIALIZABLE the read is inside the
    snapshot. Never derive the anchor from a blind write, because MySQL evaluates an UPDATE against the
-   latest row. State 1 or 2 here: section 6; under READ COMMITTED **this is the only point where a wait
+   latest row. Under SNAPSHOT and SERIALIZABLE a row in flight that matches the predicate by its after
+   image alone, which the committed images do not show, aborts here too. State 1 or 2 here: section 6; under READ COMMITTED **this is the only point where a wait
    is allowed**, because nothing is locked on this row yet. The anchor is what turns read-then-write
    into first-updater-wins: if the row moved after this transaction read it, the CAS matches nothing and
    the transaction aborts instead of losing the other write. This matches ScalarDB, whose prepare is
@@ -1148,7 +1155,9 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   keys are read back from `T` by key after the writes, in their transaction and in the order written,
   so a batch's keys come in the order of its entries. Key lists are bound as a `VALUES` table, each
   value cast to its column's type, at most 1,000 keys per statement where order does not matter. A duplicate of a key the database generated is the application's duplicate:
-  without the key as written there is nothing to look up in flight. `RETURNING` on an UPDATE or
+  without the key as written there is nothing to look up in flight. Under SNAPSHOT and SERIALIZABLE
+  the snapshot cannot see a key written after it, from which the duplicate may come: a duplicate of a
+  key the snapshot does not show committed is a conflict, `40001`. `RETURNING` on an UPDATE or
   DELETE, and generated keys by column index, are refused. ScalarDB's import refuses a `SERIAL`
   column; an identity column, `GENERATED BY DEFAULT AS IDENTITY`, imports.
 - **Return values.** `executeUpdate` of a predicate DML is the sum of the per-key counts; an INSERT

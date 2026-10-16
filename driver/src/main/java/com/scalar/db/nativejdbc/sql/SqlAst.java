@@ -36,6 +36,7 @@ import net.sf.jsqlparser.expression.LongValue;
 import net.sf.jsqlparser.expression.MySQLGroupConcat;
 import net.sf.jsqlparser.expression.NextValExpression;
 import net.sf.jsqlparser.expression.NotExpression;
+import net.sf.jsqlparser.expression.StringValue;
 import net.sf.jsqlparser.expression.UserVariable;
 import net.sf.jsqlparser.expression.VariableAssignment;
 import net.sf.jsqlparser.expression.XMLSerializeExpr;
@@ -336,6 +337,13 @@ public final class SqlAst {
         return Outcome.refused(why);
       }
     }
+    if (stmt instanceof ResetStatement) {
+      // RESET ALL reverts the session's isolation level too, which the driver would not know
+      String name = String.valueOf(((ResetStatement) stmt).getName()).strip();
+      if (name.equalsIgnoreCase("all") || setsTransactionMode(name)) {
+        return Outcome.refused(TRANSACTION_MODE);
+      }
+    }
     Walker walker = new Walker();
     try {
       walker.getTables(stmt);
@@ -403,7 +411,15 @@ public final class SqlAst {
                   + " passthrough setting if that SQL does not touch ScalarDB tables");
         }
         // PostgreSQL's SET as a function
-        setsSession |= !parts.isEmpty() && parts.get(parts.size() - 1).equals("set_config");
+        if (!parts.isEmpty() && parts.get(parts.size() - 1).equals("set_config")) {
+          setsSession = true;
+          ExpressionList<?> args = ((Function) v).getParameters();
+          Object first = args == null || args.isEmpty() ? null : args.get(0);
+          if (!(first instanceof StringValue)
+              || setsTransactionMode(((StringValue) first).getValue())) {
+            return Outcome.refused(TRANSACTION_MODE);
+          }
+        }
       }
     }
     // Every SELECT of the statement, wherever it is nested: the walk visits them, and the tree
@@ -827,6 +843,19 @@ public final class SqlAst {
     return statement instanceof PlainSelect
         && ((PlainSelect) statement).getDistinct() == null
         && !isGrouped((PlainSelect) statement);
+  }
+
+  /**
+   * Returns whether the statement is a select that skips rows before its first: an OFFSET.
+   *
+   * @return whether rows the result does not return still count toward it
+   */
+  public boolean skipsRows() {
+    if (!(statement instanceof PlainSelect)) {
+      return false;
+    }
+    PlainSelect s = (PlainSelect) statement;
+    return s.getOffset() != null || (s.getLimit() != null && s.getLimit().getOffset() != null);
   }
 
   /**
@@ -4111,18 +4140,31 @@ public final class SqlAst {
               + " statement";
         }
       }
-      name = name.replaceFirst("^@@", "").replaceFirst("^(session|local|global)\\.", "");
-      if (name.equals("autocommit")
-          || name.equals("completion_type")
-          || name.equals("implicit_transactions")
-          || name.startsWith("transaction")
-          || name.startsWith("tx_")
-          || name.startsWith("default_transaction")) {
-        return "the transaction mode is set through Connection.setAutoCommit and"
-            + " Connection.setTransactionIsolation, not in SQL";
+      if (setsTransactionMode(name)) {
+        return TRANSACTION_MODE;
       }
     }
     return null;
+  }
+
+  private static final String TRANSACTION_MODE =
+      "the transaction mode is set through Connection.setAutoCommit and"
+          + " Connection.setTransactionIsolation, not in SQL";
+
+  /** Whether a setting, as SET, RESET or set_config names it, is part of the transaction mode. */
+  private static boolean setsTransactionMode(String setting) {
+    String name =
+        setting
+            .strip()
+            .toLowerCase(Locale.ROOT)
+            .replaceFirst("^@@", "")
+            .replaceFirst("^(session|local|global)\\.", "");
+    return name.equals("autocommit")
+        || name.equals("completion_type")
+        || name.equals("implicit_transactions")
+        || name.startsWith("transaction")
+        || name.startsWith("tx_")
+        || name.startsWith("default_transaction");
   }
 
   /** A name part without its quotes, in any of the engines' quoting styles. */

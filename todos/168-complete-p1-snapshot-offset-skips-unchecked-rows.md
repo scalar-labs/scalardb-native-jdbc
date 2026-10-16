@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "168"
 tags: [code-review, correctness, jdbc, isolation]
@@ -41,3 +41,10 @@ Check every row passed over: the offset applied by the driver, `absolute`/`relat
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- SqlAst.skipsRows (OFFSET); such a read takes the per-table check. A precise route carries its
+  checks too, and Proxies runs them when the result set is not forward-only.
+- SnapshotIntegrationTest covers it at both levels.

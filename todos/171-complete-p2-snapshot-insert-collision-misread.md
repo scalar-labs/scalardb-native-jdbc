@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "171"
 tags: [code-review, correctness, jdbc, isolation]
@@ -36,3 +36,10 @@ Read the state outside the snapshot (not possible in one transaction on PostgreS
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Writes: at the snapshot levels a 23505 with no key in flight and no key committed in the snapshot
+  is 40001; a committed key stays the application's 23505.
+- SnapshotIntegrationTest covers it at both levels.

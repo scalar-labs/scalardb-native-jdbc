@@ -395,6 +395,21 @@ class SqlAstTest {
             "SET @x = 1, @@session.autocommit = 0")) {
       assertThat(SqlAst.analyze(sql, Engine.MYSQL, false).isPresent()).as(sql).isFalse();
     }
+    // PostgreSQL's RESET, RESET ALL and set_config revert or set it too (todo 172)
+    for (String sql :
+        List.of(
+            "RESET ALL",
+            "RESET default_transaction_isolation",
+            "RESET transaction_isolation",
+            "SELECT set_config('default_transaction_isolation', 'read committed', false)",
+            "SELECT pg_catalog.set_config('Transaction_Isolation', 'read committed', true)",
+            "SELECT set_config(?, 'read committed', false)")) {
+      assertThat(SqlAst.analyze(sql, Engine.POSTGRESQL, true).isPresent()).as(sql).isFalse();
+    }
+    assertThat(
+            SqlAst.analyze("SELECT set_config('search_path', 'a', false)", Engine.POSTGRESQL, true)
+                .isPresent())
+        .isTrue();
     assertThat(SqlAst.analyze("SET search_path = a, b", Engine.POSTGRESQL, true).isPresent())
         .isTrue();
     assertThat(SqlAst.analyze("SET @x = 1", Engine.MYSQL, false).isPresent()).isTrue();
@@ -489,7 +504,7 @@ class SqlAstTest {
         new String[] {
           "SET search_path = app, public",
           "SET ROLE app",
-          "RESET ALL",
+          "RESET search_path",
           "USE app",
           "SET NAMES utf8mb4",
           "ALTER SESSION SET CURRENT_SCHEMA = app"

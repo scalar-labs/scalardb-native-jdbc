@@ -560,7 +560,7 @@ final class Router {
       throw Errors.unsupported(
           "tables in ScalarDB's classic layout are not supported yet" + tables);
     }
-    Writes.Plan plan = Writes.plan(engine, shape.get(), t, tables);
+    Writes.Plan plan = Writes.plan(engine, shape.get(), t, tables, snapshot());
     return new Route(
         sql,
         sql,
@@ -917,8 +917,14 @@ final class Router {
     List<SqlAst.TableRef> anchorable = anchorable(ast, split);
     // at SNAPSHOT and SERIALIZABLE a row in flight aborts the read: where every ScalarDB table
     // returns rows, each row carries its state, read as it is rather than without the rows in
-    // flight; elsewhere each table is checked whole first (design 4.2)
-    boolean states = snapshot() && covers(anchorable, scalarDb.keySet());
+    // flight; elsewhere each table is checked whole first (design 4.2). A row in flight the
+    // result does not return changes it where an outer join leaves a row unmatched, or an offset
+    // skips rows: checked whole too
+    boolean states =
+        snapshot()
+            && covers(anchorable, scalarDb.keySet())
+            && !split.places().containsValue(SqlAst.Place.NULLABLE)
+            && !ast.skipsRows();
     // the versions cost lookups per row, read only where they are recorded
     List<SqlAst.TableRef> anchored = anchoring || states ? anchorable : List.of();
     IdentityHashMap<SqlAst.TableRef, Writes.Names> anchorNames = new IdentityHashMap<>();
@@ -961,7 +967,8 @@ final class Router {
             r.anchored(
                 anchoring || states ? new Anchored(anchorTables, keys, states) : null, anchoring);
       }
-      if (snapshot() && !states) {
+      if (snapshot()) {
+        // with states, run only for a scrollable result, whose moves pass over rows unchecked
         r = r.checked(checks(scalarDb));
       }
       return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)

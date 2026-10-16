@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "169"
 tags: [code-review, correctness, jdbc]
@@ -37,3 +37,10 @@ and the anchors' epoch at execute, mark when not autocommit and the epoch is unc
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Proxies: the abort marks rollback-only only when the read ran in a transaction that is still the
+  current one (autocommit and anchors' epoch captured at execute).
+- SnapshotIntegrationTest covers it at both levels.
