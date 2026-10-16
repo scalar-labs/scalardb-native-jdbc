@@ -83,9 +83,17 @@ slf4j-api and its vendor driver on the classpath, and connects with `jdbc:scalar
 
 At SNAPSHOT and SERIALIZABLE, a statement that reaches a row a ScalarDB transaction is writing fails
 with `40001` at once: roll back and retry. Without both ScalarDB settings, SERIALIZABLE between the
-driver and ScalarDB is not guaranteed. SERIALIZABLE is refused on Oracle, whose SERIALIZABLE is snapshot
-isolation; use `TRANSACTION_REPEATABLE_READ` there once it is supported. Any other combination, and
-`TRANSACTION_READ_UNCOMMITTED`, is refused with SQLState `0AN01`.
+driver and ScalarDB is not guaranteed.
+
+With ScalarDB at SERIALIZABLE, PostgreSQL may also abort a ScalarDB transaction's read with a
+serialization failure. ScalarDB reports a failed read as `CrudException`, or `ValidationException` or
+`CommitException` at commit, not as a conflict exception: a ScalarDB application retries those when
+the cause's SQLState is `40001`.
+
+`TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. On MySQL, MariaDB, SQL Server and
+Oracle the other two levels are accepted, but every statement on a ScalarDB table is refused with
+`0AN01` for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot
+isolation; `TRANSACTION_REPEATABLE_READ` will be the level to use there.
 
 ## Preview scope
 

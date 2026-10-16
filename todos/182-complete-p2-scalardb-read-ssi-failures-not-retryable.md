@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "182"
 tags: [code-review, docs, isolation, scalardb]
@@ -35,3 +35,9 @@ cause's SQLState is 40001; raise the mapping with ScalarDB.
 
 **By:** Claude Code
 - From the review of milestone 7 and its fixes, d4949c0..322bd32.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- README (Isolation levels), design 5, 6 and 7 and the references say ScalarDB reports a read's SSI
+  failure as CrudException, ValidationException or CommitException, retryable by the cause's 40001.

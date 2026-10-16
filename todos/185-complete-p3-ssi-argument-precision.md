@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "185"
 tags: [code-review, docs, isolation]
@@ -42,3 +42,11 @@ Edit the sections as listed.
 
 **By:** Claude Code
 - From the review of milestone 7 and its fixes, d4949c0..322bd32.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Design 5: writers that change tx_id, prepares as the writers, `directly` is rw and why, the
+  read-only structure for a read-write S, one prepare per storage; section 7 table carries the
+  assumptions; item 15 adds grouped and DISTINCT reads; references: coordinator write omission,
+  isValidationRequired's exception, JdbcDatabase get/scan without conflict mapping.

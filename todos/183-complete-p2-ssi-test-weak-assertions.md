@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "183"
 tags: [code-review, tests, isolation]
@@ -37,3 +37,10 @@ except in IN_FLIGHT; reword design 5's test sentence; optionally assert the rout
 
 **By:** Claude Code
 - From the review of milestone 7 and its fixes, d4949c0..322bd32.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- SerializableIntegrationTest: each read mode's path asserted through nativeSQL; no `d.read aborts`
+  outside IN_FLIGHT; the read-only case runs through all three read paths and asserts, at SSI, `read-only
+  sees 20/0` and `driver aborts`. Design 5's test sentence matches.

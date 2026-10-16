@@ -420,7 +420,7 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   | SQLSTATE | Exception | Meaning | What the caller does |
   |---|---|---|---|
   | `40001` | `SQLTransactionRollbackException` | a driver-decided abort: a conflict with a ScalarDB or driver transaction (4.4, section 6) | roll back and retry the transaction |
-  | `0AN01` | `SQLFeatureNotSupportedException` | a statement or setting the driver does not handle, with the reason: a statement on a ScalarDB table it cannot rewrite, one the parser cannot interpret, a procedure call or a function that runs SQL text (4.1), the transaction mode set in SQL, a passthrough statement outside autocommit; `READ_UNCOMMITTED`, and `SERIALIZABLE` on Oracle (section 5) | rewrite the statement; never retry |
+  | `0AN01` | `SQLFeatureNotSupportedException` | a statement or setting the driver does not handle, with the reason: a statement on a ScalarDB table it cannot rewrite, one the parser cannot interpret, a procedure call or a function that runs SQL text (4.1), the transaction mode set in SQL, a passthrough statement outside autocommit; `READ_UNCOMMITTED`, and `SERIALIZABLE` on Oracle once milestone 8 builds it (section 5) | rewrite the statement; never retry |
   | `55000` | `SQLNonTransientException` | a statement names a ScalarDB table the setup of section 3 has not been run for; not `08004`, since it is raised per statement and an `08` state makes a pool discard a working connection | run the setup |
   | `42000` | `SQLSyntaxErrorException` | a name a statement must not use: `T_data`, `T_tx_metadata`, `T_scalardb`, a synonym; the message names the table to use | rewrite the statement |
   | `42501` | `SQLSyntaxErrorException` | ScalarDB's catalog exists but this user cannot read it | grant SELECT on the catalog tables |
@@ -1383,6 +1383,11 @@ coverage of each engine's syntax is therefore part of the certification of that 
 
 One setting, the native connection's isolation level, selects everything else.
 
+Built so far: all three levels on PostgreSQL, and READ COMMITTED on the other engines. Elsewhere
+SNAPSHOT and SERIALIZABLE are accepted by `setTransactionIsolation`, and every statement on a ScalarDB
+table is refused with `0AN01`; the engine mappings, the locking re-reads, Oracle's refusal of
+SERIALIZABLE and the translation of `TRANSACTION_REPEATABLE_READ` below come with milestone 8.
+
 | Level | Native connection | In-flight row on read | In-flight row on write | CAS anchor | Read locks | ScalarDB side |
 |---|---|---|---|---|---|---|
 | READ COMMITTED | READ COMMITTED | return the before image | at the state read of 4.3 step 1: abort, or bounded wait; at the CAS: always abort | identity of the version this transaction read, which for an in-flight row is its before image's `(before_tx_id, before_tx_version)`; else a read now | none | any |
@@ -1417,26 +1422,36 @@ One setting, the native connection's isolation level, selects everything else.
     before `Sv` took its snapshot, the dangerous structure SSI aborts, also when `Sv` is read-only. A
     phantom is that case, `D`'s read covering the range `Sp` inserts into, and so is write skew.
   - **A read-only `S`** has no `Sp`. Take the serial order SSI gives the storage transactions. Each
-    validation `Sv(x)` read the version `Sr(x)` read, so every writer of `x` is ordered before `Sr(x)`
-    or after `Sv(x)`. `S` fits at one point unless a writer `W` of some `y`, ordered after `Sv(y)`,
-    precedes a writer `W'` of some `x` ordered before `Sr(x)`. `W'` committed before `Sr(x)` took its
-    snapshot, so before every validation began. Where `W -rw-> W'` directly, `Sv(y) -rw-> W -rw-> W'`
-    with `W'` committed first and before `Sv(y)`'s snapshot is the dangerous structure, which
-    PostgreSQL aborts also when `Sv(y)` is read-only.
-  - **What is assumed.** The cases above are direct conflicts. A chain through third transactions, in
+    validation `Sv(x)` read the version `Sr(x)` read, so every writer of `x` that changes its `tx_id` is
+    ordered before `Sr(x)` or after `Sv(x)`; a record commit or a roll-forward, which keeps `tx_id`, may
+    land in between and changes nothing `S` compared. Writers here are prepares. `S` fits at one point
+    unless a writer `W` of some `y`, ordered after `Sv(y)`, precedes a writer `W'` of some `x` ordered
+    before `Sr(x)`. `W'` committed before `Sr(x)` took its snapshot, so before every validation began.
+    Where `W -> W'` directly, the edge is `rw`, since a `ww` or `wr` edge would make `W` commit before
+    `W'` and so be visible to `Sv(y)`; then `Sv(y) -rw-> W -rw-> W'` with `W'` committed first and
+    before `Sv(y)`'s snapshot is the dangerous structure, which PostgreSQL aborts also when `Sv(y)` is
+    read-only.
+  - **What is assumed.** The cases above are direct conflicts; the read-only structure applies to a
+    read-write `S` the same way, through its validations. A chain through third transactions, in
     the window or between `W` and `W'`, rests on SSI's theorem applied with `S`'s storage transactions
     as if they were one: every cycle has a dangerous structure that SSI aborts. `S`'s reads, prepare and
     validations are separate storage transactions, so this is an argument, not a proof; the read-only
     step has the least margin. With ScalarDB's two-phase commit, every participant on the database
     prepares in its own storage transaction, and the argument assumes every prepare commits before any
     validation begins, which holds when the application validates only after every participant
-    prepared, as the interface's order of calls asks.
+    prepared, as the interface's order of calls asks. `Sp` is one storage transaction only where
+    ScalarDB has this one JDBC storage; with several storages it prepares once per storage, the same
+    assumption.
 
-  `SerializableIntegrationTest` checks it: a phantom, write skew and Fekete's read-only anomaly, at
-  seven timings around ScalarDB's prepare and validation, the driver reading row by row, through a join
-  and through the per-table check, with a native SERIALIZABLE transaction in the driver's part.
-  With ScalarDB's storage at REPEATABLE READ the same schedules commit each anomaly, because SSI does not see ScalarDB's statements; at SERIALIZABLE the driver aborts with `40001` or
-  ScalarDB's validation fails. The cost is SSI's false positives on both sides, ScalarDB's own reads
+  `SerializableIntegrationTest` checks it: a phantom and write skew at seven timings around ScalarDB's
+  prepare and validation, and Fekete's read-only anomaly, each with the driver reading row by row,
+  through a join and through the per-table check, in a native SERIALIZABLE transaction. With
+  ScalarDB's storage at REPEATABLE READ the same schedules commit each anomaly, because SSI does not
+  see ScalarDB's statements; at SERIALIZABLE the driver aborts with `40001` or ScalarDB fails to
+  prepare or validate. A failure of a ScalarDB *read* is not reported as a conflict: ScalarDB 3.19's
+  `JdbcDatabase.get` and `scan` map no SQLState, so an SSI abort of a read or a validation read reaches
+  the application as `CrudException`, `ValidationException` or `CommitException`, retryable only by
+  the cause's `40001`. The cost is SSI's false positives on both sides, ScalarDB's own reads
   included, more so where PostgreSQL coarsens its predicate locks to pages or relations.
 - **Why SERIALIZABLE holds on the other engines.** The driver is strict two-phase locking on rows: shared on read, exclusive
   through the CAS on write, all held to commit. A ScalarDB prepare is an upsert on the data row followed by
@@ -1523,7 +1538,8 @@ One setting, the native connection's isolation level, selects everything else.
   ScalarDB read happens to touch them.
 - **ScalarDB waiting on the driver**: a prepare blocked by a `FOR SHARE` or CAS lock waits until the
   driver's transaction ends, then re-evaluates its condition. Deadlocks are detected by the database, and
-  ScalarDB's JDBC adapter maps them to a retryable conflict (`RdbEngine.isConflict`: PostgreSQL `40001`
+  ScalarDB's JDBC adapter maps them, on its writes, to a retryable conflict (reads are not mapped,
+  section 5) (`RdbEngine.isConflict`: PostgreSQL `40001`
   and `40P01`; MySQL and MariaDB error 1213; SQL Server 1205; Oracle ORA-00060, ORA-08177, ORA-08176).
   MySQL's lock wait timeout, error 1205, is mapped too. PostgreSQL's `lock_timeout` (`55P03`) and SQL
   Server's `LOCK_TIMEOUT` (error 1222) are **not** mapped, so a prepare that times out there surfaces as
@@ -1550,12 +1566,15 @@ between `T` and plain tables are the database's own.
 |---|---|---|
 | READ COMMITTED | the database's READ COMMITTED | each statement sees committed values only, no snapshot across statements; a write to a key this transaction read is first-updater-wins through the anchor, so a lost update becomes a `40001` abort, against driver and ScalarDB writers alike; reads that take no anchor (subqueries, grouped and DISTINCT reads, the `rc_T` shapes of 4.2) protect nothing, and a locking clause is refused on them; lock the keys first with an attributable `SELECT ... FOR UPDATE` |
 | SNAPSHOT | the database's REPEATABLE READ / SNAPSHOT | consistent snapshot, ScalarDB transactions visible atomically, first-committer-wins; write skew possible, as snapshot isolation allows |
-| SERIALIZABLE | PostgreSQL's SERIALIZABLE; on MySQL, MariaDB and SQL Server the driver's own locking reads (4.2, section 5); refused on Oracle (section 5) | serializable **if** the ScalarDB transaction runs at SERIALIZABLE, and on PostgreSQL ScalarDB's storage connections too |
+| SERIALIZABLE | PostgreSQL's SERIALIZABLE; on MySQL, MariaDB and SQL Server the driver's own locking reads (4.2, section 5); refused on Oracle (section 5) | serializable **if** the ScalarDB transaction runs at SERIALIZABLE, and on PostgreSQL ScalarDB's storage connections too, under the assumptions of section 5 (an argument, not a proof; with two-phase commit, every prepare before any validation) |
 
 **Limits**
 
 - **No SERIALIZABLE on Oracle.** Oracle has neither SSI nor gap locks, so the driver refuses the level
   there (section 5); SNAPSHOT is Oracle's strongest.
+- **ScalarDB's reads fail non-retryably under SSI.** ScalarDB does not map a serialization failure of a
+  read to a conflict (section 5): its applications retry `CrudException`, `ValidationException` and
+  `CommitException` whose cause has SQLState `40001`.
 - **ScalarDB's storage level on PostgreSQL.** With ScalarDB's storage connections below SERIALIZABLE,
   SSI does not see ScalarDB's statements, and the driver's SERIALIZABLE is snapshot isolation against
   ScalarDB: write skew, phantoms and the read-only anomaly all commit (section 5). The driver cannot
@@ -1702,8 +1721,9 @@ retries.
     scrollable result set. The check runs before the read wherever it falls in the transaction, once per
     table, not as the transaction's first statement as items 11 and 12 had it. SERIALIZABLE there is
     PostgreSQL's SSI with ScalarDB's storage connections at SERIALIZABLE, without read locks (section
-    5). A write aborts on a row in flight its predicate matches by either image; Oracle refuses
-    SERIALIZABLE.
+    5). A write aborts on a row in flight its predicate matches by either image. Oracle's refusal of
+    SERIALIZABLE is designed (section 5), built with milestone 8. A grouped or DISTINCT read takes the
+    per-table check too.
 
 ## References in ScalarDB (`core/src/main/java/com/scalar/db`; verified on `v3.19.1` and on the 4.0 line, identical in every cited behaviour)
 
@@ -1715,12 +1735,15 @@ retries.
 - `transaction/consensuscommit/Snapshot.java`, `isChanged`: validation compares `tx_id`;
   `toSerializable`: one validation read per get and scan, run in parallel.
 - `transaction/consensuscommit/CommitHandler.java`, `commit`: prepare, then validation, then the
-  coordinator write and the record commit; `TransactionContext.isValidationRequired`: SERIALIZABLE
-  only, read-only transactions included.
+  coordinator write and the record commit; the coordinator write is omitted for a read-only
+  transaction by default (`write_omission_on_read_only`). `TransactionContext.isValidationRequired`:
+  SERIALIZABLE only, read-only transactions included, and not when every get is in the write set and
+  there is no scan.
 - `transaction/consensuscommit/ParticipantCommitHandler.java`, `canOnePhaseCommit`: off when
   validation is required; `validateRecords`.
 - `storage/jdbc/JdbcDatabase.java`, `get` and `scan`: each a storage transaction of its own at
-  `scalar.db.jdbc.isolation_level`.
+  `scalar.db.jdbc.isolation_level`, an SQL failure wrapped in a plain `ExecutionException`, no
+  conflict mapping (only `mutate` checks `isConflict`).
 - `transaction/consensuscommit/ConsensusCommitUtils.java`, `convertConjunctions`, and
   `CrudHandler.requiresBeforeIndexCheck`: ScalarDB's own before-image read and its index split.
 - `transaction/consensuscommit/RecoveryHandler.java`, `RecoveryExecutor.java` and

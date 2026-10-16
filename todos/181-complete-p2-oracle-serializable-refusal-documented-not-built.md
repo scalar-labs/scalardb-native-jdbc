@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "181"
 tags: [code-review, docs, jdbc, oracle]
@@ -39,3 +39,11 @@ Build the refusal now (setTransactionIsolation and the metadata proxy), leave th
 
 **By:** Claude Code
 - From the review of milestone 7 and its fixes, d4949c0..322bd32.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- README says what the code does today: READ_UNCOMMITTED refused; SNAPSHOT and SERIALIZABLE accepted
+  off PostgreSQL with every ScalarDB-table statement refused; Oracle's refusal still to come. Design 5
+  opens with what is built; the errors table and section 10 item 15 mark Oracle's refusal as milestone 8
+  (Option 1).

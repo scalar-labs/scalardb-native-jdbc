@@ -221,6 +221,13 @@ class SerializableIntegrationTest {
           String driver =
               level == Connection.TRANSACTION_SERIALIZABLE ? "SERIALIZABLE" : "SNAPSHOT";
           for (Read read : Read.values()) {
+            try (Connection c = e.openDriver()) {
+              c.setTransactionIsolation(level);
+              // the read takes the path its name says: row by row carries each row's state
+              assertThat(c.nativeSQL(read.sql).contains("\"scalardb_native_meta\".\"tx_state\""))
+                  .as("driver %s, %s read row by row", driver, read)
+                  .isEqualTo(read != Read.CHECKED);
+            }
             for (Workload w : List.of(PHANTOM, WRITE_SKEW)) {
               String name = w == PHANTOM ? "phantom" : "write skew";
               for (Timing timing : Timing.values()) {
@@ -231,6 +238,12 @@ class SerializableIntegrationTest {
                         driver, storage, read, name, timing, g);
                 seed(tm, g, w.seed());
                 String trace = run(e, tpc, level, read, w, g, timing);
+                if (timing != Timing.IN_FLIGHT) {
+                  // nothing is in flight when the driver reads: an abort there is not the cycle's
+                  assertThat(trace)
+                      .as("%s: the read goes through", at)
+                      .doesNotContain("d.read aborts");
+                }
                 boolean holds = w.holds(rows(e, g));
                 if (ssi || !timing.needsSsi) {
                   assertThat(holds).as("%s: the rule holds; steps: %s", at, trace).isTrue();
@@ -242,16 +255,24 @@ class SerializableIntegrationTest {
                 }
               }
             }
+            g++;
+            String at =
+                String.format(
+                    "driver %s, storage %s, %s read, read-only ScalarDB transaction, group %d",
+                    driver, storage, read, g);
+            String trace = readOnly(e, tm, level, read, g);
+            assertThat(trace.contains("anomaly"))
+                .as("%s: %s; steps: %s", at, ssi ? "no anomaly" : "the anomaly", trace)
+                .isEqualTo(!ssi);
+            if (ssi) {
+              // the deposit commits first: the read-only transaction sees it, and SSI aborts the
+              // driver, the pivot
+              assertThat(trace)
+                  .as("%s: steps", at)
+                  .contains("read-only sees 20/0")
+                  .contains("driver aborts");
+            }
           }
-          g++;
-          String at =
-              String.format(
-                  "driver %s, storage %s, read-only ScalarDB transaction, group %d",
-                  driver, storage, g);
-          String trace = readOnly(e, tm, level, g);
-          assertThat(trace.contains("anomaly"))
-              .as("%s: %s; steps: %s", at, ssi ? "no anomaly" : "the anomaly", trace)
-              .isEqualTo(!ssi);
         }
       }
     }
@@ -316,11 +337,12 @@ class SerializableIntegrationTest {
    * 10; a read-only ScalarDB transaction reads both. If it sees x = 20 and y = 0 and the driver
    * still charged the penalty, no serial order fits.
    */
-  private static String readOnly(Engines e, DistributedTransactionManager tm, int level, int g)
+  private static String readOnly(
+      Engines e, DistributedTransactionManager tm, int level, Read readPath, int g)
       throws Exception {
     seed(tm, g, new int[][] {{1, 0}, {2, 0}});
     StringBuilder trace = new StringBuilder();
-    try (Native d = new Native(e.openDriver(), level, Read.ROWS)) {
+    try (Native d = new Native(e.openDriver(), level, readPath)) {
       Map<Integer, Integer> read = d.read(g);
       DistributedTransaction deposit = tm.begin();
       int x = deposit.get(get(g, 1)).orElseThrow().getInt("v");
