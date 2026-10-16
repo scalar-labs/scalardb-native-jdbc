@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "173"
 tags: [code-review, documentation]
@@ -33,3 +33,10 @@ main now serves the snapshot levels on PostgreSQL.
 
 **By:** Claude Code
 - From the end-of-milestone-7 review of d4949c0..a6336c0, verified against the code.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- README: an Isolation levels section (engines, the ScalarDB settings SERIALIZABLE needs, Oracle
+  refused, 40001 on a row in flight); the intro and Getting started point to it; Preview scope no longer
+  describes alpha.1 as the current state.

@@ -9,9 +9,8 @@ both kinds of table, and ScalarDB's transactions on the same tables keep their g
 The driver wraps the database's JDBC driver. Statements on ordinary tables pass through unchanged;
 statements on ScalarDB-managed tables are rewritten so that they read committed data and leave behind
 the row metadata that ScalarDB's own transactions check. The result is one native transaction, ACID
-across ordinary and ScalarDB tables, isolated from concurrent ScalarDB transactions at READ COMMITTED,
-SNAPSHOT or SERIALIZABLE, chosen with `setTransactionIsolation`, with no change to ScalarDB and no call
-into it. It is not a ScalarDB client, not a dialect translator, and not a cross-database transaction
+across ordinary and ScalarDB tables, isolated from concurrent ScalarDB transactions at the level chosen with
+`setTransactionIsolation` (see [Isolation levels](#isolation-levels)), with no call into ScalarDB. It is not a ScalarDB client, not a dialect translator, and not a cross-database transaction
 manager.
 
 One database per connection, and a transaction never spans databases. A ScalarDB transaction that also
@@ -51,7 +50,8 @@ Java 11 or later. `BEGIN`, `COMMIT` and `ROLLBACK` work as in psql, `\dt` marks 
 
 The driver serves ScalarDB tables in the decoupled layout: created, or imported, with
 `transaction-metadata-decoupling` set to `true`. ScalarDB itself needs
-`scalar.db.jdbc.isolation_level=REPEATABLE_READ` (or `SERIALIZABLE`) to create or import them.
+`scalar.db.jdbc.isolation_level=REPEATABLE_READ` to create or import them, or `SERIALIZABLE` where the
+driver runs at SERIALIZABLE (see [Isolation levels](#isolation-levels)).
 
 Before the driver serves a table, an operator with DDL privileges runs the setup once. It creates the
 in-flight index and the read view, and on an imported table writes the row metadata ScalarDB has not.
@@ -73,12 +73,27 @@ try (Connection c = DriverManager.getConnection(url, "admin", password)) {
 read views to the application's users. The application then needs the driver jar, JSQLParser 5.4,
 slf4j-api and its vendor driver on the classpath, and connects with `jdbc:scalardb-native:postgresql:...`.
 
-## Preview scope (3.19.0-alpha.1)
+## Isolation levels
 
-Certified: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line.
+| `setTransactionIsolation` | Engines | ScalarDB settings |
+|---|---|---|
+| `TRANSACTION_READ_COMMITTED` | all five | none |
+| `TRANSACTION_REPEATABLE_READ` (SNAPSHOT) | PostgreSQL | none |
+| `TRANSACTION_SERIALIZABLE` | PostgreSQL | `scalar.db.consensus_commit.isolation_level=SERIALIZABLE` and `scalar.db.jdbc.isolation_level=SERIALIZABLE` |
 
-- Reads of ScalarDB tables work on all five engines; writes run on PostgreSQL only. Any other isolation
-  level, and ScalarDB's classic layout, are refused with SQLState `0AN01`.
+At SNAPSHOT and SERIALIZABLE, a statement that reaches a row a ScalarDB transaction is writing fails
+with `40001` at once: roll back and retry. Without both ScalarDB settings, SERIALIZABLE between the
+driver and ScalarDB is not guaranteed. SERIALIZABLE is refused on Oracle, whose SERIALIZABLE is snapshot
+isolation; use `TRANSACTION_REPEATABLE_READ` there once it is supported. Any other combination, and
+`TRANSACTION_READ_UNCOMMITTED`, is refused with SQLState `0AN01`.
+
+## Preview scope
+
+Certified in 3.19.0-alpha.1: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line. SNAPSHOT
+and SERIALIZABLE on PostgreSQL came after it.
+
+- Reads of ScalarDB tables work on all five engines; writes run on PostgreSQL only. ScalarDB's classic
+  layout is refused with SQLState `0AN01`.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
 - A write that would lose an update, against a ScalarDB transaction or another driver transaction,
