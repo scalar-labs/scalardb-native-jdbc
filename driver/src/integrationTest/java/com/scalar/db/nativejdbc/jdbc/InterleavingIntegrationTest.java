@@ -426,7 +426,7 @@ class InterleavingIntegrationTest {
       throws Exception {
     String where = at + ", seed " + seed;
     Random random = new Random(seed);
-    int[] start = values(e, t, rows);
+    int[] start = values(tpc, t, rows);
     List<Actor> actors = new ArrayList<>();
     StringBuilder trace = new StringBuilder();
     try {
@@ -444,7 +444,7 @@ class InterleavingIntegrationTest {
       } catch (AssertionError ex) {
         throw new AssertionError(ex.getMessage() + "\nsteps: " + trace, ex);
       }
-      int[] end = values(e, t, rows);
+      int[] end = values(tpc, t, rows);
       for (int i = 0; i < rows.length; i++) {
         int expected = 0;
         for (Actor a : actors) {
@@ -743,13 +743,30 @@ class InterleavingIntegrationTest {
     }
   }
 
-  private static int[] values(Engines e, Table t, int[] rows) throws SQLException {
-    try (Connection v = e.open()) {
-      int[] out = new int[rows.length];
-      for (int i = 0; i < rows.length; i++) {
-        out[i] = v(v, t, rows[i]);
+  /**
+   * The rows' committed values, read through ScalarDB, never the data table: a ScalarDB rollback
+   * after its prepare is best effort, and may leave a record prepared, its after image in the data
+   * table, until a read recovers it (todo 217). The read recovers it, and is tried again until no
+   * record is left uncommitted.
+   */
+  private static int[] values(TwoPhaseCommitTransactionManager tpc, Table t, int[] rows)
+      throws Exception {
+    for (int attempt = 0; ; attempt++) {
+      TwoPhaseCommitTransaction tx = tpc.begin();
+      try {
+        int[] out = new int[rows.length];
+        for (int i = 0; i < rows.length; i++) {
+          out[i] = tx.get(get(t, rows[i])).orElseThrow().getInt("v");
+        }
+        return out;
+      } catch (CrudConflictException ex) {
+        if (attempt >= 50) {
+          throw ex;
+        }
+        Thread.sleep(100);
+      } finally {
+        tx.rollback();
       }
-      return out;
     }
   }
 

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "217"
 tags: [correctness, data, mysql, flaky]
@@ -43,3 +43,20 @@ which since todo 204 leaves the transaction open) or a ScalarDB rollback after p
 
 **By:** Claude Code
 - In the all-engine run of milestone 8b1; not reproduced on rerun.
+
+### 2026-10-17 - Resolved: the test's accounting
+
+**By:** Claude Code
+- No update was lost. Replaying Random(16) against the trace, the extra -1 is s3's transfer
+  [203, 202], prepared then rolled back. ScalarDB's rollback after prepare (TwoPhaseConsensusCommit
+  .rollback -> rollbackRecords) is one grouped mutate conditioned on tx_id and tx_state = 1, and is
+  best effort: a concurrent read's lazy recovery rolled 203 back first, the group failed with
+  NoMutation ("Rolling back records failed ... recovered lazily"), and 202 stayed prepared, its
+  after image in the data table, the coordinator ABORTED. No ScalarDB read reached 202 afterwards,
+  and the test read the raw data table. The same race shows in a passing run's log (transaction
+  9485d01a, a later read recovered it).
+- Fix: the schedule's start and end values are read through ScalarDB (a two-phase transaction's
+  gets, retried while a record is uncommitted), which returns committed values and recovers stuck
+  records.
+- The driver was right throughout: its READ COMMITTED read returned the before image, and its writes
+  to the stuck row aborted or waited out the bounded wait, the known cost of section 6 (todo 084).
