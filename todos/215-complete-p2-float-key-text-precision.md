@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "215"
 tags: [code-review, correctness, mysql, mariadb]
@@ -32,3 +32,8 @@ Read FLOAT key columns with getFloat (exact to the stored float) and bind as its
 
 **By:** Claude Code
 - From the focused review of b963158 (the fixes of todos 207-211).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- getFloat cannot help (six digits are lost on the wire). Key columns of ScalarDB FLOAT type (from the metadata table, TableInfo.floatColumns) are selected as (k + 0E0) on MySQL and MariaDB wherever the driver reads keys: Names.readColumns and Router.versions. Test: INSERT, locking read, UPDATE, DELETE of 0.1f + 0.02f.

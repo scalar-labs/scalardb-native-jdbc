@@ -1184,13 +1184,16 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   given (a NULL or 0 it generates, `1.6` in an INT) and compares after conversion (`1` equals
   `'01'`), or leaves out a single key column that `information_schema` shows `AUTO_INCREMENT`, whose
   values the vendor driver reports; anything else is refused, and so is the statement's own
-  `RETURNING`. Before such an INSERT one locking read (`FOR SHARE`, so the latest committed rows,
-  not a REPEATABLE READ snapshot's) asks whether any row already matches those values: if
+  `RETURNING`. Before such an INSERT one locking read (`FOR SHARE`, the latest committed rows; at
+  READ COMMITTED, the only level MySQL writes run at before 8b, it locks no gap, where at REPEATABLE
+  READ it would deadlock concurrent INSERTs) asks whether any row already matches those values: if
   one does and the INSERT still succeeds, MySQL stored other values (a trigger, a non-strict
   `sql_mode`), the read-back would find the older row, and the write is refused. A FLOAT key is
   bound as its exact double, which MySQL compares an uncast value as, and so is a float the
   application binds alone to a FLOAT key, when the driver matches keys; the column types come from
-  `information_schema` with the column order. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
+  `information_schema` with the column order. Both engines send a FLOAT as six digits, which can
+  name another float, so the driver reads a key of ScalarDB's FLOAT type as `k + 0E0`, a double
+  sent with all its digits. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
   only the driver's own rows go through. Neither engine's INSERT takes an alias, nor MariaDB's DELETE
   of one table, which becomes `DELETE T FROM T_data AS T`; a column qualified by a created table's name
   in `RETURNING` is refused on MariaDB. A failed statement there leaves the transaction open with the

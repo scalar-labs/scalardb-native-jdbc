@@ -637,6 +637,8 @@ public final class Catalog implements AutoCloseable {
                     + engine.quote("key_type")
                     + ", "
                     + engine.quote("indexed")
+                    + ", "
+                    + engine.quote("data_type")
                     + " FROM "
                     + quoted("metadata")
                     + " ORDER BY "
@@ -647,7 +649,9 @@ public final class Catalog implements AutoCloseable {
       while (rs.next()) {
         metadata
             .computeIfAbsent(rs.getString(1), k -> new ArrayList<>())
-            .add(new MetadataColumn(rs.getString(2), rs.getString(3), rs.getBoolean(4)));
+            .add(
+                new MetadataColumn(
+                    rs.getString(2), rs.getString(3), rs.getBoolean(4), rs.getString(5)));
       }
     } catch (SQLException e) {
       if (!engine.isMissingTable(e)) {
@@ -747,11 +751,14 @@ public final class Catalog implements AutoCloseable {
     final String name;
     final @Nullable String keyType;
     final boolean indexed;
+    final @Nullable String dataType;
 
-    MetadataColumn(String name, @Nullable String keyType, boolean indexed) {
+    MetadataColumn(
+        String name, @Nullable String keyType, boolean indexed, @Nullable String dataType) {
       this.name = name;
       this.keyType = keyType;
       this.indexed = indexed;
+      this.dataType = dataType;
     }
   }
 
@@ -830,6 +837,7 @@ public final class Catalog implements AutoCloseable {
             columns.clusteringKey,
             columns.dataColumns,
             columns.indexed,
+            columns.floats,
             setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
       v = byLeft.get(k);
@@ -854,6 +862,7 @@ public final class Catalog implements AutoCloseable {
             columns.clusteringKey,
             columns.dataColumns,
             columns.indexed,
+            columns.floats,
             setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
       v = byRight.get(k);
@@ -881,6 +890,7 @@ public final class Catalog implements AutoCloseable {
             columns.clusteringKey,
             columns.dataColumns,
             columns.indexed,
+            columns.floats,
             true);
       }
       return new TableInfo(
@@ -923,6 +933,9 @@ public final class Catalog implements AutoCloseable {
         if (col.indexed) {
           out.indexed.add(col.name);
         }
+        if ("FLOAT".equalsIgnoreCase(col.dataType)) {
+          out.floats.add(col.name);
+        }
         if (col.keyType != null) {
           String kt = col.keyType.toUpperCase(Locale.ROOT);
           if (kt.equals("PARTITION")) {
@@ -954,6 +967,7 @@ public final class Catalog implements AutoCloseable {
     final List<String> clusteringKey = new ArrayList<>();
     final List<String> dataColumns = new ArrayList<>();
     final List<String> indexed = new ArrayList<>();
+    final List<String> floats = new ArrayList<>();
     boolean transactional;
   }
 

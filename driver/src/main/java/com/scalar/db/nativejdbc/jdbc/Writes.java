@@ -236,9 +236,9 @@ final class Writes {
     }
     String keys =
         "SELECT "
-            + n.columns("d")
+            + n.readColumns("d")
             + ", "
-            + n.columns("m")
+            + n.readColumns("m")
             + ", m."
             + n.txId
             + ", m."
@@ -350,7 +350,7 @@ final class Writes {
             returns
                 ? source.substring(0, end)
                     + (returning == null ? " RETURNING " : ", ")
-                    + n.columns("")
+                    + n.readColumns("")
                     + source.substring(end)
                 : source);
     if (insert == null) {
@@ -397,7 +397,7 @@ final class Writes {
           readBack.add(
               new Step(
                   "SELECT "
-                      + n.columns("d")
+                      + n.readColumns("d")
                       + " FROM "
                       + n.data
                       + " d WHERE "
@@ -1669,6 +1669,7 @@ final class Writes {
     final String dataTable;
 
     final List<String> keyColumns;
+    private final List<String> floatKeys;
     final String data;
     final String meta;
     final String view;
@@ -1684,6 +1685,7 @@ final class Writes {
       this.namespace = t.namespace();
       this.dataTable = t.dataTable();
       this.keyColumns = t.keyColumns();
+      this.floatKeys = t.floatColumns();
       String ns = engine.quote(t.namespace()) + ".";
       this.data = ns + engine.quote(t.dataTable());
       this.meta = ns + engine.quote(Objects.requireNonNull(t.metadataTable(), "metadata table"));
@@ -1702,6 +1704,24 @@ final class Writes {
         out.add((q.isEmpty() ? "" : q + ".") + engine.quote(k));
       }
       return String.join(", ", out);
+    }
+
+    /** The key columns as a select list the driver reads keys from, as {@link #key} reads them. */
+    String readColumns(String q) {
+      List<String> out = new ArrayList<>();
+      for (String k : keyColumns) {
+        out.add(key(q, k));
+      }
+      return String.join(", ", out);
+    }
+
+    /**
+     * A key column as the driver reads it back: a FLOAT key on MySQL and MariaDB as a double, which
+     * they send with all its digits, where a float's six can name another float (todo 215).
+     */
+    String key(String q, String k) {
+      String c = (q.isEmpty() ? "" : q + ".") + engine.quote(k);
+      return engine != Engine.POSTGRESQL && floatKeys.contains(k) ? "(" + c + " + 0E0)" : c;
     }
 
     /** {@code k1 = ? AND k2 = ?}. */
@@ -1799,7 +1819,7 @@ final class Writes {
      */
     String withMeta(String dataRef, String keyQualifier, String where) {
       return "SELECT "
-          + columns(keyQualifier)
+          + readColumns(keyQualifier)
           + ", m."
           + txId
           + ", m."

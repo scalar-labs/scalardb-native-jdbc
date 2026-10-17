@@ -522,9 +522,13 @@ final class Router {
           "writes of ScalarDB tables are supported on PostgreSQL, MySQL and MariaDB only so far"
               + tables);
     }
-    if (isolation != Connection.TRANSACTION_READ_COMMITTED && !snapshot()) {
+    // MySQL and MariaDB at their snapshot levels come with milestone 8b: the check before a MySQL
+    // INSERT locks gaps there, which deadlocks concurrent INSERTs (todo 214)
+    if (isolation != Connection.TRANSACTION_READ_COMMITTED
+        && !(snapshot() && engine == Engine.POSTGRESQL)) {
       throw Errors.unsupported(
-          "writes of ScalarDB tables run at READ COMMITTED, REPEATABLE READ or SERIALIZABLE"
+          "writes of ScalarDB tables run at READ COMMITTED, and at REPEATABLE READ or SERIALIZABLE"
+              + " on PostgreSQL only so far"
               + tables);
     }
     Outcome<StatementShape> shape = StatementShape.classify(ast);
@@ -652,7 +656,7 @@ final class Router {
     String m = engine.quote(META_ALIAS);
     List<String> out = new ArrayList<>();
     for (String k : n.keyColumns) {
-      out.add(x + "." + engine.quote(k));
+      out.add(n.key(x, k));
     }
     String prefix = piece == SqlAst.Piece.COMMITTED ? "" : "before_";
     List<String> read = new ArrayList<>(List.of(prefix + "tx_id", prefix + "tx_version"));

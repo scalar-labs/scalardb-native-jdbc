@@ -39,7 +39,7 @@ class CatalogTest {
     for (String n : namesWithKeys) {
       int colon = n.indexOf(':');
       @Nullable String key = colon < 0 ? null : n.substring(colon + 1);
-      out.add(new MetadataColumn(colon < 0 ? n : n.substring(0, colon), key, false));
+      out.add(new MetadataColumn(colon < 0 ? n : n.substring(0, colon), key, false, null));
     }
     return out;
   }
@@ -53,13 +53,13 @@ class CatalogTest {
     metadata.put("ns.Orders_data", columns("Id:PARTITION", "K:CLUSTERING", "Amount"));
     List<MetadataColumn> ordersMeta = columns("Id:PARTITION", "K:CLUSTERING", "before_Amount");
     for (String t : TX) {
-      ordersMeta.add(new MetadataColumn(t, null, false));
+      ordersMeta.add(new MetadataColumn(t, null, false, null));
     }
     metadata.put("ns.Orders_tx_metadata", ordersMeta);
     metadata.put("app.orders", columns("id:PARTITION", "x", "y"));
     List<MetadataColumn> classic = columns("id:PARTITION", "x", "before_x");
     for (String t : TX) {
-      classic.add(new MetadataColumn(t, null, false));
+      classic.add(new MetadataColumn(t, null, false, null));
     }
     metadata.put("ns.classic", classic);
     metadata.put("app.storage_only", columns("id:PARTITION", "x"));

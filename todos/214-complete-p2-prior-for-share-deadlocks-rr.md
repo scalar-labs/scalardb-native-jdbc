@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "214"
 tags: [code-review, concurrency, mysql, regression]
@@ -39,3 +39,8 @@ Another latest-committed read at RR without gap locks (none known on MySQL).
 
 **By:** Claude Code
 - From the focused review of b963158 (the fixes of todos 207-211).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Writes off PostgreSQL are refused at REPEATABLE READ and SERIALIZABLE until milestone 8b (Option 1); FOR SHARE stays, locking no gap at READ COMMITTED. Plan 8b notes the constraint. Test: refusal at REPEATABLE READ.

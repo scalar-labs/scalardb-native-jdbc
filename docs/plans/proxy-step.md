@@ -466,7 +466,9 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
   uses `RETURNING`, and MySQL takes an `AUTO_INCREMENT` key from the vendor driver. All engines: 331
   unit and 252 integration tests, 54 skipped, none failed.
 - **8b: MySQL and MariaDB at SNAPSHOT and SERIALIZABLE.** REPEATABLE READ with the after-image
-  checks, and the locking re-read of 4.2 with its coarse path at SERIALIZABLE.
+  checks, and the locking re-read of 4.2 with its coarse path at SERIALIZABLE. Writes are refused
+  there until then; the check before a MySQL INSERT must then read the latest committed rows
+  without a gap lock, which deadlocks concurrent INSERTs (todo 214).
 - **8c: SQL Server**, all three levels: the per-engine row, the `READ_COMMITTED_SNAPSHOT` and
   `XACT_ABORT` checks, the hint pass of 4.7.
 - **8d: Oracle**: READ COMMITTED and SNAPSHOT, `TRANSACTION_REPEATABLE_READ` mapped to its

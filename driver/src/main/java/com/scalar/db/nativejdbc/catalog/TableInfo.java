@@ -18,6 +18,7 @@ public final class TableInfo {
   private final List<String> clusteringKey;
   private final List<String> dataColumns;
   private final List<String> indexedColumns;
+  private final List<String> floatColumns;
   private final boolean setUp;
 
   TableInfo(
@@ -32,6 +33,34 @@ public final class TableInfo {
       List<String> dataColumns,
       List<String> indexedColumns,
       boolean setUp) {
+    this(
+        namespace,
+        table,
+        layout,
+        dataTable,
+        metadataTable,
+        virtualTable,
+        partitionKey,
+        clusteringKey,
+        dataColumns,
+        indexedColumns,
+        List.of(),
+        setUp);
+  }
+
+  TableInfo(
+      String namespace,
+      String table,
+      Layout layout,
+      String dataTable,
+      @Nullable String metadataTable,
+      @Nullable String virtualTable,
+      List<String> partitionKey,
+      List<String> clusteringKey,
+      List<String> dataColumns,
+      List<String> indexedColumns,
+      List<String> floatColumns,
+      boolean setUp) {
     this.namespace = namespace;
     this.table = table;
     this.layout = layout;
@@ -42,6 +71,7 @@ public final class TableInfo {
     this.clusteringKey = List.copyOf(clusteringKey);
     this.dataColumns = List.copyOf(dataColumns);
     this.indexedColumns = List.copyOf(indexedColumns);
+    this.floatColumns = List.copyOf(floatColumns);
     this.setUp = setUp;
   }
 
@@ -181,6 +211,15 @@ public final class TableInfo {
    */
   public List<String> dataColumns() {
     return dataColumns;
+  }
+
+  /**
+   * Returns the columns of ScalarDB's FLOAT type, single precision.
+   *
+   * @return the column names
+   */
+  public List<String> floatColumns() {
+    return floatColumns;
   }
 
   /**

@@ -408,7 +408,7 @@ class MoreWritesIntegrationTest {
     }
   }
 
-  /** The findings of the review of 8f902dc (todos 207-210). */
+  /** The findings of the reviews of 8f902dc and b963158 (todos 207-215). */
   private static void reviewOf8aFixes2(Engines e) throws Exception {
     Engine engine = e.engine();
     try (Connection d = e.openDriver()) {
@@ -421,18 +421,25 @@ class MoreWritesIntegrationTest {
         ps.setObject(1, 0.2f);
         assertThat(ps.executeUpdate()).isEqualTo(1);
       }
-      if (engine == Engine.MYSQL) {
-        // 209: at REPEATABLE READ, a key deleted after the snapshot can be inserted again
-        d.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (0, 40)");
+      // 215: a FLOAT key whose 6-digit text is another float
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO wb.fl (k, x) VALUES (?, 5)")) {
+        ps.setFloat(1, 0.1f + 0.02f);
+        assertThat(ps.executeUpdate()).isEqualTo(1);
+      }
+      d.setAutoCommit(false);
+      assertThat(rows(d, "SELECT x FROM wb.fl WHERE x = 5 FOR UPDATE")).containsExactly("5");
+      assertThat(d.createStatement().executeUpdate("UPDATE wb.fl SET x = 6 WHERE x = 5"))
+          .isEqualTo(1);
+      d.commit();
+      d.setAutoCommit(true);
+      assertThat(d.createStatement().executeUpdate("DELETE FROM wb.fl WHERE x = 6")).isEqualTo(1);
+      if (engine != Engine.POSTGRESQL) {
+        // 214: writes at REPEATABLE READ wait for milestone 8b off PostgreSQL
         try (Connection rr = e.openDriver()) {
           rr.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
           rr.setAutoCommit(false);
-          // a plain table's read opens the snapshot; a ScalarDB table's is refused there (8b)
-          assertThat(rows(rr, "SELECT COUNT(*) FROM wb.plain")).hasSize(1);
-          d.createStatement().executeUpdate("DELETE FROM wb.ord WHERE k = 40");
-          assertThat(rr.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (1, 40)"))
-              .isEqualTo(1);
-          rr.commit();
+          assertRefused(
+              () -> rr.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (1, 40)"));
         }
       }
     }
