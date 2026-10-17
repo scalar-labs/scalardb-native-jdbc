@@ -267,9 +267,7 @@ class WriteIntegrationTest {
                   d.createStatement()
                       .executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (3, 'd')"))
           .isInstanceOf(SQLException.class)
-          .extracting("SQLState")
-          .asString()
-          .startsWith("23"); // an integrity constraint violation on every engine
+          .satisfies(ex -> assertThat(e.engine().isDuplicateKey((SQLException) ex)).isTrue());
       d.createStatement().executeUpdate("UPDATE " + t.sql + " SET x = 'C' WHERE id = 3");
       d.commit();
       d.setAutoCommit(true);

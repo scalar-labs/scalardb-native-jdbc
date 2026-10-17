@@ -204,6 +204,7 @@ public final class SqlAst {
   private final boolean lockingOrInto;
   private final List<Table> forUpdateTables;
   private final boolean setsSessionInAnExpression;
+  private final boolean doubleQuotesQuoteIdentifiers;
 
   private SqlAst(
       String source,
@@ -218,8 +219,10 @@ public final class SqlAst {
       boolean positionalParameters,
       boolean lockingOrInto,
       List<Table> forUpdateTables,
-      boolean setsSessionInAnExpression) {
+      boolean setsSessionInAnExpression,
+      boolean doubleQuotesQuoteIdentifiers) {
     this.setsSessionInAnExpression = setsSessionInAnExpression;
+    this.doubleQuotesQuoteIdentifiers = doubleQuotesQuoteIdentifiers;
     this.source = source;
     this.statement = statement;
     this.tableRefs = tableRefs;
@@ -299,11 +302,16 @@ public final class SqlAst {
   }
 
   // MySQL's LOCK IN SHARE MODE, MariaDB's only shared lock, which the parser does not read; at the
-  // end of the statement only, so never inside a literal
+  // end of the statement only, comments aside, so never inside a literal
+  private static final String TRAILING = "(?:\\s|/\\*.*?\\*/|(?:--|#)[^\\n]*(?:\\n|$))*";
   private static final Pattern LOCK_IN_SHARE_MODE =
       Pattern.compile(
-          "\\bLOCK\\s+IN\\s+SHARE\\s+MODE(?=(?:\\s+(?:NOWAIT|SKIP\\s+LOCKED))?\\s*;?\\s*$)",
-          Pattern.CASE_INSENSITIVE);
+          "\\bLOCK\\s+IN\\s+SHARE\\s+MODE(?=(?:\\s+(?:NOWAIT|SKIP\\s+LOCKED))?"
+              + TRAILING
+              + ";?"
+              + TRAILING
+              + "$)",
+          Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
   /** {@code LOCK IN SHARE MODE} as {@code FOR SHARE}, padded, every offset kept. */
   static String lockInShareModeAsForShare(String sql) {
@@ -550,7 +558,23 @@ public final class SqlAst {
                     p -> p instanceof JdbcParameter && !((JdbcParameter) p).isUseFixedIndex()),
             lockingOrInto,
             List.copyOf(forUpdateTables),
-            setsSession));
+            setsSession,
+            doubleQuotesQuoteIdentifiers));
+  }
+
+  /**
+   * Parses the statement again without the text in {@code [from, to)} of {@link #source}, under the
+   * same rules: a clause cut out.
+   *
+   * @param from where the cut starts
+   * @param to where it ends
+   * @return the statement without it, or {@code null} when that does not parse
+   */
+  public @Nullable SqlAst without(int from, int to) {
+    Outcome<SqlAst> cut =
+        analyze(
+            source.substring(0, from) + source.substring(to), engine, doubleQuotesQuoteIdentifiers);
+    return cut.isPresent() ? cut.get() : null;
   }
 
   /**
@@ -912,6 +936,28 @@ public final class SqlAst {
     }
     int[] s = found == null ? null : span(found, found);
     return s == null ? -1 : s[1];
+  }
+
+  /**
+   * Returns where the last token spelled {@code word}, case aside, that ends at or before {@code
+   * at} starts in {@link #source}: a keyword, never a comment's or a literal's text.
+   *
+   * @param word the keyword
+   * @param at the offset it must end before
+   * @return its start, or -1 when there is none
+   */
+  public int startOfLastBefore(String word, int at) {
+    int found = -1;
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      int[] s = span(t, t);
+      if (s == null || s[1] > at) {
+        break;
+      }
+      if (t.image.equalsIgnoreCase(word)) {
+        found = s[0];
+      }
+    }
+    return found;
   }
 
   /**

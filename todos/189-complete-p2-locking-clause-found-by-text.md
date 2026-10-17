@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "189"
 tags: [code-review, correctness, jdbc, mysql, mariadb]
@@ -37,10 +37,10 @@ that contains the mark. Smaller, still text-based.
 
 ## Acceptance Criteria
 
-- [ ] Extra whitespace in the clause works on both engines
-- [ ] MariaDB LOCK IN SHARE MODE NOWAIT and SKIP LOCKED work end to end (test)
-- [ ] A literal containing the mark is unchanged
-- [ ] The dead LOCK branch is gone
+- [x] Extra whitespace in the clause works on both engines
+- [x] MariaDB LOCK IN SHARE MODE NOWAIT and SKIP LOCKED work end to end (test)
+- [x] A literal containing the mark is unchanged
+- [x] The dead LOCK branch is gone
 
 ## Recommended Action
 
@@ -50,3 +50,8 @@ that contains the mark. Smaller, still text-based.
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Router.lockingRead: the statement is parsed again without its clause (SqlAst.without), the inner clause built from the shape; no text search; a source holding the mark is refused; the dead LOCK branch is gone. Tested: whitespace in the clause, MariaDB LOCK IN SHARE MODE NOWAIT and SKIP LOCKED, the mark in a literal. A trailing ; stays refused by the split read on every engine, as before 8a.

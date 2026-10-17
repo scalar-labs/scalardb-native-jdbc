@@ -298,8 +298,8 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   | Vendor driver, prefix | pgjdbc, `jdbc:postgresql:` | MySQL: Connector/J, or MariaDB Connector/J with `permitMysqlScheme=true` in the URL, both certified, `jdbc:mysql:` (ScalarDB itself reaches MySQL only through the MariaDB driver); MariaDB: MariaDB Connector/J `jdbc:mariadb:` | mssql-jdbc, `jdbc:sqlserver:` | ojdbc, `jdbc:oracle:` |
   | Statement snapshot at READ COMMITTED | yes | yes | only with `READ_COMMITTED_SNAPSHOT` on, checked at connect | yes |
   | Read lock at SERIALIZABLE (4.2) | none: SSI, with ScalarDB's storage connections at SERIALIZABLE (section 5) | a separate locking re-read of the first arm's predicate, LEFT JOINed to `T_meta` by primary key, `LOCK IN SHARE MODE` on both engines, since MariaDB rejects `FOR SHARE` and `OF t`; the engine's SERIALIZABLE level is not used | the same separate re-read `WITH (HOLDLOCK)`; the engine's SERIALIZABLE level is not used | SERIALIZABLE is refused (section 5) |
-  | Insert that may collide | `INSERT ... ON CONFLICT DO NOTHING`, check the row count | catch error 1062; the transaction survives. Not `INSERT IGNORE`, which also downgrades data errors such as a NOT NULL violation to warnings | catch 2627 or 2601; the transaction survives with `XACT_ABORT` off, which the driver requires | catch ORA-00001; statement-level rollback keeps the transaction |
-  | Update count | rows matched | `useAffectedRows=false`, the default on both drivers; any other value, in the URL or the connect properties, is refused at connect with `08004` | rows matched | rows matched |
+  | Insert that may collide | `INSERT ... ON CONFLICT DO NOTHING`, check the row count | catch error 1062; the transaction survives. Not `INSERT IGNORE` for the user's statement, which also downgrades data errors such as a NOT NULL violation to warnings; the driver's own metadata rows use it (4.3) | catch 2627 or 2601; the transaction survives with `XACT_ABORT` off, which the driver requires | catch ORA-00001; statement-level rollback keeps the transaction |
+  | Update count | rows matched | `useAffectedRows=false`, the default on both drivers; the value the vendor driver reports for the URL and the connect properties (`getPropertyInfo`, its own spellings and precedence) must not be true, or the connection is refused with `08004` | rows matched | rows matched |
   | In-flight index | partial index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` | filtered index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` |
   | Retryable errors | SQLSTATE `40001`, `40P01` | SQLSTATE `40001` (error 1213), error 1205 (SQLSTATE `HY000`) | 1205 deadlock victim (`40001`), 3960 snapshot update conflict, 1222 if `LOCK_TIMEOUT` is set | ORA-08177 cannot serialize, ORA-00060 deadlock, ORA-08176; ScalarDB maps the same three |
   | Duplicate key | `23505` | error 1062 | 2627, 2601 | ORA-00001 |
@@ -424,7 +424,7 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   | `55000` | `SQLNonTransientException` | a statement names a ScalarDB table the setup of section 3 has not been run for; not `08004`, since it is raised per statement and an `08` state makes a pool discard a working connection | run the setup |
   | `42000` | `SQLSyntaxErrorException` | a name a statement must not use: `T_data`, `T_tx_metadata`, `T_scalardb`, a synonym; the message names the table to use | rewrite the statement |
   | `42501` | `SQLSyntaxErrorException` | ScalarDB's catalog exists but this user cannot read it | grant SELECT on the catalog tables |
-  | `08004` | `SQLNonTransientConnectionException` | refused at connect: no ScalarDB catalog (unless allowed), SQL Server without `READ_COMMITTED_SNAPSHOT` | fix the configuration or run the setup |
+  | `08004` | `SQLNonTransientConnectionException` | refused at connect: no ScalarDB catalog (unless allowed), SQL Server without `READ_COMMITTED_SNAPSHOT`, `useAffectedRows` on MySQL or MariaDB | fix the configuration or run the setup |
   | `08001` | `SQLException` | a malformed URL or driver property, a missing vendor driver | fix the URL or the class path |
 
   A refusal uses `0AN01`, an implementation-defined subclass of the standard's feature-not-supported
@@ -788,14 +788,18 @@ union as a derived table.
   made again, at once under `SKIP LOCKED`, which then skips the row, after the wait otherwise;
   `NOWAIT` fails with `55P03`. `FOR KEY SHARE` is refused: a ScalarDB prepare writes the row with a
   non-key UPDATE, which it does not block. **On MySQL and MariaDB** a locking clause outside a derived
-  table locks none of the rows the derived table reads, so the clause moves into the first arm, whose
-  derived table the engines merge into the statement, the user's predicate with it: only the rows it
-  matches are locked (measured on MySQL 8.4 and MariaDB 11.4). There the first arm leaves a row in
+  table locks none of the rows the derived table reads, so the statement is parsed again without its
+  clause, which goes into the first arm, whose derived table the engines merge into the statement,
+  the user's predicate with it: only the rows it matches are locked (measured on MySQL 8.4 and MariaDB
+  11.4). The merge is asked for, `/*+ MERGE(t) */` on MySQL and `SET STATEMENT
+  optimizer_switch='derived_merge=on' FOR` on MariaDB, since a session that turns merging off would
+  otherwise lock every committed row. Only `FOR UPDATE` and `FOR SHARE` are taken; `OF` adds nothing
+  on one table and is dropped. There the first arm leaves a row in
   flight out by a scalar subquery on its state, a condition on the row itself: these engines lock a
   row as they read it, and release the lock of a row that a condition on it rejects, but keep the lock
   of a row a join rejects, which would hold up ScalarDB's commit of it. A shared lock read through a
   covering index locks the index entry only, not the row, so under `FOR SHARE` the versions read under
-  the lock lock each row again by key. `LOCK IN SHARE MODE`, which the parser does not read, is parsed
+  the lock lock each row again through the primary key, not its metadata row on MySQL. `LOCK IN SHARE MODE`, which the parser does not read, is parsed
   as `FOR SHARE`, the engines' spelling restored in the statement run; `NOWAIT` fails as the engine
   reports its own, MySQL error 3572 and MariaDB 1205. These engines lock a row before the rest of the
   predicate runs, so a row goes in flight around the lock only through a ScalarDB prepare queued for
@@ -1022,10 +1026,11 @@ union as a derived table.
   only; `OF t` does not reach through a view, so the base tables are inlined. On PostgreSQL that lock
   alone blocks a ScalarDB prepare, which writes `T` first, and it covers rows that have no metadata row.
   The inner-join views of a created table may take the clause directly, and there the lock lands on both
-  `T` and `T_meta`. On MySQL, MariaDB and SQL Server a lock on the data table alone is not enough when the
-  read is served by a covering index, which is why those engines lock `T_meta` by primary key in the
-  SERIALIZABLE bullet; MariaDB also rejects `FOR SHARE` and the `OF t` form and uses
-  `LOCK IN SHARE MODE`. Oracle accepts `FOR UPDATE` on an outer-join view. A user locking clause on a
+  `T` and `T_meta`. On MySQL and MariaDB a user's clause at READ COMMITTED moves into the first arm
+  instead, as the READ COMMITTED bullet says, and a shared one locks the rows again by primary key;
+  their SERIALIZABLE path and SQL Server lock `T_meta` by primary key, as the SERIALIZABLE bullet says,
+  since a lock on the data table alone is not enough when the read is served by a covering index.
+  MariaDB rejects `FOR SHARE` and the `OF t` form and uses `LOCK IN SHARE MODE`. Oracle accepts `FOR UPDATE` on an outer-join view. A user locking clause on a
   shape that runs against `rc_T`, joins and subqueries, is refused, since the lock cannot be rewritten
   through an arbitrary join. Sections 7 and 9 rely on this rule wherever they say `FOR UPDATE`.
 - **The per-table check**, for the shapes the row-by-row detector of the SNAPSHOT bullet does not
@@ -1064,7 +1069,7 @@ VALUES (:k, :new_id, 3, 1, :now, :now);
 
 A duplicate key on either statement is a conflict. On PostgreSQL a failed statement aborts the whole
 transaction, so use `INSERT ... ON CONFLICT DO NOTHING` and check the row count, or wrap the inserts in a
-SAVEPOINT. On MySQL catch error 1062; the transaction survives it. Do not use `INSERT IGNORE`, which also
+SAVEPOINT. On MySQL catch error 1062; the transaction survives it. Do not use `INSERT IGNORE` for `T`, which also
 turns data errors such as a NOT NULL violation into warnings. The `T` insert decides the classification.
 If it failed, read `T_meta.tx_state` for `k`: state 3 or NULL is an application duplicate; state 1 or 2
 is an in-flight ScalarDB insert or delete, a retryable conflict. If it succeeded and the `T_meta` insert
@@ -1169,9 +1174,13 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   so a batch's keys come in the order of its entries. Key lists are bound as a `VALUES` table, each
   value cast to its column's type, at most 1,000 keys per statement where order does not matter; on
   MySQL and MariaDB as a `UNION ALL` of one-row selects, uncast. MariaDB's INSERT has `RETURNING`; on
-  MySQL, which has none, the keys are read back by the values the statement gives them, or are the one
-  key column's `AUTO_INCREMENT` values the vendor driver reports, and the statement's own `RETURNING`
-  is refused. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
+  MySQL, which has none, the statement lists its columns and either gives each key column a literal
+  or a placeholder, each row's key then read back by those values and required to match exactly one
+  row, since MySQL may store another value than the one given (a NULL or 0 it generates, `1.6` in an
+  INT) and compares after conversion (`1` equals `'01'`), or leaves out a single key column that
+  `information_schema` shows `AUTO_INCREMENT`, whose values the vendor driver reports; anything else,
+  an INSERT without a column list included, is refused, and so is the statement's own `RETURNING`.
+  A FLOAT key is bound as its exact double, which MySQL compares an uncast value as. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
   only the driver's own rows go through. Neither engine's INSERT takes an alias, nor MariaDB's DELETE
   of one table, which becomes `DELETE T FROM T_data AS T`; a column qualified by a created table's name
   in `RETURNING` is refused on MariaDB. A failed statement there leaves the transaction open with the
@@ -1402,7 +1411,8 @@ coverage of each engine's syntax is therefore part of the certification of that 
 
 One setting, the native connection's isolation level, selects everything else.
 
-Built so far: all three levels on PostgreSQL, and READ COMMITTED on the other engines. Elsewhere
+Built so far: all three levels on PostgreSQL, and READ COMMITTED on the other engines, its writes and
+locking reads on MySQL and MariaDB as on PostgreSQL. Elsewhere
 SNAPSHOT and SERIALIZABLE are accepted by `setTransactionIsolation`, and every statement on a ScalarDB
 table is refused with `0AN01`; the engine mappings, the locking re-reads, Oracle's refusal of
 SERIALIZABLE and the translation of `TRANSACTION_REPEATABLE_READ` below come with milestone 8.
@@ -1672,7 +1682,7 @@ retries.
 | NULL-metadata row vanishes | ScalarDB rolled back a prepare over a row that had no metadata, leaving `tx_id`, `tx_version` and `tx_state` NULL | NULL `tx_state` read as 3 in every rule (fact 2); the NULL-pair CAS of 4.4 |
 | In-flight row pinned by a user lock | user `FOR UPDATE` under READ COMMITTED on a row in flight; ScalarDB's settle blocks behind it | the lock is pushed into the first arm only (4.2) |
 | Deleted row resurrected | driver deletes a row without metadata on an imported table; a ScalarDB transaction that read it as deemed committed prepares it with "metadata does not exist" | the tombstone of 4.5 makes that prepare fail |
-| Lock through a covering index misses the row | MySQL, MariaDB, SQL Server: a shared lock via a covering secondary index locks the index entry only, so a prepare changing other columns is not blocked | the locking re-read joins `T_meta` by primary key (4.2) |
+| Lock through a covering index misses the row | MySQL, MariaDB, SQL Server: a shared lock via a covering secondary index locks the index entry only, so a prepare changing other columns is not blocked | at READ COMMITTED on MySQL and MariaDB the versions read under the lock lock the rows again through the primary key; elsewhere the locking re-read joins `T_meta` by primary key (4.2) |
 
 ---
 

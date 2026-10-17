@@ -330,17 +330,15 @@ public final class StatementShape {
    * their order, when every row gives each of them as a placeholder or a literal.
    *
    * @param keyColumns the table's key columns as the catalog spells them
-   * @param tableColumns the table's columns in order, which a statement without a column list gives
-   *     values for
-   * @return the key values per row, or {@code null} when a key column is not listed or a value is
-   *     anything else
+   * @return the key values per row, or {@code null} when a key column is not listed, the statement
+   *     lists no columns (the catalog's column order need not be the table's, todo 188), or a value
+   *     is anything else
    */
-  public @Nullable List<List<Expression>> insertKeyValues(
-      List<String> keyColumns, List<String> tableColumns) {
-    if (kind != Kind.INSERT) {
+  public @Nullable List<List<Expression>> insertKeyValues(List<String> keyColumns) {
+    if (kind != Kind.INSERT || insertColumns.isEmpty()) {
       return null;
     }
-    List<String> columns = insertColumns.isEmpty() ? tableColumns : insertColumns;
+    List<String> columns = insertColumns;
     List<Integer> at = new ArrayList<>();
     for (String k : keyColumns) {
       int found = -1;

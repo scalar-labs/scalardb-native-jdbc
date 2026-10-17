@@ -104,8 +104,10 @@ and SERIALIZABLE on PostgreSQL came after it.
   ScalarDB's classic layout is refused with SQLState `0AN01`.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
-- On MySQL an INSERT has no `RETURNING`, and gives its keys in `VALUES` or takes an `AUTO_INCREMENT`
-  key. On MySQL and MariaDB, `useAffectedRows` must stay false, the drivers' default.
+- On MySQL an INSERT has no `RETURNING`, lists its columns, and gives each key column a literal or a
+  placeholder of the column's type, or leaves out an `AUTO_INCREMENT` key (not NULL or 0 for it).
+  On MySQL and MariaDB, `useAffectedRows` must stay false, the drivers' default, and a locking read
+  takes `FOR UPDATE` or `FOR SHARE` (`LOCK IN SHARE MODE`).
 - A write that would lose an update, against a ScalarDB transaction or another driver transaction,
   fails with `40001` and leaves the transaction rollback-only: roll back and retry it. A query
   timeout or a cancel during a write does the same.

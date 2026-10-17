@@ -25,7 +25,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -275,10 +274,11 @@ final class Writes {
       throw refused(tables, "the statement's text cannot be rewritten");
     }
     String returning = shape.returning() ? source.substring(items, end).trim() : null;
-    // MySQL has no RETURNING: the keys are read back by the values the statement gives them, or
-    // are the one key column's AUTO_INCREMENT values, which the vendor driver reports
+    // MySQL has no RETURNING: the keys are read back by the literals and placeholders the
+    // statement gives them in its column list, one row each, or are the AUTO_INCREMENT values of
+    // the one key column it leaves out, which the vendor driver reports (todos 186, 187)
     boolean returns = engine == Engine.POSTGRESQL || engine == Engine.MARIADB;
-    List<List<Expression>> rows = shape.insertKeyValues(t.keyColumns(), t.dataColumns());
+    List<List<Expression>> rows = shape.insertKeyValues(t.keyColumns());
     if (returning != null && !returns) {
       throw refused(tables, "RETURNING is not supported on this engine");
     }
@@ -291,11 +291,11 @@ final class Writes {
       }
     }
     boolean generated = !returns && rows == null;
-    if (generated && t.keyColumns().size() != 1) {
+    if (generated && !leavesOutTheKey(engine, shape, t)) {
       throw refused(
           tables,
-          "an INSERT of a ScalarDB table with a key of several columns must give them all in"
-              + " VALUES on this engine");
+          "an INSERT of a ScalarDB table lists its columns and gives each key column a literal or"
+              + " a placeholder, or leaves out an AUTO_INCREMENT key, on this engine");
     }
     String insert =
         onDataTable(
@@ -317,7 +317,7 @@ final class Writes {
     Step inFlight = null;
     Step committed = null;
     Step repeats = null;
-    Step readBack = null;
+    List<Step> readBack = new ArrayList<>();
     if (rows != null) {
       List<String> match = new ArrayList<>();
       List<String> matchData = new ArrayList<>();
@@ -342,6 +342,17 @@ final class Writes {
         match.add("(" + String.join(" AND ", terms) + ")");
         matchData.add("(" + String.join(" AND ", termsData) + ")");
         tuples.add("(" + String.join(", ", values) + ")");
+        if (!returns) {
+          readBack.add(
+              new Step(
+                  "SELECT "
+                      + n.columns("d")
+                      + " FROM "
+                      + n.data
+                      + " d WHERE "
+                      + String.join(" AND ", termsData),
+                  matchBinds.subList(matchBinds.size() - rowBinds(ast, row), matchBinds.size())));
+        }
       }
       if (snapshot && rows.size() > 1) {
         // a key the statement itself repeats is the application's duplicate (todo 178)
@@ -378,17 +389,6 @@ final class Writes {
                     + " = 3)",
                 matchBinds);
       }
-      if (!returns) {
-        readBack =
-            new Step(
-                "SELECT "
-                    + n.columns("d")
-                    + " FROM "
-                    + n.data
-                    + " d WHERE "
-                    + String.join(" OR ", matchData),
-                matchBinds);
-      }
       inFlight =
           new Step(
               "SELECT COUNT(*) FROM "
@@ -405,12 +405,30 @@ final class Writes {
         n,
         new Step(insert, all),
         readBack,
-        generated,
         inFlight,
         committed,
         repeats,
         returning,
         Router.exposed(ref));
+  }
+
+  /** The placeholders in one row's key values. */
+  private static int rowBinds(SqlAst ast, List<Expression> row) {
+    int count = 0;
+    for (Expression e : row) {
+      int[] span = Objects.requireNonNull(ast.span(e));
+      count += Objects.requireNonNull(ast.placeholdersIn(span[0], span[1])).size();
+    }
+    return count;
+  }
+
+  /** Whether the INSERT lists its columns and leaves out the table's one key column. */
+  private static boolean leavesOutTheKey(Engine engine, StatementShape shape, TableInfo t) {
+    if (t.keyColumns().size() != 1 || shape.insertColumns().isEmpty()) {
+      return false;
+    }
+    String key = engine.columnKey(t.keyColumns().get(0));
+    return shape.insertColumns().stream().noneMatch(c -> engine.columnKey(c).equals(key));
   }
 
   /**
@@ -433,9 +451,9 @@ final class Writes {
     String data = engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
     String as = ref.hasAlias() || !alias ? "" : " AS " + ref.name();
     String before = text.substring(0, span[0]);
-    int from = before.toUpperCase(Locale.ROOT).lastIndexOf("FROM");
     if (engine == Engine.MARIADB && !as.isEmpty() && ast.statement() instanceof Delete) {
       // MariaDB's DELETE of one table takes no alias: DELETE alias FROM table AS alias
+      int from = ast.startOfLastBefore("FROM", span[0]);
       if (from < 0) {
         return null;
       }
@@ -515,12 +533,13 @@ final class Writes {
         } catch (SQLException r) {
           e.addSuppressed(r); // the write's own failure is the one to report
         }
-      } else if (e instanceof Aborted
+      } else if (e instanceof SQLTransactionRollbackException
           || e instanceof RuntimeException
           || "57014".equals(((SQLException) e).getSQLState())) {
         // a timeout or a cancel the driver raises itself can come between a key's DML and its
         // stamp, in a transaction the vendor would still commit (todo 157); a vendor error part
-        // way ends the transaction on PostgreSQL, and is undone to the write's start elsewhere
+        // way ends the transaction on PostgreSQL, and is undone to the write's start elsewhere,
+        // but a deadlock there ends it, which the application must see too (todo 199)
         rollbackOnly.run();
       }
       throw e;
@@ -579,44 +598,29 @@ final class Writes {
 
     /** As {@link #prepare(String)}; a scrollable one's rows can be read twice. */
     PreparedStatement prepare(String sql, boolean scrollable) throws SQLException {
+      return prepare(sql, scrollable, false);
+    }
+
+    /** As {@link #prepare(String, boolean)}, reporting the keys the database generates. */
+    private PreparedStatement prepare(String sql, boolean scrollable, boolean generated)
+        throws SQLException {
       checkCancelled();
       PreparedStatement ps =
           scrollable
               ? v.prepareStatement(
                   sql, ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY)
-              : v.prepareStatement(sql);
+              : generated
+                  ? v.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)
+                  : v.prepareStatement(sql);
       try {
-        limit(ps);
-        context.running(ps);
-        return ps;
-      } catch (SQLException | RuntimeException e) {
-        ps.close();
-        throw e;
-      }
-    }
-
-    /** Sets what is left of the timeout on a statement. */
-    private void limit(PreparedStatement ps) throws SQLException {
-      if (deadline != 0) {
-        long left = deadline - System.nanoTime();
-        if (left <= 0) {
-          throw new SQLTimeoutException("the statement's query timeout passed", "57014");
+        if (deadline != 0) {
+          long left = deadline - System.nanoTime();
+          if (left <= 0) {
+            throw new SQLTimeoutException("the statement's query timeout passed", "57014");
+          }
+          ps.setQueryTimeout((int) Math.max(1, (left + 999_999_999L) / 1_000_000_000L));
         }
-        ps.setQueryTimeout((int) Math.max(1, (left + 999_999_999L) / 1_000_000_000L));
-      }
-    }
-
-    /** As {@link #prepare(Step, Object[])}, keyless, reporting the keys the database generates. */
-    PreparedStatement prepareGenerated(Step step) throws SQLException {
-      checkCancelled();
-      PreparedStatement ps = v.prepareStatement(step.sql, Statement.RETURN_GENERATED_KEYS);
-      try {
-        limit(ps);
         context.running(ps);
-        int i = 1;
-        for (int b : step.binds) {
-          context.bind(ps, i++, b);
-        }
         return ps;
       } catch (SQLException | RuntimeException e) {
         ps.close();
@@ -631,7 +635,13 @@ final class Writes {
 
     PreparedStatement prepare(Step step, Object @Nullable [] key, boolean scrollable)
         throws SQLException {
-      PreparedStatement ps = prepare(step.sql, scrollable);
+      return prepare(step, key, scrollable, false);
+    }
+
+    PreparedStatement prepare(
+        Step step, Object @Nullable [] key, boolean scrollable, boolean generated)
+        throws SQLException {
+      PreparedStatement ps = prepare(step.sql, scrollable, generated);
       try {
         int i = 1;
         for (int b : step.binds) {
@@ -659,7 +669,13 @@ final class Writes {
   private static int bind(PreparedStatement ps, int from, Object[] key) throws SQLException {
     int i = from;
     for (Object k : key) {
-      ps.setObject(i++, k);
+      if (k instanceof Float) {
+        // as the stored float's exact double: MySQL and MariaDB compare an uncast 0.1 as a double,
+        // which no stored float equals (todo 192)
+        ps.setDouble(i++, ((Float) k).doubleValue());
+      } else {
+        ps.setObject(i++, k);
+      }
     }
     return i;
   }
@@ -1004,10 +1020,11 @@ final class Writes {
    */
   private static final class InsertPlan extends Plan {
     final Step insert;
-    // where the INSERT returns nothing, the keys it wrote, read back by their values, or
-    // generated: the AUTO_INCREMENT values the vendor driver reports
-    final @Nullable Step readBack;
-    final boolean generated;
+    // on MySQL, which has no RETURNING, each row's key read back by its values; none for an
+    // AUTO_INCREMENT key the statement leaves out, which the vendor driver reports
+    final List<Step> readBack;
+    // whether that key is AUTO_INCREMENT, asked once
+    private volatile @Nullable Boolean autoIncrement;
     final @Nullable Step inFlight;
     // at SNAPSHOT and SERIALIZABLE, the keys committed in the snapshot
     final @Nullable Step committed;
@@ -1019,8 +1036,7 @@ final class Writes {
     InsertPlan(
         Names n,
         Step insert,
-        @Nullable Step readBack,
-        boolean generated,
+        List<Step> readBack,
         @Nullable Step inFlight,
         @Nullable Step committed,
         @Nullable Step repeats,
@@ -1028,8 +1044,7 @@ final class Writes {
         String exposed) {
       super(n);
       this.insert = insert;
-      this.readBack = readBack;
-      this.generated = generated;
+      this.readBack = List.copyOf(readBack);
       this.inFlight = inFlight;
       this.committed = committed;
       this.repeats = repeats;
@@ -1045,7 +1060,10 @@ final class Writes {
     @Override
     List<String> sql() {
       List<String> out = new ArrayList<>(List.of(insert.sql));
-      for (Step s : Arrays.asList(readBack, inFlight, committed, repeats)) {
+      for (Step s : readBack) {
+        out.add(s.sql);
+      }
+      for (Step s : Arrays.asList(inFlight, committed, repeats)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -1064,8 +1082,15 @@ final class Writes {
       ResultSet rs = null;
       Savepoint sp = run.v.setSavepoint();
       try {
-        if (generated) {
-          ps = run.prepareGenerated(insert);
+        if (generated()) {
+          if (!autoIncrement(run)) {
+            throw Errors.unsupported(
+                "an INSERT of a ScalarDB table that leaves out its key needs an AUTO_INCREMENT"
+                    + " key on this engine");
+          }
+          // ponytail: the vendor driver numbers the rows from the first value by the increment it
+          // read at connect; a session that changes auto_increment_increment gets wrong keys
+          ps = run.prepare(insert, null, false, true);
           long count = ps.executeLargeUpdate();
           try (ResultSet k = ps.getGeneratedKeys()) {
             while (k.next()) {
@@ -1074,11 +1099,10 @@ final class Writes {
           }
           if (keys.rows.size() != count) {
             throw new SQLException(
-                "an INSERT of a ScalarDB table that does not give its key needs an AUTO_INCREMENT"
-                    + " key",
+                "the database reported " + keys.rows.size() + " keys for " + count + " rows",
                 "0AN01");
           }
-        } else if (readBack == null) {
+        } else if (readBack.isEmpty()) {
           ps = run.prepare(insert, null, returning != null);
           rs = ps.executeQuery();
           int from = rs.getMetaData().getColumnCount() - width + 1;
@@ -1130,13 +1154,25 @@ final class Writes {
         }
       }
       try {
-        if (readBack != null) {
-          // ponytail: in the database's order, not the statement's, for getGeneratedKeys
-          try (PreparedStatement r = run.prepare(readBack, null);
+        for (int row = 0; row < readBack.size(); row++) {
+          // each row's key as stored: MySQL may have stored another value than the one given, or
+          // generated one for a NULL or 0, and a value compared after conversion may match other
+          // rows; exactly one match each, or the write is undone
+          int before = keys.rows.size();
+          try (PreparedStatement r = run.prepare(readBack.get(row), null);
               ResultSet k = r.executeQuery()) {
             while (k.next()) {
               keys.read(k, 1, width);
             }
+          }
+          if (keys.rows.size() - before != 1) {
+            throw Errors.unsupported(
+                "the key of row "
+                    + (row + 1)
+                    + " of the INSERT reads back as "
+                    + (keys.rows.size() - before)
+                    + " rows: bind each key with its column's type, and leave an AUTO_INCREMENT"
+                    + " key out of the column list rather than give it NULL or 0");
           }
         }
         stamp(run, keys);
@@ -1154,6 +1190,30 @@ final class Writes {
         throw e;
       }
       return keys.rows.size();
+    }
+
+    /** Whether the database generates the key: MySQL, keys not read back. */
+    private boolean generated() {
+      return n.engine == Engine.MYSQL && readBack.isEmpty();
+    }
+
+    private boolean autoIncrement(Run run) throws SQLException {
+      Boolean known = autoIncrement;
+      if (known == null) {
+        try (PreparedStatement ps =
+            run.v.prepareStatement(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema = ? AND table_name = ?"
+                    + " AND column_name = ? AND extra LIKE '%auto_increment%'")) {
+          ps.setString(1, n.namespace);
+          ps.setString(2, n.dataTable);
+          ps.setString(3, n.keyColumns.get(0));
+          try (ResultSet rs = ps.executeQuery()) {
+            known = rs.next();
+          }
+        }
+        autoIncrement = known;
+      }
+      return known;
     }
 
     /**
@@ -1451,8 +1511,14 @@ final class Writes {
       Map<List<Object>, Anchors.Version> found = new HashMap<>();
       for (int from = 0; from < keys.rows.size(); from += CHUNK) {
         List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
-        String read = n.withMeta("d", n.keyIn("d", keys.types, chunk.size()));
-        try (PreparedStatement ps = run.prepare(relock == null ? read : read + " " + relock)) {
+        String where = n.keyIn("d", keys.types, chunk.size());
+        // the relock goes through the primary key, which a covering index would otherwise stand
+        // in for
+        String read =
+            relock == null
+                ? n.withMeta("d", where)
+                : n.withMeta("d FORCE INDEX (PRIMARY)", "d", where) + " " + relock;
+        try (PreparedStatement ps = run.prepare(read)) {
           bindAll(ps, 1, chunk);
           try (ResultSet m = ps.executeQuery()) {
             while (m.next()) {
@@ -1477,6 +1543,8 @@ final class Writes {
   static final class Names {
     final Engine engine;
     final String table; // as Router.Anchored names it
+    final String namespace; // stored spellings, unquoted
+    final String dataTable;
 
     final List<String> keyColumns;
     final String data;
@@ -1491,6 +1559,8 @@ final class Writes {
     Names(Engine engine, TableInfo t) {
       this.engine = engine;
       this.table = t.namespace() + "." + t.table();
+      this.namespace = t.namespace();
+      this.dataTable = t.dataTable();
       this.keyColumns = t.keyColumns();
       String ns = engine.quote(t.namespace()) + ".";
       this.data = ns + engine.quote(t.dataTable());
@@ -1536,15 +1606,17 @@ final class Writes {
      */
     String keyValues(List<String> types, int count) {
       if (engine != Engine.POSTGRESQL) {
-        // a select per key: MySQL's VALUES names no columns; the types are PostgreSQL's
-        List<String> rows = new ArrayList<>();
-        for (int i = 0; i < count; i++) {
-          List<String> items =
-              new ArrayList<>(List.of(i + (i == 0 ? " AS " + engine.quote(ORDINAL) : "")));
-          for (int j = 0; j < types.size(); j++) {
-            items.add("?" + (i == 0 ? " AS " + engine.quote("scalardb_native_k" + j) : ""));
-          }
-          rows.add("SELECT " + String.join(", ", items));
+        // a select per key, the first naming the columns: MySQL's VALUES names none; the types
+        // are PostgreSQL's
+        StringBuilder first = new StringBuilder("SELECT 0 AS " + engine.quote(ORDINAL));
+        StringBuilder rest = new StringBuilder();
+        for (int j = 0; j < types.size(); j++) {
+          first.append(", ? AS ").append(engine.quote("scalardb_native_k" + j));
+          rest.append(", ?");
+        }
+        List<String> rows = new ArrayList<>(List.of(first.toString()));
+        for (int i = 1; i < count; i++) {
+          rows.add("SELECT " + i + rest);
         }
         return "(" + String.join(" UNION ALL ", rows) + ") u";
       }
@@ -1596,6 +1668,14 @@ final class Writes {
      * its metadata.
      */
     String withMeta(String keyQualifier, String where) {
+      return withMeta("d", keyQualifier, where);
+    }
+
+    /**
+     * As {@link #withMeta(String, String)}, {@code dataRef} after the data table's name: its alias
+     * {@code d}, and an index hint if any.
+     */
+    String withMeta(String dataRef, String keyQualifier, String where) {
       return "SELECT "
           + columns(keyQualifier)
           + ", m."
@@ -1606,7 +1686,9 @@ final class Writes {
           + txState
           + " FROM "
           + data
-          + " d LEFT JOIN "
+          + " "
+          + dataRef
+          + " LEFT JOIN "
           + meta
           + " m ON "
           + keyJoin("m", "d")

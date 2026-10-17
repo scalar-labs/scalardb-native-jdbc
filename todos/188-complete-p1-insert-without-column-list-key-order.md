@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "188"
 tags: [code-review, correctness, jdbc]
@@ -34,9 +34,9 @@ TableInfo and use that.
 
 ## Acceptance Criteria
 
-- [ ] INSERT without a column list never stamps a row it did not write, on any engine
-- [ ] Duplicate classification on PostgreSQL uses correct keys or none
-- [ ] Test with a table whose key is not its first column
+- [x] INSERT without a column list never stamps a row it did not write, on any engine
+- [x] Duplicate classification on PostgreSQL uses correct keys or none
+- [x] Test with a table whose key is not its first column
 
 ## Recommended Action
 
@@ -46,3 +46,8 @@ TableInfo and use that.
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- StatementShape.insertKeyValues: no key list without a column list again; MySQL refuses such an INSERT. Tested on all three engines with a table whose key is not its first column.

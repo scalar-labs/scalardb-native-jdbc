@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "192"
 tags: [code-review, correctness, mysql, mariadb]
@@ -27,7 +27,7 @@ Refuse FLOAT/REAL key columns on MySQL/MariaDB (ScalarDB discourages approximate
 
 ## Acceptance Criteria
 
-- [ ] UPDATE/DELETE of a FLOAT-keyed table works or is refused up front, never a 40001 loop
+- [x] UPDATE/DELETE of a FLOAT-keyed table works or is refused up front, never a 40001 loop
 
 ## Recommended Action
 
@@ -37,3 +37,8 @@ Refuse FLOAT/REAL key columns on MySQL/MariaDB (ScalarDB discourages approximate
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Writes.bind: a Float key is bound as its exact double; UPDATE and DELETE of a FLOAT-keyed table tested on all three engines.

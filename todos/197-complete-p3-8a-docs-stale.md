@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "197"
 tags: [code-review, documentation]
@@ -22,7 +22,7 @@ dependencies: []
 
 ## Acceptance Criteria
 
-- [ ] Each passage matches the code
+- [x] Each passage matches the code
 
 ## Recommended Action
 
@@ -32,3 +32,8 @@ dependencies: []
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- design 1 (table rows, error table), 4.2 (locking-clause rule, MySQL paragraph), 4.3, 5 (Built so far), 9 (covering index), README.

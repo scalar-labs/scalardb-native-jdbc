@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "190"
 tags: [code-review, correctness, performance, mysql, mariadb]
@@ -27,7 +27,7 @@ Document the switches as required. Weaker.
 
 ## Acceptance Criteria
 
-- [ ] Locking reads lock only matching rows with merging switched off in the session (test)
+- [x] Locking reads lock only matching rows with merging switched off in the session (test)
 
 ## Recommended Action
 
@@ -37,3 +37,8 @@ Document the switches as required. Weaker.
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- MERGE(alias) hint on MySQL, SET STATEMENT optimizer_switch='derived_merge=on' FOR on MariaDB; tested with merging and pushdown off in the session (another row stays unlocked).

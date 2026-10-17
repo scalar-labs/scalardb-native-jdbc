@@ -708,68 +708,84 @@ final class Router {
             "a column qualified by a schema in a locking read of a ScalarDB table" + tables);
       }
     }
-    // MySQL and MariaDB lock no row a derived table reads for a clause outside it: the clause
-    // moves into the committed copy, which they merge into the statement, the user's predicate
-    // with it, so that only the rows it matches are locked
+    Writes.Names n = new Writes.Names(engine, t);
+    // MySQL and MariaDB lock no row a derived table reads for a clause outside it: the statement is
+    // parsed again without its clause, which goes into the committed copy instead, and the copy is
+    // merged into the statement, the user's predicate with it, so that only the rows it matches
+    // are locked (todos 189, 190)
+    SqlAst read = ast;
+    SqlAst.TableRef readRef = ref;
+    IdentityHashMap<SqlAst.TableRef, TableInfo> readDb = scalarDb;
     String inner = null;
     String relock = null;
-    int clause = -1;
     if (engine != Engine.POSTGRESQL) {
-      if (shape.lockMode() != ForMode.UPDATE) {
-        // a shared lock read through a covering index locks the index entry only: the rows are
-        // locked again by key, as the versions are read under the lock
-        // ponytail: NOWAIT there, under SKIP LOCKED too, fails rather than skips a row locked in
-        // between
-        relock =
-            (engine == Engine.MARIADB ? "LOCK IN SHARE MODE" : "FOR SHARE")
-                + (shape.noWait() || shape.skipLocked() ? " NOWAIT" : "");
+      boolean update = shape.lockMode() == ForMode.UPDATE;
+      if (!update && shape.lockMode() != ForMode.SHARE) {
+        throw Errors.unsupported(
+            "only FOR UPDATE and FOR SHARE lock a ScalarDB table on this engine" + tables);
       }
-      clause = Math.max(ast.afterLast("FOR") - "FOR".length(), ast.afterLast("LOCK") - 4);
-      inner =
-          (shape.lockMode() == ForMode.UPDATE
-                  ? "FOR UPDATE"
-                  : engine == Engine.MARIADB ? "LOCK IN SHARE MODE" : "FOR SHARE")
-              + (shape.noWait() ? " NOWAIT" : "")
-              + (shape.skipLocked() ? " SKIP LOCKED" : "");
+      String share = engine == Engine.MARIADB ? "LOCK IN SHARE MODE" : "FOR SHARE";
+      String wait = (shape.noWait() ? " NOWAIT" : "") + (shape.skipLocked() ? " SKIP LOCKED" : "");
+      inner = (update ? "FOR UPDATE" : share) + wait;
+      // a shared lock read through a covering index locks the index entry only: the rows are
+      // locked again by key as the versions are read under the lock, not their metadata rows
+      // ponytail: NOWAIT there, under SKIP LOCKED too, fails rather than skips a row locked in
+      // between
+      relock =
+          update
+              ? null
+              : share + (engine == Engine.MYSQL ? " OF d" : "") + (wait.isEmpty() ? "" : " NOWAIT");
+      int clause = ast.afterLast("FOR") - "FOR".length();
+      SqlAst bare =
+          clause < 0 || ast.source().contains(LOCK_MARK) ? null : ast.without(clause, ast.end());
+      if (bare == null || bare.hasLockingOrIntoClause() || bare.tableRefs().size() != 1) {
+        throw Errors.unsupported(
+            "the locking read cannot be rewritten onto the committed rows" + tables);
+      }
+      read = bare;
+      readRef = bare.tableRefs().get(0);
+      readDb = new IdentityHashMap<>();
+      readDb.put(readRef, t);
     }
-    Writes.Names n = new Writes.Names(engine, t);
+    SqlAst.TableRef anchoredRef = readRef;
     SqlAst.SplitText text =
         SplitRead.emit(
             engine,
-            ast,
-            ast.split(r -> scalarDb.containsKey(r) ? t.keyColumns() : null),
-            scalarDb,
+            read,
+            read.split(r -> r == anchoredRef ? t.keyColumns() : null),
+            readDb,
             new IdentityHashMap<>(),
             Set.of(),
-            List.of(ref),
-            (r, piece) -> versions(ref, n, piece, false),
+            List.of(readRef),
+            (r, piece) -> versions(anchoredRef, n, piece, false),
             true,
             false,
             inner == null ? null : LOCK_MARK);
     Expression where = shape.where();
     int[] span = where == null ? null : ast.span(where);
     List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
-    // the user's clause, the statement's last, comes out of the outer statement
-    String emitted = text == null ? "" : text.sql();
-    String own = clause < 0 || ast.end() < clause ? "" : ast.source().substring(clause, ast.end());
-    int at = own.isEmpty() ? -1 : emitted.lastIndexOf(own);
-    if (text == null
-        || (where != null && span == null)
-        || inWhere == null
-        || (inner != null
-            && (at < 0
-                || !emitted
-                    .substring(at + own.length())
-                    .strip()
-                    .equals(ast.source().substring(ast.end()).strip())))) {
+    if (text == null || (where != null && span == null) || inWhere == null) {
       throw Errors.unsupported(
           "the locking read cannot be rewritten onto the committed rows" + tables);
     }
-    String lockSql =
-        inner == null
-            ? emitted
-            : emitted.substring(0, at).replace(LOCK_MARK, inner)
-                + emitted.substring(at + own.length());
+    String lockSql = text.sql();
+    if (inner != null) {
+      lockSql = lockSql.replace(LOCK_MARK, inner);
+      if (engine == Engine.MARIADB) {
+        lockSql = "SET STATEMENT optimizer_switch='derived_merge=on' FOR " + lockSql;
+      } else {
+        // ponytail: ahead of any hint comment of the user's, which MySQL then ignores
+        int select = read.afterLast("SELECT");
+        if (select < 0 || !lockSql.regionMatches(true, 0, read.source(), 0, select)) {
+          throw Errors.unsupported(
+              "the locking read cannot be rewritten onto the committed rows" + tables);
+        }
+        lockSql =
+            lockSql.substring(0, select)
+                + String.format(" /*+ MERGE(%s) */", exposed(readRef))
+                + lockSql.substring(select);
+      }
+    }
     Writes.Step inFlight =
         shape.skipLocked()
             ? null // a row in flight is a locked row, skipped

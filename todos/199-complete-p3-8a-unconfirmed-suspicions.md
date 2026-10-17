@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "199"
 tags: [code-review, investigation, mysql, mariadb]
@@ -25,7 +25,7 @@ To check, not yet reproduced:
 
 ## Acceptance Criteria
 
-- [ ] Each item reproduced and filed, or ruled out
+- [x] Each item reproduced and filed, or ruled out
 
 ## Recommended Action
 
@@ -35,3 +35,8 @@ To check, not yet reproduced:
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Relock NOWAIT under SKIP LOCKED: kept, ponytail. Relock S-locking metadata rows: MySQL uses OF d with FORCE INDEX (PRIMARY) (the covering test showed OF alone fell back to the index); MariaDB has no OF. Localized keyViolated: falls back to the primary key, a retry ends once the key settles; not changed. Deadlock state: a vendor SQLTransactionRollbackException during a write now marks the transaction rollback-only. auto_increment_increment: ponytail in InsertPlan. Trailing ;: refused by design on every engine.

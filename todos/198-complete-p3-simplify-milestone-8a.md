@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "198"
 tags: [code-review, quality, simplicity]
@@ -26,7 +26,7 @@ Take them with the fixes above where they touch the same code.
 
 ## Acceptance Criteria
 
-- [ ] Each simplification applied or rejected with a reason
+- [x] Each simplification applied or rejected with a reason
 
 ## Recommended Action
 
@@ -36,3 +36,8 @@ Take them with the fixes above where they touch the same code.
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- 1-3 and 6-7 applied (Router.lockingRead rewritten anyway; keyValues aliases the first row only; FROM found only in the MariaDB branch); 4 folded prepareGenerated into prepare; 5 InsertPlan.generated() derived from the engine and the read-back steps.

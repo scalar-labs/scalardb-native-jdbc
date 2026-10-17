@@ -469,6 +469,27 @@ class SqlAstTest {
         .isEqualTo("SELECT 'LOCK IN SHARE MODE'");
     assertThat(SqlAst.lockInShareModeAsForShare("SELECT 1 LOCK IN SHARE MODE"))
         .isEqualTo("SELECT 1 FOR SHARE         ");
+    // a comment after it, which tools append (todo 194)
+    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 1 LOCK IN SHARE MODE /* app */ -- x"))
+        .startsWith("SELECT 1 FOR SHARE ");
+  }
+
+  @Test
+  void startOfLastBefore_findsKeywordsOnly() {
+    String sql = "DELETE FROM /* from cache */ t WHERE x = 'from'";
+    SqlAst ast = SqlAst.analyze(sql, Engine.MARIADB, false).get();
+    assertThat(ast.startOfLastBefore("FROM", sql.indexOf(" t "))).isEqualTo(7);
+    assertThat(ast.startOfLastBefore("FROM", 3)).isEqualTo(-1);
+  }
+
+  @Test
+  void without_parsesTheStatementAgainWithoutAClause() {
+    String sql = "SELECT x FROM t WHERE id = ? FOR  UPDATE\n NOWAIT -- c";
+    SqlAst ast = SqlAst.analyze(sql, Engine.MYSQL, false).get();
+    SqlAst bare = ast.without(ast.afterLast("FOR") - 3, ast.end());
+    assertThat(bare).isNotNull();
+    assertThat(bare.hasLockingOrIntoClause()).isFalse();
+    assertThat(bare.parameterCount()).isEqualTo(1);
   }
 
   @Test

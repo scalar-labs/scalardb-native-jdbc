@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "186"
 tags: [code-review, correctness, jdbc, mysql]
@@ -44,10 +44,10 @@ Read the key back with `LAST_INSERT_ID()`-free means: insert one row per stateme
 
 ## Acceptance Criteria
 
-- [ ] NULL- and 0-bound AUTO_INCREMENT keys get metadata and the right count, or are refused
-- [ ] A coerced key (1.6 into INT, 1 into VARCHAR with '01' present) never stamps another row
-- [ ] Read-back row count must equal the INSERT count, else the write is undone and fails
-- [ ] Integration tests on MySQL for each case
+- [x] NULL- and 0-bound AUTO_INCREMENT keys get metadata and the right count, or are refused
+- [x] A coerced key (1.6 into INT, 1 into VARCHAR with '01' present) never stamps another row
+- [x] Read-back row count must equal the INSERT count, else the write is undone and fails
+- [x] Integration tests on MySQL for each case
 
 ## Recommended Action
 
@@ -57,3 +57,8 @@ Read the key back with `LAST_INSERT_ID()`-free means: insert one row per stateme
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Writes: each VALUES row's key is read back by its own values and must match exactly one row, or the write is undone and refused (0AN01); a NULL or 0 AUTO_INCREMENT key is refused, never left without metadata. MoreWritesIntegrationTest.reviewOf8a covers NULL, 0 and the '01' case.

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "195"
 tags: [code-review, quality, mariadb]
@@ -21,7 +21,7 @@ Take the FROM keyword's position from the parser tokens (SqlAst), not the text.
 
 ## Acceptance Criteria
 
-- [ ] A comment containing "from" before the table name does not break the DELETE (test)
+- [x] A comment containing "from" before the table name does not break the DELETE (test)
 
 ## Recommended Action
 
@@ -31,3 +31,8 @@ Take the FROM keyword's position from the parser tokens (SqlAst), not the text.
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- SqlAst.startOfLastBefore finds the FROM keyword by token; unit and integration tests.

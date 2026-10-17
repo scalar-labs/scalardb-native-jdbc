@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "193"
 tags: [code-review, correctness, jdbc, mysql, mariadb]
@@ -32,8 +32,8 @@ Ask the vendor driver: `Driver.getPropertyInfo(url, props)` for the effective va
 
 ## Acceptance Criteria
 
-- [ ] Every spelling above is refused; false/no/0 accepted
-- [ ] Integration test on MySQL and MariaDB
+- [x] Every spelling above is refused; false/no/0 accepted
+- [x] Integration test on MySQL and MariaDB
 
 ## Recommended Action
 
@@ -43,3 +43,8 @@ Ask the vendor driver: `Driver.getPropertyInfo(url, props)` for the effective va
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- NativeJdbcDriver.requireRowsMatched asks the vendor driver (getPropertyInfo), which applies its own spellings and precedence; verified against Connector/J 26.7 and MariaDB 3.5.10 for each bypass; true only is refused. Integration test (properties and URL); the unit test moved there.

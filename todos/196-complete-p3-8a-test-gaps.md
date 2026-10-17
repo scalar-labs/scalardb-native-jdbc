@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "196"
 tags: [code-review, testing]
@@ -19,9 +19,9 @@ dependencies: []
 
 ## Acceptance Criteria
 
-- [ ] PostgreSQL duplicate assertions are exact again
-- [ ] NOWAIT error codes asserted
-- [ ] A test where a multi-key write fails part way on MySQL, the transaction continues and commits, and no partial write remains
+- [x] PostgreSQL duplicate assertions are exact again
+- [x] NOWAIT error codes asserted
+- [x] A test where a multi-key write fails part way on MySQL, the transaction continues and commits, and no partial write remains
 
 ## Recommended Action
 
@@ -31,3 +31,8 @@ dependencies: []
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- PostgreSQL duplicates assert 23505 again (isDuplicateKey, SQLState per engine); NOWAIT asserts 3572 and 1205; a multi-key write failing part way on MySQL and MariaDB is undone, the transaction goes on and commits; the other cases with their todos.

@@ -98,7 +98,23 @@ class MoreWritesIntegrationTest {
               + (e.engine() == Engine.POSTGRESQL ? "TIMESTAMPTZ" : "DATETIME(6)")
               + " PRIMARY KEY, x TEXT)",
           // run once per statement, after its snapshot: opens a window for a ScalarDB prepare
-          e.pauseFunction("wb.pause", 1));
+          e.pauseFunction("wb.pause", 1),
+          // the review of 8a: a key that is not the first column, a NOT NULL column, a text key,
+          // a FLOAT key
+          "CREATE TABLE wb.ord (x INT, k INT PRIMARY KEY)",
+          "INSERT INTO wb.ord VALUES (0, 5)",
+          "CREATE TABLE wb.nn (id INT PRIMARY KEY, v INT NOT NULL)",
+          "INSERT INTO wb.nn VALUES (1, 0), (2, 0)",
+          "CREATE TABLE wb.vk (k VARCHAR(10) PRIMARY KEY, x INT)",
+          "INSERT INTO wb.vk VALUES ('01', 0)",
+          "CREATE TABLE wb.fl (k FLOAT PRIMARY KEY, x INT)",
+          "INSERT INTO wb.fl VALUES (0.1, 0)");
+      if (e.engine() == Engine.MYSQL) {
+        // an AUTO_INCREMENT column that is not the key
+        e.execute(
+            c,
+            "CREATE TABLE wb.seq (k INT DEFAULT 99 PRIMARY KEY, s INT AUTO_INCREMENT UNIQUE, x INT)");
+      }
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
@@ -108,6 +124,12 @@ class MoreWritesIntegrationTest {
       admin.importTable("wb", "gen", DECOUPLED, Map.of());
       admin.importTable("wb", "cov", DECOUPLED, Map.of());
       admin.importTable("wb", "tz", DECOUPLED, Map.of());
+      for (String table : List.of("ord", "nn", "vk", "fl")) {
+        admin.importTable("wb", table, DECOUPLED, Map.of());
+      }
+      if (e.engine() == Engine.MYSQL) {
+        admin.importTable("wb", "seq", DECOUPLED, Map.of());
+      }
       admin.createTable(
           "wb",
           "made",
@@ -174,7 +196,147 @@ class MoreWritesIntegrationTest {
           tm,
           new Table(
               "wb.gen", "wb." + gen.metadataTable(), Objects.requireNonNull(gen.virtualTable())));
+      reviewOf8a(e, catalog);
     }
+  }
+
+  /** The findings of the review of milestone 8a (todos 186-199). */
+  private static void reviewOf8a(Engines e, Catalog catalog) throws Exception {
+    Engine engine = e.engine();
+    boolean mysql = engine == Engine.MYSQL;
+    String ordMeta = "wb." + catalog.lookup(List.of(), "wb", "ord").metadataTable();
+    String vkMeta = "wb." + catalog.lookup(List.of(), "wb", "vk").metadataTable();
+    try (Connection d = e.openDriver();
+        Connection v = e.open()) {
+      // 188: without a column list the key's position is the table's, not ScalarDB's
+      if (mysql) {
+        assertRefused(() -> d.createStatement().executeUpdate("INSERT INTO wb.ord VALUES (5, 1)"));
+        assertThat(rows(v, "SELECT k, tx_version FROM " + ordMeta + " ORDER BY k"))
+            .containsExactly("5/1");
+      } else {
+        assertThat(d.createStatement().executeUpdate("INSERT INTO wb.ord VALUES (5, 1)"))
+            .isEqualTo(1);
+        assertThat(rows(v, "SELECT k, tx_version FROM " + ordMeta + " ORDER BY k"))
+            .containsExactly("1/1", "5/1");
+      }
+      if (mysql) {
+        // 186: a NULL or 0 AUTO_INCREMENT key, which MySQL generates, is refused, not left
+        // without metadata; nothing is written
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO wb.gen (id, x) VALUES (?, 'n')")) {
+          ps.setNull(1, java.sql.Types.INTEGER);
+          assertRefused(ps::executeUpdate);
+        }
+        assertRefused(
+            () -> d.createStatement().executeUpdate("INSERT INTO wb.gen (id, x) VALUES (0, 'z')"));
+        assertThat(rows(v, "SELECT COUNT(*) FROM wb.gen WHERE x IN ('n', 'z')"))
+            .containsExactly("0");
+        // 186: a key compared after conversion that matches another row
+        assertRefused(
+            () -> d.createStatement().executeUpdate("INSERT INTO wb.vk (k, x) VALUES (1, 1)"));
+        assertThat(rows(v, "SELECT k, tx_version FROM " + vkMeta)).containsExactly("01/1");
+        assertThat(d.createStatement().executeUpdate("INSERT INTO wb.vk (k, x) VALUES ('1', 1)"))
+            .isEqualTo(1);
+        // 187: an expression key, and an AUTO_INCREMENT column that is not the key
+        assertRefused(
+            () ->
+                d.createStatement()
+                    .executeUpdate("INSERT INTO wb.gen (id, x) VALUES (70 + 0, 'e')"));
+        assertRefused(() -> d.createStatement().executeUpdate("INSERT INTO wb.seq (x) VALUES (9)"));
+        assertThat(rows(v, "SELECT COUNT(*) FROM wb.seq")).containsExactly("0");
+      }
+      // 192: a FLOAT key matches its own row
+      assertThat(d.createStatement().executeUpdate("UPDATE wb.fl SET x = 2 WHERE x = 0"))
+          .isEqualTo(1);
+      assertThat(d.createStatement().executeUpdate("DELETE FROM wb.fl WHERE x >= 0")).isEqualTo(1);
+      // 195: a comment holding "from" before a created table's name
+      d.createStatement().executeUpdate("INSERT INTO wb.made (id, x) VALUES (90, 'f')");
+      assertThat(
+              d.createStatement()
+                  .executeUpdate("DELETE FROM /* from cache */ wb.made WHERE id = 90"))
+          .isEqualTo(1);
+      d.setAutoCommit(false);
+      // 189: whitespace in the clause; a statement ending in ; the split read refuses everywhere
+      assertThat(rows(d, "SELECT x FROM wb.imp WHERE id = 1 FOR  UPDATE\n  NOWAIT"))
+          .containsExactly("a");
+      assertRefused(() -> rows(d, "SELECT x FROM wb.imp WHERE id = 1 FOR UPDATE;"));
+      d.rollback();
+      if (engine == Engine.MARIADB) {
+        for (String wait : List.of("NOWAIT", "SKIP LOCKED")) {
+          assertThat(rows(d, "SELECT x FROM wb.imp WHERE id = 1 LOCK IN SHARE MODE " + wait))
+              .containsExactly("a");
+          d.rollback();
+        }
+        // 194: a comment after the clause
+        assertThat(rows(d, "SELECT x FROM wb.imp WHERE id = 1 LOCK IN SHARE MODE /* c */"))
+            .containsExactly("a");
+        d.rollback();
+      }
+      if (engine != Engine.POSTGRESQL) {
+        // 189: the driver's own mark in a literal is refused, never replaced
+        assertRefused(
+            () ->
+                rows(
+                    d,
+                    "SELECT x FROM wb.imp WHERE x <> '/* scalardb_native_lock */' AND id = 1"
+                        + " FOR UPDATE"));
+        d.rollback();
+        // 191: FOR NO KEY UPDATE is PostgreSQL's
+        assertRefused(() -> rows(d, "SELECT x FROM wb.imp WHERE id = 1 FOR NO KEY UPDATE"));
+        d.rollback();
+        // 190: with derived tables neither merged nor given the predicate, still one row locked
+        e.execute(
+            d,
+            engine == Engine.MYSQL
+                ? "SET SESSION optimizer_switch = 'derived_merge=off,derived_condition_pushdown=off'"
+                : "SET SESSION optimizer_switch = 'derived_merge=off,condition_pushdown_for_derived=off'");
+        assertThat(rows(d, "SELECT x FROM wb.imp WHERE id = 1 FOR UPDATE")).containsExactly("a");
+        e.execute(v, "SET SESSION innodb_lock_wait_timeout = 1");
+        assertThat(v.createStatement().executeUpdate("UPDATE wb.imp SET x = x WHERE id = 2"))
+            .isEqualTo(1);
+        d.rollback();
+        // 196: a write that fails part way is undone to its start, and the transaction goes on
+        assertThatThrownBy(
+                () ->
+                    d.createStatement()
+                        .executeUpdate(
+                            "UPDATE wb.nn SET v = CASE WHEN id = 2 THEN NULL ELSE 1 END"))
+            .isInstanceOf(SQLException.class);
+        assertThat(d.createStatement().executeUpdate("UPDATE wb.nn SET v = 5 WHERE id = 2"))
+            .isEqualTo(1);
+        d.commit();
+        assertThat(rows(v, "SELECT id, v FROM wb.nn ORDER BY id")).containsExactly("1/0", "2/5");
+      }
+      d.setAutoCommit(true);
+    }
+    if (engine != Engine.POSTGRESQL) {
+      // 193: useAffectedRows on, whichever way it is set, is refused at connect
+      Properties on = new Properties();
+      on.setProperty("useAffectedRows", "true");
+      assertThatThrownBy(() -> e.openDriver(on).close())
+          .isInstanceOf(SQLException.class)
+          .extracting("SQLState")
+          .isEqualTo("08004");
+      String url = e.url();
+      String driverUrl =
+          "jdbc:scalardb-native:"
+              + url.substring("jdbc:".length())
+              + (url.contains("?") ? "&" : "?")
+              + "useAffectedRows=true";
+      assertThatThrownBy(
+              () -> java.sql.DriverManager.getConnection(driverUrl, e.username(), e.password()))
+          .isInstanceOf(SQLException.class)
+          .extracting("SQLState")
+          .isEqualTo("08004");
+    }
+  }
+
+  /** Asserts that a statement is refused with 0AN01. */
+  private static void assertRefused(org.assertj.core.api.ThrowableAssert.ThrowingCallable call) {
+    assertThatThrownBy(call)
+        .isInstanceOf(SQLException.class)
+        .extracting("SQLState")
+        .isEqualTo("0AN01");
   }
 
   private static void batches(
@@ -228,8 +390,9 @@ class MoreWritesIntegrationTest {
                 BatchUpdateException.class,
                 b -> {
                   assertThat(b.getUpdateCounts()).containsExactly(1);
-                  assertThat(b.getSQLState()).startsWith("23");
-                  assertThat(b.getNextException().getSQLState()).startsWith("23");
+                  assertThat(e.engine().isDuplicateKey(b.getNextException())).isTrue();
+                  assertThat(b.getSQLState())
+                      .isEqualTo(e.engine() == Engine.POSTGRESQL ? "23505" : "23000");
                 });
       }
       assertThat(rows(d, "SELECT COUNT(*) FROM " + t.sql + " WHERE id >= 20")).containsExactly("0");
@@ -293,7 +456,8 @@ class MoreWritesIntegrationTest {
             .extracting("SQLState")
             .isEqualTo("0AN01");
         for (int id = 30; id <= 32; id++) {
-          d.createStatement().executeUpdate("INSERT INTO " + t.sql + " VALUES (" + id + ", 'r')");
+          d.createStatement()
+              .executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (" + id + ", 'r')");
         }
       }
     }
@@ -381,9 +545,8 @@ class MoreWritesIntegrationTest {
       assertThat(rows(st.getGeneratedKeys())).containsExactly("5/e", "6/f");
       // DEFAULT for the key, and the statement's own RETURNING
       if (e.engine() == Engine.MYSQL) {
-        assertThat(
-                d.createStatement()
-                    .executeUpdate("INSERT INTO " + t.sql + " VALUES (DEFAULT, 'g')"))
+        // without a column list MySQL is refused (todo 188): the key left out instead
+        assertThat(d.createStatement().executeUpdate("INSERT INTO " + t.sql + " (x) VALUES ('g')"))
             .isEqualTo(1);
       } else {
         try (ResultSet rs =
@@ -517,8 +680,15 @@ class MoreWritesIntegrationTest {
         assertThatThrownBy(
                 () -> rows(other, "SELECT x FROM " + t.sql + " WHERE id = 42 FOR SHARE NOWAIT"))
             .isInstanceOf(SQLException.class)
-            .extracting("SQLState")
-            .isEqualTo(e.engine() == Engine.POSTGRESQL ? "55P03" : "HY000");
+            .satisfies(
+                ex -> {
+                  SQLException s = (SQLException) ex;
+                  switch (e.engine()) {
+                    case POSTGRESQL -> assertThat(s.getSQLState()).isEqualTo("55P03");
+                    case MYSQL -> assertThat(s.getErrorCode()).isEqualTo(3572);
+                    default -> assertThat(s.getErrorCode()).isEqualTo(1205);
+                  }
+                });
         other.rollback();
         assertThatThrownBy(
                 () -> rows(other, "SELECT x FROM " + t.sql + " WHERE id >= 42 FOR UPDATE"))

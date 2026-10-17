@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "191"
 tags: [code-review, correctness, mysql, mariadb]
@@ -22,7 +22,7 @@ Refuse `NO_KEY_UPDATE` off PostgreSQL with 0AN01, as `KEY_SHARE` is refused.
 
 ## Acceptance Criteria
 
-- [ ] FOR NO KEY UPDATE is refused on MySQL and MariaDB (test)
+- [x] FOR NO KEY UPDATE is refused on MySQL and MariaDB (test)
 
 ## Recommended Action
 
@@ -32,3 +32,8 @@ Refuse `NO_KEY_UPDATE` off PostgreSQL with 0AN01, as `KEY_SHARE` is refused.
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Only FOR UPDATE and FOR SHARE are taken on MySQL and MariaDB; FOR NO KEY UPDATE is refused. Tested.

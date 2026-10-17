@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "187"
 tags: [code-review, correctness, jdbc, mysql]
@@ -34,9 +34,9 @@ only through an omitted column. Simpler, still needs the AUTO_INCREMENT check.
 
 ## Acceptance Criteria
 
-- [ ] Expression keys and non-key AUTO_INCREMENT columns are refused (0AN01) or handled exactly
-- [ ] No committed row is restamped by an INSERT that did not write it
-- [ ] Integration tests for the three cases
+- [x] Expression keys and non-key AUTO_INCREMENT columns are refused (0AN01) or handled exactly
+- [x] No committed row is restamped by an INSERT that did not write it
+- [x] Integration tests for the three cases
 
 ## Recommended Action
 
@@ -46,3 +46,8 @@ only through an omitted column. Simpler, still needs the AUTO_INCREMENT check.
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Writes: the generated path only when the column list leaves out the single key column and information_schema shows it AUTO_INCREMENT (asked once per plan); expression keys and a non-key AUTO_INCREMENT column are refused. Ponytail: the vendor numbers rows by the increment read at connect. Tested.

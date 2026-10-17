@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "194"
 tags: [code-review, quality, mysql, mariadb]
@@ -23,7 +23,7 @@ Allow trailing comments in the lookahead; support or refuse WAIT n explicitly. L
 
 ## Acceptance Criteria
 
-- [ ] A trailing comment after LOCK IN SHARE MODE parses (unit test)
+- [x] A trailing comment after LOCK IN SHARE MODE parses (unit test)
 
 ## Recommended Action
 
@@ -33,3 +33,8 @@ Allow trailing comments in the lookahead; support or refuse WAIT n explicitly. L
 
 **By:** Claude Code
 - From the review of milestone 8a, 758043b.
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- The LOCK IN SHARE MODE rewrite allows trailing comments; WAIT n stays refused; leniency kept. Unit test.
