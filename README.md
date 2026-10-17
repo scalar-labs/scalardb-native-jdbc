@@ -78,7 +78,7 @@ slf4j-api and its vendor driver on the classpath, and connects with `jdbc:scalar
 | `setTransactionIsolation` | Engines | ScalarDB settings |
 |---|---|---|
 | `TRANSACTION_READ_COMMITTED` | all five | none |
-| `TRANSACTION_REPEATABLE_READ` (SNAPSHOT) | PostgreSQL | none |
+| `TRANSACTION_REPEATABLE_READ` (SNAPSHOT) | PostgreSQL, MySQL, MariaDB | none |
 | `TRANSACTION_SERIALIZABLE` | PostgreSQL | `scalar.db.consensus_commit.isolation_level=SERIALIZABLE` and `scalar.db.jdbc.isolation_level=SERIALIZABLE` |
 
 At SNAPSHOT and SERIALIZABLE, a statement that reaches a row a ScalarDB transaction is writing fails
@@ -90,9 +90,9 @@ serialization failure. ScalarDB reports a failed read as `CrudException`, or `Va
 `CommitException` at commit, not as a conflict exception: a ScalarDB application retries those when
 the cause's SQLState is `40001`.
 
-`TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. On MySQL, MariaDB, SQL Server and
-Oracle the other two levels are accepted, but every statement on a ScalarDB table is refused with
-`0AN01` for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot
+`TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. SERIALIZABLE on MySQL and MariaDB,
+and the two levels on SQL Server and Oracle, are accepted, but every statement on a ScalarDB table is
+refused with `0AN01` there for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot
 isolation; `TRANSACTION_REPEATABLE_READ` will be the level to use there.
 
 ## Preview scope
@@ -105,8 +105,8 @@ and SERIALIZABLE on PostgreSQL came after it.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
 - On MySQL an INSERT has no `RETURNING`, and gives each key column a literal or a placeholder of the
-  column's type, or leaves out an `AUTO_INCREMENT` key (not NULL or 0 for it). An INSERT whose key a
-  trigger or a non-strict `sql_mode` changes into one a row already holds is refused.
+  column's type, or leaves out an `AUTO_INCREMENT` key (not NULL or 0 for it). It needs a strict `sql_mode`,
+  and no `BEFORE INSERT` trigger on the table.
   On MySQL and MariaDB, `useAffectedRows` must stay false, the drivers' default, and a locking read
   takes `FOR UPDATE` or `FOR SHARE` (`LOCK IN SHARE MODE`).
 - A write that would lose an update, against a ScalarDB transaction or another driver transaction,

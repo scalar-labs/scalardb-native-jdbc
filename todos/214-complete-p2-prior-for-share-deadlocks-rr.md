@@ -44,3 +44,8 @@ Another latest-committed read at RR without gap locks (none known on MySQL).
 
 **By:** Claude Code
 - Writes off PostgreSQL are refused at REPEATABLE READ and SERIALIZABLE until milestone 8b (Option 1); FOR SHARE stays, locking no gap at READ COMMITTED. Plan 8b notes the constraint. Test: refusal at REPEATABLE READ.
+
+### 2026-10-17 - Reworked in 8b1
+
+**By:** Claude Code
+- The gate is lifted for REPEATABLE READ; the prior read is gone, replaced by refusing a non-strict sql_mode and BEFORE INSERT triggers at plan time; key lookups are point lookups. 800 concurrent INSERTs at REPEATABLE READ: 0 deadlocks, no waits.

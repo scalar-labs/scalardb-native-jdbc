@@ -465,10 +465,17 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
   rows again by key, past a covering index; `LOCK IN SHARE MODE` is parsed as `FOR SHARE`; MariaDB
   uses `RETURNING`, and MySQL takes an `AUTO_INCREMENT` key from the vendor driver. All engines: 331
   unit and 252 integration tests, 54 skipped, none failed.
-- **8b: MySQL and MariaDB at SNAPSHOT and SERIALIZABLE.** REPEATABLE READ with the after-image
-  checks, and the locking re-read of 4.2 with its coarse path at SERIALIZABLE. Writes are refused
-  there until then; the check before a MySQL INSERT must then read the latest committed rows
-  without a gap lock, which deadlocks concurrent INSERTs (todo 214).
+- **8b: MySQL and MariaDB at SNAPSHOT and SERIALIZABLE**, split in two (2026-10-17):
+  - **8b1: SNAPSHOT**, REPEATABLE READ with the after-image checks. **Done (2026-10-17).** The
+    PostgreSQL paths held as they were, first-committer-wins through the anchored CAS. Added: a
+    locking read compared with the same read in the snapshot, since these engines lock the rows
+    committed now; the driver's key lookups as primary-key point lookups, since a semi-join scans and
+    locks a range at REPEATABLE READ; the INSERT check of todo 201 replaced by refusing a non-strict
+    `sql_mode` and `BEFORE INSERT` triggers, since a check that sees the latest rows locks gaps
+    (todo 214). `SnapshotIntegrationTest` runs on both, the PostgreSQL-only cases (a partial index,
+    a deferred constraint, `set_config`) gated.
+  - **8b2: SERIALIZABLE**: the connection at REPEATABLE READ, the locking re-read of 4.2 merged with
+    the first arm, and its coarse path.
 - **8c: SQL Server**, all three levels: the per-engine row, the `READ_COMMITTED_SNAPSHOT` and
   `XACT_ABORT` checks, the hint pass of 4.7.
 - **8d: Oracle**: READ COMMITTED and SNAPSHOT, `TRANSACTION_REPEATABLE_READ` mapped to its

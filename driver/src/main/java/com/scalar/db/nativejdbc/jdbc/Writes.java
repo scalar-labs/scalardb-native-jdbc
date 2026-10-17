@@ -172,9 +172,43 @@ final class Writes {
           tables, "RETURNING on an UPDATE or DELETE of a ScalarDB table is not supported");
     }
     Names n = new Names(engine, t);
+    if (engine == Engine.MYSQL && vendor != null && shape.kind() == StatementShape.Kind.INSERT) {
+      String why = storesOtherKeys(vendor, n);
+      if (why != null) {
+        throw refused(tables, why);
+      }
+    }
     return shape.kind() == StatementShape.Kind.INSERT
         ? insertPlan(shape, t, n, all, tables, snapshot, vendor == null ? null : columns(vendor, n))
         : keyedPlan(shape, t, n, all, tables, snapshot);
+  }
+
+  /**
+   * Why MySQL may store other key values than an INSERT gives, which the read-back by those values
+   * would then find in an older row (todos 201, 214): a non-strict sql_mode, which truncates, or a
+   * BEFORE INSERT trigger, which may set them; null when neither.
+   */
+  private static @Nullable String storesOtherKeys(Connection vendor, Names n) throws SQLException {
+    try (PreparedStatement ps =
+        vendor.prepareStatement(
+            "SELECT @@SESSION.sql_mode, EXISTS (SELECT 1 FROM information_schema.triggers WHERE"
+                + " event_object_schema = ? AND event_object_table = ? AND event_manipulation ="
+                + " 'INSERT' AND action_timing = 'BEFORE')")) {
+      ps.setString(1, n.namespace);
+      ps.setString(2, n.dataTable);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        String mode = rs.getString(1).toUpperCase(Locale.ROOT);
+        if (!mode.contains("STRICT_TRANS_TABLES") && !mode.contains("STRICT_ALL_TABLES")) {
+          return "an INSERT of a ScalarDB table needs a strict sql_mode on MySQL";
+        }
+        if (rs.getBoolean(2)) {
+          return "an INSERT of a ScalarDB table whose data table has a BEFORE INSERT trigger is not"
+              + " supported on MySQL";
+        }
+        return null;
+      }
+    }
   }
 
   /** The data table's columns in their own order with their types (todos 203, 208). */
@@ -362,7 +396,6 @@ final class Writes {
     Step committed = null;
     Step repeats = null;
     List<Step> readBack = new ArrayList<>();
-    Step prior = null;
     if (rows != null) {
       List<String> match = new ArrayList<>();
       List<String> matchData = new ArrayList<>();
@@ -405,18 +438,6 @@ final class Writes {
                   matchBinds.subList(matchBinds.size() - rowBinds(ast, row), matchBinds.size()),
                   floatKeys));
         }
-      }
-      if (!returns) {
-        prior =
-            new Step(
-                "SELECT 1 FROM "
-                    + n.data
-                    + " d WHERE "
-                    + String.join(" OR ", matchData)
-                    // the latest committed rows, not a REPEATABLE READ snapshot's (todo 209)
-                    + " LIMIT 1 FOR SHARE",
-                matchBinds,
-                floatKeys);
       }
       if (snapshot && rows.size() > 1) {
         // a key the statement itself repeats is the application's duplicate (todo 178)
@@ -472,7 +493,6 @@ final class Writes {
         n,
         new Step(insert, all),
         readBack,
-        prior,
         inFlight,
         committed,
         repeats,
@@ -1127,10 +1147,6 @@ final class Writes {
     // on MySQL, which has no RETURNING, each row's key read back by its values; none for an
     // AUTO_INCREMENT key the statement leaves out, which the vendor driver reports
     final List<Step> readBack;
-    // with it, whether a row matches those values before the INSERT: one that does and is not a
-    // duplicate means MySQL stored other values (a trigger, a non-strict conversion), which the
-    // read-back would mistake for the older row (todo 201)
-    final @Nullable Step prior;
     // whether that key is AUTO_INCREMENT, asked once
     private volatile @Nullable Boolean autoIncrement;
     final @Nullable Step inFlight;
@@ -1145,7 +1161,6 @@ final class Writes {
         Names n,
         Step insert,
         List<Step> readBack,
-        @Nullable Step prior,
         @Nullable Step inFlight,
         @Nullable Step committed,
         @Nullable Step repeats,
@@ -1154,7 +1169,6 @@ final class Writes {
       super(n);
       this.insert = insert;
       this.readBack = List.copyOf(readBack);
-      this.prior = prior;
       this.inFlight = inFlight;
       this.committed = committed;
       this.repeats = repeats;
@@ -1173,7 +1187,7 @@ final class Writes {
       for (Step s : readBack) {
         out.add(s.sql);
       }
-      for (Step s : Arrays.asList(prior, inFlight, committed, repeats)) {
+      for (Step s : Arrays.asList(inFlight, committed, repeats)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -1220,20 +1234,8 @@ final class Writes {
             keys.read(rs, from, width);
           }
         } else {
-          // ponytail: at READ COMMITTED no gap is locked, so a row committed between this read and
-          // the INSERT under a trigger that changes the key still goes unnoticed
-          boolean existed;
-          try (PreparedStatement check = run.prepare(Objects.requireNonNull(prior), null);
-              ResultSet r = check.executeQuery()) {
-            existed = r.next();
-          }
           ps = run.prepare(insert, null);
           ps.executeUpdate();
-          if (existed) {
-            throw Errors.unsupported(
-                "the INSERT stored other key values than it gave, which a row already holds: a"
-                    + " trigger or a non-strict sql_mode changed them");
-          }
         }
       } catch (SQLException e) {
         if (ps != null) {
@@ -1528,13 +1530,23 @@ final class Writes {
     // the locking clause the versions read under the lock takes too, or null: on MySQL and
     // MariaDB a shared lock read through a covering index locks the index entry only, not the row
     final @Nullable String relock;
+    // at REPEATABLE READ on MySQL and MariaDB, the same read without the lock: a locking read there
+    // returns the rows committed now, which must be the snapshot's
+    final @Nullable Step snapshot;
 
-    LockPlan(Names n, Step lock, @Nullable Step inFlight, boolean noWait, @Nullable String relock) {
+    LockPlan(
+        Names n,
+        Step lock,
+        @Nullable Step inFlight,
+        boolean noWait,
+        @Nullable String relock,
+        @Nullable Step snapshot) {
       super(n);
       this.lock = lock;
       this.inFlight = inFlight;
       this.noWait = noWait;
       this.relock = relock;
+      this.snapshot = snapshot;
     }
 
     @Override
@@ -1544,7 +1556,13 @@ final class Writes {
 
     @Override
     List<String> sql() {
-      return inFlight == null ? List.of(lock.sql) : List.of(inFlight.sql, lock.sql);
+      List<String> out = new ArrayList<>();
+      for (Step s : Arrays.asList(inFlight, lock, snapshot)) {
+        if (s != null) {
+          out.add(s.sql);
+        }
+      }
+      return out;
     }
 
     @SuppressFBWarnings(
@@ -1576,6 +1594,10 @@ final class Writes {
           boolean settled =
               (inFlight == null || !matchesInFlight(run)) && lockedVersions(run, keys, versions);
           if (settled) {
+            if (snapshot != null && !asInSnapshot(run, keys, versions)) {
+              throw new Aborted(
+                  "a row the statement locks changed after the transaction's snapshot");
+            }
             run.v.releaseSavepoint(sp);
             for (int i = 0; i < keys.rows.size(); i++) {
               run.context.anchor(n.table, keys.rows.get(i), versions.get(i));
@@ -1601,6 +1623,39 @@ final class Writes {
           throw new Aborted(held); // rows keep going in flight around the lock: bounded retries
         }
       }
+    }
+
+    /**
+     * Whether the rows locked, at the versions read under the lock, are those the snapshot shows:
+     * none changed, added or gone since it was taken (design 5, SNAPSHOT on MySQL and MariaDB).
+     */
+    private boolean asInSnapshot(Run run, Keys keys, List<Anchors.Version> versions)
+        throws SQLException {
+      int width = n.keyColumns.size();
+      Map<List<Object>, Anchors.Version> locked = new HashMap<>();
+      for (int i = 0; i < keys.rows.size(); i++) {
+        locked.put(Anchors.key(keys.rows.get(i)), versions.get(i));
+      }
+      int seen = 0;
+      try (PreparedStatement ps = run.prepare(Objects.requireNonNull(snapshot), null);
+          ResultSet rs = ps.executeQuery()) {
+        int from = rs.getMetaData().getColumnCount() - width - 1;
+        while (rs.next()) {
+          Anchors.Version now =
+              locked.get(Anchors.key(Objects.requireNonNull(readKey(rs, from, width))));
+          if (now == null) {
+            if (inFlight == null) {
+              continue; // SKIP LOCKED, which has no in-flight check, left it out
+            }
+            return false;
+          }
+          if (!now.is(rs.getString(from + width), rs.getObject(from + width + 1))) {
+            return false;
+          }
+          seen++;
+        }
+      }
+      return seen == locked.size();
     }
 
     /** {@code NOWAIT}'s failure as the engine reports its own: 55P03, MySQL 3572, MariaDB 1205. */
@@ -1789,8 +1844,19 @@ final class Writes {
       return String.join(" AND ", terms);
     }
 
-    /** {@code (q.k1, q.k2) IN (SELECT ... FROM <keyValues>)}, the keys bound in order. */
+    /**
+     * {@code (q.k1, q.k2) IN (SELECT ... FROM <keyValues>)}, the keys bound in order; on MySQL and
+     * MariaDB {@code (q.k1 = ? AND q.k2 = ?) OR ...}, point lookups on the primary key, where a
+     * semi-join may scan, and lock, a range at REPEATABLE READ.
+     */
     String keyIn(String q, List<String> types, int count) {
+      if (engine != Engine.POSTGRESQL) {
+        List<String> keys = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+          keys.add("(" + keyEquals(q) + ")");
+        }
+        return "(" + String.join(" OR ", keys) + ")";
+      }
       List<String> cols = new ArrayList<>();
       for (int i = 0; i < types.size(); i++) {
         cols.add("u." + engine.quote("scalardb_native_k" + i));

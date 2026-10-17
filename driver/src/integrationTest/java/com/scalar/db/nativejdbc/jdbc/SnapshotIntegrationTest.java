@@ -16,6 +16,7 @@ import com.scalar.db.api.Update;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
@@ -51,7 +52,10 @@ class SnapshotIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void snapshotLevels(Engines e) throws Exception {
-    assumeTrue(e == Engines.POSTGRESQL, "the snapshot levels are PostgreSQL only so far");
+    boolean pg = e.engine() == Engine.POSTGRESQL;
+    assumeTrue(
+        pg || e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB,
+        "the snapshot levels are PostgreSQL, MySQL and MariaDB only so far");
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace("sn", true);
@@ -86,18 +90,27 @@ class SnapshotIntegrationTest {
                   Duration.ofMinutes(1),
                   List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
-      try (Statement st = c.createStatement()) {
-        // a commit that fails: its duplicate is found at COMMIT
-        st.execute("CREATE SCHEMA IF NOT EXISTS sn_plain");
-        // a unique constraint besides the key, on rows v > 100 only
-        st.execute("CREATE UNIQUE INDEX IF NOT EXISTS u_v_unique ON sn.u_data (v) WHERE v > 100");
-        st.execute(
-            "CREATE TABLE IF NOT EXISTS sn_plain.c (id INT, CONSTRAINT c_pk PRIMARY KEY (id)"
-                + " DEFERRABLE INITIALLY DEFERRED)");
+      // no partial index nor deferred constraint elsewhere: the cases that need them run on
+      // PostgreSQL only
+      if (pg) {
+        try (Statement st = c.createStatement()) {
+          // a commit that fails: its duplicate is found at COMMIT
+          st.execute("CREATE SCHEMA IF NOT EXISTS sn_plain");
+          // a unique constraint besides the key, on rows v > 100 only
+          st.execute("CREATE UNIQUE INDEX IF NOT EXISTS u_v_unique ON sn.u_data (v) WHERE v > 100");
+          st.execute(
+              "CREATE TABLE IF NOT EXISTS sn_plain.c (id INT, CONSTRAINT c_pk PRIMARY KEY (id)"
+                  + " DEFERRABLE INITIALLY DEFERRED)");
+        }
       }
     }
+    // SERIALIZABLE off PostgreSQL comes with milestone 8b2
     for (int level :
-        new int[] {Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE}) {
+        pg
+            ? new int[] {
+              Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE
+            }
+            : new int[] {Connection.TRANSACTION_REPEATABLE_READ}) {
       String at = level == Connection.TRANSACTION_SERIALIZABLE ? "SERIALIZABLE" : "SNAPSHOT";
       try (DistributedTransactionManager tm = factory.getTransactionManager();
           TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
@@ -113,6 +126,8 @@ class SnapshotIntegrationTest {
       int level,
       String at)
       throws Exception {
+    boolean pg = e.engine() == Engine.POSTGRESQL;
+    String duplicate = pg ? "23505" : "23000";
     Properties waits = new Properties();
     waits.setProperty("scalardbnative.inflightWaitMs", "5000");
     try (Connection d = e.openDriver(waits)) {
@@ -203,21 +218,23 @@ class SnapshotIntegrationTest {
             .as("%s: a committed key is the application's duplicate", at)
             .isInstanceOf(SQLException.class)
             .extracting(ex -> ((SQLException) ex).getSQLState())
-            .isEqualTo("23505");
+            .isEqualTo(duplicate);
       }
       d.rollback();
       // a key the statement repeats, or another unique constraint, is the application's duplicate
       // too, never retried (todo 178)
       for (String sql :
-          List.of(
-              "INSERT INTO sn.t (id, x, v) VALUES (90, 'p', 0), (90, 'q', 0)",
-              "INSERT INTO sn.u (id, x, v) VALUES (91, 'p', 101), (92, 'q', 101)")) {
+          pg
+              ? List.of(
+                  "INSERT INTO sn.t (id, x, v) VALUES (90, 'p', 0), (90, 'q', 0)",
+                  "INSERT INTO sn.u (id, x, v) VALUES (91, 'p', 101), (92, 'q', 101)")
+              : List.of("INSERT INTO sn.t (id, x, v) VALUES (90, 'p', 0), (90, 'q', 0)")) {
         try (Statement st = d.createStatement()) {
           assertThatThrownBy(() -> st.executeUpdate(sql))
               .as("%s: %s", at, sql)
               .isInstanceOf(SQLException.class)
               .extracting(ex -> ((SQLException) ex).getSQLState())
-              .isEqualTo("23505");
+              .isEqualTo(duplicate);
         }
         d.rollback();
       }
@@ -247,40 +264,43 @@ class SnapshotIntegrationTest {
           .containsExactly("a");
       d.rollback();
 
-      // a commit that fails ends the transaction, whose checks go with it (todo 170)
-      assertThat(rows(d, "SELECT COUNT(*) FROM sn.u")).containsExactly("20");
-      try (Statement st = d.createStatement()) {
-        st.executeUpdate("INSERT INTO sn_plain.c VALUES (1)");
-        st.executeUpdate("INSERT INTO sn_plain.c VALUES (1)");
-      }
-      assertThatThrownBy(d::commit).isInstanceOf(SQLException.class);
-      held = prepared(tpc, "u", 3, "b");
-      assertAborts(d, "SELECT COUNT(*) FROM sn.u WHERE x = 'a'", at + ": after a failed commit");
-      d.rollback();
-      held.rollback();
+      // a failed commit, set_config, RESET and the result set's class are PostgreSQL's
+      if (pg) {
+        // a commit that fails ends the transaction, whose checks go with it (todo 170)
+        assertThat(rows(d, "SELECT COUNT(*) FROM sn.u")).containsExactly("20");
+        try (Statement st = d.createStatement()) {
+          st.executeUpdate("INSERT INTO sn_plain.c VALUES (1)");
+          st.executeUpdate("INSERT INTO sn_plain.c VALUES (1)");
+        }
+        assertThatThrownBy(d::commit).isInstanceOf(SQLException.class);
+        held = prepared(tpc, "u", 3, "b");
+        assertAborts(d, "SELECT COUNT(*) FROM sn.u WHERE x = 'a'", at + ": after a failed commit");
+        d.rollback();
+        held.rollback();
 
-      // passthrough may set the level in SQL; the driver follows the session (todo 184)
-      d.setAutoCommit(true);
-      d.setClientInfo("scalardbnative.passthrough", "true");
-      try (Statement st = d.createStatement()) {
-        st.execute("SELECT set_config('default_transaction_isolation', 'read committed', false)");
-      }
-      d.setClientInfo("scalardbnative.passthrough", "false");
-      assertThat(d.nativeSQL("SELECT x FROM sn.t WHERE id = 1"))
-          .as("%s: read as READ COMMITTED after passthrough", at)
-          .doesNotContain("\"scalardb_native_meta\".\"tx_state\"");
-      d.setTransactionIsolation(level);
-      d.setAutoCommit(false);
+        // passthrough may set the level in SQL; the driver follows the session (todo 184)
+        d.setAutoCommit(true);
+        d.setClientInfo("scalardbnative.passthrough", "true");
+        try (Statement st = d.createStatement()) {
+          st.execute("SELECT set_config('default_transaction_isolation', 'read committed', false)");
+        }
+        d.setClientInfo("scalardbnative.passthrough", "false");
+        assertThat(d.nativeSQL("SELECT x FROM sn.t WHERE id = 1"))
+            .as("%s: read as READ COMMITTED after passthrough", at)
+            .doesNotContain("\"scalardb_native_meta\".\"tx_state\"");
+        d.setTransactionIsolation(level);
+        d.setAutoCommit(false);
 
-      // a result set whose rows are checked one by one is not handed out unchecked (todo 175)
-      try (Statement st = d.createStatement();
-          ResultSet rs = st.executeQuery("SELECT x FROM sn.t WHERE id = 1")) {
-        Class<?> vendor = Class.forName("org.postgresql.jdbc.PgResultSet");
-        assertThatThrownBy(() -> rs.unwrap(vendor))
-            .as("%s: unwrap", at)
-            .isInstanceOf(SQLException.class);
+        // a result set whose rows are checked one by one is not handed out unchecked (todo 175)
+        try (Statement st = d.createStatement();
+            ResultSet rs = st.executeQuery("SELECT x FROM sn.t WHERE id = 1")) {
+          Class<?> vendor = Class.forName("org.postgresql.jdbc.PgResultSet");
+          assertThatThrownBy(() -> rs.unwrap(vendor))
+              .as("%s: unwrap", at)
+              .isInstanceOf(SQLException.class);
+        }
+        d.rollback();
       }
-      d.rollback();
       // nativeSQL shows the text of the connection's level (todo 175)
       String text = "SELECT x FROM sn.t WHERE id = 1";
       String snapshotText = d.nativeSQL(text);
@@ -291,21 +311,22 @@ class SnapshotIntegrationTest {
       d.setTransactionIsolation(level);
       assertThat(d.nativeSQL(text)).as("%s: nativeSQL back", at).isEqualTo(snapshotText);
 
-      // the transaction mode is not set in SQL (todo 172)
-      for (String sql :
-          List.of(
-              "SELECT set_config('default_transaction_isolation', 'read committed', false)",
-              "RESET ALL",
-              "RESET default_transaction_isolation",
-              "RESET \"default_transaction_isolation\"")) {
-        assertThatThrownBy(() -> rows(d, sql))
-            .as("%s: %s", at, sql)
-            .isInstanceOf(SQLException.class)
-            .extracting(ex -> ((SQLException) ex).getSQLState())
-            .isEqualTo("0AN01");
-        d.rollback();
+      if (pg) {
+        // the transaction mode is not set in SQL (todo 172)
+        for (String sql :
+            List.of(
+                "SELECT set_config('default_transaction_isolation', 'read committed', false)",
+                "RESET ALL",
+                "RESET default_transaction_isolation",
+                "RESET \"default_transaction_isolation\"")) {
+          assertThatThrownBy(() -> rows(d, sql))
+              .as("%s: %s", at, sql)
+              .isInstanceOf(SQLException.class)
+              .extracting(ex -> ((SQLException) ex).getSQLState())
+              .isEqualTo("0AN01");
+          d.rollback();
+        }
       }
-
       // table by table: an aggregate or a subquery checks its tables whole first
       held = prepared(tpc, "u", 20, "b");
       assertAborts(d, "SELECT COUNT(*) FROM sn.u WHERE id < 5", at + ": an aggregate");
@@ -362,6 +383,18 @@ class SnapshotIntegrationTest {
             .isEqualTo("40001");
       }
       d.rollback();
+      // a locking read of a row changed after the snapshot, which MySQL and MariaDB would return
+      // as committed now
+      for (String lock : List.of("FOR UPDATE", pg ? "FOR SHARE" : "LOCK IN SHARE MODE")) {
+        rows(d, "SELECT x FROM sn.t WHERE id = 4");
+        scalarDbSet(tm, 4, lock);
+        assertThatThrownBy(() -> rows(d, "SELECT x FROM sn.t WHERE id = 4 " + lock))
+            .as("%s: %s of a row changed after the snapshot", at, lock)
+            .isInstanceOf(SQLException.class)
+            .extracting(ex -> ((SQLException) ex).getSQLState())
+            .isEqualTo("40001");
+        d.rollback();
+      }
 
       // a write to a row in flight aborts at once, whatever the wait allows
       held = prepared(tpc, "t", 5, "b");

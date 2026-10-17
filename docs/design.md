@@ -1184,11 +1184,12 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   given (a NULL or 0 it generates, `1.6` in an INT) and compares after conversion (`1` equals
   `'01'`), or leaves out a single key column that `information_schema` shows `AUTO_INCREMENT`, whose
   values the vendor driver reports; anything else is refused, and so is the statement's own
-  `RETURNING`. Before such an INSERT one locking read (`FOR SHARE`, the latest committed rows; at
-  READ COMMITTED, the only level MySQL writes run at before 8b, it locks no gap, where at REPEATABLE
-  READ it would deadlock concurrent INSERTs) asks whether any row already matches those values: if
-  one does and the INSERT still succeeds, MySQL stored other values (a trigger, a non-strict
-  `sql_mode`), the read-back would find the older row, and the write is refused. A FLOAT key is
+  `RETURNING`. The read-back is sound only where MySQL stores the values given, or values that
+  compare equal to them, which a primary key then keeps unique: such an INSERT is refused when the
+  session's `sql_mode` is not strict, which truncates, or the data table has a `BEFORE INSERT`
+  trigger, which may set the key, either of which could make the read-back find an older row. A
+  check before the INSERT would have to see the latest committed rows, a locking read, whose gap
+  lock at REPEATABLE READ deadlocks concurrent INSERTs (todo 214). A FLOAT key is
   bound as its exact double, which MySQL compares an uncast value as, and so is a float the
   application binds alone to a FLOAT key, when the driver matches keys; the column types come from
   `information_schema` with the column order. Both engines send a FLOAT as six digits, which can
@@ -1424,11 +1425,19 @@ coverage of each engine's syntax is therefore part of the certification of that 
 
 One setting, the native connection's isolation level, selects everything else.
 
-Built so far: all three levels on PostgreSQL, and READ COMMITTED on the other engines, its writes and
-locking reads on MySQL and MariaDB as on PostgreSQL. Elsewhere
-SNAPSHOT and SERIALIZABLE are accepted by `setTransactionIsolation`, and every statement on a ScalarDB
-table is refused with `0AN01`; the engine mappings, the locking re-reads, Oracle's refusal of
-SERIALIZABLE and the translation of `TRANSACTION_REPEATABLE_READ` below come with milestone 8.
+Built so far: all three levels on PostgreSQL; READ COMMITTED and SNAPSHOT on MySQL and MariaDB, their
+writes and locking reads as on PostgreSQL; READ COMMITTED on SQL Server and Oracle. Elsewhere the
+levels are accepted by `setTransactionIsolation`, and every statement on a ScalarDB table is refused
+with `0AN01`; the locking re-reads, Oracle's refusal of SERIALIZABLE and the translation of
+`TRANSACTION_REPEATABLE_READ` below come with milestone 8.
+
+SNAPSHOT on MySQL and MariaDB needs two things PostgreSQL gives natively. A locking read there returns
+the rows committed now, not the snapshot's, and raises nothing for a row changed since: the driver
+runs the read again without the lock, in the snapshot, and aborts with `40001` unless it returns the
+same keys at the versions read under the lock, the metadata rows locked too. And the driver's own
+key lookups, under a lock or in an `INSERT ... SELECT`, take next-key locks at REPEATABLE READ: they
+are written as point lookups on the primary key, `(k = ?) OR (k = ?)`, which lock only the rows, so
+concurrent INSERTs neither wait on nor deadlock with each other.
 
 | Level | Native connection | In-flight row on read | In-flight row on write | CAS anchor | Read locks | ScalarDB side |
 |---|---|---|---|---|---|---|

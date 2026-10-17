@@ -434,12 +434,38 @@ class MoreWritesIntegrationTest {
       d.setAutoCommit(true);
       assertThat(d.createStatement().executeUpdate("DELETE FROM wb.fl WHERE x = 6")).isEqualTo(1);
       if (engine != Engine.POSTGRESQL) {
-        // 214: writes at REPEATABLE READ wait for milestone 8b off PostgreSQL
+        // 209, 214: at REPEATABLE READ a key deleted after the snapshot can be inserted again
+        d.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (0, 40)");
         try (Connection rr = e.openDriver()) {
           rr.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
           rr.setAutoCommit(false);
+          assertThat(rows(rr, "SELECT COUNT(*) FROM wb.plain")).hasSize(1);
+          d.createStatement().executeUpdate("DELETE FROM wb.ord WHERE k = 40");
+          assertThat(rr.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (1, 40)"))
+              .isEqualTo(1);
+          rr.commit();
+          // nor do concurrent INSERTs of other keys wait on each other's locks
+          e.execute(d, "SET SESSION innodb_lock_wait_timeout = 2");
+          e.execute(rr, "SET SESSION innodb_lock_wait_timeout = 2");
+          d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+          d.setAutoCommit(false);
+          d.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (0, 41)");
+          rr.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (0, 42)");
+          d.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (0, 43)");
+          d.commit();
+          rr.commit();
+          d.setAutoCommit(true);
+          d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        }
+      }
+      if (engine == Engine.MYSQL) {
+        // 214: a non-strict sql_mode, which may store another key than the one given
+        Properties loose = new Properties();
+        loose.setProperty("sessionVariables", "sql_mode=''");
+        loose.setProperty("jdbcCompliantTruncation", "false"); // or Connector/J makes it strict
+        try (Connection l = e.openDriver(loose)) {
           assertRefused(
-              () -> rr.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (1, 40)"));
+              () -> l.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (0, 44)"));
         }
       }
     }

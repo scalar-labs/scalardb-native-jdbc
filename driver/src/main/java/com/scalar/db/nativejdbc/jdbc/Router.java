@@ -522,14 +522,8 @@ final class Router {
           "writes of ScalarDB tables are supported on PostgreSQL, MySQL and MariaDB only so far"
               + tables);
     }
-    // MySQL and MariaDB at their snapshot levels come with milestone 8b: the check before a MySQL
-    // INSERT locks gaps there, which deadlocks concurrent INSERTs (todo 214)
-    if (isolation != Connection.TRANSACTION_READ_COMMITTED
-        && !(snapshot() && engine == Engine.POSTGRESQL)) {
-      throw Errors.unsupported(
-          "writes of ScalarDB tables run at READ COMMITTED, and at REPEATABLE READ or SERIALIZABLE"
-              + " on PostgreSQL only so far"
-              + tables);
+    if (!levelSupported()) {
+      throw Errors.unsupported(LEVELS + tables);
     }
     Outcome<StatementShape> shape = StatementShape.classify(ast);
     if (!shape.isPresent()) {
@@ -739,10 +733,14 @@ final class Router {
       // locked again by key as the versions are read under the lock, not their metadata rows
       // ponytail: NOWAIT there, under SKIP LOCKED too, fails rather than skips a row locked in
       // between
+      // at REPEATABLE READ a plain read sees the snapshot, so FOR UPDATE's versions are read under
+      // a lock too, and the metadata rows with them, which MySQL's OF d would read in the snapshot
       relock =
-          update
+          update && !snapshot()
               ? null
-              : share + (engine == Engine.MYSQL ? " OF d" : "") + (wait.isEmpty() ? "" : " NOWAIT");
+              : (update ? "FOR UPDATE" : share)
+                  + (engine == Engine.MYSQL && !snapshot() ? " OF d" : "")
+                  + (wait.isEmpty() ? "" : " NOWAIT");
       int clause = ast.afterLast("FOR") - "FOR".length();
       SqlAst bare =
           clause < 0 || ast.source().contains(LOCK_MARK) ? null : ast.without(clause, ast.end());
@@ -809,7 +807,11 @@ final class Router {
             new Writes.Step(lockSql, text.parameterSources()),
             inFlight,
             shape.noWait() && !snapshot(),
-            relock);
+            relock,
+            // the comment the clause replaces is left as it is
+            inner != null && snapshot()
+                ? new Writes.Step(text.sql(), text.parameterSources())
+                : null);
     return new Route(
         sql,
         sql,
@@ -895,12 +897,8 @@ final class Router {
               + " later"
               + tables);
     }
-    if (isolation != Connection.TRANSACTION_READ_COMMITTED
-        && !(snapshot && engine == Engine.POSTGRESQL)) {
-      throw Errors.unsupported(
-          "reads of ScalarDB tables run at READ COMMITTED, and at REPEATABLE READ or SERIALIZABLE"
-              + " on PostgreSQL only so far; set one of those levels on the connection"
-              + tables);
+    if (!levelSupported()) {
+      throw Errors.unsupported(LEVELS + tables);
     }
     if (ast.hasLockingOrIntoClause()) {
       SqlAst.TableRef locked = lockable(ast, scalarDb);
@@ -1068,6 +1066,25 @@ final class Router {
               + " IN (1, 2) LIMIT 1");
     }
     return List.copyOf(out);
+  }
+
+  private static final String LEVELS =
+      "statements on ScalarDB tables run at READ COMMITTED and REPEATABLE READ, and at SERIALIZABLE"
+          + " on PostgreSQL only so far; set one of those levels on the connection";
+
+  /** Whether statements on ScalarDB tables run at the connection's level on this engine yet. */
+  private boolean levelSupported() {
+    lock.lock();
+    try {
+      return isolation == Connection.TRANSACTION_READ_COMMITTED
+          || (isolation == Connection.TRANSACTION_REPEATABLE_READ
+              && (engine == Engine.POSTGRESQL
+                  || engine == Engine.MYSQL
+                  || engine == Engine.MARIADB))
+          || (isolation == Connection.TRANSACTION_SERIALIZABLE && engine == Engine.POSTGRESQL);
+    } finally {
+      lock.unlock();
+    }
   }
 
   /** Whether the connection runs at SNAPSHOT or SERIALIZABLE, which abort on a row in flight. */
