@@ -6,6 +6,7 @@ import com.scalar.db.nativejdbc.engine.Engine;
 import java.util.List;
 import java.util.stream.Stream;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.statement.select.ForMode;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -449,6 +450,25 @@ class SqlAstTest {
     // only the statement's own TO
     assertThat(SqlAst.setToAsEquals("SELECT 'SET a TO b'")).isEqualTo("SELECT 'SET a TO b'");
     assertThat(SqlAst.setToAsEquals("SET a = 'TO b'")).isEqualTo("SET a = 'TO b'");
+  }
+
+  @Test
+  void lockInShareMode_parsesAsForShare_everyOffsetKept() {
+    for (String sql :
+        List.of(
+            "SELECT x FROM t WHERE id = 1 LOCK IN SHARE MODE",
+            "select x from t lock  in share\nmode nowait;",
+            "SELECT x FROM t LOCK IN SHARE MODE SKIP LOCKED ")) {
+      SqlAst ast = SqlAst.analyze(sql, Engine.MARIADB, false).get();
+      assertThat(ast.hasLockingOrIntoClause()).as(sql).isTrue();
+      assertThat(StatementShape.of(ast).orElseThrow().lockMode()).as(sql).isEqualTo(ForMode.SHARE);
+      assertThat(ast.source()).as(sql).hasSameSizeAs(sql);
+    }
+    // the statement's own clause only, never a literal's text
+    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 'LOCK IN SHARE MODE'"))
+        .isEqualTo("SELECT 'LOCK IN SHARE MODE'");
+    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 1 LOCK IN SHARE MODE"))
+        .isEqualTo("SELECT 1 FOR SHARE         ");
   }
 
   @Test

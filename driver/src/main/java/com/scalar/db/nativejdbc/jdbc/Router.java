@@ -513,9 +513,10 @@ final class Router {
       names.add(t.namespace() + "." + t.table());
     }
     String tables = " (" + String.join(", ", names) + ")";
-    if (engine != Engine.POSTGRESQL) {
+    if (!writes()) {
       throw Errors.unsupported(
-          "writes of ScalarDB tables are supported on PostgreSQL only so far" + tables);
+          "writes of ScalarDB tables are supported on PostgreSQL, MySQL and MariaDB only so far"
+              + tables);
     }
     if (isolation != Connection.TRANSACTION_READ_COMMITTED && !snapshot()) {
       throw Errors.unsupported(
@@ -562,13 +563,13 @@ final class Router {
 
   /**
    * The table a locking read locks (design 4.2, READ COMMITTED): the one ScalarDB table of a read
-   * row by row, on PostgreSQL, where writes run. Null for any other locking read: a join, a
-   * subquery, a grouped or DISTINCT select, an aggregate in the select list or ORDER BY.
+   * row by row, on an engine where writes run. Null for any other locking read: a join, a subquery,
+   * a grouped or DISTINCT select, an aggregate in the select list or ORDER BY.
    */
   private SqlAst.@Nullable TableRef lockable(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
     Optional<StatementShape> shape = StatementShape.of(ast);
-    if (engine != Engine.POSTGRESQL
+    if (!writes()
         || scalarDb.size() != 1
         || shape.isEmpty()
         || shape.get().kind() != StatementShape.Kind.SELECT
@@ -584,14 +585,14 @@ final class Router {
   }
 
   /**
-   * The tables whose rows a read anchors (design 4.2, READ COMMITTED), on PostgreSQL, where writes
-   * run: in a read row by row, each table the result has a row of, joined in the top-level FROM
-   * clause, a LEFT JOIN's nullable side included. A table in a subquery returns no row, and a
-   * grouped or DISTINCT select, or an aggregate in the select list or ORDER BY, returns none of a
-   * table's own: none anchored.
+   * The tables whose rows a read anchors (design 4.2, READ COMMITTED), where writes run: in a read
+   * row by row, each table the result has a row of, joined in the top-level FROM clause, a LEFT
+   * JOIN's nullable side included. A table in a subquery returns no row, and a grouped or DISTINCT
+   * select, or an aggregate in the select list or ORDER BY, returns none of a table's own: none
+   * anchored.
    */
   private List<SqlAst.TableRef> anchorable(SqlAst ast, SqlAst.Split split) {
-    if (engine != Engine.POSTGRESQL || !ast.rowPerRow()) {
+    if (!writes() || !ast.rowPerRow()) {
       return List.of();
     }
     List<SqlAst.TableRef> out = new ArrayList<>();
@@ -604,6 +605,11 @@ final class Router {
       }
     }
     return out;
+  }
+
+  /** Whether the engine runs the driver's writes, and so its anchors and locking reads. */
+  private boolean writes() {
+    return engine == Engine.POSTGRESQL || engine == Engine.MYSQL || engine == Engine.MARIADB;
   }
 
   /**
@@ -702,6 +708,30 @@ final class Router {
             "a column qualified by a schema in a locking read of a ScalarDB table" + tables);
       }
     }
+    // MySQL and MariaDB lock no row a derived table reads for a clause outside it: the clause
+    // moves into the committed copy, which they merge into the statement, the user's predicate
+    // with it, so that only the rows it matches are locked
+    String inner = null;
+    String relock = null;
+    int clause = -1;
+    if (engine != Engine.POSTGRESQL) {
+      if (shape.lockMode() != ForMode.UPDATE) {
+        // a shared lock read through a covering index locks the index entry only: the rows are
+        // locked again by key, as the versions are read under the lock
+        // ponytail: NOWAIT there, under SKIP LOCKED too, fails rather than skips a row locked in
+        // between
+        relock =
+            (engine == Engine.MARIADB ? "LOCK IN SHARE MODE" : "FOR SHARE")
+                + (shape.noWait() || shape.skipLocked() ? " NOWAIT" : "");
+      }
+      clause = Math.max(ast.afterLast("FOR") - "FOR".length(), ast.afterLast("LOCK") - 4);
+      inner =
+          (shape.lockMode() == ForMode.UPDATE
+                  ? "FOR UPDATE"
+                  : engine == Engine.MARIADB ? "LOCK IN SHARE MODE" : "FOR SHARE")
+              + (shape.noWait() ? " NOWAIT" : "")
+              + (shape.skipLocked() ? " SKIP LOCKED" : "");
+    }
     Writes.Names n = new Writes.Names(engine, t);
     SqlAst.SplitText text =
         SplitRead.emit(
@@ -714,14 +744,32 @@ final class Router {
             List.of(ref),
             (r, piece) -> versions(ref, n, piece, false),
             true,
-            false);
+            false,
+            inner == null ? null : LOCK_MARK);
     Expression where = shape.where();
     int[] span = where == null ? null : ast.span(where);
     List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
-    if (text == null || (where != null && span == null) || inWhere == null) {
+    // the user's clause, the statement's last, comes out of the outer statement
+    String emitted = text == null ? "" : text.sql();
+    String own = clause < 0 || ast.end() < clause ? "" : ast.source().substring(clause, ast.end());
+    int at = own.isEmpty() ? -1 : emitted.lastIndexOf(own);
+    if (text == null
+        || (where != null && span == null)
+        || inWhere == null
+        || (inner != null
+            && (at < 0
+                || !emitted
+                    .substring(at + own.length())
+                    .strip()
+                    .equals(ast.source().substring(ast.end()).strip())))) {
       throw Errors.unsupported(
           "the locking read cannot be rewritten onto the committed rows" + tables);
     }
+    String lockSql =
+        inner == null
+            ? emitted
+            : emitted.substring(0, at).replace(LOCK_MARK, inner)
+                + emitted.substring(at + own.length());
     Writes.Step inFlight =
         shape.skipLocked()
             ? null // a row in flight is a locked row, skipped
@@ -731,9 +779,10 @@ final class Router {
     Writes.Plan plan =
         new Writes.LockPlan(
             n,
-            new Writes.Step(text.sql(), text.parameterSources()),
+            new Writes.Step(lockSql, text.parameterSources()),
             inFlight,
-            shape.noWait() && !snapshot());
+            shape.noWait() && !snapshot(),
+            relock);
     return new Route(
         sql,
         sql,
@@ -785,6 +834,12 @@ final class Router {
     return new Writes.Step(sql + " LIMIT 1", binds);
   }
 
+  /**
+   * Where the committed copy's locking clause goes, put in after the split read is emitted: the
+   * parser that checks it reads no {@code LOCK IN SHARE MODE NOWAIT} in a derived table.
+   */
+  private static final String LOCK_MARK = "/* scalardb_native_lock */";
+
   /** The version lookups' alias for the metadata table, which an anchored read must not use. */
   private static final String META_ALIAS = "scalardb_native_meta";
 
@@ -825,7 +880,7 @@ final class Router {
       if (locked == null) {
         throw Errors.unsupported(
             "a locking read (FOR UPDATE, FOR SHARE) of a ScalarDB table must read that table alone"
-                + " row by row, on PostgreSQL; SELECT ... INTO is not supported"
+                + " row by row, on PostgreSQL, MySQL or MariaDB; SELECT ... INTO is not supported"
                 + tables);
       }
       return lockingRead(sql, ast, scalarDb, locked, tables);
@@ -925,7 +980,8 @@ final class Router {
             anchored,
             (r, piece) -> versions(r, Objects.requireNonNull(anchorNames.get(r)), piece, states),
             false,
-            states);
+            states,
+            null);
     if (text != null) {
       Route r =
           route(

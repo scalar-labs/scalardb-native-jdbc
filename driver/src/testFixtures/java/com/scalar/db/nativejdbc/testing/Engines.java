@@ -170,6 +170,11 @@ public enum Engines {
     return engine;
   }
 
+  /** Whether the driver writes ScalarDB tables on this engine yet (milestone 8). */
+  public boolean writes() {
+    return engine == Engine.POSTGRESQL || engine == Engine.MYSQL || engine == Engine.MARIADB;
+  }
+
   private Started started() throws SQLException {
     synchronized (STARTED) {
       Started s = STARTED.get(this);
@@ -300,6 +305,66 @@ public enum Engines {
           throw new UnsupportedOperationException(
               "SQL Server resolves through the user's default schema");
     };
+  }
+
+  /** A FROM item of the integers {@code from} to {@code to}, column {@code g}, alias {@code g}. */
+  public String series(int from, int to) {
+    if (engine == Engine.POSTGRESQL) {
+      return "generate_series(" + from + ", " + to + ") g";
+    }
+    if (engine != Engine.MYSQL && engine != Engine.MARIADB) {
+      throw new UnsupportedOperationException(engine + " (milestone 8)");
+    }
+    // a digit per power of ten, cross joined: MySQL limits a recursive CTE to 1,000 rows
+    String digits =
+        "(SELECT 0 AS d UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3"
+            + " UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7"
+            + " UNION ALL SELECT 8 UNION ALL SELECT 9)";
+    List<String> joins = new ArrayList<>(List.of(digits + " d0"));
+    List<String> terms = new ArrayList<>(List.of("d0.d"));
+    for (long span = 10; span <= to - from; span *= 10) {
+      joins.add(digits + " d" + joins.size());
+      terms.add(span + " * d" + terms.size() + ".d");
+    }
+    return "(SELECT g FROM (SELECT "
+        + from
+        + " + "
+        + String.join(" + ", terms)
+        + " AS g FROM "
+        + String.join(" CROSS JOIN ", joins)
+        + ") s WHERE g <= "
+        + to
+        + ") g";
+  }
+
+  /** A binary column type. */
+  public String binaryType() {
+    return engine == Engine.POSTGRESQL ? "BYTEA" : "BLOB";
+  }
+
+  /**
+   * The DDL of a function {@code name()} that sleeps {@code seconds} and returns true, once per
+   * call: a window inside a running statement.
+   */
+  public String pauseFunction(String name, int seconds) {
+    return engine == Engine.POSTGRESQL
+        ? "CREATE FUNCTION "
+            + name
+            + "() RETURNS BOOLEAN AS 'SELECT pg_sleep("
+            + seconds
+            + ") IS NOT NULL' LANGUAGE sql VOLATILE"
+        : "CREATE FUNCTION "
+            + name
+            + "() RETURNS BOOLEAN NOT DETERMINISTIC NO SQL BEGIN DO SLEEP("
+            + seconds
+            + "); RETURN TRUE; END";
+  }
+
+  /** A query with a row while some session sleeps in a function of {@link #pauseFunction}. */
+  public String sleeping() {
+    return engine == Engine.POSTGRESQL
+        ? "SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep'"
+        : "SELECT 1 FROM information_schema.processlist WHERE state = 'User sleep'";
   }
 
   /** Runs fixture DDL as given. */

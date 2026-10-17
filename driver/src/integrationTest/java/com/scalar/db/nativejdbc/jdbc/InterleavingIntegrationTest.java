@@ -25,6 +25,7 @@ import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
+import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
@@ -36,7 +37,6 @@ import java.sql.SQLTransactionRollbackException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -92,37 +92,37 @@ class InterleavingIntegrationTest {
     return Engines.selected();
   }
 
+  /** {@code (id, 'a', v), ...} for each id. */
+  private static String rowsOf(int[] ids, int v) {
+    List<String> out = new ArrayList<>();
+    for (int id : ids) {
+      out.add("(" + id + ", 'a', " + v + ")");
+    }
+    return String.join(", ", out);
+  }
+
   /** One ScalarDB table as the test reaches it: by SQL, and by ScalarDB's own name. */
   private record Table(String sql, String meta, String scalarDbName, boolean imported) {}
 
   @ParameterizedTest
   @MethodSource("engines")
   void interleavings(Engines e) throws Exception {
-    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4)");
+    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
           "CREATE SCHEMA il",
           // run once per statement, after its snapshot: opens a window inside one read
-          "CREATE FUNCTION il.pause() RETURNS BOOLEAN AS 'SELECT pg_sleep(1) IS NOT NULL'"
-              + " LANGUAGE sql VOLATILE");
+          e.pauseFunction("il.pause", 1));
       for (String isolation : ISOLATIONS) {
         String imp = "il.imp_" + isolation.toLowerCase(Locale.ROOT);
         e.execute(
             c,
             "CREATE TABLE " + imp + " (id INT PRIMARY KEY, x TEXT, v INT)",
             // rows without metadata, as an imported table has them
-            "INSERT INTO " + imp + " SELECT g, 'a', 0 FROM generate_series(1, 12) g",
-            "INSERT INTO "
-                + imp
-                + " SELECT g, 'a', 0 FROM unnest(ARRAY"
-                + Arrays.toString(COUNTERS)
-                + ") g",
-            "INSERT INTO "
-                + imp
-                + " SELECT g, 'a', 100 FROM unnest(ARRAY"
-                + Arrays.toString(ACCOUNTS)
-                + ") g");
+            "INSERT INTO " + imp + " SELECT g, 'a', 0 FROM " + e.series(1, 12),
+            "INSERT INTO " + imp + " VALUES " + rowsOf(COUNTERS, 0),
+            "INSERT INTO " + imp + " VALUES " + rowsOf(ACCOUNTS, 100));
       }
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
@@ -373,7 +373,7 @@ class InterleavingIntegrationTest {
       try (Connection v = e.open()) {
         // the read has its snapshot once it is inside pause()
         long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
-        while (rows(v, "SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep'").isEmpty()) {
+        while (rows(v, e.sleeping()).isEmpty()) {
           assertThat(System.nanoTime()).as("the read reaches pause()").isLessThan(until);
           Thread.sleep(10);
         }
@@ -516,9 +516,11 @@ class InterleavingIntegrationTest {
                       + " ScalarDB's): "
                       + rows(
                           v,
-                          "SELECT pid, application_name, pg_blocking_pids(pid), state,"
-                              + " wait_event, query FROM pg_stat_activity"
-                              + " WHERE datname = current_database()"));
+                          e.engine() == Engine.POSTGRESQL
+                              ? "SELECT pid, application_name, pg_blocking_pids(pid), state,"
+                                  + " wait_event, query FROM pg_stat_activity"
+                                  + " WHERE datname = current_database()"
+                              : "SELECT id, state, info FROM information_schema.processlist"));
             }
           }
           Thread.sleep(10);
@@ -792,7 +794,7 @@ class InterleavingIntegrationTest {
 
   private static int update(Connection d, Table t, int id) throws SQLException {
     try (Statement st = d.createStatement()) {
-      return st.executeUpdate("UPDATE " + t.sql() + " SET x = x || '+' WHERE id = " + id);
+      return st.executeUpdate("UPDATE " + t.sql() + " SET x = CONCAT(x, '+') WHERE id = " + id);
     }
   }
 

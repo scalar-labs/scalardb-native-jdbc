@@ -299,7 +299,7 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   | Statement snapshot at READ COMMITTED | yes | yes | only with `READ_COMMITTED_SNAPSHOT` on, checked at connect | yes |
   | Read lock at SERIALIZABLE (4.2) | none: SSI, with ScalarDB's storage connections at SERIALIZABLE (section 5) | a separate locking re-read of the first arm's predicate, LEFT JOINed to `T_meta` by primary key, `LOCK IN SHARE MODE` on both engines, since MariaDB rejects `FOR SHARE` and `OF t`; the engine's SERIALIZABLE level is not used | the same separate re-read `WITH (HOLDLOCK)`; the engine's SERIALIZABLE level is not used | SERIALIZABLE is refused (section 5) |
   | Insert that may collide | `INSERT ... ON CONFLICT DO NOTHING`, check the row count | catch error 1062; the transaction survives. Not `INSERT IGNORE`, which also downgrades data errors such as a NOT NULL violation to warnings | catch 2627 or 2601; the transaction survives with `XACT_ABORT` off, which the driver requires | catch ORA-00001; statement-level rollback keeps the transaction |
-  | Update count | rows matched | `useAffectedRows=false`, the default on both drivers, pinned so the count is rows matched | rows matched | rows matched |
+  | Update count | rows matched | `useAffectedRows=false`, the default on both drivers; any other value, in the URL or the connect properties, is refused at connect with `08004` | rows matched | rows matched |
   | In-flight index | partial index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` | filtered index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` |
   | Retryable errors | SQLSTATE `40001`, `40P01` | SQLSTATE `40001` (error 1213), error 1205 (SQLSTATE `HY000`) | 1205 deadlock victim (`40001`), 3960 snapshot update conflict, 1222 if `LOCK_TIMEOUT` is set | ORA-08177 cannot serialize, ORA-00060 deadlock, ORA-08176; ScalarDB maps the same three |
   | Duplicate key | `23505` | error 1062 | 2627, 2601 | ORA-00001 |
@@ -787,11 +787,21 @@ union as a derived table.
   either check finds a row in flight, its rollback releases the attempt's locks, and the read is
   made again, at once under `SKIP LOCKED`, which then skips the row, after the wait otherwise;
   `NOWAIT` fails with `55P03`. `FOR KEY SHARE` is refused: a ScalarDB prepare writes the row with a
-  non-key UPDATE, which it does not block. On
-  MySQL and MariaDB a user `FOR UPDATE` stays in the first arm, since an exclusive lock reaches the
-  row; a user `FOR SHARE`, and on SQL Server any user locking clause, is taken as the separate
-  primary-key re-read of the SERIALIZABLE bullet, since a shared lock through a covering index would
-  not reach the row. A user locking clause on a join or a subquery is refused for now.
+  non-key UPDATE, which it does not block. **On MySQL and MariaDB** a locking clause outside a derived
+  table locks none of the rows the derived table reads, so the clause moves into the first arm, whose
+  derived table the engines merge into the statement, the user's predicate with it: only the rows it
+  matches are locked (measured on MySQL 8.4 and MariaDB 11.4). There the first arm leaves a row in
+  flight out by a scalar subquery on its state, a condition on the row itself: these engines lock a
+  row as they read it, and release the lock of a row that a condition on it rejects, but keep the lock
+  of a row a join rejects, which would hold up ScalarDB's commit of it. A shared lock read through a
+  covering index locks the index entry only, not the row, so under `FOR SHARE` the versions read under
+  the lock lock each row again by key. `LOCK IN SHARE MODE`, which the parser does not read, is parsed
+  as `FOR SHARE`, the engines' spelling restored in the statement run; `NOWAIT` fails as the engine
+  reports its own, MySQL error 3572 and MariaDB 1205. These engines lock a row before the rest of the
+  predicate runs, so a row goes in flight around the lock only through a ScalarDB prepare queued for
+  it ahead of the read, which the versions read under the lock catch. On SQL Server any user locking
+  clause is taken as the separate primary-key re-read of the SERIALIZABLE bullet. A user locking
+  clause on a join or a subquery is refused for now.
 - **SNAPSHOT**: the detector `P OR (tx_state IN (1,2) AND P_before)`: a row in flight that the read
   would return, by its after image or its before image, aborts the transaction (section 6). Where every
   ScalarDB table of the read returns rows, the tables the anchors of 4.2 cover, the read is the split
@@ -1157,7 +1167,16 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   `RETURNING` rows are its result as the database returned them, the appended keys hidden; generated
   keys are read back from `T` by key after the writes, in their transaction and in the order written,
   so a batch's keys come in the order of its entries. Key lists are bound as a `VALUES` table, each
-  value cast to its column's type, at most 1,000 keys per statement where order does not matter. A duplicate of a key the database generated is the application's duplicate:
+  value cast to its column's type, at most 1,000 keys per statement where order does not matter; on
+  MySQL and MariaDB as a `UNION ALL` of one-row selects, uncast. MariaDB's INSERT has `RETURNING`; on
+  MySQL, which has none, the keys are read back by the values the statement gives them, or are the one
+  key column's `AUTO_INCREMENT` values the vendor driver reports, and the statement's own `RETURNING`
+  is refused. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
+  only the driver's own rows go through. Neither engine's INSERT takes an alias, nor MariaDB's DELETE
+  of one table, which becomes `DELETE T FROM T_data AS T`; a column qualified by a created table's name
+  in `RETURNING` is refused on MariaDB. A failed statement there leaves the transaction open with the
+  earlier keys of a write already written, so each write runs under a savepoint and is undone to its
+  start on any failure, as the engine undoes a statement of its own. A duplicate of a key the database generated is the application's duplicate:
   without the key as written there is nothing to look up in flight. Under SNAPSHOT and SERIALIZABLE
   the snapshot cannot see a key written after it, from which the duplicate may come: a duplicate of a
   key the snapshot does not show committed is a conflict, `40001`. Only a duplicate of the primary
@@ -1724,6 +1743,10 @@ retries.
     5). A write aborts on a row in flight its predicate matches by either image. Oracle's refusal of
     SERIALIZABLE is designed (section 5), built with milestone 8. A grouped or DISTINCT read takes the
     per-table check too.
+16. Milestone 8a (2026-10-17): writes, anchored reads and locking reads on MySQL and MariaDB at READ
+    COMMITTED. A user locking clause is not kept on the outer statement but moved into the first arm
+    and checked there row by row, and a shared one locks each row again by key (4.2); a write runs
+    under a savepoint (4.3).
 
 ## References in ScalarDB (`core/src/main/java/com/scalar/db`; verified on `v3.19.1` and on the 4.0 line, identical in every cited behaviour)
 

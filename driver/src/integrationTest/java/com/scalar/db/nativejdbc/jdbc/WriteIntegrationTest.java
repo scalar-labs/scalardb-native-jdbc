@@ -20,6 +20,7 @@ import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
+import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
@@ -70,7 +71,7 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void writes_onBothLayouts(Engines e) throws Exception {
-    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4a)");
+    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
@@ -131,6 +132,15 @@ class WriteIntegrationTest {
     }
   }
 
+  /** Makes {@code schema} the session's for unqualified names: a database on MySQL. */
+  private static void setSchema(Engines e, Connection d, String schema) throws SQLException {
+    if (e.engine() == Engine.POSTGRESQL) {
+      d.setSchema(schema);
+    } else {
+      d.setCatalog(schema);
+    }
+  }
+
   private static void eachWriteKind(Engines e, DistributedTransactionManager tm, Table t)
       throws Exception {
     try (Connection d = e.openDriver()) {
@@ -157,7 +167,7 @@ class WriteIntegrationTest {
       assertThat(
               d.createStatement()
                   .executeUpdate(
-                      "UPDATE " + t.sql + " SET x = x || '!' WHERE id IN (11, 12) -- two"))
+                      "UPDATE " + t.sql + " SET x = CONCAT(x, '!') WHERE id IN (11, 12) -- two"))
           .isEqualTo(2);
       // execute() answers with an update count
       Statement st = d.createStatement();
@@ -258,7 +268,8 @@ class WriteIntegrationTest {
                       .executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (3, 'd')"))
           .isInstanceOf(SQLException.class)
           .extracting("SQLState")
-          .isEqualTo("23505");
+          .asString()
+          .startsWith("23"); // an integrity constraint violation on every engine
       d.createStatement().executeUpdate("UPDATE " + t.sql + " SET x = 'C' WHERE id = 3");
       d.commit();
       d.setAutoCommit(true);
@@ -356,7 +367,7 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void reviewFindings(Engines e) throws Exception {
-    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4a)");
+    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
@@ -367,15 +378,21 @@ class WriteIntegrationTest {
           "INSERT INTO rpl.t VALUES (1, 'plain')",
           "CREATE TABLE rsd.t (id INT PRIMARY KEY, x TEXT)",
           "INSERT INTO rsd.t VALUES (1, 'scalardb')",
-          "CREATE TABLE rf.imp (id INT PRIMARY KEY, x TEXT, b BYTEA)",
+          "CREATE TABLE rf.imp (id INT PRIMARY KEY, x TEXT, b " + e.binaryType() + ")",
           "INSERT INTO rf.imp VALUES (60, 'a', NULL), (70, 'a', NULL), (80, 'a', NULL),"
               + " (85, 'a', NULL)",
           "CREATE TABLE rf.ch (k CHAR(4) PRIMARY KEY, x TEXT)",
           "INSERT INTO rf.ch VALUES ('ab', 'a')",
-          "CREATE TABLE rf.ts (k TIMESTAMP PRIMARY KEY, x TEXT)",
+          // a local date-time: DATETIME on MySQL, whose TIMESTAMP is converted by time zone
+          "CREATE TABLE rf.ts (k "
+              + (e.engine() == Engine.POSTGRESQL ? "TIMESTAMP" : "DATETIME")
+              + " PRIMARY KEY, x TEXT)",
           "INSERT INTO rf.ts VALUES ('2020-03-08 02:30:00', 'a')",
-          "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN AS $$ BEGIN PERFORM pg_sleep(3);"
-              + " RETURN v = 'a'; END $$ LANGUAGE plpgsql VOLATILE");
+          e.engine() == Engine.POSTGRESQL
+              ? "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN AS $$ BEGIN PERFORM pg_sleep(3);"
+                  + " RETURN v = 'a'; END $$ LANGUAGE plpgsql VOLATILE"
+              : "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN NOT DETERMINISTIC NO SQL"
+                  + " BEGIN DO SLEEP(3); RETURN v = 'a'; END");
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
@@ -408,12 +425,12 @@ class WriteIntegrationTest {
     // 130: a prepared plain write that comes to name a ScalarDB table is refused, not run as text
     try (Connection d = e.openDriver();
         Connection v = e.open()) {
-      d.setSchema("rpl");
+      setSchema(e, d, "rpl");
       PreparedStatement ps = d.prepareStatement("UPDATE t SET x = ? WHERE id = ?");
       ps.setString(1, "p");
       ps.setInt(2, 1);
       ps.executeUpdate();
-      d.setSchema("rsd");
+      setSchema(e, d, "rsd");
       ps.setString(1, "raw");
       assertThatThrownBy(ps::executeUpdate).hasMessageContaining("prepare it again");
       assertThat(rows(v, "SELECT x FROM rsd.t WHERE id = 1")).containsExactly("scalardb");
@@ -574,13 +591,13 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void anchorsFromReads(Engines e) throws Exception {
-    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4)");
+    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
           "CREATE SCHEMA an",
           "CREATE TABLE an.imp (id INT PRIMARY KEY, x TEXT)",
-          "INSERT INTO an.imp SELECT g, 'a' FROM generate_series(1, 11) g");
+          "INSERT INTO an.imp SELECT g, 'a' FROM " + e.series(1, 11));
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
@@ -760,13 +777,13 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void anchorsFromJoins(Engines e) throws Exception {
-    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4)");
+    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
           "CREATE SCHEMA aj",
           "CREATE TABLE aj.p (id INT PRIMARY KEY, x TEXT)",
-          "INSERT INTO aj.p SELECT g, 'a' FROM generate_series(1, 9) g");
+          "INSERT INTO aj.p SELECT g, 'a' FROM " + e.series(1, 9));
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
@@ -840,7 +857,13 @@ class WriteIntegrationTest {
       // than read without anchors
       d.setAutoCommit(true);
       try (PreparedStatement ps = d.prepareStatement(join + "?")) {
-        ps.unwrap(Class.forName("org.postgresql.PGStatement")); // the vendor statement
+        ps.unwrap(
+            Class.forName(
+                switch (e.engine()) {
+                  case POSTGRESQL -> "org.postgresql.PGStatement";
+                  case MARIADB -> "org.mariadb.jdbc.Statement";
+                  default -> "com.mysql.cj.jdbc.JdbcStatement";
+                })); // the vendor statement
         d.setAutoCommit(false);
         ps.setInt(1, 7);
         assertThatThrownBy(ps::executeQuery)
@@ -940,13 +963,13 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void anchorReviewFindings(Engines e) throws Exception {
-    assumeTrue(e == Engines.POSTGRESQL, "writes are PostgreSQL only so far (milestone 4)");
+    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
           "CREATE SCHEMA af",
           "CREATE TABLE af.imp (id INT PRIMARY KEY, x TEXT)",
-          "INSERT INTO af.imp SELECT g, 'a' FROM generate_series(1, 9) g");
+          "INSERT INTO af.imp SELECT g, 'a' FROM " + e.series(1, 9));
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
@@ -986,8 +1009,10 @@ class WriteIntegrationTest {
       assertThat(d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w4' WHERE id = 2"))
           .isEqualTo(1);
       d.commit();
-      // 143: an aggregate in ORDER BY only
-      assertThat(rows(d, "SELECT 1 FROM af.imp ORDER BY count(*)")).containsExactly("1");
+      // 143: an aggregate in ORDER BY only, which MySQL refuses itself
+      if (e.engine() == Engine.POSTGRESQL) {
+        assertThat(rows(d, "SELECT 1 FROM af.imp ORDER BY count(*)")).containsExactly("1");
+      }
       // 144: hidden columns by label, generated keys, the lookups' alias, a position past the list,
       // an updatable result set
       try (Statement st = d.createStatement();
@@ -995,7 +1020,9 @@ class WriteIntegrationTest {
         assertThat(rs.next()).isTrue();
         assertThatThrownBy(() -> rs.getString("scalardb_native_x0"))
             .isInstanceOf(SQLException.class);
-        assertThat(st.getGeneratedKeys().getMetaData().getColumnCount()).isZero();
+        if (e.engine() == Engine.POSTGRESQL) { // Connector/J refuses it after a read
+          assertThat(st.getGeneratedKeys().getMetaData().getColumnCount()).isZero();
+        }
       }
       assertThat(rows(d, "SELECT x FROM af.imp AS scalardb_native_meta WHERE id = 3"))
           .containsExactly("a");

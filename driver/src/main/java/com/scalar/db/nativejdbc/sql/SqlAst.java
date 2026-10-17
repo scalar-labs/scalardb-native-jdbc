@@ -298,6 +298,23 @@ public final class SqlAst {
     return m.find() ? sql.substring(0, m.start(1)) + "= " + sql.substring(m.end(1)) : sql;
   }
 
+  // MySQL's LOCK IN SHARE MODE, MariaDB's only shared lock, which the parser does not read; at the
+  // end of the statement only, so never inside a literal
+  private static final Pattern LOCK_IN_SHARE_MODE =
+      Pattern.compile(
+          "\\bLOCK\\s+IN\\s+SHARE\\s+MODE(?=(?:\\s+(?:NOWAIT|SKIP\\s+LOCKED))?\\s*;?\\s*$)",
+          Pattern.CASE_INSENSITIVE);
+
+  /** {@code LOCK IN SHARE MODE} as {@code FOR SHARE}, padded, every offset kept. */
+  static String lockInShareModeAsForShare(String sql) {
+    Matcher m = LOCK_IN_SHARE_MODE.matcher(sql);
+    return m.find()
+        ? sql.substring(0, m.start())
+            + String.format("%-" + (m.end() - m.start()) + "s", "FOR SHARE")
+            + sql.substring(m.end())
+        : sql;
+  }
+
   /**
    * Parses one statement as {@link #parse(String, Engine, boolean)} does, and says why when it
    * refuses it.
@@ -309,7 +326,12 @@ public final class SqlAst {
    */
   public static Outcome<SqlAst> analyze(
       String text, Engine engine, boolean doubleQuotesQuoteIdentifiers) {
-    String sql = engine == Engine.POSTGRESQL ? setToAsEquals(text) : text;
+    String sql =
+        engine == Engine.POSTGRESQL
+            ? setToAsEquals(text)
+            : engine == Engine.MYSQL || engine == Engine.MARIADB
+                ? lockInShareModeAsForShare(text)
+                : text;
     Statement stmt;
     try {
       // parseStatements, not parse: the latter silently keeps only the first of "a; b"

@@ -44,6 +44,12 @@ final class SplitRead {
      */
     LEFT_JOIN,
     /**
+     * The row's state read by a scalar subquery, a condition on the row itself: where a locking
+     * read locks each row as it reads it, MySQL and MariaDB release the lock of a row in flight it
+     * rejects, which they keep for a row a join rejects.
+     */
+    SCALAR,
+    /**
      * None: every row as it is, those in flight with their after images, which then carry their
      * state and abort the read (SNAPSHOT and SERIALIZABLE).
      */
@@ -68,6 +74,8 @@ final class SplitRead {
    * @param committedOnly whether to emit the committed copy alone, as a locking read takes it
    * @param raw whether the committed copy keeps the rows in flight, as at SNAPSHOT and
    *     SERIALIZABLE, where the states {@code extras} read abort on them
+   * @param lock the locking clause the committed copy carries itself, or {@code null}: MySQL and
+   *     MariaDB lock no row a derived table reads for a clause outside it
    * @return the split read, or {@code null} to read through the views
    */
   static SqlAst.@Nullable SplitText emit(
@@ -80,7 +88,8 @@ final class SplitRead {
       List<SqlAst.TableRef> anchored,
       BiFunction<SqlAst.TableRef, SqlAst.Piece, List<String>> extras,
       boolean committedOnly,
-      boolean raw) {
+      boolean raw,
+      @Nullable String lock) {
     Map<SqlAst.TableRef, SqlAst.Place> places = split.places();
     List<SqlAst.TableRef> refs = new ArrayList<>();
     List<List<SqlAst.Piece>> pieces = new ArrayList<>();
@@ -180,7 +189,12 @@ final class SplitRead {
                       cols,
                       raw
                           ? Check.NONE
-                          : perRow.contains(ref) || rowByRowUnderLimit ? Check.LEFT_JOIN : inCopy);
+                          : lock != null
+                              ? Check.SCALAR
+                              : perRow.contains(ref) || rowByRowUnderLimit
+                                  ? Check.LEFT_JOIN
+                                  : inCopy,
+                      lock);
               }
             }
           });
@@ -230,7 +244,8 @@ final class SplitRead {
   }
 
   /** The table's rows not in flight, with the columns {@code read} of its own. */
-  private static String committed(Engine engine, TableInfo t, List<String> read, Check check) {
+  private static String committed(
+      Engine engine, TableInfo t, List<String> read, Check check, @Nullable String lock) {
     String txState = engine.quote("tx_state");
     StringBuilder sql = new StringBuilder("(SELECT ");
     List<String> cols = new ArrayList<>();
@@ -276,8 +291,20 @@ final class SplitRead {
             .append(txState)
             .append(", 3) = 3");
         break;
+      case SCALAR:
+        sql.append(" WHERE COALESCE((SELECT q.")
+            .append(txState)
+            .append(" FROM ")
+            .append(meta(engine, t))
+            .append(" q WHERE ")
+            .append(keyJoin(engine, t, "q"))
+            .append("), 3) NOT IN (1, 2)");
+        break;
       case NONE:
         break;
+    }
+    if (lock != null) {
+      sql.append(" ").append(lock);
     }
     return sql.append(")").toString();
   }

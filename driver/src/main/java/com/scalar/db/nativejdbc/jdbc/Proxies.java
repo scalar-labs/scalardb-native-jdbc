@@ -506,7 +506,15 @@ public final class Proxies {
         cancelled = true;
         Statement running = runningWrite;
         if (running != null) {
-          running.cancel(); // the driver's statement of a write, not the idle vendor one (136)
+          try {
+            running.cancel(); // the driver's statement of a write, not the idle vendor one (136)
+          } catch (SQLException ex) {
+            // between two statements of a wait, the flag ends it; MariaDB's driver refuses
+            // to cancel a closed statement
+            if (!running.isClosed()) {
+              throw ex;
+            }
+          }
           return null;
         }
       }

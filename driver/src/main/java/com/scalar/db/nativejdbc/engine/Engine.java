@@ -881,6 +881,27 @@ public enum Engine {
     throw new AssertionError(this);
   }
 
+  /**
+   * Returns whether the exception is a unique constraint's duplicate key, any constraint's.
+   *
+   * @param e the exception
+   * @return whether it is the engine's duplicate key
+   */
+  public boolean isDuplicateKey(SQLException e) {
+    switch (this) {
+      case POSTGRESQL:
+        return "23505".equals(e.getSQLState());
+      case MYSQL:
+      case MARIADB:
+        return e.getErrorCode() == 1062;
+      case SQLSERVER:
+        return e.getErrorCode() == 2627 || e.getErrorCode() == 2601;
+      case ORACLE:
+        return e.getErrorCode() == 1;
+    }
+    throw new AssertionError(this);
+  }
+
   private String sessionSchemasQuery() {
     switch (this) {
       case POSTGRESQL:

@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc;
 
 import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.jdbc.Proxies;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -18,6 +19,8 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.TreeSet;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -115,6 +118,7 @@ public final class NativeJdbcDriver implements Driver {
     NativeJdbcUrl parsed = parse(url);
     DriverProperties settings = DriverProperties.read(parsed.driverParameters(), info);
     Properties vendorProperties = DriverProperties.vendorProperties(info);
+    requireRowsMatched(parsed, vendorProperties);
     Driver vendor = vendorDriver(parsed);
     // the user's own connection first: a caller who cannot log in leaves nothing behind
     Connection connection = vendor.connect(parsed.vendorUrl(), vendorProperties);
@@ -138,6 +142,33 @@ public final class NativeJdbcDriver implements Driver {
       throw e;
     }
   }
+
+  /**
+   * On MySQL and MariaDB, refuses {@code useAffectedRows} other than false, in the URL or the
+   * properties: the driver's writes need each UPDATE's count to be the rows it matched, not those
+   * it changed (design section 1).
+   */
+  private static void requireRowsMatched(NativeJdbcUrl parsed, Properties vendorProperties)
+      throws SQLException {
+    if (parsed.engine() != Engine.MYSQL && parsed.engine() != Engine.MARIADB) {
+      return;
+    }
+    Matcher m = USE_AFFECTED_ROWS.matcher(parsed.vendorUrl());
+    String value = m.find() ? m.group(1) : null;
+    for (String name : vendorProperties.stringPropertyNames()) {
+      if (name.equalsIgnoreCase("useAffectedRows")) {
+        value = vendorProperties.getProperty(name);
+      }
+    }
+    if (value != null && !value.trim().equalsIgnoreCase("false")) {
+      throw new SQLException(
+          "useAffectedRows must stay false: the driver's writes count the rows an UPDATE matched",
+          "08004");
+    }
+  }
+
+  private static final Pattern USE_AFFECTED_ROWS =
+      Pattern.compile("[?&]useAffectedRows=([^&]*)", Pattern.CASE_INSENSITIVE);
 
   /**
    * The catalog for this database and identity. The key is a digest of the vendor URL, every vendor

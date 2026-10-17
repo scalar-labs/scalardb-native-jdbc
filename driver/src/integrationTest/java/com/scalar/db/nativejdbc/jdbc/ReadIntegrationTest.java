@@ -381,9 +381,9 @@ class ReadIntegrationTest {
           vendor.setAutoCommit(false); // in a transaction, where anchors are recorded
           String sql = new Router(engine, catalog, new Session(engine)).route(vendor, byKey).sql;
           vendor.rollback();
-          if (engine == Engine.POSTGRESQL) {
-            assertThat(sql).contains("scalardb_native_x"); // a key read anchors its row (4b)
-          } else {
+          // a key read anchors its row where writes run (4b)
+          assertThat(sql.contains("scalardb_native_x")).isEqualTo(e.writes());
+          if (engine != Engine.POSTGRESQL) {
             assertThat(sql.contains("COALESCE")).isEqualTo(perRow);
           }
         }

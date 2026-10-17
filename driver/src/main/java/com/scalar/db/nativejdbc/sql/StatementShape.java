@@ -330,18 +330,22 @@ public final class StatementShape {
    * their order, when every row gives each of them as a placeholder or a literal.
    *
    * @param keyColumns the table's key columns as the catalog spells them
+   * @param tableColumns the table's columns in order, which a statement without a column list gives
+   *     values for
    * @return the key values per row, or {@code null} when a key column is not listed or a value is
    *     anything else
    */
-  public @Nullable List<List<Expression>> insertKeyValues(List<String> keyColumns) {
-    if (kind != Kind.INSERT || insertColumns.isEmpty()) {
+  public @Nullable List<List<Expression>> insertKeyValues(
+      List<String> keyColumns, List<String> tableColumns) {
+    if (kind != Kind.INSERT) {
       return null;
     }
+    List<String> columns = insertColumns.isEmpty() ? tableColumns : insertColumns;
     List<Integer> at = new ArrayList<>();
     for (String k : keyColumns) {
       int found = -1;
-      for (int i = 0; i < insertColumns.size(); i++) {
-        if (engine.columnKey(insertColumns.get(i)).equals(engine.columnKey(k))) {
+      for (int i = 0; i < columns.size(); i++) {
+        if (engine.columnKey(columns.get(i)).equals(engine.columnKey(k))) {
           found = i;
         }
       }
@@ -361,7 +365,7 @@ public final class StatementShape {
     }
     List<List<Expression>> out = new ArrayList<>();
     for (ExpressionList<?> row : rows) {
-      if (row.size() != insertColumns.size()) {
+      if (row.size() != columns.size()) {
         return null;
       }
       List<Expression> keys = new ArrayList<>();

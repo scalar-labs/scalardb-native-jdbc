@@ -452,6 +452,26 @@ table hints before parsing; that pass must still refuse `NOLOCK` and `READUNCOMM
 table, so it detects them before stripping. Oracle maps SNAPSHOT to its SERIALIZABLE and refuses the driver's SERIALIZABLE with `0AN01`, in
 `setTransactionIsolation` and in `DatabaseMetaData.supportsTransactionIsolationLevel`, as section 5 says.
 
+Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
+
+- **8a: MySQL and MariaDB at READ COMMITTED.** Writes, anchored reads and locking reads; the
+  insert collision by error 1062, the stamp by `INSERT IGNORE` (driver-built rows only), keys read
+  back by the statement's own key values where PostgreSQL uses `RETURNING`; a savepoint around each
+  write, since a failed statement there leaves the transaction open with the earlier keys written;
+  `useAffectedRows` refused. The write, review and interleaving tests run on both.
+  **Done (2026-10-17).** As planned, with these found on the engines: a locking clause outside a
+  derived table locks nothing the table reads, so the user's clause moves into the first arm, which
+  checks rows in flight row by row (a join keeps the lock of a row it rejects); `FOR SHARE` locks the
+  rows again by key, past a covering index; `LOCK IN SHARE MODE` is parsed as `FOR SHARE`; MariaDB
+  uses `RETURNING`, and MySQL takes an `AUTO_INCREMENT` key from the vendor driver. All engines: 331
+  unit and 252 integration tests, 54 skipped, none failed.
+- **8b: MySQL and MariaDB at SNAPSHOT and SERIALIZABLE.** REPEATABLE READ with the after-image
+  checks, and the locking re-read of 4.2 with its coarse path at SERIALIZABLE.
+- **8c: SQL Server**, all three levels: the per-engine row, the `READ_COMMITTED_SNAPSHOT` and
+  `XACT_ABORT` checks, the hint pass of 4.7.
+- **8d: Oracle**: READ COMMITTED and SNAPSHOT, `TRANSACTION_REPEATABLE_READ` mapped to its
+  SERIALIZABLE, the driver's SERIALIZABLE refused.
+
 ### Milestone 9: tools and acceptance
 
 The `tools` module with the setup command (`setup`, `check`, `teardown`, `--dry-run`, exit codes, todo

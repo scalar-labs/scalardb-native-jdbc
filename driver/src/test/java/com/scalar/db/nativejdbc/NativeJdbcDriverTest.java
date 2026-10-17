@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Properties;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -35,6 +36,26 @@ class NativeJdbcDriverTest {
         .hasMessageNotContaining("s3cret")
         .extracting("SQLState")
         .isEqualTo("08001");
+  }
+
+  @Test
+  void useAffectedRows_isRefusedOnMySqlAndMariaDb_inTheUrlOrTheProperties() {
+    Properties on = new Properties();
+    on.setProperty("useaffectedrows", "TRUE");
+    for (String url :
+        List.of(
+            "jdbc:scalardb-native:mysql://h/db?a=1&useAffectedRows=true",
+            "jdbc:scalardb-native:mariadb://h/db?useAffectedRows=1")) {
+      assertThatThrownBy(() -> new NativeJdbcDriver().connect(url, new Properties()))
+          .isInstanceOf(SQLException.class)
+          .extracting("SQLState")
+          .isEqualTo("08004");
+    }
+    assertThatThrownBy(
+            () -> new NativeJdbcDriver().connect("jdbc:scalardb-native:mysql://h/db", on))
+        .isInstanceOf(SQLException.class)
+        .extracting("SQLState")
+        .isEqualTo("08004");
   }
 
   @Test
