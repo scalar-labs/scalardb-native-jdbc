@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "206"
 tags: [code-review, investigation, mysql]
@@ -29,3 +29,8 @@ dependencies: []
 
 **By:** Claude Code
 - From the focused review of 4a62f9e (the fixes of todos 186-199).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- ANSI_QUOTES hint: probed on m8-mysql, MERGE("x") merges a double-quoted alias, ruled out. /*! */: the literal scan treats it as a comment, and executable comments are refused anyway, ruled out. lower_case_table_names=1: information_schema names then compare case-insensitively (tolower collation), ruled out by reasoning, not probed. Test 196: row 1's metadata version is now asserted.

@@ -48,8 +48,12 @@ final class Writes {
 
   /** What a run needs from the statement that runs it. */
   interface Context {
-    /** Binds the application's value of one of its placeholders to a driver statement. */
-    void bind(PreparedStatement ps, int position, int placeholder) throws SQLException;
+    /**
+     * Binds the application's value of one of its placeholders to a driver statement; {@code
+     * asStored} binds a float as the exact double a stored float compares as (todo 205).
+     */
+    void bind(PreparedStatement ps, int position, int placeholder, boolean asStored)
+        throws SQLException;
 
     /** The statement's query timeout in seconds, 0 for none. */
     int queryTimeout() throws SQLException;
@@ -92,10 +96,17 @@ final class Writes {
   static final class Step {
     final String sql;
     final List<Integer> binds;
+    // the driver's match of the application's key values against stored keys
+    final boolean matchesKeys;
 
     Step(String sql, List<Integer> binds) {
+      this(sql, binds, false);
+    }
+
+    Step(String sql, List<Integer> binds, boolean matchesKeys) {
       this.sql = sql;
       this.binds = List.copyOf(binds);
+      this.matchesKeys = matchesKeys;
     }
   }
 
@@ -132,11 +143,18 @@ final class Writes {
    * @param tables the tables the statement names, for the refusal's message
    * @param snapshot whether the connection runs at SNAPSHOT or SERIALIZABLE, where a row in flight
    *     the predicate matches by its after image aborts too (design 4.2)
+   * @param vendor the vendor connection, which an INSERT that lists no columns reads the data
+   *     table's column order with, or {@code null} to leave its keys unknown
    * @return the plan
    * @throws SQLException 0AN01 for a write the driver cannot run yet
    */
   static Plan plan(
-      Engine engine, StatementShape shape, TableInfo t, String tables, boolean snapshot)
+      Engine engine,
+      StatementShape shape,
+      TableInfo t,
+      String tables,
+      boolean snapshot,
+      @Nullable Connection vendor)
       throws SQLException {
     SqlAst ast = shape.ast();
     String source = ast.source();
@@ -150,8 +168,33 @@ final class Writes {
     }
     Names n = new Names(engine, t);
     return shape.kind() == StatementShape.Kind.INSERT
-        ? insertPlan(shape, t, n, all, tables, snapshot)
+        ? insertPlan(
+            shape,
+            t,
+            n,
+            all,
+            tables,
+            snapshot,
+            vendor == null || !shape.insertColumns().isEmpty() ? null : columnOrder(vendor, n))
         : keyedPlan(shape, t, n, all, tables, snapshot);
+  }
+
+  /** The data table's columns in their own order (todo 203). */
+  private static List<String> columnOrder(Connection vendor, Names n) throws SQLException {
+    List<String> out = new ArrayList<>();
+    try (PreparedStatement ps =
+        vendor.prepareStatement(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND"
+                + " table_name = ? ORDER BY ordinal_position")) {
+      ps.setString(1, n.namespace);
+      ps.setString(2, n.dataTable);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.add(rs.getString(1));
+        }
+      }
+    }
+    return out;
   }
 
   private static Plan keyedPlan(
@@ -261,7 +304,8 @@ final class Writes {
       Names n,
       List<Integer> all,
       String tables,
-      boolean snapshot)
+      boolean snapshot,
+      @Nullable List<String> tableColumns)
       throws SQLException {
     Engine engine = n.engine;
     SqlAst ast = shape.ast();
@@ -278,7 +322,7 @@ final class Writes {
     // statement gives them in its column list, one row each, or are the AUTO_INCREMENT values of
     // the one key column it leaves out, which the vendor driver reports (todos 186, 187)
     boolean returns = engine == Engine.POSTGRESQL || engine == Engine.MARIADB;
-    List<List<Expression>> rows = shape.insertKeyValues(t.keyColumns());
+    List<List<Expression>> rows = shape.insertKeyValues(t.keyColumns(), tableColumns);
     if (returning != null && !returns) {
       throw refused(tables, "RETURNING is not supported on this engine");
     }
@@ -318,6 +362,7 @@ final class Writes {
     Step committed = null;
     Step repeats = null;
     List<Step> readBack = new ArrayList<>();
+    Step prior = null;
     if (rows != null) {
       List<String> match = new ArrayList<>();
       List<String> matchData = new ArrayList<>();
@@ -351,8 +396,20 @@ final class Writes {
                       + n.data
                       + " d WHERE "
                       + String.join(" AND ", termsData),
-                  matchBinds.subList(matchBinds.size() - rowBinds(ast, row), matchBinds.size())));
+                  matchBinds.subList(matchBinds.size() - rowBinds(ast, row), matchBinds.size()),
+                  true));
         }
+      }
+      if (!returns) {
+        prior =
+            new Step(
+                "SELECT 1 FROM "
+                    + n.data
+                    + " d WHERE "
+                    + String.join(" OR ", matchData)
+                    + " LIMIT 1",
+                matchBinds,
+                true);
       }
       if (snapshot && rows.size() > 1) {
         // a key the statement itself repeats is the application's duplicate (todo 178)
@@ -367,7 +424,8 @@ final class Writes {
                     + ") v GROUP BY "
                     + String.join(", ", columns)
                     + " HAVING COUNT(*) > 1",
-                matchBinds);
+                matchBinds,
+                true);
       }
       if (snapshot) {
         // the snapshot cannot see a key written after it, which the duplicate came from: a key
@@ -387,7 +445,8 @@ final class Writes {
                     + " IS NULL OR m."
                     + n.txState
                     + " = 3)",
-                matchBinds);
+                matchBinds,
+                true);
       }
       inFlight =
           new Step(
@@ -398,13 +457,15 @@ final class Writes {
                   + ") AND "
                   + n.txState
                   + " IN (1, 2)",
-              matchBinds);
+              matchBinds,
+              true);
     }
     SqlAst.TableRef ref = shape.table();
     return new InsertPlan(
         n,
         new Step(insert, all),
         readBack,
+        prior,
         inFlight,
         committed,
         repeats,
@@ -464,6 +525,26 @@ final class Writes {
 
   private static SQLException refused(String tables, String reason) {
     return Errors.unsupported(reason + tables);
+  }
+
+  /**
+   * Whether MySQL rolled back only the statement: a lock wait timeout, which Connector/J reports as
+   * a rollback, does so unless innodb_rollback_on_timeout is on (todo 204).
+   */
+  private static boolean statementOnly(Connection vendor, SQLException e) {
+    try {
+      if (e.getErrorCode() != 1205
+          || !vendor.getMetaData().getDatabaseProductName().equals("MySQL")) {
+        return false; // 1205 is a deadlock on SQL Server
+      }
+      try (Statement s = vendor.createStatement();
+          ResultSet rs = s.executeQuery("SELECT @@innodb_rollback_on_timeout")) {
+        return rs.next() && !rs.getBoolean(1);
+      }
+    } catch (SQLException r) {
+      e.addSuppressed(r);
+      return false;
+    }
   }
 
   /** Work run in a write's transaction. */
@@ -533,7 +614,8 @@ final class Writes {
         } catch (SQLException r) {
           e.addSuppressed(r); // the write's own failure is the one to report
         }
-      } else if (e instanceof SQLTransactionRollbackException
+      } else if ((e instanceof SQLTransactionRollbackException
+              && !statementOnly(vendor, (SQLException) e))
           || e instanceof RuntimeException
           || "57014".equals(((SQLException) e).getSQLState())) {
         // a timeout or a cancel the driver raises itself can come between a key's DML and its
@@ -645,7 +727,7 @@ final class Writes {
       try {
         int i = 1;
         for (int b : step.binds) {
-          context.bind(ps, i++, b);
+          context.bind(ps, i++, b, step.matchesKeys);
         }
         if (key != null) {
           bind(ps, i, key);
@@ -1023,6 +1105,10 @@ final class Writes {
     // on MySQL, which has no RETURNING, each row's key read back by its values; none for an
     // AUTO_INCREMENT key the statement leaves out, which the vendor driver reports
     final List<Step> readBack;
+    // with it, whether a row matches those values before the INSERT: one that does and is not a
+    // duplicate means MySQL stored other values (a trigger, a non-strict conversion), which the
+    // read-back would mistake for the older row (todo 201)
+    final @Nullable Step prior;
     // whether that key is AUTO_INCREMENT, asked once
     private volatile @Nullable Boolean autoIncrement;
     final @Nullable Step inFlight;
@@ -1037,6 +1123,7 @@ final class Writes {
         Names n,
         Step insert,
         List<Step> readBack,
+        @Nullable Step prior,
         @Nullable Step inFlight,
         @Nullable Step committed,
         @Nullable Step repeats,
@@ -1045,6 +1132,7 @@ final class Writes {
       super(n);
       this.insert = insert;
       this.readBack = List.copyOf(readBack);
+      this.prior = prior;
       this.inFlight = inFlight;
       this.committed = committed;
       this.repeats = repeats;
@@ -1063,7 +1151,7 @@ final class Writes {
       for (Step s : readBack) {
         out.add(s.sql);
       }
-      for (Step s : Arrays.asList(inFlight, committed, repeats)) {
+      for (Step s : Arrays.asList(prior, inFlight, committed, repeats)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -1110,8 +1198,20 @@ final class Writes {
             keys.read(rs, from, width);
           }
         } else {
+          // ponytail: a non-locking read; a row committed between it and the INSERT under a
+          // trigger that changes the key still goes unnoticed
+          boolean existed;
+          try (PreparedStatement check = run.prepare(Objects.requireNonNull(prior), null);
+              ResultSet r = check.executeQuery()) {
+            existed = r.next();
+          }
           ps = run.prepare(insert, null);
           ps.executeUpdate();
+          if (existed) {
+            throw Errors.unsupported(
+                "the INSERT stored other key values than it gave, which a row already holds: a"
+                    + " trigger or a non-strict sql_mode changed them");
+          }
         }
       } catch (SQLException e) {
         if (ps != null) {

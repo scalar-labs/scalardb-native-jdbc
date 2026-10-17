@@ -472,6 +472,19 @@ class SqlAstTest {
     // a comment after it, which tools append (todo 194)
     assertThat(SqlAst.lockInShareModeAsForShare("SELECT 1 LOCK IN SHARE MODE /* app */ -- x"))
         .startsWith("SELECT 1 FOR SHARE ");
+    // nor a literal or comment with a comment after it (todo 200)
+    for (String sql :
+        List.of(
+            "UPDATE t SET x = 'LOCK IN SHARE MODE #' WHERE id = 5",
+            "SELECT x FROM t WHERE x <> 'LOCK IN SHARE MODE -- z'",
+            "SELECT x FROM t WHERE x <> 'it\\'s LOCK IN SHARE MODE #'",
+            "SELECT `LOCK IN SHARE MODE #`",
+            "SELECT 1 /* LOCK IN SHARE MODE */",
+            "SELECT 1 # LOCK IN SHARE MODE")) {
+      assertThat(SqlAst.lockInShareModeAsForShare(sql)).as(sql).isEqualTo(sql);
+    }
+    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 'a' LOCK IN SHARE MODE # 'b'"))
+        .startsWith("SELECT 'a' FOR SHARE ");
   }
 
   @Test

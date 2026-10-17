@@ -1153,7 +1153,9 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   error, so even PostgreSQL, which does this natively only after a failed statement, would otherwise
   accept further statements and a commit. A query timeout or a cancel the driver raises itself during
   a write marks the transaction the same way (it throws `57014`): it can come between a key's write
-  and its stamp, which would otherwise commit unstamped.
+  and its stamp, which would otherwise commit unstamped. So does a vendor error of class 40 during a
+  write, except MySQL's lock wait timeout (1205) while `innodb_rollback_on_timeout` is off, which
+  undoes the statement only, as the write's savepoint does.
 - **NULL or missing metadata.** If step 1 finds a metadata row with `tx_id IS NULL`, which a ScalarDB
   rollback over a row that had no metadata leaves behind with `tx_state` NULL as well (fact 2), the anchor
   has a NULL `tx_id` and a version of NULL or 0, which the CAS ignores: its condition is
@@ -1173,14 +1175,19 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   keys are read back from `T` by key after the writes, in their transaction and in the order written,
   so a batch's keys come in the order of its entries. Key lists are bound as a `VALUES` table, each
   value cast to its column's type, at most 1,000 keys per statement where order does not matter; on
-  MySQL and MariaDB as a `UNION ALL` of one-row selects, uncast. MariaDB's INSERT has `RETURNING`; on
-  MySQL, which has none, the statement lists its columns and either gives each key column a literal
-  or a placeholder, each row's key then read back by those values and required to match exactly one
-  row, since MySQL may store another value than the one given (a NULL or 0 it generates, `1.6` in an
-  INT) and compares after conversion (`1` equals `'01'`), or leaves out a single key column that
-  `information_schema` shows `AUTO_INCREMENT`, whose values the vendor driver reports; anything else,
-  an INSERT without a column list included, is refused, and so is the statement's own `RETURNING`.
-  A FLOAT key is bound as its exact double, which MySQL compares an uncast value as. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
+  MySQL and MariaDB as a `UNION ALL` of one-row selects, uncast. An INSERT without a column list
+  gives its values in the data table's own column order, which `information_schema` gives when the
+  statement is planned. MariaDB's INSERT has `RETURNING`; on MySQL, which has none, the statement
+  either gives each key column a literal or a placeholder, each row's key then read back by those
+  values and required to match exactly one row, since MySQL may store another value than the one
+  given (a NULL or 0 it generates, `1.6` in an INT) and compares after conversion (`1` equals
+  `'01'`), or leaves out a single key column that `information_schema` shows `AUTO_INCREMENT`, whose
+  values the vendor driver reports; anything else is refused, and so is the statement's own
+  `RETURNING`. Before such an INSERT one read asks whether any row already matches those values: if
+  one does and the INSERT still succeeds, MySQL stored other values (a trigger, a non-strict
+  `sql_mode`), the read-back would find the older row, and the write is refused. A FLOAT key is
+  bound as its exact double, which MySQL compares an uncast value as, the application's `setFloat`
+  too when the driver matches keys. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
   only the driver's own rows go through. Neither engine's INSERT takes an alias, nor MariaDB's DELETE
   of one table, which becomes `DELETE T FROM T_data AS T`; a column qualified by a created table's name
   in `RETURNING` is refused on MariaDB. A failed statement there leaves the transaction open with the

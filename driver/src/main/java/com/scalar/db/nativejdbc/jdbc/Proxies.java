@@ -925,10 +925,16 @@ public final class Proxies {
       long epoch = owner.anchors.epoch();
       return new Writes.Context() {
         @Override
-        public void bind(PreparedStatement ps, int position, int placeholder) throws SQLException {
+        public void bind(PreparedStatement ps, int position, int placeholder, boolean asStored)
+            throws SQLException {
           Call c = parameters == null ? null : parameters.get(placeholder);
           if (c == null) {
             throw new SQLException("no value is bound to parameter " + placeholder, "07001");
+          }
+          if (asStored && c.method.getName().equals("setFloat")) {
+            // Connector/J sends a float as its shortest decimal text, which no stored float equals
+            ps.setDouble(position, ((Float) c.args[1]).doubleValue());
+            return;
           }
           Object[] at = c.args.clone();
           at[0] = position;

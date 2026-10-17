@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "205"
 tags: [code-review, compatibility, mysql]
@@ -36,3 +36,8 @@ Document FLOAT keys as needing setDouble.
 
 **By:** Claude Code
 - From the focused review of 4a62f9e (the fixes of todos 186-199).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- The driver's key-matching steps bind the application's setFloat as the float's exact double; the user's own statement is unchanged. Test.

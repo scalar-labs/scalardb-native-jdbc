@@ -62,7 +62,7 @@ class WritesTest {
   private static List<String> plan(TableInfo t, String sql) throws Exception {
     StatementShape shape =
         StatementShape.of(SqlAst.parse(sql, Engine.POSTGRESQL).orElseThrow()).orElseThrow();
-    return Writes.plan(Engine.POSTGRESQL, shape, t, "", false).sql();
+    return Writes.plan(Engine.POSTGRESQL, shape, t, "", false, null).sql();
   }
 
   @Test

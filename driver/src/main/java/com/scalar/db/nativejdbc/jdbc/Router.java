@@ -477,7 +477,7 @@ final class Router {
       }
     }
     if (!scalarDb.isEmpty() && kind == SqlAst.Kind.DML) {
-      return write(sql, ast, scalarDb);
+      return write(vendor, sql, ast, scalarDb);
     }
     if (!scalarDb.isEmpty()) {
       return read(
@@ -506,7 +506,11 @@ final class Router {
   }
 
   /** A write of a ScalarDB table: planned now, run by the driver (design 4.3, milestone 4a). */
-  private Route write(String sql, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
+  private Route write(
+      Connection vendor,
+      String sql,
+      SqlAst ast,
+      IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb)
       throws SQLException {
     Set<String> names = new TreeSet<>();
     for (TableInfo t : scalarDb.values()) {
@@ -536,7 +540,7 @@ final class Router {
       throw Errors.unsupported(
           "tables in ScalarDB's classic layout are not supported yet" + tables);
     }
-    Writes.Plan plan = Writes.plan(engine, shape.get(), t, tables, snapshot());
+    Writes.Plan plan = Writes.plan(engine, shape.get(), t, tables, snapshot(), vendor);
     return new Route(
         sql,
         sql,
@@ -775,8 +779,11 @@ final class Router {
         lockSql = "SET STATEMENT optimizer_switch='derived_merge=on' FOR " + lockSql;
       } else {
         // ponytail: ahead of any hint comment of the user's, which MySQL then ignores
-        int select = read.afterLast("SELECT");
-        if (select < 0 || !lockSql.regionMatches(true, 0, read.source(), 0, select)) {
+        // the outer SELECT of the text as emitted, which re-spaces the user's (todo 202); the
+        // quoting setting does not move a token
+        SqlAst emitted = SqlAst.parse(lockSql, engine, true).orElse(null);
+        int select = emitted == null ? -1 : emitted.afterFirst("SELECT");
+        if (select < 0) {
           throw Errors.unsupported(
               "the locking read cannot be rewritten onto the committed rows" + tables);
         }

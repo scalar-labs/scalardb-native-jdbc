@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "203"
 tags: [code-review, correctness, postgresql, mariadb]
@@ -37,3 +37,8 @@ Refuse an INSERT without a column list on every engine. Simpler, less compatible
 
 **By:** Claude Code
 - From the focused review of 4a62f9e (the fixes of todos 186-199).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- An INSERT without a column list reads the data table's column order from information_schema at plan time (Option 1); a key in flight gives 40001 on PostgreSQL, MySQL and MariaDB (test). MySQL now runs such an INSERT too.

@@ -110,6 +110,12 @@ class MoreWritesIntegrationTest {
           "CREATE TABLE wb.fl (k FLOAT PRIMARY KEY, x INT)",
           "INSERT INTO wb.fl VALUES (0.1, 0)");
       if (e.engine() == Engine.MYSQL) {
+        // the review of 4a62f9e: a trigger that changes the key
+        e.execute(
+            c,
+            "CREATE TABLE wb.trg (k INT PRIMARY KEY, x INT)",
+            "INSERT INTO wb.trg VALUES (5, 0)",
+            "CREATE TRIGGER wb.trg_k BEFORE INSERT ON wb.trg FOR EACH ROW SET NEW.k = NEW.k + 100");
         // an AUTO_INCREMENT column that is not the key
         e.execute(
             c,
@@ -129,6 +135,7 @@ class MoreWritesIntegrationTest {
       }
       if (e.engine() == Engine.MYSQL) {
         admin.importTable("wb", "seq", DECOUPLED, Map.of());
+        admin.importTable("wb", "trg", DECOUPLED, Map.of());
       }
       admin.createTable(
           "wb",
@@ -197,6 +204,7 @@ class MoreWritesIntegrationTest {
           new Table(
               "wb.gen", "wb." + gen.metadataTable(), Objects.requireNonNull(gen.virtualTable())));
       reviewOf8a(e, catalog);
+      reviewOf8aFixes(e, catalog, tpc);
     }
   }
 
@@ -208,17 +216,11 @@ class MoreWritesIntegrationTest {
     String vkMeta = "wb." + catalog.lookup(List.of(), "wb", "vk").metadataTable();
     try (Connection d = e.openDriver();
         Connection v = e.open()) {
-      // 188: without a column list the key's position is the table's, not ScalarDB's
-      if (mysql) {
-        assertRefused(() -> d.createStatement().executeUpdate("INSERT INTO wb.ord VALUES (5, 1)"));
-        assertThat(rows(v, "SELECT k, tx_version FROM " + ordMeta + " ORDER BY k"))
-            .containsExactly("5/1");
-      } else {
-        assertThat(d.createStatement().executeUpdate("INSERT INTO wb.ord VALUES (5, 1)"))
-            .isEqualTo(1);
-        assertThat(rows(v, "SELECT k, tx_version FROM " + ordMeta + " ORDER BY k"))
-            .containsExactly("1/1", "5/1");
-      }
+      // 188, 203: without a column list the key's position is the table's, not ScalarDB's
+      assertThat(d.createStatement().executeUpdate("INSERT INTO wb.ord VALUES (5, 1)"))
+          .isEqualTo(1);
+      assertThat(rows(v, "SELECT k, tx_version FROM " + ordMeta + " ORDER BY k"))
+          .containsExactly("1/1", "5/1");
       if (mysql) {
         // 186: a NULL or 0 AUTO_INCREMENT key, which MySQL generates, is refused, not left
         // without metadata; nothing is written
@@ -306,6 +308,9 @@ class MoreWritesIntegrationTest {
             .isEqualTo(1);
         d.commit();
         assertThat(rows(v, "SELECT id, v FROM wb.nn ORDER BY id")).containsExactly("1/0", "2/5");
+        String nnMeta = "wb." + catalog.lookup(List.of(), "wb", "nn").metadataTable();
+        assertThat(rows(v, "SELECT id, tx_version FROM " + nnMeta + " WHERE id = 1"))
+            .containsExactly("1/1");
       }
       d.setAutoCommit(true);
     }
@@ -328,6 +333,74 @@ class MoreWritesIntegrationTest {
           .isInstanceOf(SQLException.class)
           .extracting("SQLState")
           .isEqualTo("08004");
+    }
+  }
+
+  /** The findings of the review of the fixes of 8a (todos 200-205). */
+  private static void reviewOf8aFixes(
+      Engines e, Catalog catalog, TwoPhaseCommitTransactionManager tpc) throws Exception {
+    Engine engine = e.engine();
+    try (Connection d = e.openDriver();
+        Connection v = e.open()) {
+      // 200: a literal holding the clause and a comment mark is written as given
+      d.createStatement().executeUpdate("INSERT INTO wb.made (id, x) VALUES (91, 'f')");
+      d.createStatement()
+          .executeUpdate("UPDATE wb.made SET x = 'LOCK IN SHARE MODE #' WHERE id = 91");
+      assertThat(rows(d, "SELECT x FROM wb.made WHERE id = 91"))
+          .containsExactly("LOCK IN SHARE MODE #");
+      // 203: without a column list, a key in flight is a conflict, not a duplicate
+      TwoPhaseCommitTransaction held = tpc.begin();
+      held.insert(
+          Insert.newBuilder()
+              .namespace("wb")
+              .table(Objects.requireNonNull(catalog.lookup(List.of(), "wb", "ord").virtualTable()))
+              .partitionKey(Key.ofInt("k", 7))
+              .intValue("x", 1)
+              .build());
+      held.prepare();
+      try {
+        assertThatThrownBy(
+                () -> d.createStatement().executeUpdate("INSERT INTO wb.ord VALUES (1, 7)"))
+            .isInstanceOf(SQLException.class)
+            .extracting("SQLState")
+            .isEqualTo("40001");
+      } finally {
+        held.rollback();
+      }
+      // 205: a FLOAT key bound with setFloat
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO wb.fl (k, x) VALUES (?, 3)")) {
+        ps.setFloat(1, 0.1f);
+        assertThat(ps.executeUpdate()).isEqualTo(1);
+      }
+      d.setAutoCommit(false);
+      // 202: leading whitespace, and a scalar subquery
+      assertThat(rows(d, "  \n SELECT x FROM wb.imp WHERE id = (SELECT 1) FOR UPDATE"))
+          .containsExactly("a");
+      d.rollback();
+      if (engine == Engine.MYSQL) {
+        // 201: a trigger stores another key than the one given, which a committed row holds
+        String trgMeta = "wb." + catalog.lookup(List.of(), "wb", "trg").metadataTable();
+        assertRefused(
+            () -> d.createStatement().executeUpdate("INSERT INTO wb.trg (k, x) VALUES (5, 1)"));
+        d.commit();
+        assertThat(rows(v, "SELECT k FROM wb.trg")).containsExactly("5");
+        assertThat(rows(v, "SELECT k, tx_version FROM " + trgMeta)).containsExactly("5/1");
+      }
+      if (engine != Engine.POSTGRESQL) {
+        // 204: a lock wait timeout undoes the statement only, as the engine does
+        v.setAutoCommit(false);
+        v.createStatement().executeUpdate("UPDATE wb.imp SET x = x WHERE id = 1");
+        e.execute(d, "SET SESSION innodb_lock_wait_timeout = 1");
+        d.createStatement().executeUpdate("UPDATE wb.imp SET x = 'w2' WHERE id = 2");
+        assertThatThrownBy(
+                () -> d.createStatement().executeUpdate("UPDATE wb.imp SET x = 'w1' WHERE id = 1"))
+            .isInstanceOf(SQLException.class);
+        v.rollback();
+        v.setAutoCommit(true);
+        d.commit();
+        assertThat(rows(v, "SELECT x FROM wb.imp WHERE id = 2")).containsExactly("w2");
+      }
+      d.setAutoCommit(true);
     }
   }
 

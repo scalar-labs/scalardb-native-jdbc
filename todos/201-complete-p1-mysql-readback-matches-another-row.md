@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "201"
 tags: [code-review, correctness, data, mysql]
@@ -43,3 +43,8 @@ AUTO_INCREMENT check) and sessions without STRICT_TRANS_TABLES/STRICT_ALL_TABLES
 
 **By:** Claude Code
 - From the focused review of 4a62f9e (the fixes of todos 186-199).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- One read per INSERT, before it, asks whether any row matches the given key values; a match plus a successful INSERT is refused (0AN01). Trigger case tested on MySQL.

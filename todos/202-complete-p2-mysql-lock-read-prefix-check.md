@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "202"
 tags: [code-review, correctness, compatibility, mysql]
@@ -36,3 +36,8 @@ offset of its outer SELECT), and put the hint there.
 
 **By:** Claude Code
 - From the focused review of 4a62f9e (the fixes of todos 186-199).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- The MERGE hint goes after the first SELECT of the emitted text, parsed again; leading whitespace and a scalar subquery tested.

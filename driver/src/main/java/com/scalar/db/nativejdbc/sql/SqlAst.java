@@ -302,7 +302,7 @@ public final class SqlAst {
   }
 
   // MySQL's LOCK IN SHARE MODE, MariaDB's only shared lock, which the parser does not read; at the
-  // end of the statement only, comments aside, so never inside a literal
+  // end of the statement only, comments aside, and outside literals and comments (todo 200)
   private static final String TRAILING = "(?:\\s|/\\*.*?\\*/|(?:--|#)[^\\n]*(?:\\n|$))*";
   private static final Pattern LOCK_IN_SHARE_MODE =
       Pattern.compile(
@@ -316,11 +316,48 @@ public final class SqlAst {
   /** {@code LOCK IN SHARE MODE} as {@code FOR SHARE}, padded, every offset kept. */
   static String lockInShareModeAsForShare(String sql) {
     Matcher m = LOCK_IN_SHARE_MODE.matcher(sql);
-    return m.find()
-        ? sql.substring(0, m.start())
+    while (m.find()) {
+      if (isCodeAt(sql, m.start())) {
+        return sql.substring(0, m.start())
             + String.format("%-" + (m.end() - m.start()) + "s", "FOR SHARE")
-            + sql.substring(m.end())
-        : sql;
+            + sql.substring(m.end());
+      }
+    }
+    return sql;
+  }
+
+  /**
+   * Whether {@code at} is outside the literals, quoted names and comments of MySQL or MariaDB text.
+   * Backslash escapes are assumed: under NO_BACKSLASH_ESCAPES a literal may then look unterminated,
+   * which only ever reads more text as a literal.
+   */
+  static boolean isCodeAt(String sql, int at) {
+    int i = 0;
+    while (i < at) {
+      char c = sql.charAt(i);
+      int end;
+      if (c == '\'' || c == '"' || c == '`') {
+        end = i + 1;
+        while (end < sql.length() && sql.charAt(end) != c) {
+          end += c != '`' && sql.charAt(end) == '\\' ? 2 : 1;
+        }
+        end++; // a doubled quote reads as two literals, which is the same for this purpose
+      } else if (c == '#' || sql.startsWith("--", i)) {
+        end = sql.indexOf('\n', i);
+        end = end < 0 ? sql.length() : end + 1;
+      } else if (sql.startsWith("/*", i)) {
+        end = sql.indexOf("*/", i + 2);
+        end = end < 0 ? sql.length() : end + 2;
+      } else {
+        i++;
+        continue;
+      }
+      if (end > at) {
+        return false;
+      }
+      i = end;
+    }
+    return true;
   }
 
   /**
@@ -936,6 +973,23 @@ public final class SqlAst {
     }
     int[] s = found == null ? null : span(found, found);
     return s == null ? -1 : s[1];
+  }
+
+  /**
+   * Returns where the statement's first token spelled {@code word}, case aside, ends in {@link
+   * #source}: a keyword, as for {@link #afterLast}.
+   *
+   * @param word the keyword
+   * @return one past its last character, or -1 when the statement has none
+   */
+  public int afterFirst(String word) {
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      if (t.image.equalsIgnoreCase(word)) {
+        int[] s = span(t, t);
+        return s == null ? -1 : s[1];
+      }
+    }
+    return -1;
   }
 
   /**

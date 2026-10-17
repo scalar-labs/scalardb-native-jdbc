@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "200"
 tags: [code-review, correctness, data, mysql, mariadb]
@@ -41,3 +41,8 @@ Require the text after the match to hold no quote character (and back to end-of-
 
 **By:** Claude Code
 - From the focused review of 4a62f9e (the fixes of todos 186-199).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Matches inside literals, quoted names and comments are skipped (SqlAst.isCodeAt); unit and integration tests.

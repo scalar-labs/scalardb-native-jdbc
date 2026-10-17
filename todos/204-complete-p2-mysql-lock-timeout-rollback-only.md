@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "204"
 tags: [code-review, correctness, mysql]
@@ -36,3 +36,8 @@ On MySQL and MariaDB mark rollback-only for 1213 (deadlock) only, and for 1205 w
 
 **By:** Claude Code
 - From the focused review of 4a62f9e (the fixes of todos 186-199).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- A class-40 error 1205 on MySQL marks rollback-only only when @@innodb_rollback_on_timeout is on (read on that error); test on MySQL and MariaDB.
