@@ -108,7 +108,10 @@ class MoreWritesIntegrationTest {
           "CREATE TABLE wb.vk (k VARCHAR(10) PRIMARY KEY, x INT)",
           "INSERT INTO wb.vk VALUES ('01', 0)",
           "CREATE TABLE wb.fl (k FLOAT PRIMARY KEY, x INT)",
-          "INSERT INTO wb.fl VALUES (0.1, 0)");
+          "INSERT INTO wb.fl VALUES (0.1, 0)",
+          "CREATE TABLE wb.dbl (k "
+              + (e.engine() == Engine.POSTGRESQL ? "DOUBLE PRECISION" : "DOUBLE")
+              + " PRIMARY KEY, x INT)");
       if (e.engine() == Engine.MYSQL) {
         // the review of 4a62f9e: a trigger that changes the key
         e.execute(
@@ -130,7 +133,7 @@ class MoreWritesIntegrationTest {
       admin.importTable("wb", "gen", DECOUPLED, Map.of());
       admin.importTable("wb", "cov", DECOUPLED, Map.of());
       admin.importTable("wb", "tz", DECOUPLED, Map.of());
-      for (String table : List.of("ord", "nn", "vk", "fl")) {
+      for (String table : List.of("ord", "nn", "vk", "fl", "dbl")) {
         admin.importTable("wb", table, DECOUPLED, Map.of());
       }
       if (e.engine() == Engine.MYSQL) {
@@ -205,6 +208,7 @@ class MoreWritesIntegrationTest {
               "wb.gen", "wb." + gen.metadataTable(), Objects.requireNonNull(gen.virtualTable())));
       reviewOf8a(e, catalog);
       reviewOf8aFixes(e, catalog, tpc);
+      reviewOf8aFixes2(e);
     }
   }
 
@@ -401,6 +405,50 @@ class MoreWritesIntegrationTest {
         assertThat(rows(v, "SELECT x FROM wb.imp WHERE id = 2")).containsExactly("w2");
       }
       d.setAutoCommit(true);
+    }
+  }
+
+  /** The findings of the review of 8f902dc (todos 207-210). */
+  private static void reviewOf8aFixes2(Engines e) throws Exception {
+    Engine engine = e.engine();
+    try (Connection d = e.openDriver()) {
+      // 208, 210: a float bound to a DOUBLE key, and setObject of a float to a FLOAT key
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO wb.dbl (k, x) VALUES (?, 1)")) {
+        ps.setFloat(1, 0.1f);
+        assertThat(ps.executeUpdate()).isEqualTo(1);
+      }
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO wb.fl (k, x) VALUES (?, 4)")) {
+        ps.setObject(1, 0.2f);
+        assertThat(ps.executeUpdate()).isEqualTo(1);
+      }
+      if (engine == Engine.MYSQL) {
+        // 209: at REPEATABLE READ, a key deleted after the snapshot can be inserted again
+        d.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (0, 40)");
+        try (Connection rr = e.openDriver()) {
+          rr.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+          rr.setAutoCommit(false);
+          // a plain table's read opens the snapshot; a ScalarDB table's is refused there (8b)
+          assertThat(rows(rr, "SELECT COUNT(*) FROM wb.plain")).hasSize(1);
+          d.createStatement().executeUpdate("DELETE FROM wb.ord WHERE k = 40");
+          assertThat(rr.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (1, 40)"))
+              .isEqualTo(1);
+          rr.commit();
+        }
+      }
+    }
+    if (engine != Engine.POSTGRESQL) {
+      // 207: a backslash the session does not read as an escape leaves the next literal alone
+      // set at connect, where Connector/J reads it for its own placeholder parsing
+      Properties noEscapes = new Properties();
+      noEscapes.setProperty(
+          "sessionVariables", "sql_mode='STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES'");
+      try (Connection d = e.openDriver(noEscapes)) {
+        d.createStatement()
+            .executeUpdate(
+                "UPDATE wb.made SET x = CONCAT('a\\', 'LOCK IN SHARE MODE #') WHERE id = 91");
+        assertThat(rows(d, "SELECT x FROM wb.made WHERE id = 91"))
+            .containsExactly("a\\LOCK IN SHARE MODE #");
+      }
     }
   }
 

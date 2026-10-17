@@ -931,7 +931,7 @@ public final class Proxies {
           if (c == null) {
             throw new SQLException("no value is bound to parameter " + placeholder, "07001");
           }
-          if (asStored && c.method.getName().equals("setFloat")) {
+          if (asStored && c.args.length > 1 && c.args[1] instanceof Float) {
             // Connector/J sends a float as its shortest decimal text, which no stored float equals
             ps.setDouble(position, ((Float) c.args[1]).doubleValue());
             return;

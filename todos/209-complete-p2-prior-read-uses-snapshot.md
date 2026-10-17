@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "209"
 tags: [code-review, correctness, mysql, regression]
@@ -38,3 +38,8 @@ Gate MySQL writes to READ COMMITTED until milestone 8b.
 
 **By:** Claude Code
 - From the focused review of 8f902dc (the fixes of todos 200-206).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- The prior read is LIMIT 1 FOR SHARE, the latest committed rows; gaps are locked at REPEATABLE READ, closing the race there. Test at REPEATABLE READ on MySQL.

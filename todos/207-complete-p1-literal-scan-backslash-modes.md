@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "207"
 tags: [code-review, correctness, data, mysql, mariadb]
@@ -43,3 +43,8 @@ Read sql_mode (NO_BACKSLASH_ESCAPES) with the ANSI_QUOTES setting and scan accor
 
 **By:** Claude Code
 - From the focused review of 8f902dc (the fixes of todos 200-206).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- The match must be code under both backslash readings (NO_BACKSLASH_ESCAPES is not tracked), and a backslash does not escape inside "..." under ANSI_QUOTES. Unit tests for both repros; integration test with NO_BACKSLASH_ESCAPES set at connect (Connector/J misparses placeholders when it is set later by SET, a vendor limit).

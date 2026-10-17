@@ -1154,8 +1154,9 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   accept further statements and a commit. A query timeout or a cancel the driver raises itself during
   a write marks the transaction the same way (it throws `57014`): it can come between a key's write
   and its stamp, which would otherwise commit unstamped. So does a vendor error of class 40 during a
-  write, except MySQL's lock wait timeout (1205) while `innodb_rollback_on_timeout` is off, which
-  undoes the statement only, as the write's savepoint does.
+  write, except a MySQL or MariaDB lock wait timeout (1205) while `innodb_rollback_on_timeout` is
+  off, which undoes the statement only, as the write's savepoint does; with it on, the timeout ends
+  the transaction on MariaDB too, whose driver reports it as a plain error.
 - **NULL or missing metadata.** If step 1 finds a metadata row with `tx_id IS NULL`, which a ScalarDB
   rollback over a row that had no metadata leaves behind with `tx_state` NULL as well (fact 2), the anchor
   has a NULL `tx_id` and a version of NULL or 0, which the CAS ignores: its condition is
@@ -1183,11 +1184,13 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   given (a NULL or 0 it generates, `1.6` in an INT) and compares after conversion (`1` equals
   `'01'`), or leaves out a single key column that `information_schema` shows `AUTO_INCREMENT`, whose
   values the vendor driver reports; anything else is refused, and so is the statement's own
-  `RETURNING`. Before such an INSERT one read asks whether any row already matches those values: if
+  `RETURNING`. Before such an INSERT one locking read (`FOR SHARE`, so the latest committed rows,
+  not a REPEATABLE READ snapshot's) asks whether any row already matches those values: if
   one does and the INSERT still succeeds, MySQL stored other values (a trigger, a non-strict
   `sql_mode`), the read-back would find the older row, and the write is refused. A FLOAT key is
-  bound as its exact double, which MySQL compares an uncast value as, the application's `setFloat`
-  too when the driver matches keys. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
+  bound as its exact double, which MySQL compares an uncast value as, and so is a float the
+  application binds alone to a FLOAT key, when the driver matches keys; the column types come from
+  `information_schema` with the column order. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
   only the driver's own rows go through. Neither engine's INSERT takes an alias, nor MariaDB's DELETE
   of one table, which becomes `DELETE T FROM T_data AS T`; a column qualified by a created table's name
   in `RETURNING` is refused on MariaDB. A failed statement there leaves the transaction open with the

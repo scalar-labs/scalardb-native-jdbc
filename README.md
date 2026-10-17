@@ -111,8 +111,8 @@ and SERIALIZABLE on PostgreSQL came after it.
   takes `FOR UPDATE` or `FOR SHARE` (`LOCK IN SHARE MODE`).
 - A write that would lose an update, against a ScalarDB transaction or another driver transaction,
   fails with `40001` and leaves the transaction rollback-only: roll back and retry it. A query
-  timeout or a cancel during a write does the same. A MySQL lock wait timeout undoes the statement
-  only, unless `innodb_rollback_on_timeout` is on.
+  timeout or a cancel during a write does the same. A MySQL or MariaDB lock wait timeout undoes the
+  statement only, unless `innodb_rollback_on_timeout` is on.
 - A transaction checks, when it writes a row, that the row is unchanged since it read it. Rows
   returned through a RIGHT or FULL JOIN, a derived table, a CTE or a UNION are read committed, but are
   not checked this way.

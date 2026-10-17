@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "210"
 tags: [code-review, correctness, mysql]
@@ -31,3 +31,8 @@ column-type check.
 
 **By:** Claude Code
 - From the focused review of 8f902dc (the fixes of todos 200-206).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Any bound Float (setFloat, setObject) is converted for those placeholders. Test: setObject on a FLOAT key.

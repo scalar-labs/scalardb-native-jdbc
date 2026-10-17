@@ -465,12 +465,13 @@ class SqlAstTest {
       assertThat(ast.source()).as(sql).hasSameSizeAs(sql);
     }
     // the statement's own clause only, never a literal's text
-    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 'LOCK IN SHARE MODE'"))
+    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 'LOCK IN SHARE MODE'", false))
         .isEqualTo("SELECT 'LOCK IN SHARE MODE'");
-    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 1 LOCK IN SHARE MODE"))
+    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 1 LOCK IN SHARE MODE", false))
         .isEqualTo("SELECT 1 FOR SHARE         ");
     // a comment after it, which tools append (todo 194)
-    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 1 LOCK IN SHARE MODE /* app */ -- x"))
+    assertThat(
+            SqlAst.lockInShareModeAsForShare("SELECT 1 LOCK IN SHARE MODE /* app */ -- x", false))
         .startsWith("SELECT 1 FOR SHARE ");
     // nor a literal or comment with a comment after it (todo 200)
     for (String sql :
@@ -481,10 +482,17 @@ class SqlAstTest {
             "SELECT `LOCK IN SHARE MODE #`",
             "SELECT 1 /* LOCK IN SHARE MODE */",
             "SELECT 1 # LOCK IN SHARE MODE")) {
-      assertThat(SqlAst.lockInShareModeAsForShare(sql)).as(sql).isEqualTo(sql);
+      assertThat(SqlAst.lockInShareModeAsForShare(sql, false)).as(sql).isEqualTo(sql);
     }
-    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 'a' LOCK IN SHARE MODE # 'b'"))
+    assertThat(SqlAst.lockInShareModeAsForShare("SELECT 'a' LOCK IN SHARE MODE # 'b'", false))
         .startsWith("SELECT 'a' FOR SHARE ");
+    // nor where a backslash is read either way, or not at all in a quoted name (todo 207)
+    String noEscapes = "UPDATE t SET x = 'a\\', y = 'LOCK IN SHARE MODE #' WHERE k = 1";
+    assertThat(SqlAst.lockInShareModeAsForShare(noEscapes, false)).isEqualTo(noEscapes);
+    String ansi = "SELECT k AS \"a\\\" FROM t WHERE y <> '\" LOCK IN SHARE MODE #'";
+    assertThat(SqlAst.lockInShareModeAsForShare(ansi, true)).isEqualTo(ansi);
+    assertThat(SqlAst.lockInShareModeAsForShare("SELECT \"a\\\" LOCK IN SHARE MODE", true))
+        .startsWith("SELECT \"a\\\" FOR SHARE ");
   }
 
   @Test

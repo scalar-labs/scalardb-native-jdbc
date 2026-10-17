@@ -24,11 +24,16 @@ import java.time.OffsetTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.statement.delete.Delete;
 import org.jspecify.annotations.Nullable;
 
@@ -50,7 +55,7 @@ final class Writes {
   interface Context {
     /**
      * Binds the application's value of one of its placeholders to a driver statement; {@code
-     * asStored} binds a float as the exact double a stored float compares as (todo 205).
+     * asStored} binds a float as the exact double a stored float compares as (todos 205, 208).
      */
     void bind(PreparedStatement ps, int position, int placeholder, boolean asStored)
         throws SQLException;
@@ -96,17 +101,17 @@ final class Writes {
   static final class Step {
     final String sql;
     final List<Integer> binds;
-    // the driver's match of the application's key values against stored keys
-    final boolean matchesKeys;
+    // the placeholders that give a FLOAT key alone, matched by the driver against stored keys
+    final Set<Integer> floatKeys;
 
     Step(String sql, List<Integer> binds) {
-      this(sql, binds, false);
+      this(sql, binds, Set.of());
     }
 
-    Step(String sql, List<Integer> binds, boolean matchesKeys) {
+    Step(String sql, List<Integer> binds, Set<Integer> floatKeys) {
       this.sql = sql;
       this.binds = List.copyOf(binds);
-      this.matchesKeys = matchesKeys;
+      this.floatKeys = Set.copyOf(floatKeys);
     }
   }
 
@@ -168,29 +173,22 @@ final class Writes {
     }
     Names n = new Names(engine, t);
     return shape.kind() == StatementShape.Kind.INSERT
-        ? insertPlan(
-            shape,
-            t,
-            n,
-            all,
-            tables,
-            snapshot,
-            vendor == null || !shape.insertColumns().isEmpty() ? null : columnOrder(vendor, n))
+        ? insertPlan(shape, t, n, all, tables, snapshot, vendor == null ? null : columns(vendor, n))
         : keyedPlan(shape, t, n, all, tables, snapshot);
   }
 
-  /** The data table's columns in their own order (todo 203). */
-  private static List<String> columnOrder(Connection vendor, Names n) throws SQLException {
-    List<String> out = new ArrayList<>();
+  /** The data table's columns in their own order with their types (todos 203, 208). */
+  private static Map<String, String> columns(Connection vendor, Names n) throws SQLException {
+    Map<String, String> out = new LinkedHashMap<>();
     try (PreparedStatement ps =
         vendor.prepareStatement(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND"
-                + " table_name = ? ORDER BY ordinal_position")) {
+            "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = ?"
+                + " AND table_name = ? ORDER BY ordinal_position")) {
       ps.setString(1, n.namespace);
       ps.setString(2, n.dataTable);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          out.add(rs.getString(1));
+          out.put(rs.getString(1), rs.getString(2).toLowerCase(Locale.ROOT));
         }
       }
     }
@@ -305,7 +303,7 @@ final class Writes {
       List<Integer> all,
       String tables,
       boolean snapshot,
-      @Nullable List<String> tableColumns)
+      @Nullable Map<String, String> tableColumns)
       throws SQLException {
     Engine engine = n.engine;
     SqlAst ast = shape.ast();
@@ -322,7 +320,9 @@ final class Writes {
     // statement gives them in its column list, one row each, or are the AUTO_INCREMENT values of
     // the one key column it leaves out, which the vendor driver reports (todos 186, 187)
     boolean returns = engine == Engine.POSTGRESQL || engine == Engine.MARIADB;
-    List<List<Expression>> rows = shape.insertKeyValues(t.keyColumns(), tableColumns);
+    List<List<Expression>> rows =
+        shape.insertKeyValues(
+            t.keyColumns(), tableColumns == null ? null : List.copyOf(tableColumns.keySet()));
     if (returning != null && !returns) {
       throw refused(tables, "RETURNING is not supported on this engine");
     }
@@ -368,6 +368,7 @@ final class Writes {
       List<String> matchData = new ArrayList<>();
       List<String> tuples = new ArrayList<>();
       List<Integer> matchBinds = new ArrayList<>();
+      Set<Integer> floatKeys = new HashSet<>();
       for (List<Expression> row : rows) {
         List<String> terms = new ArrayList<>();
         List<String> termsData = new ArrayList<>();
@@ -377,6 +378,11 @@ final class Writes {
           List<Integer> inside = span == null ? null : ast.placeholdersIn(span[0], span[1]);
           if (span == null || inside == null) {
             throw refused(tables, "the statement's text cannot be rewritten");
+          }
+          if (inside.size() == 1
+              && row.get(i) instanceof JdbcParameter
+              && isFloat(engine, tableColumns, t.keyColumns().get(i))) {
+            floatKeys.add(inside.get(0));
           }
           String k = engine.quote(t.keyColumns().get(i));
           terms.add(k + " = " + source.substring(span[0], span[1]));
@@ -397,7 +403,7 @@ final class Writes {
                       + " d WHERE "
                       + String.join(" AND ", termsData),
                   matchBinds.subList(matchBinds.size() - rowBinds(ast, row), matchBinds.size()),
-                  true));
+                  floatKeys));
         }
       }
       if (!returns) {
@@ -407,9 +413,10 @@ final class Writes {
                     + n.data
                     + " d WHERE "
                     + String.join(" OR ", matchData)
-                    + " LIMIT 1",
+                    // the latest committed rows, not a REPEATABLE READ snapshot's (todo 209)
+                    + " LIMIT 1 FOR SHARE",
                 matchBinds,
-                true);
+                floatKeys);
       }
       if (snapshot && rows.size() > 1) {
         // a key the statement itself repeats is the application's duplicate (todo 178)
@@ -425,7 +432,7 @@ final class Writes {
                     + String.join(", ", columns)
                     + " HAVING COUNT(*) > 1",
                 matchBinds,
-                true);
+                floatKeys);
       }
       if (snapshot) {
         // the snapshot cannot see a key written after it, which the duplicate came from: a key
@@ -446,7 +453,7 @@ final class Writes {
                     + n.txState
                     + " = 3)",
                 matchBinds,
-                true);
+                floatKeys);
       }
       inFlight =
           new Step(
@@ -458,7 +465,7 @@ final class Writes {
                   + n.txState
                   + " IN (1, 2)",
               matchBinds,
-              true);
+              floatKeys);
     }
     SqlAst.TableRef ref = shape.table();
     return new InsertPlan(
@@ -471,6 +478,20 @@ final class Writes {
         repeats,
         returning,
         Router.exposed(ref));
+  }
+
+  /** Whether a column is single precision: FLOAT on MySQL and MariaDB, REAL on PostgreSQL. */
+  private static boolean isFloat(
+      Engine engine, @Nullable Map<String, String> columns, String column) {
+    if (columns == null) {
+      return false;
+    }
+    for (Map.Entry<String, String> c : columns.entrySet()) {
+      if (engine.columnKey(c.getKey()).equals(engine.columnKey(column))) {
+        return c.getValue().equals("float") || c.getValue().equals("real");
+      }
+    }
+    return false;
   }
 
   /** The placeholders in one row's key values. */
@@ -528,23 +549,25 @@ final class Writes {
   }
 
   /**
-   * Whether MySQL rolled back only the statement: a lock wait timeout, which Connector/J reports as
-   * a rollback, does so unless innodb_rollback_on_timeout is on (todo 204).
+   * Whether a vendor error ended the transaction: one of class 40, except a MySQL or MariaDB lock
+   * wait timeout, which undoes the statement only unless innodb_rollback_on_timeout is on, and
+   * which MariaDB's driver reports as a plain error (todos 204, 211).
    */
-  private static boolean statementOnly(Connection vendor, SQLException e) {
+  private static boolean endsTransaction(Connection vendor, SQLException e) {
     try {
-      if (e.getErrorCode() != 1205
-          || !vendor.getMetaData().getDatabaseProductName().equals("MySQL")) {
-        return false; // 1205 is a deadlock on SQL Server
-      }
-      try (Statement s = vendor.createStatement();
-          ResultSet rs = s.executeQuery("SELECT @@innodb_rollback_on_timeout")) {
-        return rs.next() && !rs.getBoolean(1);
+      String product =
+          e.getErrorCode() == 1205 ? vendor.getMetaData().getDatabaseProductName() : "";
+      if (product.equals("MySQL") || product.equals("MariaDB")) { // 1205 is a deadlock elsewhere
+        try (Statement s = vendor.createStatement();
+            ResultSet rs = s.executeQuery("SELECT @@innodb_rollback_on_timeout")) {
+          return !rs.next() || rs.getBoolean(1);
+        }
       }
     } catch (SQLException r) {
       e.addSuppressed(r);
-      return false;
+      return true;
     }
+    return e instanceof SQLTransactionRollbackException;
   }
 
   /** Work run in a write's transaction. */
@@ -614,10 +637,9 @@ final class Writes {
         } catch (SQLException r) {
           e.addSuppressed(r); // the write's own failure is the one to report
         }
-      } else if ((e instanceof SQLTransactionRollbackException
-              && !statementOnly(vendor, (SQLException) e))
-          || e instanceof RuntimeException
-          || "57014".equals(((SQLException) e).getSQLState())) {
+      } else if (e instanceof RuntimeException
+          || "57014".equals(((SQLException) e).getSQLState())
+          || endsTransaction(vendor, (SQLException) e)) {
         // a timeout or a cancel the driver raises itself can come between a key's DML and its
         // stamp, in a transaction the vendor would still commit (todo 157); a vendor error part
         // way ends the transaction on PostgreSQL, and is undone to the write's start elsewhere,
@@ -727,7 +749,7 @@ final class Writes {
       try {
         int i = 1;
         for (int b : step.binds) {
-          context.bind(ps, i++, b, step.matchesKeys);
+          context.bind(ps, i++, b, step.floatKeys.contains(b));
         }
         if (key != null) {
           bind(ps, i, key);
@@ -1198,8 +1220,8 @@ final class Writes {
             keys.read(rs, from, width);
           }
         } else {
-          // ponytail: a non-locking read; a row committed between it and the INSERT under a
-          // trigger that changes the key still goes unnoticed
+          // ponytail: at READ COMMITTED no gap is locked, so a row committed between this read and
+          // the INSERT under a trigger that changes the key still goes unnoticed
           boolean existed;
           try (PreparedStatement check = run.prepare(Objects.requireNonNull(prior), null);
               ResultSet r = check.executeQuery()) {

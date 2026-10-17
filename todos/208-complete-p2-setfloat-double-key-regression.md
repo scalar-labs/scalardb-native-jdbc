@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "208"
 tags: [code-review, correctness, mysql, regression]
@@ -33,3 +33,8 @@ asked with the column order), per bind position.
 
 **By:** Claude Code
 - From the focused review of 8f902dc (the fixes of todos 200-206).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- Column types read from information_schema with the column order at plan time; only a placeholder that alone gives a FLOAT/REAL key is bound as the float's exact double. Test: setFloat on a DOUBLE key.

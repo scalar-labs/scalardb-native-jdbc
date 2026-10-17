@@ -313,11 +313,19 @@ public final class SqlAst {
               + "$)",
           Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
-  /** {@code LOCK IN SHARE MODE} as {@code FOR SHARE}, padded, every offset kept. */
-  static String lockInShareModeAsForShare(String sql) {
+  /**
+   * {@code LOCK IN SHARE MODE} as {@code FOR SHARE}, padded, every offset kept.
+   *
+   * @param sql the statement
+   * @param ansiQuotes whether {@code "x"} quotes an identifier, in which a backslash is not special
+   */
+  static String lockInShareModeAsForShare(String sql, boolean ansiQuotes) {
     Matcher m = LOCK_IN_SHARE_MODE.matcher(sql);
     while (m.find()) {
-      if (isCodeAt(sql, m.start())) {
+      // code whether or not the session has NO_BACKSLASH_ESCAPES, which the driver does not track:
+      // a backslash read the wrong way shifts every later quote (todo 207)
+      if (isCodeAt(sql, m.start(), true, ansiQuotes)
+          && isCodeAt(sql, m.start(), false, ansiQuotes)) {
         return sql.substring(0, m.start())
             + String.format("%-" + (m.end() - m.start()) + "s", "FOR SHARE")
             + sql.substring(m.end());
@@ -328,18 +336,20 @@ public final class SqlAst {
 
   /**
    * Whether {@code at} is outside the literals, quoted names and comments of MySQL or MariaDB text.
-   * Backslash escapes are assumed: under NO_BACKSLASH_ESCAPES a literal may then look unterminated,
-   * which only ever reads more text as a literal.
+   *
+   * @param backslashEscapes whether a backslash escapes the next character in a string
+   * @param ansiQuotes whether {@code "x"} is a quoted name, which a backslash does not escape in
    */
-  static boolean isCodeAt(String sql, int at) {
+  static boolean isCodeAt(String sql, int at, boolean backslashEscapes, boolean ansiQuotes) {
     int i = 0;
     while (i < at) {
       char c = sql.charAt(i);
       int end;
       if (c == '\'' || c == '"' || c == '`') {
+        boolean escapes = backslashEscapes && (c == '\'' || (c == '"' && !ansiQuotes));
         end = i + 1;
         while (end < sql.length() && sql.charAt(end) != c) {
-          end += c != '`' && sql.charAt(end) == '\\' ? 2 : 1;
+          end += escapes && sql.charAt(end) == '\\' ? 2 : 1;
         }
         end++; // a doubled quote reads as two literals, which is the same for this purpose
       } else if (c == '#' || sql.startsWith("--", i)) {
@@ -375,7 +385,7 @@ public final class SqlAst {
         engine == Engine.POSTGRESQL
             ? setToAsEquals(text)
             : engine == Engine.MYSQL || engine == Engine.MARIADB
-                ? lockInShareModeAsForShare(text)
+                ? lockInShareModeAsForShare(text, doubleQuotesQuoteIdentifiers)
                 : text;
     Statement stmt;
     try {

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "211"
 tags: [code-review, correctness, mariadb, docs]
@@ -36,3 +36,8 @@ Document it as unsupported (leave the option off).
 
 **By:** Claude Code
 - From the focused review of 8f902dc (the fixes of todos 200-206).
+
+### 2026-10-17 - Fixed
+
+**By:** Claude Code
+- endsTransaction: 1205 on MySQL or MariaDB ends the transaction only when @@innodb_rollback_on_timeout is on, whatever the exception class. Not tested with the option on (needs a server restart); docs updated.
