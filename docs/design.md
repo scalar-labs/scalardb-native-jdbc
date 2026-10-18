@@ -1428,8 +1428,8 @@ coverage of each engine's syntax is therefore part of the certification of that 
 
 One setting, the native connection's isolation level, selects everything else.
 
-Built so far: all three levels on PostgreSQL; READ COMMITTED and SNAPSHOT on MySQL and MariaDB, their
-writes and locking reads as on PostgreSQL; READ COMMITTED on SQL Server and Oracle. Elsewhere the
+Built so far: all three levels on PostgreSQL, MySQL and MariaDB, the latter two's writes and locking
+reads as on PostgreSQL; READ COMMITTED on SQL Server and Oracle. Elsewhere the
 levels are accepted by `setTransactionIsolation`, and every statement on a ScalarDB table is refused
 with `0AN01`; the locking re-reads, Oracle's refusal of SERIALIZABLE and the translation of
 `TRANSACTION_REPEATABLE_READ` below come with milestone 8.
@@ -1446,6 +1446,23 @@ d.k = u.k0`, each key a lookup that locks its row alone, where a semi-join or an
 scan, and lock, the whole table when they are a large share of it (todo 220); concurrent INSERTs
 then neither wait on nor deadlock with them. A connection's level is changed between transactions
 only: these engines' `SET SESSION TRANSACTION` applies to the next one (todo 219).
+
+SERIALIZABLE on MySQL and MariaDB, as built (milestone 8b2): the connection runs at REPEATABLE READ and
+`getTransactionIsolation` reports SERIALIZABLE. A read of one ScalarDB table row by row runs as that
+read under `FOR SHARE`, by the path of a user's locking read: the predicate locked on the data table,
+each row's metadata row locked again by primary key, and the rows compared with the same read in the
+snapshot, a row in flight that the predicate matches aborting it; the keys are held in memory, with
+no row cap yet, and the in-flight check takes the predicate without its `LIMIT`. Any other read takes
+the coarse path, with two changes from 4.2: the statement runs on the data tables, not through `rc_T`,
+whose union is a derived table a locking clause does not reach, the in-flight check having left only
+committed rows there; and it need be the transaction's first statement only when a ScalarDB table is
+in an `IN` or `EXISTS` subquery, whose rows the clause does not lock and which are read in the
+snapshot. Read under locks alone, an older snapshot does not matter. A table in a derived table or a
+set operation is refused. An UPDATE or DELETE also reads its predicate on the data table under a
+shared lock, the metadata rows of what it matches locked by primary key, and aborts unless that is
+what its read in the snapshot found; its next-key locks hold off a ScalarDB insert into the range.
+`SerializableIntegrationTest` runs the cycles on both engines, ScalarDB's prepare failing on its short
+lock wait where it waits on the driver.
 
 | Level | Native connection | In-flight row on read | In-flight row on write | CAS anchor | Read locks | ScalarDB side |
 |---|---|---|---|---|---|---|

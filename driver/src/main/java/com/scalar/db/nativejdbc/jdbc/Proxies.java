@@ -247,9 +247,26 @@ public final class Proxies {
                 "the isolation level cannot be changed in the middle of a transaction", "25001");
           }
           {
-            Object r = forward(vendor, method, args);
-            router.setIsolation((Integer) args[0]);
-            return r;
+            int level = (Integer) args[0];
+            // SERIALIZABLE on MySQL and MariaDB runs at REPEATABLE READ with the driver's locking
+            // re-reads; their own SERIALIZABLE would lock covering index entries only (design 4.2)
+            vendor.setTransactionIsolation(
+                level == Connection.TRANSACTION_SERIALIZABLE && router.locksAtSerializable()
+                    ? Connection.TRANSACTION_REPEATABLE_READ
+                    : level);
+            router.setIsolation(level);
+            return null;
+          }
+        case "getTransactionIsolation":
+          {
+            // the vendor connection's own level, unless the driver runs SERIALIZABLE at another
+            int level = vendor.getTransactionIsolation();
+            int driver = router.isolation();
+            return driver == Connection.TRANSACTION_SERIALIZABLE
+                    && level == Connection.TRANSACTION_REPEATABLE_READ
+                    && router.locksAtSerializable()
+                ? driver
+                : level;
           }
         case "setCatalog":
           {
@@ -889,6 +906,9 @@ public final class Proxies {
           out.rows.close();
         }
         throw e;
+      } finally {
+        // it ran in the transaction, as a routed statement does (todo 219)
+        owner.ran(route);
       }
       writeReturns = plan.returnsRows();
       writeCount = writeReturns ? -1L : count[0];

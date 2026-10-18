@@ -22,6 +22,7 @@ import com.scalar.db.exception.transaction.ValidationConflictException;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
@@ -39,12 +40,14 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * SERIALIZABLE on PostgreSQL (design section 5): with the driver and ScalarDB's storage connections
- * at SERIALIZABLE, PostgreSQL's SSI breaks every cycle between a driver transaction and ScalarDB
+ * SERIALIZABLE (design section 5): on PostgreSQL, with the driver and ScalarDB's storage
+ * connections at SERIALIZABLE, SSI breaks every cycle between a driver transaction and ScalarDB
  * transactions, including those row locks cannot: a phantom from a ScalarDB insert, write skew, and
- * a read-only ScalarDB transaction that sees a state no serial order gives. Each scenario also runs
- * with the driver at REPEATABLE READ, its SNAPSHOT, or ScalarDB's storage at REPEATABLE READ, where
- * the timings that need SSI must end in the anomaly: that shows the scenario reaches it.
+ * a read-only ScalarDB transaction that sees a state no serial order gives. On MySQL and MariaDB
+ * the driver's locking re-reads break them: a ScalarDB prepare waits on them, here until ScalarDB's
+ * short lock wait fails it. Each scenario also runs with the driver at REPEATABLE READ, its
+ * SNAPSHOT, or on PostgreSQL ScalarDB's storage at REPEATABLE READ, where the timings that need SSI
+ * must end in the anomaly: that shows the scenario reaches it.
  */
 @SuppressFBWarnings(
     value = "SQL_INJECTION_JDBC",
@@ -181,7 +184,10 @@ class SerializableIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void ssiBreaksTheCycles(Engines e) throws Exception {
-    assumeTrue(e == Engines.POSTGRESQL, "SSI is PostgreSQL's");
+    boolean pg = e.engine() == Engine.POSTGRESQL;
+    assumeTrue(
+        pg || e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB,
+        "SERIALIZABLE is PostgreSQL's, MySQL's and MariaDB's so far");
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace("sz", true);
@@ -208,25 +214,39 @@ class SerializableIntegrationTest {
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     int g = 0;
-    for (String storage : List.of("REPEATABLE_READ", "SERIALIZABLE")) {
+    // the storage's level matters to PostgreSQL's SSI only
+    for (String storage :
+        pg ? List.of("REPEATABLE_READ", "SERIALIZABLE") : List.of("REPEATABLE_READ")) {
       Properties p = new Properties();
       p.setProperty("scalar.db.consensus_commit.isolation_level", "SERIALIZABLE");
       p.setProperty("scalar.db.jdbc.isolation_level", storage);
+      if (!pg) {
+        // a prepare that waits on the driver's lock fails at once, as a conflict: the test runs
+        // both sides in one thread
+        p.setProperty(
+            "scalar.db.contact_points",
+            e.url()
+                + (e.url().contains("?") ? "&" : "?")
+                + "sessionVariables=innodb_lock_wait_timeout=1");
+      }
       TransactionFactory factory = e.scalarDb(p);
       try (DistributedTransactionManager tm = factory.getTransactionManager();
           TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
         for (int level : LEVELS) {
           boolean ssi =
-              storage.equals("SERIALIZABLE") && level == Connection.TRANSACTION_SERIALIZABLE;
+              level == Connection.TRANSACTION_SERIALIZABLE
+                  && (!pg || storage.equals("SERIALIZABLE"));
           String driver =
               level == Connection.TRANSACTION_SERIALIZABLE ? "SERIALIZABLE" : "SNAPSHOT";
           for (Read read : Read.values()) {
-            try (Connection c = e.openDriver()) {
-              c.setTransactionIsolation(level);
-              // the read takes the path its name says: row by row carries each row's state
-              assertThat(c.nativeSQL(read.sql).contains("\"scalardb_native_meta\".\"tx_state\""))
-                  .as("driver %s, %s read row by row", driver, read)
-                  .isEqualTo(read != Read.CHECKED);
+            if (pg) {
+              try (Connection c = e.openDriver()) {
+                c.setTransactionIsolation(level);
+                // the read takes the path its name says: row by row carries each row's state
+                assertThat(c.nativeSQL(read.sql).contains("\"scalardb_native_meta\".\"tx_state\""))
+                    .as("driver %s, %s read row by row", driver, read)
+                    .isEqualTo(read != Read.CHECKED);
+              }
             }
             for (Workload w : List.of(PHANTOM, WRITE_SKEW)) {
               String name = w == PHANTOM ? "phantom" : "write skew";
@@ -264,7 +284,7 @@ class SerializableIntegrationTest {
             assertThat(trace.contains("anomaly"))
                 .as("%s: %s; steps: %s", at, ssi ? "no anomaly" : "the anomaly", trace)
                 .isEqualTo(!ssi);
-            if (ssi) {
+            if (ssi && pg) {
               // the deposit commits first: the read-only transaction sees it, and SSI aborts the
               // driver, the pivot
               assertThat(trace)
@@ -345,10 +365,19 @@ class SerializableIntegrationTest {
     try (Native d = new Native(e.openDriver(), level, readPath)) {
       Map<Integer, Integer> read = d.read(g);
       DistributedTransaction deposit = tm.begin();
-      int x = deposit.get(get(g, 1)).orElseThrow().getInt("v");
-      deposit.update(update(g, 1, x + 20));
-      deposit.commit();
-      trace.append("deposit, ");
+      try {
+        int x = deposit.get(get(g, 1)).orElseThrow().getInt("v");
+        deposit.update(update(g, 1, x + 20));
+        deposit.commit();
+        trace.append("deposit, ");
+      } catch (TransactionException ex) {
+        if (!conflict(ex)) {
+          throw ex;
+        }
+        // waited on the driver's lock
+        rollback(deposit);
+        trace.append("deposit aborts ").append(ex.getClass().getSimpleName()).append(", ");
+      }
       int[] seen = null;
       DistributedTransaction ro = tm.begin();
       try {

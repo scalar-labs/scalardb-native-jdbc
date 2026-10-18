@@ -80,6 +80,7 @@ slf4j-api and its vendor driver on the classpath, and connects with `jdbc:scalar
 | `TRANSACTION_READ_COMMITTED` | all five | none |
 | `TRANSACTION_REPEATABLE_READ` (SNAPSHOT) | PostgreSQL, MySQL, MariaDB | none |
 | `TRANSACTION_SERIALIZABLE` | PostgreSQL | `scalar.db.consensus_commit.isolation_level=SERIALIZABLE` and `scalar.db.jdbc.isolation_level=SERIALIZABLE` |
+| `TRANSACTION_SERIALIZABLE` | MySQL, MariaDB | `scalar.db.consensus_commit.isolation_level=SERIALIZABLE` |
 
 At SNAPSHOT and SERIALIZABLE, a statement that reaches a row a ScalarDB transaction is writing fails
 with `40001` at once: roll back and retry. Without both ScalarDB settings, SERIALIZABLE between the
@@ -90,15 +91,23 @@ serialization failure. ScalarDB reports a failed read as `CrudException`, or `Va
 `CommitException` at commit, not as a conflict exception: a ScalarDB application retries those when
 the cause's SQLState is `40001`.
 
-`TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. SERIALIZABLE on MySQL and MariaDB,
-and the two levels on SQL Server and Oracle, are accepted, but every statement on a ScalarDB table is
-refused with `0AN01` there for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot
+SERIALIZABLE on MySQL and MariaDB runs the connection at REPEATABLE READ, and every read of a
+ScalarDB table takes shared locks held to commit, which a ScalarDB transaction writing those rows, or
+inserting into a range read, waits on. A read of one table row by row locks its rows; any other read
+first locks the in-flight index of each ScalarDB table it reads, which holds off every ScalarDB write
+to the table until commit, and runs as `LOCK IN SHARE MODE`. Such a read with a ScalarDB table in a
+subquery must be the transaction's first statement, or it fails with `40001`; a ScalarDB table in a
+derived table or a set operation is refused with `0AN01`. A read checks every row its `WHERE` matches
+for a ScalarDB write in flight, its `LIMIT` aside.
+
+`TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. The two levels on SQL Server and
+Oracle are accepted, but every statement on a ScalarDB table is refused with `0AN01` there for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot
 isolation; `TRANSACTION_REPEATABLE_READ` will be the level to use there.
 
 ## Preview scope
 
 Certified in 3.19.0-alpha.1: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line. SNAPSHOT
-and SERIALIZABLE on PostgreSQL, and READ COMMITTED and SNAPSHOT on MySQL and MariaDB, came after it.
+and SERIALIZABLE on PostgreSQL, and all three levels on MySQL and MariaDB, came after it.
 
 - Reads of ScalarDB tables work on all five engines; writes run on PostgreSQL, MySQL and MariaDB.
   ScalarDB's classic layout is refused with SQLState `0AN01`.

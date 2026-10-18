@@ -159,6 +159,7 @@ final class Writes {
       TableInfo t,
       String tables,
       boolean snapshot,
+      boolean locks,
       @Nullable Connection vendor)
       throws SQLException {
     SqlAst ast = shape.ast();
@@ -180,7 +181,7 @@ final class Writes {
     }
     return shape.kind() == StatementShape.Kind.INSERT
         ? insertPlan(shape, t, n, all, tables, snapshot, vendor == null ? null : columns(vendor, n))
-        : keyedPlan(shape, t, n, all, tables, snapshot);
+        : keyedPlan(shape, t, n, all, tables, snapshot, locks);
   }
 
   /**
@@ -243,7 +244,8 @@ final class Writes {
       Names n,
       List<Integer> all,
       String tables,
-      boolean snapshot)
+      boolean snapshot,
+      boolean locks)
       throws SQLException {
     Engine engine = n.engine;
     SqlAst ast = shape.ast();
@@ -328,11 +330,28 @@ final class Writes {
                     + " LIMIT 1",
                 inWhere)
             : null;
+    // at SERIALIZABLE on MySQL and MariaDB the predicate is read again on the data table under a
+    // shared lock, whose next-key locks hold off a ScalarDB insert into its range, and must
+    // return what the snapshot does (design 4.2)
+    Step locked =
+        locks
+            ? new Step(
+                "SELECT "
+                    + n.readColumns(exposed)
+                    + " FROM "
+                    + n.data
+                    + " "
+                    + exposed
+                    + (span == null ? "" : " WHERE " + source.substring(span[0], span[1]))
+                    + " LOCK IN SHARE MODE",
+                inWhere)
+            : null;
     return new KeyedPlan(
         n,
         shape.kind() == StatementShape.Kind.DELETE,
         t.layout() == Layout.DECOUPLED_IMPORTED,
         afterImages,
+        locked,
         new Step(keys, inWhere),
         new Step(dml, all),
         where != null);
@@ -945,6 +964,7 @@ final class Writes {
     final boolean delete;
     final boolean imported;
     final @Nullable Step afterImages;
+    final @Nullable Step locked;
     final Step keys;
     final Step dml;
     final boolean predicate;
@@ -954,6 +974,7 @@ final class Writes {
         boolean delete,
         boolean imported,
         @Nullable Step afterImages,
+        @Nullable Step locked,
         Step keys,
         Step dml,
         boolean predicate) {
@@ -961,6 +982,7 @@ final class Writes {
       this.delete = delete;
       this.imported = imported;
       this.afterImages = afterImages;
+      this.locked = locked;
       this.keys = keys;
       this.dml = dml;
       this.predicate = predicate;
@@ -968,9 +990,13 @@ final class Writes {
 
     @Override
     List<String> sql() {
-      return afterImages == null
-          ? List.of(keys.sql, dml.sql)
-          : List.of(afterImages.sql, keys.sql, dml.sql);
+      List<String> out = new ArrayList<>();
+      for (Step s : Arrays.asList(afterImages, locked, keys, dml)) {
+        if (s != null) {
+          out.add(s.sql);
+        }
+      }
+      return out;
     }
 
     @Override
@@ -984,8 +1010,21 @@ final class Writes {
           }
         }
       }
+      // the lock first: when it is the transaction's first read, the snapshot is taken under it
+      Map<List<Object>, Anchors.Version> now = locked == null ? null : lockedRows(run);
       List<String> types = new ArrayList<>();
       List<Row> rows = settledKeys(run, types);
+      if (now != null) {
+        for (Row row : rows) {
+          Anchors.Version latest = now.remove(Anchors.key(row.key));
+          if (latest == null || !latest.is(row.txId, row.version)) {
+            throw new Aborted("a row the statement's predicate matches changed after the snapshot");
+          }
+        }
+        if (!now.isEmpty()) {
+          throw new Aborted("a row the statement's predicate matches was added after the snapshot");
+        }
+      }
       // first-updater-wins (4.3 step 1): a key this transaction read must still be at that version
       Anchors anchors = run.context.anchors();
       for (Row row : rows) {
@@ -1059,6 +1098,27 @@ final class Writes {
         }
         run.sleep(until, "a row the statement writes is being written by a ScalarDB transaction");
       }
+    }
+
+    /**
+     * The versions of the rows the predicate matches now, they and their metadata rows under a
+     * shared lock; an abort for one in flight.
+     */
+    private Map<List<Object>, Anchors.Version> lockedRows(Run run) throws SQLException {
+      Keys keys = new Keys();
+      try (PreparedStatement ps = run.prepare(Objects.requireNonNull(locked), null);
+          ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          keys.read(rs, 1, n.keyColumns.size());
+        }
+      }
+      Map<List<Object>, Anchors.Version> out =
+          versions(run, n, keys, n.engine == Engine.MARIADB ? "LOCK IN SHARE MODE" : "FOR SHARE");
+      if (out == null) {
+        throw new Aborted(
+            "a row the statement's predicate matches is being written by a ScalarDB transaction");
+      }
+      return out;
     }
 
     /**
@@ -1665,7 +1725,7 @@ final class Writes {
       if (inFlight == null) {
         // SKIP LOCKED: under the statement's ORDER BY and LIMIT the snapshot's rows would be those
         // it skipped (todo 221); each row locked is then the snapshot's, at the version locked
-        Map<List<Object>, Anchors.Version> then = readVersions(run, keys, null);
+        Map<List<Object>, Anchors.Version> then = versions(run, n, keys, null);
         if (then == null) {
           return false;
         }
@@ -1727,7 +1787,7 @@ final class Writes {
      */
     private boolean lockedVersions(Run run, Keys keys, List<Anchors.Version> versions)
         throws SQLException {
-      Map<List<Object>, Anchors.Version> found = readVersions(run, keys, relock);
+      Map<List<Object>, Anchors.Version> found = versions(run, n, keys, relock);
       if (found == null) {
         return false;
       }
@@ -1736,42 +1796,42 @@ final class Writes {
       }
       return true;
     }
+  }
 
-    /**
-     * The version of each key with a data row, read under {@code lock} if any; null when one is in
-     * flight.
-     */
-    private @Nullable Map<List<Object>, Anchors.Version> readVersions(
-        Run run, Keys keys, @Nullable String lock) throws SQLException {
-      int width = n.keyColumns.size();
-      Map<List<Object>, Anchors.Version> found = new HashMap<>();
-      for (int from = 0; from < keys.rows.size(); from += CHUNK) {
-        List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
-        // the relock goes through the primary key, which a covering index would otherwise stand
-        // in for
-        String read =
-            n.withMeta(
-                    n.dataOf(
-                        lock == null ? "d" : "d FORCE INDEX (PRIMARY)", keys.types, chunk.size()),
-                    "d",
-                    n.keysOf(keys.types, chunk.size()))
-                + (lock == null ? "" : " " + lock);
-        try (PreparedStatement ps = run.prepare(read)) {
-          bindAll(ps, 1, chunk);
-          try (ResultSet m = ps.executeQuery()) {
-            while (m.next()) {
-              if (inFlight(m.getObject(width + 3))) {
-                return null;
-              }
-              found.put(
-                  Anchors.key(Objects.requireNonNull(readKey(m, 1, width))),
-                  new Anchors.Version(m.getString(width + 1), m.getObject(width + 2)));
+  /**
+   * The version of each key with a data row, read under {@code lock} if any; null when one is in
+   * flight.
+   */
+  private static @Nullable Map<List<Object>, Anchors.Version> versions(
+      Run run, Names n, Keys keys, @Nullable String lock) throws SQLException {
+    int width = n.keyColumns.size();
+    Map<List<Object>, Anchors.Version> found = new HashMap<>();
+    for (int from = 0; from < keys.rows.size(); from += CHUNK) {
+      List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
+      // the relock goes through the primary key, which a covering index would otherwise stand
+      // in for
+      String read =
+          n.withMeta(
+                  n.dataOf(
+                      lock == null ? "d" : "d FORCE INDEX (PRIMARY)", keys.types, chunk.size()),
+                  "d",
+                  n.keysOf(keys.types, chunk.size()))
+              + (lock == null ? "" : " " + lock);
+      try (PreparedStatement ps = run.prepare(read)) {
+        bindAll(ps, 1, chunk);
+        try (ResultSet m = ps.executeQuery()) {
+          while (m.next()) {
+            if (inFlight(m.getObject(width + 3))) {
+              return null;
             }
+            found.put(
+                Anchors.key(Objects.requireNonNull(readKey(m, 1, width))),
+                new Anchors.Version(m.getString(width + 1), m.getObject(width + 2)));
           }
         }
       }
-      return found;
     }
+    return found;
   }
 
   /** The table's names, quoted, and the clauses built from them. */

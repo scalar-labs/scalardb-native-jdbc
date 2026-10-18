@@ -13,6 +13,7 @@ import com.scalar.db.api.TableMetadata;
 import com.scalar.db.api.TwoPhaseCommitTransaction;
 import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.api.Update;
+import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
@@ -24,6 +25,7 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLTransactionRollbackException;
 import java.sql.Statement;
 import java.time.Duration;
@@ -72,7 +74,17 @@ class SnapshotIntegrationTest {
             Map.of("transaction-metadata-decoupling", "true"));
       }
     }
-    TransactionFactory factory = e.scalarDb();
+    Properties shortWait = new Properties();
+    if (!pg) {
+      // a ScalarDB write that waits on the driver's lock fails at once, as a conflict: the test
+      // runs both sides in one thread
+      shortWait.setProperty(
+          "scalar.db.contact_points",
+          e.url()
+              + (e.url().contains("?") ? "&" : "?")
+              + "sessionVariables=innodb_lock_wait_timeout=1");
+    }
+    TransactionFactory factory = e.scalarDb(shortWait);
     try (DistributedTransactionManager tm = factory.getTransactionManager()) {
       DistributedTransaction tx = tm.begin();
       for (int id = 1; id <= 20; id++) {
@@ -104,13 +116,8 @@ class SnapshotIntegrationTest {
         }
       }
     }
-    // SERIALIZABLE off PostgreSQL comes with milestone 8b2
     for (int level :
-        pg
-            ? new int[] {
-              Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE
-            }
-            : new int[] {Connection.TRANSACTION_REPEATABLE_READ}) {
+        new int[] {Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE}) {
       String at = level == Connection.TRANSACTION_SERIALIZABLE ? "SERIALIZABLE" : "SNAPSHOT";
       try (DistributedTransactionManager tm = factory.getTransactionManager();
           TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
@@ -127,12 +134,30 @@ class SnapshotIntegrationTest {
       String at)
       throws Exception {
     boolean pg = e.engine() == Engine.POSTGRESQL;
+    // SERIALIZABLE on MySQL and MariaDB: every read locks, anything but one table row by row on the
+    // coarse path
+    boolean coarse = !pg && level == Connection.TRANSACTION_SERIALIZABLE;
     String duplicate = pg ? "23505" : "23000";
     Properties waits = new Properties();
     waits.setProperty("scalardbnative.inflightWaitMs", "5000");
     try (Connection d = e.openDriver(waits)) {
       d.setTransactionIsolation(level);
       d.setAutoCommit(false);
+      assertThat(d.getTransactionIsolation()).as("%s: the level reported", at).isEqualTo(level);
+      if (coarse) {
+        // a table in a derived table would be read unlocked: refused
+        assertThatThrownBy(() -> rows(d, "SELECT x FROM (SELECT x FROM sn.t) q"))
+            .as("%s: a derived table", at)
+            .isInstanceOf(SQLFeatureNotSupportedException.class);
+        d.rollback();
+        // a table in a subquery is read in the snapshot, which must come after the checks' locks
+        String semi = "SELECT x FROM sn.t WHERE id IN (SELECT id FROM sn.u WHERE id = 1)";
+        rows(d, "SELECT x FROM sn.t WHERE id = 2");
+        assertAborts(d, semi, at + ": a subquery read after another statement");
+        d.rollback();
+        assertThat(rows(d, semi)).as("%s: a subquery read first", at).containsExactly("a");
+        d.commit();
+      }
 
       // row by row: a row in flight that the read returns aborts it, by its before image ...
       TwoPhaseCommitTransaction held = prepared(tpc, "t", 1, "b");
@@ -150,9 +175,18 @@ class SnapshotIntegrationTest {
       assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 2"))
           .as("%s: another row in flight does not matter", at)
           .containsExactly("a");
-      assertThat(rows(d, "SELECT t.x, u.x FROM sn.t t JOIN sn.u u ON u.id = t.id WHERE t.id = 3"))
-          .as("%s: a join reads row by row too", at)
-          .containsExactly("a/a");
+      if (coarse) {
+        // a join takes the coarse path, whose check of the whole table finds the row in flight
+        assertAborts(
+            d,
+            "SELECT t.x, u.x FROM sn.t t JOIN sn.u u ON u.id = t.id WHERE t.id = 3",
+            at + ": a join on the coarse path");
+        d.rollback();
+      } else {
+        assertThat(rows(d, "SELECT t.x, u.x FROM sn.t t JOIN sn.u u ON u.id = t.id WHERE t.id = 3"))
+            .as("%s: a join reads row by row too", at)
+            .containsExactly("a/a");
+      }
       d.commit();
       held.commit();
       scalarDbSet(tm, 1, "a");
@@ -170,10 +204,16 @@ class SnapshotIntegrationTest {
       assertAborts(
           d, "SELECT id FROM sn.t ORDER BY id DESC LIMIT 3 OFFSET 3", at + ": an offset over it");
       d.rollback();
-      // a row limit alone needs the rows it returns only
-      assertThat(rows(d, "SELECT id FROM sn.t ORDER BY id LIMIT 2"))
-          .as("%s: a limit short of it", at)
-          .containsExactly("1", "2");
+      if (coarse) {
+        // the locking read checks its whole predicate for rows in flight, its limit aside
+        assertAborts(d, "SELECT id FROM sn.t ORDER BY id LIMIT 2", at + ": a limit short of it");
+        d.rollback();
+      } else {
+        // a row limit alone needs the rows it returns only
+        assertThat(rows(d, "SELECT id FROM sn.t ORDER BY id LIMIT 2"))
+            .as("%s: a limit short of it", at)
+            .containsExactly("1", "2");
+      }
       d.commit();
       inserting.rollback();
 
@@ -252,11 +292,19 @@ class SnapshotIntegrationTest {
       held = prepared(tpc, "t", 11, "b");
       d.setAutoCommit(true);
       try (Statement st = d.createStatement()) {
-        st.execute("SELECT x FROM sn.t WHERE id = 11");
-        d.setAutoCommit(false);
-        assertThatThrownBy(() -> rows(st.getResultSet()))
-            .as("%s: rows fetched later", at)
-            .isInstanceOf(SQLTransactionRollbackException.class);
+        if (coarse) {
+          // the locking read reads its rows whole at the execute
+          assertThatThrownBy(() -> st.execute("SELECT x FROM sn.t WHERE id = 11"))
+              .as("%s: rows read at the execute", at)
+              .isInstanceOf(SQLTransactionRollbackException.class);
+          d.setAutoCommit(false);
+        } else {
+          st.execute("SELECT x FROM sn.t WHERE id = 11");
+          d.setAutoCommit(false);
+          assertThatThrownBy(() -> rows(st.getResultSet()))
+              .as("%s: rows fetched later", at)
+              .isInstanceOf(SQLTransactionRollbackException.class);
+        }
       }
       held.rollback();
       assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 12"))
@@ -389,34 +437,44 @@ class SnapshotIntegrationTest {
       d.setAutoCommit(false);
       held.commit();
 
-      // the snapshot holds across statements, and the first committer wins
-      assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 4")).containsExactly("a");
-      scalarDbSet(tm, 4, "s");
-      assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 4"))
-          .as("%s: the snapshot holds", at)
-          .containsExactly("a");
-      assertThat(rows(d, "SELECT COUNT(*) FROM sn.t WHERE x = 's'"))
-          .as("%s: a checked read sees the snapshot too", at)
-          .containsExactly("0");
-      try (Statement st = d.createStatement()) {
-        assertThatThrownBy(() -> st.executeUpdate("UPDATE sn.t SET v = 1 WHERE id = 4"))
-            .as("%s: first-committer-wins against ScalarDB", at)
-            .isInstanceOf(SQLException.class)
-            .extracting(ex -> ((SQLException) ex).getSQLState())
-            .isEqualTo("40001");
-      }
-      d.rollback();
-      // a locking read of a row changed after the snapshot, which MySQL and MariaDB would return
-      // as committed now
-      for (String lock : List.of("FOR UPDATE", pg ? "FOR SHARE" : "LOCK IN SHARE MODE")) {
-        rows(d, "SELECT x FROM sn.t WHERE id = 4");
-        scalarDbSet(tm, 4, lock);
-        assertThatThrownBy(() -> rows(d, "SELECT x FROM sn.t WHERE id = 4 " + lock))
-            .as("%s: %s of a row changed after the snapshot", at, lock)
-            .isInstanceOf(SQLException.class)
-            .extracting(ex -> ((SQLException) ex).getSQLState())
-            .isEqualTo("40001");
+      if (coarse) {
+        // a read locks its rows, on which a ScalarDB write then waits, here until its short lock
+        // wait fails it
+        assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 4")).containsExactly("a");
+        assertThatThrownBy(() -> scalarDbSet(tm, 4, "s"))
+            .as("%s: a ScalarDB write of a row read", at)
+            .isInstanceOf(TransactionException.class);
         d.rollback();
+      } else {
+        // the snapshot holds across statements, and the first committer wins
+        assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 4")).containsExactly("a");
+        scalarDbSet(tm, 4, "s");
+        assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 4"))
+            .as("%s: the snapshot holds", at)
+            .containsExactly("a");
+        assertThat(rows(d, "SELECT COUNT(*) FROM sn.t WHERE x = 's'"))
+            .as("%s: a checked read sees the snapshot too", at)
+            .containsExactly("0");
+        try (Statement st = d.createStatement()) {
+          assertThatThrownBy(() -> st.executeUpdate("UPDATE sn.t SET v = 1 WHERE id = 4"))
+              .as("%s: first-committer-wins against ScalarDB", at)
+              .isInstanceOf(SQLException.class)
+              .extracting(ex -> ((SQLException) ex).getSQLState())
+              .isEqualTo("40001");
+        }
+        d.rollback();
+        // a locking read of a row changed after the snapshot, which MySQL and MariaDB would return
+        // as committed now
+        for (String lock : List.of("FOR UPDATE", pg ? "FOR SHARE" : "LOCK IN SHARE MODE")) {
+          rows(d, "SELECT x FROM sn.t WHERE id = 4");
+          scalarDbSet(tm, 4, lock);
+          assertThatThrownBy(() -> rows(d, "SELECT x FROM sn.t WHERE id = 4 " + lock))
+              .as("%s: %s of a row changed after the snapshot", at, lock)
+              .isInstanceOf(SQLException.class)
+              .extracting(ex -> ((SQLException) ex).getSQLState())
+              .isEqualTo("40001");
+          d.rollback();
+        }
       }
 
       if (!pg) {

@@ -330,6 +330,8 @@ final class Router {
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
   // the checks for rows in flight the open transaction passed, in its snapshot
   private final Set<String> passed = new HashSet<>();
+  // whether a statement ran in the open transaction, whose snapshot it may then have taken
+  private boolean ranInTransaction;
 
   Router(Engine engine, Catalog catalog, Session session) {
     this.engine = engine;
@@ -538,7 +540,8 @@ final class Router {
       throw Errors.unsupported(
           "tables in ScalarDB's classic layout are not supported yet" + tables);
     }
-    Writes.Plan plan = Writes.plan(engine, shape.get(), t, tables, snapshot(), vendor);
+    Writes.Plan plan =
+        Writes.plan(engine, shape.get(), t, tables, snapshot(), lockingSerializable(), vendor);
     return new Route(
         sql,
         sql,
@@ -576,7 +579,7 @@ final class Router {
         || shape.isEmpty()
         || shape.get().kind() != StatementShape.Kind.SELECT
         || !ast.rowPerRow()
-        || shape.get().lockMode() == null) {
+        || (shape.get().lockMode() == null && !lockingSerializable())) {
       return null;
     }
     SqlAst.TableRef ref = shape.get().table();
@@ -698,7 +701,10 @@ final class Router {
               + tables);
     }
     StatementShape shape = StatementShape.of(ast).orElseThrow();
-    if (shape.lockMode() == ForMode.KEY_SHARE) {
+    // a read at SERIALIZABLE without a clause of its own locks as FOR SHARE does
+    boolean plain = shape.lockMode() == null;
+    ForMode mode = plain ? ForMode.SHARE : shape.lockMode();
+    if (mode == ForMode.KEY_SHARE) {
       // a ScalarDB prepare writes the row with a non-key UPDATE, which KEY SHARE does not block
       throw Errors.unsupported(
           "FOR KEY SHARE does not hold off ScalarDB's writes; use FOR SHARE" + tables);
@@ -721,8 +727,8 @@ final class Router {
     String inner = null;
     String relock = null;
     if (engine != Engine.POSTGRESQL) {
-      boolean update = shape.lockMode() == ForMode.UPDATE;
-      if (!update && shape.lockMode() != ForMode.SHARE) {
+      boolean update = mode == ForMode.UPDATE;
+      if (!update && mode != ForMode.SHARE) {
         throw Errors.unsupported(
             "only FOR UPDATE and FOR SHARE lock a ScalarDB table on this engine" + tables);
       }
@@ -741,9 +747,11 @@ final class Router {
               : (update ? "FOR UPDATE" : share)
                   + (engine == Engine.MYSQL && !snapshot() ? " OF d" : "")
                   + (wait.isEmpty() ? "" : " NOWAIT");
-      int clause = ast.afterLast("FOR") - "FOR".length();
+      int clause = plain ? -1 : ast.afterLast("FOR") - "FOR".length();
       SqlAst bare =
-          clause < 0 || ast.source().contains(LOCK_MARK) ? null : ast.without(clause, ast.end());
+          ast.source().contains(LOCK_MARK)
+              ? null
+              : plain ? ast : clause < 0 ? null : ast.without(clause, ast.end());
       if (bare == null || bare.hasLockingOrIntoClause() || bare.tableRefs().size() != 1) {
         throw Errors.unsupported(
             "the locking read cannot be rewritten onto the committed rows" + tables);
@@ -899,6 +907,14 @@ final class Router {
     }
     if (!levelSupported()) {
       throw Errors.unsupported(LEVELS + tables);
+    }
+    if (lockingSerializable() && !ast.hasLockingOrIntoClause()) {
+      // every read locks what it reads (design 4.2, SERIALIZABLE): a table read row by row is
+      // locked row by row, as FOR SHARE locks it; anything else takes the coarse path
+      SqlAst.TableRef one = ast.tableRefs().size() == 1 ? lockable(ast, scalarDb) : null;
+      return one != null
+          ? lockingRead(sql, ast, scalarDb, one, tables)
+          : coarseRead(sql, ast, scalarDb, tables);
     }
     if (ast.hasLockingOrIntoClause()) {
       SqlAst.TableRef locked = lockable(ast, scalarDb);
@@ -1068,9 +1084,89 @@ final class Router {
     return List.copyOf(out);
   }
 
+  /**
+   * A read at SERIALIZABLE on MySQL or MariaDB that is not one table row by row: each ScalarDB
+   * table's in-flight index read under a shared lock, whose gap lock holds off every ScalarDB
+   * prepare of the table until commit, then the statement on the data tables, which then hold the
+   * committed rows only, under {@code LOCK IN SHARE MODE} (design 4.2, the coarse path). A table
+   * the statement reaches in a subquery or a derived table would be read unlocked, from the
+   * snapshot: refused.
+   */
+  private Route coarseRead(
+      String sql, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb, String tables)
+      throws SQLException {
+    SqlAst.Split split =
+        ast.split(
+            r -> {
+              TableInfo t = scalarDb.get(r);
+              return t == null ? null : t.keyColumns();
+            });
+    IdentityHashMap<SqlAst.TableRef, String> data = new IdentityHashMap<>();
+    boolean first = false;
+    for (Map.Entry<SqlAst.TableRef, TableInfo> e : scalarDb.entrySet()) {
+      TableInfo t = e.getValue();
+      SqlAst.Place place = split.places().get(e.getKey());
+      if (!ast.singleSelect() || place == null) {
+        throw Errors.unsupported(
+            "at SERIALIZABLE on this engine a read that is not of one table row by row reaches"
+                + " its ScalarDB tables in the FROM clause of a single SELECT or in an IN or EXISTS"
+                + " subquery of its WHERE clause, never in a derived table or a set operation"
+                + tables);
+      }
+      // the clause does not lock a subquery's rows, which are read in the snapshot: one taken
+      // under the checks' locks only, after them as the transaction's first statement
+      first |= place == SqlAst.Place.SEMI_JOINED || place == SqlAst.Place.IN_EXPRESSION;
+      if (t.layout() == Layout.CLASSIC) {
+        throw Errors.unsupported(
+            "tables in ScalarDB's classic layout are not supported yet" + tables);
+      }
+      if (e.getKey().hasHintOrLink()) {
+        throw Errors.unsupported(
+            "a table hint, sample clause, PIVOT or database link on a ScalarDB table is not"
+                + " supported"
+                + tables);
+      }
+      data.put(e.getKey(), engine.quote(t.namespace()) + "." + engine.quote(t.dataTable()));
+    }
+    String rewritten = ast.joinTokens(data::get);
+    SqlAst again =
+        rewritten == null
+            ? null
+            : SqlAst.parse(rewritten, engine, session.doubleQuotesQuoteIdentifiersAsLastRead())
+                .orElse(null);
+    int end = again == null ? -1 : again.end();
+    if (rewritten == null || end < 0) {
+      throw Errors.unsupported("the statement cannot be rewritten onto the data tables" + tables);
+    }
+    Route r =
+        route(
+            sql,
+            rewritten.substring(0, end) + " LOCK IN SHARE MODE" + rewritten.substring(end),
+            SqlAst.Kind.SELECT,
+            false,
+            false,
+            false,
+            null,
+            ast.parameterCount(),
+            0,
+            List.of(),
+            true);
+    List<String> checks = new ArrayList<>();
+    for (String check : checks(scalarDb)) {
+      checks.add(check + " LOCK IN SHARE MODE" + (first ? FIRST : ""));
+    }
+    return r.checked(checks);
+  }
+
+  /**
+   * Marks a check that must run as the transaction's first statement, or have passed in it before.
+   */
+  private static final String FIRST = " /* scalardb_native_first */";
+
   private static final String LEVELS =
-      "statements on ScalarDB tables run at READ COMMITTED and REPEATABLE READ, and at SERIALIZABLE"
-          + " on PostgreSQL only so far; set one of those levels on the connection";
+      "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
+          + " PostgreSQL, MySQL and MariaDB, at READ COMMITTED elsewhere so far; set one of those"
+          + " levels on the connection";
 
   /** Whether statements on ScalarDB tables run at the connection's level on this engine yet. */
   private boolean levelSupported() {
@@ -1081,7 +1177,36 @@ final class Router {
               && (engine == Engine.POSTGRESQL
                   || engine == Engine.MYSQL
                   || engine == Engine.MARIADB))
-          || (isolation == Connection.TRANSACTION_SERIALIZABLE && engine == Engine.POSTGRESQL);
+          || (isolation == Connection.TRANSACTION_SERIALIZABLE
+              && (engine == Engine.POSTGRESQL || locksAtSerializable()));
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /** The level statements on ScalarDB tables run at. */
+  int isolation() {
+    lock.lock();
+    try {
+      return isolation;
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * Whether SERIALIZABLE runs at the engine's snapshot level with the driver's locking re-reads, on
+   * MySQL and MariaDB (design 4.2), rather than at the engine's own SERIALIZABLE.
+   */
+  boolean locksAtSerializable() {
+    return engine == Engine.MYSQL || engine == Engine.MARIADB;
+  }
+
+  /** Whether the connection runs SERIALIZABLE by the driver's locking re-reads. */
+  private boolean lockingSerializable() {
+    lock.lock();
+    try {
+      return isolation == Connection.TRANSACTION_SERIALIZABLE && locksAtSerializable();
     } finally {
       lock.unlock();
     }
@@ -1114,6 +1239,11 @@ final class Router {
       try {
         if (passed.contains(check)) {
           continue;
+        }
+        if (check.endsWith(FIRST) && ranInTransaction) {
+          throw new Writes.Aborted(
+              "at SERIALIZABLE a read with a ScalarDB table in a subquery must be its transaction's"
+                  + " first statement, or follow one that read the same tables so; retry it first");
         }
       } finally {
         lock.unlock();
@@ -1437,6 +1567,7 @@ final class Router {
     lock.lock();
     try {
       passed.clear();
+      ranInTransaction = false;
       if (workersSetInTransaction) {
         sessionWorkers = -1;
         workersOff = null;
@@ -1543,6 +1674,11 @@ final class Router {
   void ran(Connection vendor, Route route) {
     lock.lock();
     try {
+      try {
+        ranInTransaction |= !vendor.getAutoCommit();
+      } catch (SQLException e) {
+        ranInTransaction = true; // unknown: a first-statement check then aborts
+      }
       if (route.kind == SqlAst.Kind.COMMIT) {
         session.transactionEnded();
         transactionEnded();
@@ -1572,7 +1708,13 @@ final class Router {
       if (route.passthrough && SETS_LEVEL.matcher(route.source.toLowerCase(Locale.ROOT)).find()) {
         // passthrough may set the level, or reset it, in SQL: follow the session (todos 184, 222)
         try {
-          isolation = vendor.getTransactionIsolation();
+          int level = vendor.getTransactionIsolation();
+          // REPEATABLE READ is also what SERIALIZABLE runs at on MySQL and MariaDB
+          if (!(level == Connection.TRANSACTION_REPEATABLE_READ
+              && isolation == Connection.TRANSACTION_SERIALIZABLE
+              && locksAtSerializable())) {
+            isolation = level;
+          }
         } catch (SQLException e) {
           // the connection failed; its next statement reports it
         }

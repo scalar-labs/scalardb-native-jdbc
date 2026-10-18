@@ -229,7 +229,7 @@ public enum Engines {
     Properties p = new Properties();
     p.putAll(extra);
     p.setProperty("scalar.db.storage", "jdbc");
-    p.setProperty("scalar.db.contact_points", s.url);
+    p.setProperty("scalar.db.contact_points", extra.getProperty("scalar.db.contact_points", s.url));
     p.setProperty("scalar.db.username", s.username);
     p.setProperty("scalar.db.password", s.password);
     p.setProperty("scalar.db.transaction_manager", "consensus-commit");

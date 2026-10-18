@@ -475,7 +475,12 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
     (todo 214). `SnapshotIntegrationTest` runs on both, the PostgreSQL-only cases (a partial index,
     a deferred constraint, `set_config`) gated.
   - **8b2: SERIALIZABLE**: the connection at REPEATABLE READ, the locking re-read of 4.2 merged with
-    the first arm, and its coarse path.
+    the first arm, and its coarse path. **Done (2026-10-18).** A row-by-row read of one table runs
+    as a `FOR SHARE` locking read compared with the snapshot; any other read takes the coarse path,
+    on the data tables under `LOCK IN SHARE MODE`, first-statement only with a ScalarDB table in a
+    subquery; an UPDATE or DELETE locks its predicate and compares it with the snapshot.
+    `SnapshotIntegrationTest` and `SerializableIntegrationTest` run SERIALIZABLE on both. Not built:
+    the row cap that sends a large first arm to the coarse path.
 - **8c: SQL Server**, all three levels: the per-engine row, the `READ_COMMITTED_SNAPSHOT` and
   `XACT_ABORT` checks, the hint pass of 4.7.
 - **8d: Oracle**: READ COMMITTED and SNAPSHOT, `TRANSACTION_REPEATABLE_READ` mapped to its

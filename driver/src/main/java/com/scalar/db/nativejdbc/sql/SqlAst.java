@@ -939,6 +939,15 @@ public final class SqlAst {
   }
 
   /**
+   * Returns whether the statement is one SELECT: no set operation, no WITH clause.
+   *
+   * @return whether it is a single SELECT
+   */
+  public boolean singleSelect() {
+    return statement instanceof PlainSelect && ((PlainSelect) statement).getWithItemsList() == null;
+  }
+
+  /**
    * Returns whether the statement is a select that skips rows before its first: an OFFSET.
    *
    * @return whether rows the result does not return still count toward it
