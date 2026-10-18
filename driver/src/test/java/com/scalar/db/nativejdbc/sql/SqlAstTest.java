@@ -545,6 +545,12 @@ class SqlAstTest {
         .isEqualTo(
             "SELECT x FROM a WHERE x IN (SELECT ordinal_position FROM"
                 + " `information_schema`.columns) L");
+    // joined to another table, which would go unlocked with it: refused
+    assertThat(
+            locked(
+                "SELECT a.x FROM information_schema.columns c JOIN a ON a.x = c.ordinal_position",
+                Engine.MYSQL))
+        .isNull();
   }
 
   private static @Nullable String locked(String sql, Engine engine) {

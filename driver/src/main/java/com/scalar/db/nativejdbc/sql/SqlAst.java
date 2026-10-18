@@ -1014,7 +1014,11 @@ public final class SqlAst {
       if (!(s instanceof PlainSelect || s instanceof TableStatement)) {
         return null;
       }
-      if (s.getForMode() != null || readsInformationSchema(s)) {
+      Boolean system = readsInformationSchema(s);
+      if (system == null) {
+        return null; // MySQL locks no part of it, and the other tables must be
+      }
+      if (s.getForMode() != null || system) {
         continue;
       }
       // a TABLE statement has no node of its own; nested in another, it is refused
@@ -1073,10 +1077,11 @@ public final class SqlAst {
   }
 
   /**
-   * Whether a SELECT reads a table of information_schema, which MySQL refuses to lock (error 3550)
-   * and which holds no rows a transaction writes (todo 241).
+   * Whether a SELECT reads tables of information_schema only, which MySQL refuses to lock (error
+   * 3550) and which hold no rows a transaction writes (todo 241): true, false for none of them, and
+   * {@code null} for both kinds, whose other tables would go unlocked.
    */
-  private static boolean readsInformationSchema(Select s) {
+  private static @Nullable Boolean readsInformationSchema(Select s) {
     List<FromItem> items = new ArrayList<>();
     if (s instanceof PlainSelect) {
       PlainSelect p = (PlainSelect) s;
@@ -1089,14 +1094,15 @@ public final class SqlAst {
     } else if (s instanceof TableStatement) {
       items.add(((TableStatement) s).getTable());
     }
+    int system = 0;
     for (FromItem item : items) {
       if (item instanceof Table
           && ((Table) item).getSchemaName() != null
           && unquoted(((Table) item).getSchemaName()).equalsIgnoreCase("information_schema")) {
-        return true;
+        system++;
       }
     }
-    return false;
+    return system == 0 ? Boolean.FALSE : system == items.size() ? Boolean.TRUE : null;
   }
 
   /**

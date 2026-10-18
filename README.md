@@ -102,7 +102,7 @@ holds off every ScalarDB write to the table until commit, and fails with `40001`
 row in flight at all. A ScalarDB table in a derived table or a set operation is refused with `0AN01`,
 and so is a statement with a `#` comment, whose clause the comment would swallow. The driver puts
 the operands of a set operation in parentheses, where each takes a clause of its own, and does not
-lock `information_schema`, which MySQL refuses to.
+lock `information_schema`, which MySQL refuses to; a SELECT joining it to other tables is refused.
 
 `TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. The two levels on SQL Server and
 Oracle are accepted, but every statement on a ScalarDB table is refused with `0AN01` there for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot

@@ -1166,7 +1166,8 @@ final class Router {
 
   private static final String LOCKS_EVERY_SELECT =
       "at SERIALIZABLE on MySQL and MariaDB every SELECT is read under a lock, which a statement"
-          + " with a # comment cannot be given; use -- or /* */ comments";
+          + " with a # comment, or a SELECT joining information_schema to other tables, cannot be"
+          + " given; use -- or /* */ comments, and read information_schema on its own";
 
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
