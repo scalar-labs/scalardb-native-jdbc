@@ -535,6 +535,13 @@ class SqlAstTest {
         .isEqualTo("(SELECT x FROM a L) UNION (SELECT x FROM b L) ORDER BY 1");
     // TABLE too; a # comment, which the parser reads as code, is refused (todo 239)
     assertThat(locked("TABLE a", Engine.MYSQL)).isEqualTo("TABLE a L");
+    // an OF list that leaves a table of the block out is refused (todo 247)
+    assertThat(locked("SELECT * FROM a JOIN b USING (x) FOR SHARE OF a", Engine.MYSQL)).isNull();
+    assertThat(locked("SELECT * FROM a JOIN b USING (x) FOR UPDATE OF b", Engine.MYSQL)).isNull();
+    assertThat(locked("SELECT * FROM a JOIN b USING (x) FOR SHARE OF a, b", Engine.MYSQL))
+        .isEqualTo("SELECT * FROM a JOIN b USING (x) FOR SHARE OF a, b");
+    assertThat(locked("SELECT * FROM a FOR SHARE OF a", Engine.MYSQL))
+        .isEqualTo("SELECT * FROM a FOR SHARE OF a");
     assertThat(locked("SELECT x FROM a WHERE id = 1 # c", Engine.MYSQL)).isNull();
     // MySQL does not lock information_schema (todo 241)
     assertThat(

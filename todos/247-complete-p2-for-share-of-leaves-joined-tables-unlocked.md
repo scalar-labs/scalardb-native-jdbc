@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "247"
 tags: [code-review, mysql, serializable, locking]
@@ -46,3 +46,4 @@ aliases, and a mixed `FOR UPDATE OF t FOR SHARE OF u` (which JSqlParser refuses 
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 45afd86 and e24a850 (probe on MySQL 8.4).
+- 2026-10-18: fixed (Option 1): an OF list naming fewer tables than its block has is refused with 0AN01; SqlAstTest covers FOR SHARE OF and FOR UPDATE OF.

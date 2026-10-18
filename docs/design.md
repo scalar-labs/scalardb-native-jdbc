@@ -1458,7 +1458,10 @@ does not lock them; tables ScalarDB does not manage are so locked as the engine'
 lock them (todo 229). The operands of a set operation are put in parentheses, the only place each
 takes a clause of its own, a MySQL `TABLE` statement takes one too, `information_schema`, which MySQL
 refuses to lock, is left alone, and a `#` comment, which the parser reads as an operator, is refused
-(todos 239, 241, 243). The application's own spelling of a clause is kept (todo 240), and a plain
+(todos 239, 241, 243), as is a MySQL `OF` list that leaves a table of its SELECT out (todo 247). A
+passthrough level is followed by the session's level read back, not the statement's text, and set
+again, which clears a `SET TRANSACTION` for the next transaction alone (todo 249). MariaDB's 1020
+under `innodb_snapshot_isolation` ends the transaction as a deadlock does (todo 248). The application's own spelling of a clause is kept (todo 240), and a plain
 statement prepared at another level is prepared again (todo 242). A write's own reads take next-key locks at REPEATABLE READ. A read of one ScalarDB table row by row runs as that
 read under `FOR SHARE`, by the path of a user's locking read: the predicate locked on the data table,
 each row's metadata row locked again by primary key, and the rows compared with the same read in the

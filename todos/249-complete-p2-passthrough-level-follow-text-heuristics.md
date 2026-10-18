@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "249"
 tags: [code-review, mysql, mariadb, isolation, passthrough]
@@ -71,3 +71,4 @@ More fragile.
 
 - 2026-10-18: filed by the focused review of 45afd86 and e24a850 (probes on MySQL 8.4 and
   MariaDB 11.4).
+- 2026-10-18: fixed (Option 1): the session level is read back and followed when it differs from what the driver set (REPEATABLE READ at SERIALIZABLE), or when the text sets REPEATABLE READ for the session; then it is set again, which clears a pending SET TRANSACTION in autocommit (probed: in a transaction, autocommit off, SET SESSION does not clear it, but passthrough runs in autocommit only). SnapshotIntegrationTest covers the comment-prefixed SET and both one-shots, reading the next transaction's level from innodb_trx.

@@ -1166,8 +1166,9 @@ final class Router {
 
   private static final String LOCKS_EVERY_SELECT =
       "at SERIALIZABLE on MySQL and MariaDB every SELECT is read under a lock, which a statement"
-          + " with a # comment, or a SELECT joining information_schema to other tables, cannot be"
-          + " given; use -- or /* */ comments, and read information_schema on its own";
+          + " with a # comment, a SELECT joining information_schema to other tables, or a locking"
+          + " clause whose OF list leaves a table out, cannot be given; use -- or /* */ comments,"
+          + " read information_schema on its own, and name every table in OF";
 
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
@@ -1551,6 +1552,16 @@ final class Router {
   private static final Pattern SETS_LEVEL =
       Pattern.compile("isolation|set_config|\\b(reset|discard)\\b");
 
+  private static final Pattern SETS_SESSION_REPEATABLE =
+      Pattern.compile("\\bsession\\s+transaction\\s+isolation\\s+level\\s+repeatable\\b");
+
+  private static final Map<Integer, String> LEVEL_NAMES =
+      Map.of(
+          Connection.TRANSACTION_READ_UNCOMMITTED, "READ UNCOMMITTED",
+          Connection.TRANSACTION_READ_COMMITTED, "READ COMMITTED",
+          Connection.TRANSACTION_REPEATABLE_READ, "REPEATABLE READ",
+          Connection.TRANSACTION_SERIALIZABLE, "SERIALIZABLE");
+
   private static final Pattern RESETS_ALL = Pattern.compile("\\b(reset|discard)\\s+all\\b");
 
   /** After a rollback, which undoes a SET made in the transaction. */
@@ -1671,6 +1682,7 @@ final class Router {
    * After a routed statement ran, or failed, since it may have taken effect before failing: re-read
    * the session and forget resolved names, as it requires. Never throws.
    */
+  @SuppressFBWarnings(value = "SQL_INJECTION_JDBC", justification = "a level name of the driver's")
   void ran(Connection vendor, Route route) {
     lock.lock();
     try {
@@ -1701,24 +1713,31 @@ final class Router {
         catalog.invalidateResolutions();
       }
       String text = route.source.toLowerCase(Locale.ROOT);
-      if (route.passthrough
-          && SETS_LEVEL.matcher(text).find()
-          // there a SELECT sets no level, as PostgreSQL's set_config does (todo 244)
-          && (!locksAtSerializable() || text.strip().startsWith("set"))) {
+      if (route.passthrough && SETS_LEVEL.matcher(text).find()) {
         // passthrough may set the level, or reset it, in SQL: follow the session (todos 184, 222)
         try {
           int level = vendor.getTransactionIsolation();
-          if (level == Connection.TRANSACTION_SERIALIZABLE && locksAtSerializable()) {
-            // run as setTransactionIsolation runs it, in autocommit as passthrough is (todo 232)
-            vendor.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+          if (!locksAtSerializable()) {
             isolation = level;
-          } else if (!(level == Connection.TRANSACTION_REPEATABLE_READ
-              && isolation == Connection.TRANSACTION_SERIALIZABLE
-              && locksAtSerializable()
-              && !text.contains("repeatable"))) {
-            // REPEATABLE READ is also what SERIALIZABLE runs at on MySQL and MariaDB, unless that
-            // is the level the statement named
-            isolation = level;
+          } else {
+            // the level is read, not the text, which a comment or a SELECT may name it in; what
+            // SERIALIZABLE runs at, REPEATABLE READ, is followed only where the statement set it
+            // for the session, not globally or for the next transaction (todos 232, 244, 249)
+            int expected =
+                isolation == Connection.TRANSACTION_SERIALIZABLE
+                    ? Connection.TRANSACTION_REPEATABLE_READ
+                    : isolation;
+            if (level == Connection.TRANSACTION_SERIALIZABLE) {
+              isolation = level;
+              level = Connection.TRANSACTION_REPEATABLE_READ;
+            } else if (level != expected || SETS_SESSION_REPEATABLE.matcher(text).find()) {
+              isolation = level;
+            }
+            // set it again: that clears a SET TRANSACTION for the next transaction alone, which
+            // the session's level does not show, in autocommit as passthrough runs
+            try (Statement s = vendor.createStatement()) {
+              s.execute("SET SESSION TRANSACTION ISOLATION LEVEL " + LEVEL_NAMES.get(level));
+            }
           }
         } catch (SQLException e) {
           // the connection failed; its next statement reports it

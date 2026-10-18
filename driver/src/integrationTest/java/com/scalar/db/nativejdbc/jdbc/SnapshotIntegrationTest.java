@@ -382,7 +382,27 @@ class SnapshotIntegrationTest {
           assertThat(d.getTransactionIsolation())
               .as("%s: after a SELECT naming REPEATABLE READ", at)
               .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
-          st.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+          // a level for the next transaction alone is not followed, and is cleared (todo 249)
+          st.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+          st.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+          assertThat(d.getTransactionIsolation())
+              .as("%s: after SET TRANSACTION", at)
+              .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
+          d.setClientInfo("scalardbnative.passthrough", "false");
+          d.setAutoCommit(false);
+          rows(d, text);
+          assertThat(
+                  rows(
+                      d,
+                      "SELECT trx_isolation_level FROM information_schema.innodb_trx"
+                          + " WHERE trx_mysql_thread_id = CONNECTION_ID()"))
+              .as("%s: the next transaction's level", at)
+              .containsExactly("REPEATABLE READ");
+          d.rollback();
+          d.setAutoCommit(true);
+          d.setClientInfo("scalardbnative.passthrough", "true");
+          // the level is read, not the text, which may start with a comment (todo 249)
+          st.execute("/* c */ SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ");
           assertThat(d.getTransactionIsolation())
               .as("%s: REPEATABLE READ set in SQL", at)
               .isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
@@ -707,6 +727,31 @@ class SnapshotIntegrationTest {
           .as("%s: rollback-only after the deadlock", at)
           .isInstanceOf(SQLTransactionRollbackException.class);
       d.rollback();
+      if (e.engine() == Engine.MARIADB) {
+        // so does MariaDB's 1020, a locking read of a row changed since the snapshot, which
+        // SNAPSHOT reads in (todo 248)
+        o.setAutoCommit(true);
+        d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+        ds.execute("SET SESSION innodb_snapshot_isolation = ON");
+        try {
+          rows(d, "SELECT v FROM sn_plain.p WHERE id = 2");
+          st.execute("UPDATE sn_plain.p SET v = 5 WHERE id = 1");
+          assertThatThrownBy(
+                  () -> rows(d, "SELECT v FROM sn_plain.p WHERE id = 1 LOCK IN SHARE MODE"))
+              .as("%s: the changed row", at)
+              .isInstanceOf(SQLException.class)
+              .extracting(ex -> ((SQLException) ex).getErrorCode())
+              .isEqualTo(1020);
+          assertThatThrownBy(() -> rows(d, "SELECT x FROM sn.t WHERE id = 1"))
+              .as("%s: rollback-only after 1020", at)
+              .isInstanceOf(SQLTransactionRollbackException.class);
+        } finally {
+          d.rollback();
+          d.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+          ds.execute("SET SESSION innodb_snapshot_isolation = OFF");
+          d.rollback();
+        }
+      }
     }
   }
 

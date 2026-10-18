@@ -611,12 +611,18 @@ final class Writes {
   /**
    * Whether a vendor error ended the transaction: one of class 40, except a MySQL or MariaDB lock
    * wait timeout, which undoes the statement only unless innodb_rollback_on_timeout is on, and
-   * which MariaDB's driver reports as a plain error (todos 204, 211).
+   * which MariaDB's driver reports as a plain error (todos 204, 211); and MariaDB's 1020, a locking
+   * read of a row changed since the snapshot under innodb_snapshot_isolation, which ends it too
+   * (todo 248).
    */
   static boolean endsTransaction(Connection vendor, SQLException e) {
     try {
+      int code = e.getErrorCode();
       String product =
-          e.getErrorCode() == 1205 ? vendor.getMetaData().getDatabaseProductName() : "";
+          code == 1205 || code == 1020 ? vendor.getMetaData().getDatabaseProductName() : "";
+      if (code == 1020) {
+        return product.equals("MariaDB") || e instanceof SQLTransactionRollbackException;
+      }
       if (product.equals("MySQL") || product.equals("MariaDB")) { // 1205 is a deadlock elsewhere
         try (Statement s = vendor.createStatement();
             ResultSet rs = s.executeQuery("SELECT @@innodb_rollback_on_timeout")) {

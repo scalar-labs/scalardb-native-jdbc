@@ -1018,6 +1018,9 @@ public final class SqlAst {
       if (system == null) {
         return null; // MySQL locks no part of it, and the other tables must be
       }
+      if (s.getForMode() != null && !locksAllOf(s)) {
+        return null; // MySQL's OF leaves the block's other tables unlocked (todo 247)
+      }
       if (s.getForMode() != null || system) {
         continue;
       }
@@ -1081,6 +1084,21 @@ public final class SqlAst {
    * 3550) and which hold no rows a transaction writes (todo 241): true, false for none of them, and
    * {@code null} for both kinds, whose other tables would go unlocked.
    */
+  /** Whether a block's locking clause, with an {@code OF} list or none, covers all its tables. */
+  private static boolean locksAllOf(Select s) {
+    List<Table> of = s.getForUpdateTables();
+    if (of == null || of.isEmpty()) {
+      return true;
+    }
+    PlainSelect p = s instanceof PlainSelect ? (PlainSelect) s : null;
+    int tables = p == null ? 1 : 1 + (p.getJoins() == null ? 0 : p.getJoins().size());
+    Set<String> named = new HashSet<>();
+    for (Table t : of) {
+      named.add(unquoted(t.getName()).toLowerCase(Locale.ROOT));
+    }
+    return named.size() >= tables;
+  }
+
   private static @Nullable Boolean readsInformationSchema(Select s) {
     List<FromItem> items = new ArrayList<>();
     if (s instanceof PlainSelect) {

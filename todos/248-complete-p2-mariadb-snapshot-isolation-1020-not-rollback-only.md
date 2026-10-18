@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "248"
 tags: [code-review, mariadb, serializable, rollback-only]
@@ -54,3 +54,4 @@ server setting.
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 45afd86 and e24a850 (probes on MariaDB 11.4).
+- 2026-10-18: fixed (Option 1): endsTransaction counts 1020 on MariaDB. At SERIALIZABLE every read locks, so no read view forms and 1020 does not arise there; SNAPSHOT is where it does. SnapshotIntegrationTest runs a SNAPSHOT read with innodb_snapshot_isolation=ON; it fails without the fix.
