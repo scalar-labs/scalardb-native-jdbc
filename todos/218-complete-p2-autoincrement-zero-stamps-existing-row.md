@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "218"
 tags: [code-review, correctness, mysql, regression]
@@ -28,9 +28,9 @@ Refuse a literal 0/NULL key at plan time and a bound 0/NULL at run time.
 
 ## Acceptance Criteria
 
-- [ ] 0 or NULL given for an AUTO_INCREMENT key never stamps another row
-- [ ] Integration test on MySQL
-- [ ] design.md §4.4 states the case
+- [x] 0 or NULL given for an AUTO_INCREMENT key never stamps another row
+- [x] Integration test on MySQL
+- [x] design.md §4.4 states the case
 
 ## Recommended Action
 
@@ -40,3 +40,8 @@ Refuse a literal 0/NULL key at plan time and a bound 0/NULL at run time.
 
 **By:** Claude Code
 - From the review of 8b1 (9d4a74a, 056849c). Probes in the session scratchpad (rv8b1).
+
+### 2026-10-18 - Fixed
+
+**By:** Claude Code
+- Fixed: the read-back of an AUTO_INCREMENT key column adds `d.k <> 0` (columns() now reads `extra`), so an explicit 0 reads back no row and is refused; NO_AUTO_VALUE_ON_ZERO users giving 0 are refused too (conservative). Connector/J's generated keys report explicit values too, so Option 1 could not tell them apart. Test: MoreWritesIntegrationTest reviewOf8a (row 0 restored, literal and bound 0 refused, nothing stamped).

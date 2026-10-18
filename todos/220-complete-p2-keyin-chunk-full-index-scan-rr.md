@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "220"
 tags: [code-review, concurrency, mysql, mariadb]
@@ -29,8 +29,8 @@ Smaller CHUNK off PostgreSQL (lowers odds only; the plan still depends on table 
 
 ## Acceptance Criteria
 
-- [ ] 1000-key writes and locking reads at RR take record locks only (data_locks probe)
-- [ ] Far-key INSERT does not wait
+- [x] 1000-key writes and locking reads at RR take record locks only (data_locks probe)
+- [x] Far-key INSERT does not wait
 
 ## Recommended Action
 
@@ -40,3 +40,8 @@ Smaller CHUNK off PostgreSQL (lowers odds only; the plan still depends on table 
 
 **By:** Claude Code
 - From the review of 8b1 (9d4a74a, 056849c). Probes in the session scratchpad (rv8b1).
+
+### 2026-10-18 - Fixed
+
+**By:** Claude Code
+- Fixed: off PostgreSQL the key lookups are `<keyValues> u STRAIGHT_JOIN data d ON d.k = u.k0` (Names.dataOf/keysOf): the relock and snapshot reads, the stamp's INSERT ... SELECT and the orphan takeover's multi-table UPDATE. Probed eq_ref for INT, BIGINT UNSIGNED, DECIMAL, DATETIME, DATE, FLOAT, DOUBLE, CHAR bin, latin1 VARCHAR, VARBINARY, TIME on both engines; a BIT key is not found this way (not supported as a key in practice). Probe: 1000 keys of 3000 rows, record locks only, far INSERT does not wait. Test in SnapshotIntegrationTest. A MariaDB range locking read still blocks such an INSERT: todo 228.

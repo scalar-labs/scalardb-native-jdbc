@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "219"
 tags: [code-review, correctness, mysql, mariadb]
@@ -28,8 +28,8 @@ Apply the Router level from the next transaction only.
 
 ## Acceptance Criteria
 
-- [ ] A mid-transaction level change cannot make Router and the engine disagree
-- [ ] Test in SnapshotIntegrationTest on MySQL and MariaDB
+- [x] A mid-transaction level change cannot make Router and the engine disagree
+- [x] Test in SnapshotIntegrationTest on MySQL and MariaDB
 
 ## Recommended Action
 
@@ -39,3 +39,8 @@ Apply the Router level from the next transaction only.
 
 **By:** Claude Code
 - From the review of 8b1 (9d4a74a, 056849c). Probes in the session scratchpad (rv8b1).
+
+### 2026-10-18 - Fixed
+
+**By:** Claude Code
+- Fixed (Option 1): the connection refuses setTransactionIsolation with 25001 once a statement ran in the open transaction (ranInTransaction, cleared at commit, rollback, autocommit on). Test in SnapshotIntegrationTest, all three engines.

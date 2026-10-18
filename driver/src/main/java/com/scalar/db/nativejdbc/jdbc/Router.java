@@ -1569,10 +1569,8 @@ final class Router {
       if (route.changesNames) {
         catalog.invalidateResolutions();
       }
-      if (route.passthrough
-          && engine == Engine.POSTGRESQL
-          && SETS_LEVEL.matcher(route.source.toLowerCase(Locale.ROOT)).find()) {
-        // passthrough may set the level, or reset it, in SQL: follow the session (todo 184)
+      if (route.passthrough && SETS_LEVEL.matcher(route.source.toLowerCase(Locale.ROOT)).find()) {
+        // passthrough may set the level, or reset it, in SQL: follow the session (todos 184, 222)
         try {
           isolation = vendor.getTransactionIsolation();
         } catch (SQLException e) {

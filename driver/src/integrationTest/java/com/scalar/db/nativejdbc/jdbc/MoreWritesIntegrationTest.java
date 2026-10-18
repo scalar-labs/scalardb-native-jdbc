@@ -237,6 +237,24 @@ class MoreWritesIntegrationTest {
             () -> d.createStatement().executeUpdate("INSERT INTO wb.gen (id, x) VALUES (0, 'z')"));
         assertThat(rows(v, "SELECT COUNT(*) FROM wb.gen WHERE x IN ('n', 'z')"))
             .containsExactly("0");
+        // 218: nor does the read-back by 0 find an older row with key 0, as a restore stores it
+        String genMeta = "wb." + catalog.lookup(List.of(), "wb", "gen").metadataTable();
+        e.execute(
+            v,
+            "SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_AUTO_VALUE_ON_ZERO')",
+            "INSERT INTO wb.gen (id, x) VALUES (0, 'old')",
+            "SET SESSION sql_mode = REPLACE(@@sql_mode, 'NO_AUTO_VALUE_ON_ZERO', '')");
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO wb.gen (id, x) VALUES (?, 'z')")) {
+          ps.setInt(1, 0);
+          assertRefused(ps::executeUpdate);
+        }
+        assertRefused(
+            () -> d.createStatement().executeUpdate("INSERT INTO wb.gen (id, x) VALUES (0, 'z')"));
+        assertThat(rows(v, "SELECT COUNT(*) FROM wb.gen WHERE x = 'z'")).containsExactly("0");
+        assertThat(rows(v, "SELECT COUNT(*) FROM " + genMeta + " WHERE id = 0"))
+            .containsExactly("0");
+        e.execute(v, "DELETE FROM wb.gen WHERE id = 0");
         // 186: a key compared after conversion that matches another row
         assertRefused(
             () -> d.createStatement().executeUpdate("INSERT INTO wb.vk (k, x) VALUES (1, 1)"));

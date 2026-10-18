@@ -148,6 +148,8 @@ public final class Proxies {
     final Session session;
     // after an abort the driver decided, until the application rolls back (design 4.4)
     volatile boolean rollbackOnly;
+    // whether a statement ran in the open transaction, whose level is then fixed (todo 219)
+    volatile boolean ranInTransaction;
     // the versions the open transaction read, the anchors of its writes (4.2)
     final Anchors anchors = new Anchors();
     final Duration inflightWait;
@@ -174,6 +176,13 @@ public final class Proxies {
       }
       if (route.kind == SqlAst.Kind.COMMIT || route.kind == SqlAst.Kind.ROLLBACK) {
         anchors.transactionEnded();
+        ranInTransaction = false;
+      } else {
+        try {
+          ranInTransaction |= !vendor.getAutoCommit();
+        } catch (SQLException e) {
+          ranInTransaction = true; // unknown: refuse a change of level until the transaction ends
+        }
       }
       router.ran(vendor, route);
     }
@@ -231,6 +240,12 @@ public final class Proxies {
             throw Errors.unsupported(
                 "READ UNCOMMITTED is not supported: it would read ScalarDB's uncommitted writes");
           }
+          if (ranInTransaction && !vendor.getAutoCommit()) {
+            // MySQL and MariaDB would change the next transaction's level, not this one's, which
+            // the driver's reads then would not match (todo 219); PostgreSQL's driver refuses too
+            throw new SQLException(
+                "the isolation level cannot be changed in the middle of a transaction", "25001");
+          }
           {
             Object r = forward(vendor, method, args);
             router.setIsolation((Integer) args[0]);
@@ -267,6 +282,7 @@ public final class Proxies {
               session.transactionEnded();
               router.transactionEnded();
               anchors.transactionEnded();
+              ranInTransaction = false;
             }
           }
         case "rollback":
@@ -278,6 +294,7 @@ public final class Proxies {
               session.transactionEnded();
               router.transactionEnded();
               anchors.transactionEnded();
+              ranInTransaction = false;
             } else {
               session.rolledBackToSavepoint(); // the transaction goes on
             }
@@ -303,6 +320,7 @@ public final class Proxies {
                 session.transactionEnded();
                 router.transactionEnded();
                 anchors.transactionEnded();
+                ranInTransaction = false;
               }
             }
           }

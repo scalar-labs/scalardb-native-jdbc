@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "227"
 tags: [code-review, docs]
@@ -23,7 +23,7 @@ Update the three places.
 
 ## Acceptance Criteria
 
-- [ ] README and design match the code
+- [x] README and design match the code
 
 ## Recommended Action
 
@@ -33,3 +33,8 @@ Update the three places.
 
 **By:** Claude Code
 - From the review of 8b1 (9d4a74a, 056849c). Probes in the session scratchpad (rv8b1).
+
+### 2026-10-18 - Fixed
+
+**By:** Claude Code
+- Fixed: README preview scope and the level-change rule; design 4.2 relock text, 4.4 the AUTO_INCREMENT 0 read-back, 5 the driving-key lookups and SKIP LOCKED.

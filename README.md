@@ -98,7 +98,7 @@ isolation; `TRANSACTION_REPEATABLE_READ` will be the level to use there.
 ## Preview scope
 
 Certified in 3.19.0-alpha.1: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line. SNAPSHOT
-and SERIALIZABLE on PostgreSQL came after it.
+and SERIALIZABLE on PostgreSQL, and READ COMMITTED and SNAPSHOT on MySQL and MariaDB, came after it.
 
 - Reads of ScalarDB tables work on all five engines; writes run on PostgreSQL, MySQL and MariaDB.
   ScalarDB's classic layout is refused with SQLState `0AN01`.
@@ -109,6 +109,8 @@ and SERIALIZABLE on PostgreSQL came after it.
   and no `BEFORE INSERT` trigger on the table.
   On MySQL and MariaDB, `useAffectedRows` must stay false, the drivers' default, and a locking read
   takes `FOR UPDATE` or `FOR SHARE` (`LOCK IN SHARE MODE`).
+- `setTransactionIsolation` fails with `25001` once the open transaction has run a statement, as
+  pgjdbc's does: change the level between transactions.
 - A write that would lose an update, against a ScalarDB transaction or another driver transaction,
   fails with `40001` and leaves the transaction rollback-only: roll back and retry it. A query
   timeout or a cancel during a write does the same. A MySQL or MariaDB lock wait timeout undoes the

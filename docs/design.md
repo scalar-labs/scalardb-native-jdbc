@@ -799,7 +799,8 @@ union as a derived table.
   row as they read it, and release the lock of a row that a condition on it rejects, but keep the lock
   of a row a join rejects, which would hold up ScalarDB's commit of it. A shared lock read through a
   covering index locks the index entry only, not the row, so under `FOR SHARE` the versions read under
-  the lock lock each row again through the primary key, not its metadata row on MySQL. `LOCK IN SHARE MODE`, which the parser does not read, is parsed
+  the lock lock each row again through the primary key, at READ COMMITTED not its metadata row on
+  MySQL (at REPEATABLE READ under `FOR UPDATE` too, and the metadata row with it, 5). `LOCK IN SHARE MODE`, which the parser does not read, is parsed
   as `FOR SHARE`, the engines' spelling restored in the statement run; `NOWAIT` fails as the engine
   reports its own, MySQL error 3572 and MariaDB 1205. These engines lock a row before the rest of the
   predicate runs, so a row goes in flight around the lock only through a ScalarDB prepare queued for
@@ -1187,7 +1188,9 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   `RETURNING`. The read-back is sound only where MySQL stores the values given, or values that
   compare equal to them, which a primary key then keeps unique: such an INSERT is refused when the
   session's `sql_mode` is not strict, which truncates, or the data table has a `BEFORE INSERT`
-  trigger, which may set the key, either of which could make the read-back find an older row. A
+  trigger, which may set the key, either of which could make the read-back find an older row; and
+  the read-back of an `AUTO_INCREMENT` key leaves out 0, which MySQL generates a key for, so that a
+  0 reads back no row and is refused rather than find an older row 0 (todo 218). A
   check before the INSERT would have to see the latest committed rows, a locking read, whose gap
   lock at REPEATABLE READ deadlocks concurrent INSERTs (todo 214). A FLOAT key is
   bound as its exact double, which MySQL compares an uncast value as, and so is a float the
@@ -1434,10 +1437,15 @@ with `0AN01`; the locking re-reads, Oracle's refusal of SERIALIZABLE and the tra
 SNAPSHOT on MySQL and MariaDB needs two things PostgreSQL gives natively. A locking read there returns
 the rows committed now, not the snapshot's, and raises nothing for a row changed since: the driver
 runs the read again without the lock, in the snapshot, and aborts with `40001` unless it returns the
-same keys at the versions read under the lock, the metadata rows locked too. And the driver's own
-key lookups, under a lock or in an `INSERT ... SELECT`, take next-key locks at REPEATABLE READ: they
-are written as point lookups on the primary key, `(k = ?) OR (k = ?)`, which lock only the rows, so
-concurrent INSERTs neither wait on nor deadlock with each other.
+same keys at the versions read under the lock, the metadata rows locked too; under `SKIP LOCKED`,
+whose `ORDER BY` and `LIMIT` would pick in the snapshot the rows it skipped, each row locked must be
+in the snapshot at the version locked (todo 221). And the driver's own key lookups, under a lock, in
+an `INSERT ... SELECT` or an `UPDATE`, take next-key locks at REPEATABLE READ: the keys are a table
+that drives a join on the primary key, `(SELECT ? AS k0 UNION ALL ...) u STRAIGHT_JOIN data d ON
+d.k = u.k0`, each key a lookup that locks its row alone, where a semi-join or an OR of the keys may
+scan, and lock, the whole table when they are a large share of it (todo 220); concurrent INSERTs
+then neither wait on nor deadlock with them. A connection's level is changed between transactions
+only: these engines' `SET SESSION TRANSACTION` applies to the next one (todo 219).
 
 | Level | Native connection | In-flight row on read | In-flight row on write | CAS anchor | Read locks | ScalarDB side |
 |---|---|---|---|---|---|---|

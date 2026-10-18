@@ -310,6 +310,29 @@ class SnapshotIntegrationTest {
           .isNotEqualTo(snapshotText);
       d.setTransactionIsolation(level);
       assertThat(d.nativeSQL(text)).as("%s: nativeSQL back", at).isEqualTo(snapshotText);
+      if (!pg) {
+        // passthrough may set the level in SQL here too (todo 222)
+        d.setAutoCommit(true);
+        d.setClientInfo("scalardbnative.passthrough", "true");
+        try (Statement st = d.createStatement()) {
+          st.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
+        }
+        d.setClientInfo("scalardbnative.passthrough", "false");
+        assertThat(d.nativeSQL(text))
+            .as("%s: read as READ COMMITTED after passthrough", at)
+            .isNotEqualTo(snapshotText);
+        d.setTransactionIsolation(level);
+        d.setAutoCommit(false);
+      }
+      // the level is not changed once the transaction ran a statement, which MySQL and MariaDB
+      // would apply to the next transaction only (todo 219)
+      rows(d, text);
+      assertThatThrownBy(() -> d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED))
+          .as("%s: a change of level in the transaction", at)
+          .isInstanceOf(SQLException.class)
+          .extracting(ex -> ((SQLException) ex).getSQLState())
+          .isEqualTo("25001");
+      d.rollback();
 
       if (pg) {
         // the transaction mode is not set in SQL (todo 172)
@@ -394,6 +417,43 @@ class SnapshotIntegrationTest {
             .extracting(ex -> ((SQLException) ex).getSQLState())
             .isEqualTo("40001");
         d.rollback();
+      }
+
+      if (!pg) {
+        // the driver's key lookups of many keys lock those rows alone, not the table: a write
+        // below the table, which only a scan of it would lock, does not wait (todo 220)
+        StringBuilder many = new StringBuilder("INSERT INTO sn.t (id, x, v) VALUES ");
+        for (int id = 100; id < 1100; id++) {
+          many.append(id == 100 ? "" : ", ").append("(").append(id).append(", 'm', 0)");
+        }
+        try (Statement st = d.createStatement()) {
+          assertThat(st.executeUpdate(many.toString())).isEqualTo(1000);
+        }
+        // MySQL's locking read of them too; MariaDB's of a range scans the metadata (todo 228)
+        if (e.engine() == Engine.MYSQL) {
+          assertThat(rows(d, "SELECT id FROM sn.t WHERE id >= 100 FOR UPDATE")).hasSize(1000);
+        }
+        try (Connection v = e.open();
+            Statement st = v.createStatement()) {
+          st.execute("SET SESSION innodb_lock_wait_timeout = 1");
+          st.executeUpdate("INSERT INTO sn.t_data (id, x, v) VALUES (-5, 'far', 0)");
+          st.executeUpdate("DELETE FROM sn.t_data WHERE id = -5");
+        }
+        d.rollback();
+      }
+
+      // SKIP LOCKED with LIMIT returns the first row not locked, the queue (todo 221)
+      try (Connection other = e.openDriver()) {
+        other.setAutoCommit(false);
+        rows(other, "SELECT x FROM sn.t WHERE id = 7 FOR UPDATE");
+        assertThat(
+                rows(
+                    d,
+                    "SELECT id FROM sn.t WHERE id >= 7 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED"))
+            .as("%s: SKIP LOCKED with LIMIT", at)
+            .containsExactly("8");
+        d.rollback();
+        other.rollback();
       }
 
       // a write to a row in flight aborts at once, whatever the wait allows

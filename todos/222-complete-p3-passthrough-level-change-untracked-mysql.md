@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "222"
 tags: [code-review, correctness, mysql, mariadb]
@@ -21,7 +21,7 @@ Re-read the level on every engine; make SETS_LEVEL match MySQL spellings (isolat
 
 ## Acceptance Criteria
 
-- [ ] Router's level follows a passthrough change on MySQL/MariaDB
+- [x] Router's level follows a passthrough change on MySQL/MariaDB
 
 ## Recommended Action
 
@@ -31,3 +31,8 @@ Re-read the level on every engine; make SETS_LEVEL match MySQL spellings (isolat
 
 **By:** Claude Code
 - From the review of 8b1 (9d4a74a, 056849c). Probes in the session scratchpad (rv8b1).
+
+### 2026-10-18 - Fixed
+
+**By:** Claude Code
+- Fixed: Router.ran re-reads the level after a passthrough statement that may set it on every engine (SETS_LEVEL's `isolation` matches tx_isolation and transaction_isolation). Test in SnapshotIntegrationTest off PostgreSQL.

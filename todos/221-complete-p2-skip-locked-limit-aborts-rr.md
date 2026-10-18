@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "221"
 tags: [code-review, liveness, mysql, mariadb]
@@ -26,7 +26,7 @@ Refuse SKIP LOCKED with LIMIT at RR (0AN01) for now.
 
 ## Acceptance Criteria
 
-- [ ] The queue pattern returns the next unlocked row at RR, or is refused clearly
+- [x] The queue pattern returns the next unlocked row at RR, or is refused clearly
 
 ## Recommended Action
 
@@ -36,3 +36,8 @@ Refuse SKIP LOCKED with LIMIT at RR (0AN01) for now.
 
 **By:** Claude Code
 - From the review of 8b1 (9d4a74a, 056849c). Probes in the session scratchpad (rv8b1).
+
+### 2026-10-18 - Fixed
+
+**By:** Claude Code
+- Fixed (variant of Option 1): under SKIP LOCKED, asInSnapshot reads the locked keys' versions in the snapshot and requires each at the version locked, instead of rerunning the statement with its LIMIT. Test in SnapshotIntegrationTest, all three engines.

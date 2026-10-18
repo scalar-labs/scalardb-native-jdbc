@@ -211,18 +211,26 @@ final class Writes {
     }
   }
 
-  /** The data table's columns in their own order with their types (todos 203, 208). */
+  /**
+   * The data table's columns in their own order with their types (todos 203, 208), an
+   * AUTO_INCREMENT one's followed by {@code " auto_increment"} (todo 218).
+   */
   private static Map<String, String> columns(Connection vendor, Names n) throws SQLException {
     Map<String, String> out = new LinkedHashMap<>();
     try (PreparedStatement ps =
         vendor.prepareStatement(
-            "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = ?"
-                + " AND table_name = ? ORDER BY ordinal_position")) {
+            "SELECT column_name, data_type, "
+                + (n.engine == Engine.POSTGRESQL ? "FALSE" : "extra LIKE '%auto_increment%'")
+                + " FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER"
+                + " BY ordinal_position")) {
       ps.setString(1, n.namespace);
       ps.setString(2, n.dataTable);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          out.put(rs.getString(1), rs.getString(2).toLowerCase(Locale.ROOT));
+          out.put(
+              rs.getString(1),
+              rs.getString(2).toLowerCase(Locale.ROOT)
+                  + (rs.getBoolean(3) ? " auto_increment" : ""));
         }
       }
     }
@@ -406,6 +414,7 @@ final class Writes {
         List<String> terms = new ArrayList<>();
         List<String> termsData = new ArrayList<>();
         List<String> values = new ArrayList<>();
+        String readBackOnly = "";
         for (int i = 0; i < row.size(); i++) {
           int[] span = ast.span(row.get(i));
           List<Integer> inside = span == null ? null : ast.placeholdersIn(span[0], span[1]);
@@ -420,6 +429,12 @@ final class Writes {
           String k = engine.quote(t.keyColumns().get(i));
           terms.add(k + " = " + source.substring(span[0], span[1]));
           termsData.add("d." + k + " = " + source.substring(span[0], span[1]));
+          if (!returns
+              && type(engine, tableColumns, t.keyColumns().get(i)).endsWith(" auto_increment")) {
+            // MySQL generates a key given as 0, and the read-back by 0 would find an older row
+            // with key 0 (todo 218): read back no row, which refuses the write
+            readBackOnly += " AND d." + k + " <> 0";
+          }
           values.add(source.substring(span[0], span[1]));
           matchBinds.addAll(inside);
         }
@@ -434,7 +449,8 @@ final class Writes {
                       + " FROM "
                       + n.data
                       + " d WHERE "
-                      + String.join(" AND ", termsData),
+                      + String.join(" AND ", termsData)
+                      + readBackOnly,
                   matchBinds.subList(matchBinds.size() - rowBinds(ast, row), matchBinds.size()),
                   floatKeys));
         }
@@ -503,15 +519,20 @@ final class Writes {
   /** Whether a column is single precision: FLOAT on MySQL and MariaDB, REAL on PostgreSQL. */
   private static boolean isFloat(
       Engine engine, @Nullable Map<String, String> columns, String column) {
-    if (columns == null) {
-      return false;
-    }
-    for (Map.Entry<String, String> c : columns.entrySet()) {
-      if (engine.columnKey(c.getKey()).equals(engine.columnKey(column))) {
-        return c.getValue().equals("float") || c.getValue().equals("real");
+    String type = type(engine, columns, column).replace(" auto_increment", "");
+    return type.equals("float") || type.equals("real");
+  }
+
+  /** A column's entry in {@link #columns}, or "" when unknown. */
+  private static String type(Engine engine, @Nullable Map<String, String> columns, String column) {
+    if (columns != null) {
+      for (Map.Entry<String, String> c : columns.entrySet()) {
+        if (engine.columnKey(c.getKey()).equals(engine.columnKey(column))) {
+          return c.getValue();
+        }
       }
     }
-    return false;
+    return "";
   }
 
   /** The placeholders in one row's key values. */
@@ -1127,9 +1148,9 @@ final class Writes {
                   "SELECT "
                       + n.columns("d")
                       + ", ?, 3, 1, ?, ? FROM "
-                      + n.data
-                      + " d WHERE "
-                      + n.keyIn("d", keys.types, chunk.size())))) {
+                      + n.dataOf("d", keys.types, chunk.size())
+                      + " WHERE "
+                      + n.keysOf(keys.types, chunk.size())))) {
         bindAll(ps, run.stamp(ps, 1), chunk);
         stamped += ps.executeUpdate();
       }
@@ -1410,20 +1431,30 @@ final class Writes {
       int taken = 0;
       for (int from = 0; from < keys.rows.size(); from += CHUNK) {
         List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
+        // off PostgreSQL the keys drive the update, as dataOf (todo 220), and are bound first
+        boolean pg = n.engine == Engine.POSTGRESQL;
         try (PreparedStatement ps =
             run.prepare(
-                n.stamp("COALESCE(" + n.txVersion + ", 0) + 1")
+                n.stamp(
+                        pg
+                            ? n.meta
+                            : n.keyValues(keys.types, chunk.size())
+                                + " STRAIGHT_JOIN "
+                                + n.meta
+                                + " ON "
+                                + n.keyJoinValues(n.meta),
+                        "COALESCE(" + n.txVersion + ", 0) + 1")
                     + "EXISTS (SELECT 1 FROM "
                     + n.data
                     + " d WHERE "
                     + n.keyJoin(n.meta, "d")
-                    + " AND "
-                    + n.keyIn("d", keys.types, chunk.size())
+                    + (pg ? " AND " + n.keyIn("d", keys.types, chunk.size()) : "")
                     + ") AND "
                     + n.distinctFrom(n.txId)
                     + " AND "
                     + n.committed())) {
-          ps.setString(bindAll(ps, run.stamp(ps, 1), chunk), run.txId);
+          int i = pg ? bindAll(ps, run.stamp(ps, 1), chunk) : run.stamp(ps, bindAll(ps, 1, chunk));
+          ps.setString(i, run.txId);
           taken += ps.executeUpdate();
         }
       }
@@ -1631,6 +1662,21 @@ final class Writes {
      */
     private boolean asInSnapshot(Run run, Keys keys, List<Anchors.Version> versions)
         throws SQLException {
+      if (inFlight == null) {
+        // SKIP LOCKED: under the statement's ORDER BY and LIMIT the snapshot's rows would be those
+        // it skipped (todo 221); each row locked is then the snapshot's, at the version locked
+        Map<List<Object>, Anchors.Version> then = readVersions(run, keys, null);
+        if (then == null) {
+          return false;
+        }
+        for (int i = 0; i < keys.rows.size(); i++) {
+          Anchors.Version v = then.get(Anchors.key(keys.rows.get(i)));
+          if (v == null || !versions.get(i).is(v.txId, v.version)) {
+            return false;
+          }
+        }
+        return true;
+      }
       int width = n.keyColumns.size();
       Map<List<Object>, Anchors.Version> locked = new HashMap<>();
       for (int i = 0; i < keys.rows.size(); i++) {
@@ -1644,9 +1690,6 @@ final class Writes {
           Anchors.Version now =
               locked.get(Anchors.key(Objects.requireNonNull(readKey(rs, from, width))));
           if (now == null) {
-            if (inFlight == null) {
-              continue; // SKIP LOCKED, which has no in-flight check, left it out
-            }
             return false;
           }
           if (!now.is(rs.getString(from + width), rs.getObject(from + width + 1))) {
@@ -1684,23 +1727,41 @@ final class Writes {
      */
     private boolean lockedVersions(Run run, Keys keys, List<Anchors.Version> versions)
         throws SQLException {
+      Map<List<Object>, Anchors.Version> found = readVersions(run, keys, relock);
+      if (found == null) {
+        return false;
+      }
+      for (Object[] key : keys.rows) {
+        versions.add(found.getOrDefault(Anchors.key(key), new Anchors.Version(null, null)));
+      }
+      return true;
+    }
+
+    /**
+     * The version of each key with a data row, read under {@code lock} if any; null when one is in
+     * flight.
+     */
+    private @Nullable Map<List<Object>, Anchors.Version> readVersions(
+        Run run, Keys keys, @Nullable String lock) throws SQLException {
       int width = n.keyColumns.size();
       Map<List<Object>, Anchors.Version> found = new HashMap<>();
       for (int from = 0; from < keys.rows.size(); from += CHUNK) {
         List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
-        String where = n.keyIn("d", keys.types, chunk.size());
         // the relock goes through the primary key, which a covering index would otherwise stand
         // in for
         String read =
-            relock == null
-                ? n.withMeta("d", where)
-                : n.withMeta("d FORCE INDEX (PRIMARY)", "d", where) + " " + relock;
+            n.withMeta(
+                    n.dataOf(
+                        lock == null ? "d" : "d FORCE INDEX (PRIMARY)", keys.types, chunk.size()),
+                    "d",
+                    n.keysOf(keys.types, chunk.size()))
+                + (lock == null ? "" : " " + lock);
         try (PreparedStatement ps = run.prepare(read)) {
           bindAll(ps, 1, chunk);
           try (ResultSet m = ps.executeQuery()) {
             while (m.next()) {
               if (inFlight(m.getObject(width + 3))) {
-                return false;
+                return null;
               }
               found.put(
                   Anchors.key(Objects.requireNonNull(readKey(m, 1, width))),
@@ -1709,10 +1770,7 @@ final class Writes {
           }
         }
       }
-      for (Object[] key : keys.rows) {
-        versions.add(found.getOrDefault(Anchors.key(key), new Anchors.Version(null, null)));
-      }
-      return true;
+      return found;
     }
   }
 
@@ -1845,18 +1903,31 @@ final class Writes {
     }
 
     /**
-     * {@code (q.k1, q.k2) IN (SELECT ... FROM <keyValues>)}, the keys bound in order; on MySQL and
-     * MariaDB {@code (q.k1 = ? AND q.k2 = ?) OR ...}, point lookups on the primary key, where a
-     * semi-join may scan, and lock, a range at REPEATABLE READ.
+     * The data table as {@code d} ({@code dataRef}: its alias and an index hint if any), its rows
+     * of {@code count} keys alone with {@link #keysOf}'s condition: on MySQL and MariaDB behind a
+     * table of the keys, {@code <keyValues> STRAIGHT_JOIN data d ON ...}, each key a primary-key
+     * lookup; a semi-join, or an OR of the keys, may scan the whole table, which REPEATABLE READ
+     * locks (todo 220).
      */
+    String dataOf(String dataRef, List<String> types, int count) {
+      return engine == Engine.POSTGRESQL
+          ? data + " " + dataRef
+          : keyValues(types, count)
+              + " STRAIGHT_JOIN "
+              + data
+              + " "
+              + dataRef
+              + " ON "
+              + keyJoinValues("d");
+    }
+
+    /** The condition on {@link #dataOf}'s rows that selects the keys, bound after it. */
+    String keysOf(List<String> types, int count) {
+      return engine == Engine.POSTGRESQL ? keyIn("d", types, count) : "TRUE";
+    }
+
+    /** {@code (q.k1, q.k2) IN (SELECT ... FROM <keyValues>)}, the keys bound in order. */
     String keyIn(String q, List<String> types, int count) {
-      if (engine != Engine.POSTGRESQL) {
-        List<String> keys = new ArrayList<>();
-        for (int i = 0; i < count; i++) {
-          keys.add("(" + keyEquals(q) + ")");
-        }
-        return "(" + String.join(" OR ", keys) + ")";
-      }
       List<String> cols = new ArrayList<>();
       for (int i = 0; i < types.size(); i++) {
         cols.add("u." + engine.quote("scalardb_native_k" + i));
@@ -1876,14 +1947,11 @@ final class Writes {
      * its metadata.
      */
     String withMeta(String keyQualifier, String where) {
-      return withMeta("d", keyQualifier, where);
+      return withMeta(data + " d", keyQualifier, where);
     }
 
-    /**
-     * As {@link #withMeta(String, String)}, {@code dataRef} after the data table's name: its alias
-     * {@code d}, and an index hint if any.
-     */
-    String withMeta(String dataRef, String keyQualifier, String where) {
+    /** As {@link #withMeta(String, String)}, the data table as d in {@code source}. */
+    String withMeta(String source, String keyQualifier, String where) {
       return "SELECT "
           + readColumns(keyQualifier)
           + ", m."
@@ -1893,9 +1961,7 @@ final class Writes {
           + ", m."
           + txState
           + " FROM "
-          + data
-          + " "
-          + dataRef
+          + source
           + " LEFT JOIN "
           + meta
           + " m ON "
@@ -1927,8 +1993,13 @@ final class Writes {
 
     /** The stamp of I5 at {@code version}, its three values bound first, up to the WHERE. */
     String stamp(String version) {
+      return stamp(meta, version);
+    }
+
+    /** As {@link #stamp(String)}, of the metadata table in {@code target}. */
+    String stamp(String target, String version) {
       return "UPDATE "
-          + meta
+          + target
           + " SET "
           + txId
           + " = ?, "
