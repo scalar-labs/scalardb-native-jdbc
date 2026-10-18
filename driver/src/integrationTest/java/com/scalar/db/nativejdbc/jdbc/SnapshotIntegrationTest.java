@@ -429,7 +429,8 @@ class SnapshotIntegrationTest {
         try (Statement st = d.createStatement()) {
           assertThat(st.executeUpdate(many.toString())).isEqualTo(1000);
         }
-        // MySQL's locking read of them too; MariaDB's of a range scans the metadata (todo 228)
+        // MySQL's locking read of them too; MariaDB, natively too, reads a range of most of the
+        // table by a scan that locks all of it (todo 228)
         if (e.engine() == Engine.MYSQL) {
           assertThat(rows(d, "SELECT id FROM sn.t WHERE id >= 100 FOR UPDATE")).hasSize(1000);
         }
