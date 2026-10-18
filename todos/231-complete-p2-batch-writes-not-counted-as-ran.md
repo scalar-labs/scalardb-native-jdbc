@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "231"
 tags: [code-review, correctness, todo-219]
@@ -33,3 +33,4 @@ Count it in one place both write paths share.
 ## Work Log
 
 - 2026-10-18: filed by the 8b2 review (cb4844f).
+- 2026-10-18: fixed: the batch loop calls owner.ran(route) after each write; test: a batch then setTransactionIsolation gives 25001.

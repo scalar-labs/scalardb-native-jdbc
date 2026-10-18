@@ -514,6 +514,44 @@ class SqlAstTest {
   }
 
   @Test
+  void lockingEverySelect_locksEachSelectWhereItEnds() {
+    String l = " LOCK IN SHARE MODE";
+    assertThat(
+            SqlAst.analyze(
+                    "SELECT a.x FROM a WHERE a.id IN (SELECT id FROM b WHERE v > 1 LIMIT 3)"
+                        + " AND EXISTS (SELECT 1 FROM c) ORDER BY 1 -- c",
+                    Engine.MYSQL,
+                    false)
+                .get()
+                .lockingEverySelect(l))
+        .isEqualTo(
+            "SELECT a.x FROM a WHERE a.id IN (SELECT id FROM b WHERE v > 1 LIMIT 3"
+                + l
+                + ") AND EXISTS (SELECT 1 FROM c"
+                + l
+                + ") ORDER BY 1"
+                + l
+                + " -- c");
+    assertThat(
+            SqlAst.analyze(
+                    "SELECT * FROM (SELECT x FROM b) d, a FOR UPDATE;", Engine.MARIADB, false)
+                .get()
+                .lockingEverySelect(l))
+        .isEqualTo("SELECT * FROM (SELECT x FROM b" + l + ") d, a FOR UPDATE;");
+    assertThat(
+            SqlAst.analyze("(SELECT x FROM a) UNION (SELECT x FROM b)", Engine.MYSQL, false)
+                .get()
+                .lockingEverySelect(l))
+        .isEqualTo("(SELECT x FROM a" + l + ") UNION (SELECT x FROM b" + l + ")");
+    // an operand not in parentheses cannot take a clause of its own
+    assertThat(
+            SqlAst.analyze("SELECT x FROM a UNION SELECT x FROM b", Engine.MYSQL, false)
+                .get()
+                .lockingEverySelect(l))
+        .isNull();
+  }
+
+  @Test
   void transactionControl_hasItsOwnKinds() {
     assertThat(parse("COMMIT").kind()).isEqualTo(SqlAst.Kind.COMMIT);
     assertThat(parse("ROLLBACK").kind()).isEqualTo(SqlAst.Kind.ROLLBACK);

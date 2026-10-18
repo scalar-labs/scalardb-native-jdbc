@@ -825,6 +825,12 @@ public final class Proxies {
           } catch (SQLException f) {
             e.addSuppressed(f); // the read's own failure is the one to report
           }
+        } else if (marks
+            && e instanceof SQLException
+            && Writes.endsTransaction(owner.vendor, (SQLException) e)) {
+          // a deadlock ended the transaction, and the session goes on in a new one: the checks
+          // passed and the anchors read hold no more (todo 230)
+          owner.rollbackOnly = true;
         }
         throw e;
       }
@@ -1077,11 +1083,15 @@ public final class Proxies {
                 Router.Route route = routes.apply(i);
                 if (route.write != null) {
                   last[0] = route.write;
-                  counts[i] =
-                      Writes.apply(
-                          owner.vendor,
-                          route.write,
-                          writeContext(parameters.apply(i), inserted, null));
+                  try {
+                    counts[i] =
+                        Writes.apply(
+                            owner.vendor,
+                            route.write,
+                            writeContext(parameters.apply(i), inserted, null));
+                  } finally {
+                    owner.ran(route); // as runWrite (todo 231)
+                  }
                 } else {
                   counts[i] = runPlain(route);
                 }

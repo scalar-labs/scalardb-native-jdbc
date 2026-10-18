@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "235"
 tags: [code-review, docs]
@@ -34,3 +34,4 @@ Fix each item; point stale design text at section 5.
 ## Work Log
 
 - 2026-10-18: filed by the 8b2 review (cb4844f).
+- 2026-10-18: fixed: README and design.md updated, lockable javadoc fixed.

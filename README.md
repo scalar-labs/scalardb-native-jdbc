@@ -51,7 +51,7 @@ Java 11 or later. `BEGIN`, `COMMIT` and `ROLLBACK` work as in psql, `\dt` marks 
 The driver serves ScalarDB tables in the decoupled layout: created, or imported, with
 `transaction-metadata-decoupling` set to `true`. ScalarDB itself needs
 `scalar.db.jdbc.isolation_level=REPEATABLE_READ` to create or import them, or `SERIALIZABLE` where the
-driver runs at SERIALIZABLE (see [Isolation levels](#isolation-levels)).
+driver runs at SERIALIZABLE on PostgreSQL (see [Isolation levels](#isolation-levels)).
 
 Before the driver serves a table, an operator with DDL privileges runs the setup once. It creates the
 in-flight index and the read view, and on an imported table writes the row metadata ScalarDB has not.
@@ -83,22 +83,25 @@ slf4j-api and its vendor driver on the classpath, and connects with `jdbc:scalar
 | `TRANSACTION_SERIALIZABLE` | MySQL, MariaDB | `scalar.db.consensus_commit.isolation_level=SERIALIZABLE` |
 
 At SNAPSHOT and SERIALIZABLE, a statement that reaches a row a ScalarDB transaction is writing fails
-with `40001` at once: roll back and retry. Without both ScalarDB settings, SERIALIZABLE between the
-driver and ScalarDB is not guaranteed.
+with `40001`: roll back and retry. Without the ScalarDB settings in its row, SERIALIZABLE between
+the driver and ScalarDB is not guaranteed.
 
 With ScalarDB at SERIALIZABLE, PostgreSQL may also abort a ScalarDB transaction's read with a
 serialization failure. ScalarDB reports a failed read as `CrudException`, or `ValidationException` or
 `CommitException` at commit, not as a conflict exception: a ScalarDB application retries those when
 the cause's SQLState is `40001`.
 
-SERIALIZABLE on MySQL and MariaDB runs the connection at REPEATABLE READ, and every read of a
-ScalarDB table takes shared locks held to commit, which a ScalarDB transaction writing those rows, or
-inserting into a range read, waits on. A read of one table row by row locks its rows; any other read
-first locks the in-flight index of each ScalarDB table it reads, which holds off every ScalarDB write
-to the table until commit, and runs as `LOCK IN SHARE MODE`. Such a read with a ScalarDB table in a
-subquery must be the transaction's first statement, or it fails with `40001`; a ScalarDB table in a
-derived table or a set operation is refused with `0AN01`. A read checks every row its `WHERE` matches
-for a ScalarDB write in flight, its `LIMIT` aside.
+SERIALIZABLE on MySQL and MariaDB runs the connection at REPEATABLE READ, and every SELECT, each
+subquery included, takes shared locks held to commit, as the engine's own SERIALIZABLE would; other
+tables are locked so too. A ScalarDB transaction writing the rows read, or inserting into a range
+read, waits on them up to `innodb_lock_wait_timeout` (50 seconds by default) on ScalarDB's own
+connections and then fails as a conflict: give those a short lock wait. A read of one ScalarDB table
+row by row locks its rows and checks every row its `WHERE` matches for a ScalarDB write in flight, its
+`LIMIT` aside. Any other read first locks the in-flight index of each ScalarDB table it reads, which
+holds off every ScalarDB write to the table until commit, and fails with `40001` if the table has a
+row in flight at all. A ScalarDB table in a derived table or a set operation is refused with `0AN01`,
+and so is a set operation whose operands are not in parentheses, `(SELECT ...) UNION (SELECT ...)`,
+since only those take a locking clause each.
 
 `TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. The two levels on SQL Server and
 Oracle are accepted, but every statement on a ScalarDB table is refused with `0AN01` there for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot

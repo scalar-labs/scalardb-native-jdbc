@@ -330,8 +330,6 @@ final class Router {
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
   // the checks for rows in flight the open transaction passed, in its snapshot
   private final Set<String> passed = new HashSet<>();
-  // whether a statement ran in the open transaction, whose snapshot it may then have taken
-  private boolean ranInTransaction;
 
   Router(Engine engine, Catalog catalog, Session session) {
     this.engine = engine;
@@ -490,12 +488,21 @@ final class Router {
           forcedPerRow,
           forcedAnchoring != null ? forcedAnchoring : anchoring(vendor));
     }
+    String routed = sql;
+    if (kind == SqlAst.Kind.SELECT && lockingSerializable()) {
+      // other tables are locked as they are read too, as the engine's SERIALIZABLE would lock them;
+      // a write's own reads take next-key locks at REPEATABLE READ (todo 229)
+      routed = ast.lockingEverySelect(" LOCK IN SHARE MODE");
+      if (routed == null) {
+        throw Errors.unsupported(LOCKS_EVERY_SELECT);
+      }
+    }
     boolean changesSession = kind != SqlAst.Kind.SELECT && kind != SqlAst.Kind.DML;
     boolean changesNames = kind == SqlAst.Kind.DDL || kind == SqlAst.Kind.TRUNCATE;
     boolean plansParallel = kind != SqlAst.Kind.DML && kind != SqlAst.Kind.SESSION;
     return route(
         sql,
-        sql,
+        routed,
         kind,
         changesSession,
         changesNames,
@@ -567,9 +574,10 @@ final class Router {
   }
 
   /**
-   * The table a locking read locks (design 4.2, READ COMMITTED): the one ScalarDB table of a read
-   * row by row, on an engine where writes run. Null for any other locking read: a join, a subquery,
-   * a grouped or DISTINCT select, an aggregate in the select list or ORDER BY.
+   * The table a locking read locks (design 4.2), or a plain read at SERIALIZABLE on MySQL and
+   * MariaDB: the one ScalarDB table of a read row by row, on an engine where writes run. Null for
+   * any other read: a join, a subquery, a grouped or DISTINCT select, an aggregate in the select
+   * list or ORDER BY.
    */
   private SqlAst.@Nullable TableRef lockable(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
@@ -1102,7 +1110,6 @@ final class Router {
               return t == null ? null : t.keyColumns();
             });
     IdentityHashMap<SqlAst.TableRef, String> data = new IdentityHashMap<>();
-    boolean first = false;
     for (Map.Entry<SqlAst.TableRef, TableInfo> e : scalarDb.entrySet()) {
       TableInfo t = e.getValue();
       SqlAst.Place place = split.places().get(e.getKey());
@@ -1113,9 +1120,6 @@ final class Router {
                 + " subquery of its WHERE clause, never in a derived table or a set operation"
                 + tables);
       }
-      // the clause does not lock a subquery's rows, which are read in the snapshot: one taken
-      // under the checks' locks only, after them as the transaction's first statement
-      first |= place == SqlAst.Place.SEMI_JOINED || place == SqlAst.Place.IN_EXPRESSION;
       if (t.layout() == Layout.CLASSIC) {
         throw Errors.unsupported(
             "tables in ScalarDB's classic layout are not supported yet" + tables);
@@ -1134,14 +1138,15 @@ final class Router {
             ? null
             : SqlAst.parse(rewritten, engine, session.doubleQuotesQuoteIdentifiersAsLastRead())
                 .orElse(null);
-    int end = again == null ? -1 : again.end();
-    if (rewritten == null || end < 0) {
+    // every SELECT locked, a subquery's too: none reads in the snapshot (todo 229)
+    String locked = again == null ? null : again.lockingEverySelect(" LOCK IN SHARE MODE");
+    if (locked == null) {
       throw Errors.unsupported("the statement cannot be rewritten onto the data tables" + tables);
     }
     Route r =
         route(
             sql,
-            rewritten.substring(0, end) + " LOCK IN SHARE MODE" + rewritten.substring(end),
+            locked,
             SqlAst.Kind.SELECT,
             false,
             false,
@@ -1153,15 +1158,14 @@ final class Router {
             true);
     List<String> checks = new ArrayList<>();
     for (String check : checks(scalarDb)) {
-      checks.add(check + " LOCK IN SHARE MODE" + (first ? FIRST : ""));
+      checks.add(check + " LOCK IN SHARE MODE");
     }
     return r.checked(checks);
   }
 
-  /**
-   * Marks a check that must run as the transaction's first statement, or have passed in it before.
-   */
-  private static final String FIRST = " /* scalardb_native_first */";
+  private static final String LOCKS_EVERY_SELECT =
+      "at SERIALIZABLE on MySQL and MariaDB every SELECT is read under a lock, and an operand of a"
+          + " set operation takes one only in parentheses: write (SELECT ...) UNION (SELECT ...)";
 
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
@@ -1239,11 +1243,6 @@ final class Router {
       try {
         if (passed.contains(check)) {
           continue;
-        }
-        if (check.endsWith(FIRST) && ranInTransaction) {
-          throw new Writes.Aborted(
-              "at SERIALIZABLE a read with a ScalarDB table in a subquery must be its transaction's"
-                  + " first statement, or follow one that read the same tables so; retry it first");
         }
       } finally {
         lock.unlock();
@@ -1567,7 +1566,6 @@ final class Router {
     lock.lock();
     try {
       passed.clear();
-      ranInTransaction = false;
       if (workersSetInTransaction) {
         sessionWorkers = -1;
         workersOff = null;
@@ -1674,11 +1672,6 @@ final class Router {
   void ran(Connection vendor, Route route) {
     lock.lock();
     try {
-      try {
-        ranInTransaction |= !vendor.getAutoCommit();
-      } catch (SQLException e) {
-        ranInTransaction = true; // unknown: a first-statement check then aborts
-      }
       if (route.kind == SqlAst.Kind.COMMIT) {
         session.transactionEnded();
         transactionEnded();
@@ -1709,10 +1702,16 @@ final class Router {
         // passthrough may set the level, or reset it, in SQL: follow the session (todos 184, 222)
         try {
           int level = vendor.getTransactionIsolation();
-          // REPEATABLE READ is also what SERIALIZABLE runs at on MySQL and MariaDB
-          if (!(level == Connection.TRANSACTION_REPEATABLE_READ
+          if (level == Connection.TRANSACTION_SERIALIZABLE && locksAtSerializable()) {
+            // run as setTransactionIsolation runs it, in autocommit as passthrough is (todo 232)
+            vendor.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            isolation = level;
+          } else if (!(level == Connection.TRANSACTION_REPEATABLE_READ
               && isolation == Connection.TRANSACTION_SERIALIZABLE
-              && locksAtSerializable())) {
+              && locksAtSerializable()
+              && !route.source.toLowerCase(Locale.ROOT).contains("repeatable"))) {
+            // REPEATABLE READ is also what SERIALIZABLE runs at on MySQL and MariaDB, unless that
+            // is the level the statement named
             isolation = level;
           }
         } catch (SQLException e) {

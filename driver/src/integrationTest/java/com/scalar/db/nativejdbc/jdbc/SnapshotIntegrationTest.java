@@ -43,7 +43,11 @@ import org.junit.jupiter.params.provider.MethodSource;
  * holds across statements; a write never waits; and first-committer-wins holds against ScalarDB.
  */
 @SuppressFBWarnings(
-    value = {"SQL_INJECTION_JDBC", "OBL_UNSATISFIED_OBLIGATION"},
+    value = {
+      "SQL_INJECTION_JDBC",
+      "OBL_UNSATISFIED_OBLIGATION",
+      "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"
+    },
     justification = "statements written in the test sources, closed with their connection")
 class SnapshotIntegrationTest {
 
@@ -150,13 +154,14 @@ class SnapshotIntegrationTest {
             .as("%s: a derived table", at)
             .isInstanceOf(SQLFeatureNotSupportedException.class);
         d.rollback();
-        // a table in a subquery is read in the snapshot, which must come after the checks' locks
+        // a subquery is read under a lock too, never in the snapshot: first or not (todo 229)
         String semi = "SELECT x FROM sn.t WHERE id IN (SELECT id FROM sn.u WHERE id = 1)";
         rows(d, "SELECT x FROM sn.t WHERE id = 2");
-        assertAborts(d, semi, at + ": a subquery read after another statement");
-        d.rollback();
-        assertThat(rows(d, semi)).as("%s: a subquery read first", at).containsExactly("a");
+        assertThat(rows(d, semi))
+            .as("%s: a subquery read after another statement", at)
+            .containsExactly("a");
         d.commit();
+        plainTables(e, d, at);
       }
 
       // row by row: a row in flight that the read returns aborts it, by its before image ...
@@ -359,10 +364,22 @@ class SnapshotIntegrationTest {
       d.setTransactionIsolation(level);
       assertThat(d.nativeSQL(text)).as("%s: nativeSQL back", at).isEqualTo(snapshotText);
       if (!pg) {
-        // passthrough may set the level in SQL here too (todo 222)
+        // passthrough may set the level in SQL here too (todos 222, 232): SERIALIZABLE as
+        // setTransactionIsolation sets it, REPEATABLE READ as SNAPSHOT
         d.setAutoCommit(true);
         d.setClientInfo("scalardbnative.passthrough", "true");
         try (Statement st = d.createStatement()) {
+          st.execute("SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+          assertThat(d.getTransactionIsolation())
+              .as("%s: SERIALIZABLE set in SQL", at)
+              .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
+          assertThat(rows(d, "SELECT @@transaction_isolation"))
+              .as("%s: run at REPEATABLE READ", at)
+              .containsExactly("REPEATABLE-READ");
+          st.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+          assertThat(d.getTransactionIsolation())
+              .as("%s: REPEATABLE READ set in SQL", at)
+              .isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
           st.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
         }
         d.setClientInfo("scalardbnative.passthrough", "false");
@@ -377,6 +394,17 @@ class SnapshotIntegrationTest {
       rows(d, text);
       assertThatThrownBy(() -> d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED))
           .as("%s: a change of level in the transaction", at)
+          .isInstanceOf(SQLException.class)
+          .extracting(ex -> ((SQLException) ex).getSQLState())
+          .isEqualTo("25001");
+      d.rollback();
+      // a batch of writes as well (todo 231)
+      try (Statement st = d.createStatement()) {
+        st.addBatch("UPDATE sn.t SET v = 1 WHERE id = 20");
+        st.executeBatch();
+      }
+      assertThatThrownBy(() -> d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED))
+          .as("%s: a change of level after a batch", at)
           .isInstanceOf(SQLException.class)
           .extracting(ex -> ((SQLException) ex).getSQLState())
           .isEqualTo("25001");
@@ -444,6 +472,18 @@ class SnapshotIntegrationTest {
         assertThatThrownBy(() -> scalarDbSet(tm, 4, "s"))
             .as("%s: a ScalarDB write of a row read", at)
             .isInstanceOf(TransactionException.class);
+        d.rollback();
+        // a write locks its predicate and compares it with the snapshot: a row a ScalarDB
+        // transaction moved into it since aborts the write (todo 234)
+        assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 4")).containsExactly("a");
+        scalarDbSet(tm, 18, "w");
+        try (Statement st = d.createStatement()) {
+          assertThatThrownBy(() -> st.executeUpdate("UPDATE sn.t SET v = 1 WHERE x = 'w'"))
+              .as("%s: a write of a row added to its predicate after the snapshot", at)
+              .isInstanceOf(SQLException.class)
+              .extracting(ex -> ((SQLException) ex).getSQLState())
+              .isEqualTo("40001");
+        }
         d.rollback();
       } else {
         // the snapshot holds across statements, and the first committer wins
@@ -545,6 +585,70 @@ class SnapshotIntegrationTest {
       d.commit();
       scalarDbSet(tm, 6, "a");
       scalarDbSet(tm, 4, "a");
+    }
+  }
+
+  /** Tables ScalarDB does not manage, at SERIALIZABLE on MySQL and MariaDB. */
+  private static void plainTables(Engines e, Connection d, String at) throws Exception {
+    try (Connection o = e.open();
+        Statement st = o.createStatement();
+        Statement ds = d.createStatement()) {
+      st.execute("CREATE DATABASE IF NOT EXISTS sn_plain");
+      st.execute("CREATE TABLE IF NOT EXISTS sn_plain.p (id INT PRIMARY KEY, v INT)");
+      st.execute("DELETE FROM sn_plain.p");
+      st.execute("INSERT INTO sn_plain.p VALUES (1, 1), (2, 1), (3, 1), (4, 1)");
+      st.execute("SET SESSION innodb_lock_wait_timeout = 1");
+      // locked as they are read, as the engine's own SERIALIZABLE would lock them (todo 229)
+      for (String read :
+          List.of(
+              "SELECT SUM(v) FROM sn_plain.p",
+              "SELECT v FROM sn_plain.p WHERE id = 4 AND EXISTS (SELECT 1 FROM sn_plain.p q"
+                  + " WHERE q.id = 1)",
+              "SELECT x FROM sn.t WHERE id IN (SELECT id FROM sn_plain.p WHERE v = 1)")) {
+        rows(d, read);
+        assertThatThrownBy(() -> st.execute("UPDATE sn_plain.p SET v = 0 WHERE id = 1"))
+            .as("%s: a write of a row %s read", at, read)
+            .isInstanceOf(SQLException.class);
+        d.rollback();
+      }
+      assertThatThrownBy(() -> rows(d, "SELECT id FROM sn_plain.p UNION SELECT id FROM sn_plain.p"))
+          .as("%s: a set operation without parentheses", at)
+          .isInstanceOf(SQLFeatureNotSupportedException.class);
+      d.rollback();
+      assertThat(
+              rows(
+                  d,
+                  "(SELECT id FROM sn_plain.p WHERE id = 1) UNION (SELECT id FROM sn_plain.p"
+                      + " WHERE id = 2)"))
+          .as("%s: a set operation in parentheses", at)
+          .containsExactlyInAnyOrder("1", "2");
+      d.rollback();
+      // a deadlock ends the transaction: what follows fails, never runs in a new one (todo 230)
+      o.setAutoCommit(false);
+      st.execute("UPDATE sn_plain.p SET v = 2 WHERE id >= 2"); // the heavier side, not the victim
+      ds.executeUpdate("UPDATE sn_plain.p SET v = 2 WHERE id = 1");
+      Thread other =
+          new Thread(
+              () -> {
+                try {
+                  st.execute("UPDATE sn_plain.p SET v = 3 WHERE id = 1");
+                } catch (SQLException ignored) {
+                  // the test is the driver's side
+                }
+              });
+      other.start();
+      Thread.sleep(300);
+      assertThatThrownBy(() -> ds.executeUpdate("UPDATE sn_plain.p SET v = 3 WHERE id = 2"))
+          .as("%s: the deadlock", at)
+          .isInstanceOf(SQLException.class)
+          .extracting(ex -> ((SQLException) ex).getSQLState())
+          .isEqualTo("40001");
+      other.join();
+      o.rollback();
+      assertThatThrownBy(() -> rows(d, "SELECT x FROM sn.t WHERE id = 1"))
+          .as("%s: rollback-only after the deadlock", at)
+          .isInstanceOf(SQLTransactionRollbackException.class);
+      d.rollback();
     }
   }
 

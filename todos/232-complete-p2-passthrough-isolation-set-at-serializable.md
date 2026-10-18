@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "232"
 tags: [code-review, correctness, mysql, mariadb]
@@ -32,3 +32,4 @@ Refuse SQL isolation SETs into or out of SERIALIZABLE on these engines.
 ## Work Log
 
 - 2026-10-18: filed by the 8b2 review (cb4844f).
+- 2026-10-18: fixed: passthrough SERIALIZABLE resets the vendor to REPEATABLE READ and reports SERIALIZABLE; a SET naming REPEATABLE READ gives SNAPSHOT; tested.

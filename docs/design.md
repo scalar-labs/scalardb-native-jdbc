@@ -282,9 +282,10 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   changes the session or what names resolve to cannot be batched outside passthrough, since the entries
   after it were routed before it ran. On PostgreSQL a Unicode-escaped identifier, `U&"..."`, is refused:
   the parser reads it as an expression with the escapes undecoded.
-  A re-read is a SELECT; inside a transaction it takes the first-statement slot the coarse SERIALIZABLE
-  path of 4.2 needs on MySQL, MariaDB and SQL Server, so a session-changing statement inside a SERIALIZABLE transaction forces the
-  statement-level path. Not supported: temporary tables named like a ScalarDB table (PostgreSQL
+  A re-read is a SELECT; inside a transaction it would take the first-statement slot the coarse
+  SERIALIZABLE path of 4.2 was designed with on SQL Server, so a session-changing statement inside a
+  SERIALIZABLE transaction forces the statement-level path (MySQL and MariaDB, as built, need no slot:
+  section 5). Not supported: temporary tables named like a ScalarDB table (PostgreSQL
   `pg_temp` is searched first and is not in `current_schemas(false)`; MySQL temporary tables are not in
   `information_schema`), and SQL Server `USE` of another database than the catalog's.
 - **No ScalarDB API.** The driver never calls ScalarDB and knows nothing of Cluster. ScalarDB
@@ -297,13 +298,13 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   |---|---|---|---|---|
   | Vendor driver, prefix | pgjdbc, `jdbc:postgresql:` | MySQL: Connector/J, or MariaDB Connector/J with `permitMysqlScheme=true` in the URL, both certified, `jdbc:mysql:` (ScalarDB itself reaches MySQL only through the MariaDB driver); MariaDB: MariaDB Connector/J `jdbc:mariadb:` | mssql-jdbc, `jdbc:sqlserver:` | ojdbc, `jdbc:oracle:` |
   | Statement snapshot at READ COMMITTED | yes | yes | only with `READ_COMMITTED_SNAPSHOT` on, checked at connect | yes |
-  | Read lock at SERIALIZABLE (4.2) | none: SSI, with ScalarDB's storage connections at SERIALIZABLE (section 5) | a separate locking re-read of the first arm's predicate, LEFT JOINed to `T_meta` by primary key, `LOCK IN SHARE MODE` on both engines, since MariaDB rejects `FOR SHARE` and `OF t`; the engine's SERIALIZABLE level is not used | the same separate re-read `WITH (HOLDLOCK)`; the engine's SERIALIZABLE level is not used | SERIALIZABLE is refused (section 5) |
+  | Read lock at SERIALIZABLE (4.2) | none: SSI, with ScalarDB's storage connections at SERIALIZABLE (section 5) | a separate locking re-read of the first arm's predicate, LEFT JOINed to `T_meta` by primary key, `LOCK IN SHARE MODE` (as built, the metadata rows locked again by primary key under `FOR SHARE` on MySQL, section 5); the engine's SERIALIZABLE level is not used | the same separate re-read `WITH (HOLDLOCK)`; the engine's SERIALIZABLE level is not used | SERIALIZABLE is refused (section 5) |
   | Insert that may collide | `INSERT ... ON CONFLICT DO NOTHING`, check the row count | catch error 1062; the transaction survives. Not `INSERT IGNORE` for the user's statement, which also downgrades data errors such as a NOT NULL violation to warnings; the driver's own metadata rows use it (4.3) | catch 2627 or 2601; the transaction survives with `XACT_ABORT` off, which the driver requires | catch ORA-00001; statement-level rollback keeps the transaction |
   | Update count | rows matched | `useAffectedRows=false`, the default on both drivers; the value the vendor driver reports for the URL and the connect properties (`getPropertyInfo`, its own spellings and precedence) must not be true, or the connection is refused with `08004` | rows matched | rows matched |
   | In-flight index | partial index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` | filtered index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` |
   | Retryable errors | SQLSTATE `40001`, `40P01` | SQLSTATE `40001` (error 1213), error 1205 (SQLSTATE `HY000`) | 1205 deadlock victim (`40001`), 3960 snapshot update conflict, 1222 if `LOCK_TIMEOUT` is set | ORA-08177 cannot serialize, ORA-00060 deadlock, ORA-08176; ScalarDB maps the same three |
   | Duplicate key | `23505` | error 1062 | 2627, 2601 | ORA-00001 |
-  | Coarse SERIALIZABLE path (4.2) | none: the coarse check, then the statement, as under SNAPSHOT; SSI covers the statement | as the first statement, the coarse check as a locking read of the in-flight index, `LOCK IN SHARE MODE`, whose gap lock blocks every prepare on the table until commit; the user's statement then runs as a locking read through `rc_T` | the same `WITH (HOLDLOCK)` | SERIALIZABLE is refused |
+  | Coarse SERIALIZABLE path (4.2) | none: the coarse check, then the statement, as under SNAPSHOT; SSI covers the statement | the coarse check as a locking read of the in-flight index, `LOCK IN SHARE MODE`, whose gap lock blocks every prepare on the table until commit; the user's statement then runs on the data tables with `LOCK IN SHARE MODE` on every SELECT of it (as built, section 5) | the same `WITH (HOLDLOCK)` | SERIALIZABLE is refused |
   | Identifier quoting | `"name"` | `` `name` `` | `[name]` | `"NAME"`; unquoted names fold to upper case |
   | Row limit, boolean test | `LIMIT n`; `NOT COALESCE(P, false)` | `LIMIT n`; `NOT COALESCE(P, false)` | `TOP n`; `CASE WHEN P THEN 1 ELSE 0 END = 0` | `FETCH FIRST n ROWS ONLY`; `CASE WHEN P THEN 1 ELSE 0 END = 0` |
   | Vendor hints the parser keeps (4.7) | pg_hint_plan `/*+ ... */` after SELECT, as the Oracle-style hint node | optimizer `/*+ ... */`, `USE`/`FORCE`/`IGNORE INDEX`, `STRAIGHT_JOIN` | `WITH (NOLOCK)`, `WITH (INDEX(...))`, `OPTION (...)`; not `WITH (UPDLOCK, ROWLOCK)` or `UPDATE T WITH (ROWLOCK)`, which fail to parse and are stripped before parsing | `/*+ ... */` and `--+` after SELECT, UPDATE, DELETE, INSERT and MERGE; `FOR UPDATE OF col`, `NOWAIT`, `SKIP LOCKED`; not `RETURNING ... INTO`, `AS OF`, `MODEL` |
@@ -1046,7 +1047,9 @@ union as a derived table.
   on PostgreSQL the sequence is the same, at the engine's SERIALIZABLE, and SSI covers the statement. On
   MySQL, MariaDB and SQL Server the coarse check is instead a **locking read** of the in-flight index,
   `LOCK IN SHARE MODE` or `WITH (HOLDLOCK)`, whose gap or range lock blocks every later prepare on the
-  table until commit, stalling every ScalarDB writer of the table as a table lock would. It must be the
+  table until commit, stalling every ScalarDB writer of the table as a table lock would. (As built on
+  MySQL and MariaDB, section 5, every SELECT of the statement is locked, so none reads the snapshot and
+  the first-statement rule and `rc_T` below are not needed there.) It must be the
   transaction's **first statement**: a locking read does not establish the
   snapshot on these engines, so when it comes first the snapshot is taken afterwards, under the lock, and
   nothing can go in flight before commit; when a statement ran earlier, a ScalarDB transaction that
@@ -1448,19 +1451,24 @@ then neither wait on nor deadlock with them. A connection's level is changed bet
 only: these engines' `SET SESSION TRANSACTION` applies to the next one (todo 219).
 
 SERIALIZABLE on MySQL and MariaDB, as built (milestone 8b2): the connection runs at REPEATABLE READ and
-`getTransactionIsolation` reports SERIALIZABLE. A read of one ScalarDB table row by row runs as that
+`getTransactionIsolation` reports SERIALIZABLE; a level set in SQL through passthrough is followed the
+same way (todo 232). Every SELECT block of a statement, its subqueries, derived tables and CTEs
+included, gets `LOCK IN SHARE MODE` unless it has a locking clause, since a clause on the outer SELECT
+does not lock them; tables ScalarDB does not manage are so locked as the engine's SERIALIZABLE would
+lock them, and a set operation must put its operands in parentheses, the only place each takes a
+clause of its own (todo 229). A write's own reads take next-key locks at REPEATABLE READ. A read of one ScalarDB table row by row runs as that
 read under `FOR SHARE`, by the path of a user's locking read: the predicate locked on the data table,
 each row's metadata row locked again by primary key, and the rows compared with the same read in the
 snapshot, a row in flight that the predicate matches aborting it; the keys are held in memory, with
 no row cap yet, and the in-flight check takes the predicate without its `LIMIT`. Any other read takes
 the coarse path, with two changes from 4.2: the statement runs on the data tables, not through `rc_T`,
 whose union is a derived table a locking clause does not reach, the in-flight check having left only
-committed rows there; and it need be the transaction's first statement only when a ScalarDB table is
-in an `IN` or `EXISTS` subquery, whose rows the clause does not lock and which are read in the
-snapshot. Read under locks alone, an older snapshot does not matter. A table in a derived table or a
+committed rows there; and it need not be the transaction's first statement, every SELECT of it being
+read under locks, for which an older snapshot does not matter. A table in a derived table or a
 set operation is refused. An UPDATE or DELETE also reads its predicate on the data table under a
-shared lock, the metadata rows of what it matches locked by primary key, and aborts unless that is
-what its read in the snapshot found; its next-key locks hold off a ScalarDB insert into the range.
+shared lock, before any plain read so that a first statement takes its snapshot under it (todo 236),
+the metadata rows of what it matches locked by primary key, and aborts unless that is what its read in
+the snapshot found; its next-key locks hold off a ScalarDB insert into the range.
 `SerializableIntegrationTest` runs the cycles on both engines, ScalarDB's prepare failing on its short
 lock wait where it waits on the driver.
 
@@ -1551,8 +1559,8 @@ lock wait where it waits on the driver.
 - **Between driver transactions** the strength at the SERIALIZABLE level is: true serializability on
   PostgreSQL through SSI; on MySQL, MariaDB and SQL Server strict two-phase locking by the driver's own
   locking re-reads, row locks plus range locks on every predicate read, and on the coarse path the
-  user's statement run as a locking read through `rc_T` (4.2), since the engine's SERIALIZABLE level is
-  not used there. Oracle refuses the level.
+  user's statement run as a locking read, on the data tables on MySQL and MariaDB, through `rc_T` on SQL
+  Server (4.2), since the engine's SERIALIZABLE level is not used there. Oracle refuses the level.
 - **Against ScalarDB transactions** on the engines with read locks, the argument of this section needs
   only that a prepare blocks behind the driver's read lock until commit. On MySQL,
   MariaDB and SQL Server the lock must reach the row or the `T_meta` row, not only a covering index

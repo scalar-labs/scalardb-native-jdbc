@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "233"
 tags: [code-review, correctness, api, serializable]
@@ -31,3 +31,4 @@ Keep 40001 and document that retrying needs reordering.
 ## Work Log
 
 - 2026-10-18: filed by the 8b2 review (cb4844f).
+- 2026-10-18: fixed: resolved by deletion: with every SELECT locked (229) the first-statement rule and its FIRST marker are gone.

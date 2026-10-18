@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "230"
 tags: [code-review, correctness, mysql, mariadb, serializable]
@@ -36,3 +36,4 @@ Call router.transactionEnded() on such errors and let the session continue.
 ## Work Log
 
 - 2026-10-18: filed by the 8b2 review (cb4844f).
+- 2026-10-18: fixed: a forwarded statement's error that ends the transaction (Writes.endsTransaction) marks it rollback-only; test reproduces a deadlock on MySQL/MariaDB and fails without the fix.

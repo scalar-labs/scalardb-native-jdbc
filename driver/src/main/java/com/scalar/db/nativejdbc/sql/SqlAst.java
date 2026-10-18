@@ -22,6 +22,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.AnalyticExpression;
 import net.sf.jsqlparser.expression.ConnectByRootOperator;
@@ -203,6 +204,7 @@ public final class SqlAst {
   private final boolean positionalParameters;
   private final boolean lockingOrInto;
   private final List<Table> forUpdateTables;
+  private final List<PlainSelect> plainSelects;
   private final boolean setsSessionInAnExpression;
   private final boolean doubleQuotesQuoteIdentifiers;
 
@@ -219,6 +221,7 @@ public final class SqlAst {
       boolean positionalParameters,
       boolean lockingOrInto,
       List<Table> forUpdateTables,
+      List<PlainSelect> plainSelects,
       boolean setsSessionInAnExpression,
       boolean doubleQuotesQuoteIdentifiers) {
     this.setsSessionInAnExpression = setsSessionInAnExpression;
@@ -235,6 +238,7 @@ public final class SqlAst {
     this.positionalParameters = positionalParameters;
     this.lockingOrInto = lockingOrInto;
     this.forUpdateTables = forUpdateTables;
+    this.plainSelects = plainSelects;
   }
 
   /** Parses with PostgreSQL's identifier rules; a convenience for the tests of this package. */
@@ -605,6 +609,10 @@ public final class SqlAst {
                     p -> p instanceof JdbcParameter && !((JdbcParameter) p).isUseFixedIndex()),
             lockingOrInto,
             List.copyOf(forUpdateTables),
+            selects.stream()
+                .filter(PlainSelect.class::isInstance)
+                .map(PlainSelect.class::cast)
+                .collect(Collectors.toList()),
             setsSession,
             doubleQuotesQuoteIdentifiers));
   }
@@ -974,6 +982,40 @@ public final class SqlAst {
     }
     int[] s = first == null || last == null ? null : span(first, last);
     return s == null ? -1 : s[1];
+  }
+
+  /**
+   * Returns the statement with {@code clause} after every SELECT that has no locking clause: its
+   * subqueries, derived tables and CTEs too, whose rows a clause on the outer SELECT does not lock
+   * on MySQL and MariaDB.
+   *
+   * @param clause the locking clause, with a leading space
+   * @return the text, or {@code null} when a SELECT cannot take a clause there: an operand of a set
+   *     operation not in parentheses, or one that cannot be placed in the text
+   */
+  public @Nullable String lockingEverySelect(String clause) {
+    List<Integer> ends = new ArrayList<>();
+    for (PlainSelect s : plainSelects) {
+      if (s.getForMode() != null) {
+        continue;
+      }
+      Node n = s.getASTNode();
+      Token last = n == null ? null : n.jjtGetLastToken();
+      Token next = last == null ? null : last.next;
+      int[] span = last == null ? null : span(last, last);
+      if (span == null
+          || next == null
+          || !(next.kind == 0 || next.image.equals(")") || next.image.equals(";"))) {
+        return null;
+      }
+      ends.add(span[1]);
+    }
+    ends.sort(Collections.reverseOrder());
+    StringBuilder out = new StringBuilder(source);
+    for (int end : ends) {
+      out.insert(end, clause);
+    }
+    return out.toString();
   }
 
   /**

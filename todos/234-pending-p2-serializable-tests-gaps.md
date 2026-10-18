@@ -33,3 +33,4 @@ Add the tests listed, using a short innodb_lock_wait_timeout for driver connecti
 ## Work Log
 
 - 2026-10-18: filed by the 8b2 review (cb4844f).
+- 2026-10-18: partly done: the write-lock abort is tested (fails with the abort disabled), and plain-table locking against another connection; driver-vs-driver and the P3 items remain.

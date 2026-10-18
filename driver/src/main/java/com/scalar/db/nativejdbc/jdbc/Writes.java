@@ -433,7 +433,7 @@ final class Writes {
         List<String> terms = new ArrayList<>();
         List<String> termsData = new ArrayList<>();
         List<String> values = new ArrayList<>();
-        String readBackOnly = "";
+        StringBuilder readBackOnly = new StringBuilder();
         for (int i = 0; i < row.size(); i++) {
           int[] span = ast.span(row.get(i));
           List<Integer> inside = span == null ? null : ast.placeholdersIn(span[0], span[1]);
@@ -452,7 +452,7 @@ final class Writes {
               && type(engine, tableColumns, t.keyColumns().get(i)).endsWith(" auto_increment")) {
             // MySQL generates a key given as 0, and the read-back by 0 would find an older row
             // with key 0 (todo 218): read back no row, which refuses the write
-            readBackOnly += " AND d." + k + " <> 0";
+            readBackOnly.append(" AND d.").append(k).append(" <> 0");
           }
           values.add(source.substring(span[0], span[1]));
           matchBinds.addAll(inside);
@@ -613,7 +613,7 @@ final class Writes {
    * wait timeout, which undoes the statement only unless innodb_rollback_on_timeout is on, and
    * which MariaDB's driver reports as a plain error (todos 204, 211).
    */
-  private static boolean endsTransaction(Connection vendor, SQLException e) {
+  static boolean endsTransaction(Connection vendor, SQLException e) {
     try {
       String product =
           e.getErrorCode() == 1205 ? vendor.getMetaData().getDatabaseProductName() : "";
@@ -1001,6 +1001,9 @@ final class Writes {
 
     @Override
     long apply(Run run) throws SQLException {
+      // the lock first: a locking read takes no snapshot, so when the write is the transaction's
+      // first statement the plain reads below take it under the lock (todo 236)
+      Map<List<Object>, Anchors.Version> now = locked == null ? null : lockedRows(run);
       if (afterImages != null) {
         try (PreparedStatement ps = run.prepare(afterImages, null);
             ResultSet rs = ps.executeQuery()) {
@@ -1010,8 +1013,6 @@ final class Writes {
           }
         }
       }
-      // the lock first: when it is the transaction's first read, the snapshot is taken under it
-      Map<List<Object>, Anchors.Version> now = locked == null ? null : lockedRows(run);
       List<String> types = new ArrayList<>();
       List<Row> rows = settledKeys(run, types);
       if (now != null) {

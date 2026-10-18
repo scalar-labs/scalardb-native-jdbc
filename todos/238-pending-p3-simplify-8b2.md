@@ -34,3 +34,4 @@ Apply what shrinks the code; skip the rest.
 ## Work Log
 
 - 2026-10-18: filed by the 8b2 review (cb4844f).
+- 2026-10-18: partly done: Router's copy of ranInTransaction and the FIRST marker are gone with 233; the rest remains.

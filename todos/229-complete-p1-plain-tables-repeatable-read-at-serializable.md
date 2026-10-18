@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "229"
 tags: [code-review, correctness, mysql, mariadb, serializable]
@@ -38,3 +38,4 @@ Document that plain tables run at SNAPSHOT under the driver's SERIALIZABLE.
 ## Work Log
 
 - 2026-10-18: filed by the 8b2 review (cb4844f).
+- 2026-10-18: fixed: locks every SELECT block (subqueries, derived tables, CTEs) with LOCK IN SHARE MODE at SERIALIZABLE on MySQL/MariaDB, plain tables too (SqlAst.lockingEverySelect); an unparenthesized set operation is refused. Verified on both engines that a clause per block locks each block's rows.

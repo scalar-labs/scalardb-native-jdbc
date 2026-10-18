@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "236"
 tags: [code-review, correctness, mysql, mariadb]
@@ -29,3 +29,4 @@ Run lockedRows before afterImages (or drop afterImages when locked != null); con
 ## Work Log
 
 - 2026-10-18: filed by the 8b2 review (cb4844f).
+- 2026-10-18: fixed: lockedRows now runs before the plain reads; the S-to-X deadlock note left as is (an ordinary retryable deadlock).
