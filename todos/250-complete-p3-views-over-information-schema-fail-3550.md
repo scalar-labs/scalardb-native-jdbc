@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "250"
 tags: [code-review, mysql, serializable, docs]
@@ -42,3 +42,4 @@ worth it.
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 45afd86 and e24a850 (probe on MySQL 8.4).
+- 2026-10-18: documented in the README's isolation section (Option: document the limit).

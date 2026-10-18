@@ -52,11 +52,7 @@ class ReadIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   @SuppressFBWarnings(
-      value = {
-        "SQL_INJECTION_JDBC",
-        "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
-        "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"
-      },
+      value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
       justification = "fixture DDL and queries written in the test sources")
   void reads_seeTheCommittedImage_whileScalarDbHoldsRowsPrepared(Engines e) throws Exception {
     Engine engine = e.engine();
@@ -453,11 +449,7 @@ class ReadIntegrationTest {
    * flight and {@code imp} row 1 (a, updated): every copy's rows, none twice.
    */
   @SuppressFBWarnings(
-      value = {
-        "SQL_INJECTION_JDBC",
-        "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
-        "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"
-      },
+      value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
       justification = "test queries written in the test sources")
   private static void splitReads(Connection c, String made, String mid, String mx)
       throws SQLException {

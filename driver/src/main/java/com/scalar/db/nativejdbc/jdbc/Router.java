@@ -476,6 +476,23 @@ final class Router {
         scalarDb.put(ref, table);
       }
     }
+    if (!scalarDb.isEmpty() && ast.hintsOnOthers(scalarDb.keySet())) {
+      // blanked out of the text the driver rewrites (4.7)
+      throw Errors.unsupported(
+          "a SQL Server table hint other than NOLOCK or INDEX on a table ScalarDB does not manage"
+              + " is not supported in a statement that reads a ScalarDB table");
+    }
+    for (SqlAst.TableRef ref : scalarDb.keySet()) {
+      if (!StatementShape.LOCK_HINTS.containsAll(ast.hints(ref))) {
+        // READUNCOMMITTED, among them, would read a prepare's after image (4.7)
+        throw Errors.unsupported(
+            "only the table hints "
+                + String.join(", ", new TreeSet<>(StatementShape.LOCK_HINTS))
+                + " are supported on a ScalarDB table ("
+                + ref.name()
+                + ")");
+      }
+    }
     if (!scalarDb.isEmpty() && kind == SqlAst.Kind.DML) {
       return write(vendor, sql, ast, scalarDb);
     }
@@ -622,7 +639,7 @@ final class Router {
 
   /** Whether the engine runs the driver's writes, and so its anchors and locking reads. */
   private boolean writes() {
-    return engine == Engine.POSTGRESQL || engine == Engine.MYSQL || engine == Engine.MARIADB;
+    return engine != Engine.ORACLE;
   }
 
   /**
@@ -734,7 +751,27 @@ final class Router {
     IdentityHashMap<SqlAst.TableRef, TableInfo> readDb = scalarDb;
     String inner = null;
     String relock = null;
-    if (engine != Engine.POSTGRESQL) {
+    if (engine == Engine.SQLSERVER) {
+      if (ast.source().contains(LOCK_MARK)) {
+        throw Errors.unsupported(
+            "the locking read cannot be rewritten onto the committed rows" + tables);
+      }
+      if (ast.hints(ref).isEmpty()) {
+        throw Errors.unsupported(
+            "SQL Server locks with table hints, not FOR UPDATE or FOR SHARE: write WITH (UPDLOCK)"
+                + " or WITH (HOLDLOCK) after the table"
+                + tables);
+      }
+      // the hints, blanked out of the text, go onto the committed copy's data table, which the
+      // optimizer folds into the statement, the user's predicate with it (4.7)
+      inner = "WITH (" + String.join(", ", ast.hints(ref)) + ")";
+      // a lock read through a covering index there locks that index's keys only, an update lock
+      // too: the rows are locked again through the primary key as their versions are read
+      relock =
+          (mode == ForMode.UPDATE ? "UPDLOCK" : "REPEATABLEREAD")
+              + ", ROWLOCK"
+              + (shape.noWait() || shape.skipLocked() ? ", NOWAIT" : "");
+    } else if (engine != Engine.POSTGRESQL) {
       boolean update = mode == ForMode.UPDATE;
       if (!update && mode != ForMode.SHARE) {
         throw Errors.unsupported(
@@ -795,7 +832,7 @@ final class Router {
       lockSql = lockSql.replace(LOCK_MARK, inner);
       if (engine == Engine.MARIADB) {
         lockSql = "SET STATEMENT optimizer_switch='derived_merge=on' FOR " + lockSql;
-      } else {
+      } else if (engine == Engine.MYSQL) {
         // ponytail: ahead of any hint comment of the user's, which MySQL then ignores
         // the outer SELECT of the text as emitted, which re-spaces the user's (todo 202); the
         // quoting setting does not move a token
@@ -876,7 +913,7 @@ final class Router {
               + where;
       binds.addAll(inWhere);
     }
-    return new Writes.Step(sql + " LIMIT 1", binds);
+    return new Writes.Step(Writes.anyRow(engine, sql), binds);
   }
 
   /**

@@ -132,9 +132,9 @@ final class Session {
    * On SQL Server, at connect: the database must have {@code READ_COMMITTED_SNAPSHOT} on, without
    * which a read at READ COMMITTED takes no statement snapshot and can pair a new data row with an
    * old metadata row (design section 1). The connection then stays in that database: the catalog
-   * and this check are for it alone.
+   * and this check are for it alone. {@code XACT_ABORT} must be off, as a session starts.
    *
-   * @throws SQLException 08004 if the option is off
+   * @throws SQLException 08004 if the option is off, or XACT_ABORT on
    */
   void requireReadCommittedSnapshot(Connection vendor) throws SQLException {
     lock.lock();
@@ -160,6 +160,17 @@ final class Session {
               "08004");
         }
         database = name;
+      }
+      // a failed statement would end the transaction, which the driver's writes undo to their
+      // start and go on from (design section 1)
+      try (Statement st = vendor.createStatement();
+          ResultSet rs = st.executeQuery("SELECT @@OPTIONS & 16384")) {
+        if (rs.next() && rs.getInt(1) != 0) {
+          throw new SQLNonTransientConnectionException(
+              "XACT_ABORT is on for the session, which the driver needs off: SET XACT_ABORT OFF,"
+                  + " or take it out of the server's user options",
+              "08004");
+        }
       }
     } finally {
       lock.unlock();

@@ -172,7 +172,7 @@ public enum Engines {
 
   /** Whether the driver writes ScalarDB tables on this engine yet (milestone 8). */
   public boolean writes() {
-    return engine == Engine.POSTGRESQL || engine == Engine.MYSQL || engine == Engine.MARIADB;
+    return engine != Engine.ORACLE;
   }
 
   private Started started() throws SQLException {
@@ -312,7 +312,7 @@ public enum Engines {
     if (engine == Engine.POSTGRESQL) {
       return "generate_series(" + from + ", " + to + ") g";
     }
-    if (engine != Engine.MYSQL && engine != Engine.MARIADB) {
+    if (engine == Engine.ORACLE) {
       throw new UnsupportedOperationException(engine + " (milestone 8)");
     }
     // a digit per power of ten, cross joined: MySQL limits a recursive CTE to 1,000 rows
@@ -337,9 +337,28 @@ public enum Engines {
         + ") g";
   }
 
+  /** A test's statement in the engine's dialect: T-SQL's hints and paging on SQL Server. */
+  public String sql(String statement) {
+    return engine == Engine.SQLSERVER ? Rows.tsql(statement) : statement;
+  }
+
   /** A binary column type. */
   public String binaryType() {
-    return engine == Engine.POSTGRESQL ? "BYTEA" : "BLOB";
+    return switch (engine) {
+      case POSTGRESQL -> "BYTEA";
+      case SQLSERVER -> "VARBINARY(MAX)";
+      default -> "BLOB";
+    };
+  }
+
+  /** A text column type that compares with {@code =}, which SQL Server's TEXT does not. */
+  public String textType() {
+    return engine == Engine.SQLSERVER ? "VARCHAR(400)" : "TEXT";
+  }
+
+  /** A predicate that calls a function of {@link #pauseFunction}. */
+  public String paused(String name) {
+    return engine == Engine.SQLSERVER ? name + "() = 1" : "(SELECT " + name + "())";
   }
 
   /**
@@ -347,6 +366,15 @@ public enum Engines {
    * call: a window inside a running statement.
    */
   public String pauseFunction(String name, int seconds) {
+    if (engine == Engine.SQLSERVER) {
+      // a function cannot WAITFOR there: it spins
+      return "CREATE FUNCTION "
+          + name
+          + "() RETURNS BIT AS BEGIN DECLARE @t DATETIME2 = SYSDATETIME();"
+          + " WHILE DATEDIFF(millisecond, @t, SYSDATETIME()) < "
+          + seconds * 1000
+          + " SET @t = @t; RETURN 1; END";
+    }
     return engine == Engine.POSTGRESQL
         ? "CREATE FUNCTION "
             + name
@@ -362,6 +390,11 @@ public enum Engines {
 
   /** A query with a row while some session sleeps in a function of {@link #pauseFunction}. */
   public String sleeping() {
+    if (engine == Engine.SQLSERVER) {
+      return "SELECT 1 FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t"
+          + " WHERE r.session_id <> @@SPID AND t.text LIKE '%pause()%'"
+          + " AND t.text NOT LIKE '%dm_exec_requests%'";
+    }
     return engine == Engine.POSTGRESQL
         ? "SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep'"
         : "SELECT 1 FROM information_schema.processlist WHERE state = 'User sleep'";

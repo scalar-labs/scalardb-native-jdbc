@@ -35,6 +35,7 @@ import java.util.UUID;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.statement.delete.Delete;
+import net.sf.jsqlparser.statement.update.Update;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -221,7 +222,12 @@ final class Writes {
     try (PreparedStatement ps =
         vendor.prepareStatement(
             "SELECT column_name, data_type, "
-                + (n.engine == Engine.POSTGRESQL ? "FALSE" : "extra LIKE '%auto_increment%'")
+                + (n.engine == Engine.POSTGRESQL
+                    ? "FALSE"
+                    : n.engine == Engine.SQLSERVER
+                        ? "COLUMNPROPERTY(OBJECT_ID(QUOTENAME(table_schema) + '.'"
+                            + " + QUOTENAME(table_name)), column_name, 'IsIdentity')"
+                        : "extra LIKE '%auto_increment%'")
                 + " FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER"
                 + " BY ordinal_position")) {
       ps.setString(1, n.namespace);
@@ -313,7 +319,9 @@ final class Writes {
                 + keyed
                 + ")"
                 + source.substring(span[1]);
-    dml = onDataTable(engine, ast, t, true, dml);
+    // SQL Server's UPDATE names the table in a FROM clause before the WHERE, which the key joins
+    int from = span == null ? end : ast.startOfLastBefore("WHERE", span[0]);
+    dml = onDataTable(engine, ast, t, true, dml, from);
     if (dml == null) {
       throw refused(tables, "the statement's text cannot be rewritten");
     }
@@ -322,12 +330,13 @@ final class Writes {
     Step afterImages =
         snapshot
             ? new Step(
-                "SELECT 1 FROM "
-                    + SplitRead.afterImages(engine, t, t.dataColumns())
-                    + " "
-                    + exposed
-                    + (span == null ? "" : " WHERE " + source.substring(span[0], span[1]))
-                    + " LIMIT 1",
+                anyRow(
+                    engine,
+                    "SELECT 1 FROM "
+                        + SplitRead.afterImages(engine, t, t.dataColumns())
+                        + " "
+                        + exposed
+                        + (span == null ? "" : " WHERE " + source.substring(span[0], span[1]))),
                 inWhere)
             : null;
     // at SERIALIZABLE on MySQL and MariaDB the predicate is read again on the data table under a
@@ -380,11 +389,17 @@ final class Writes {
     // MySQL has no RETURNING: the keys are read back by the literals and placeholders the
     // statement gives them in its column list, one row each, or are the AUTO_INCREMENT values of
     // the one key column it leaves out, which the vendor driver reports (todos 186, 187)
-    boolean returns = engine == Engine.POSTGRESQL || engine == Engine.MARIADB;
+    // SQL Server returns them by OUTPUT, before the rows the statement inserts
+    boolean outputs = engine == Engine.SQLSERVER;
+    boolean returns = engine == Engine.POSTGRESQL || engine == Engine.MARIADB || outputs;
+    int output = outputs ? rowsStart(ast) : -1;
+    if (outputs && output < 0) {
+      throw refused(tables, "the statement's text cannot be rewritten");
+    }
     List<List<Expression>> rows =
         shape.insertKeyValues(
             t.keyColumns(), tableColumns == null ? null : List.copyOf(tableColumns.keySet()));
-    if (returning != null && !returns) {
+    if (returning != null && (!returns || outputs)) {
       throw refused(tables, "RETURNING is not supported on this engine");
     }
     if (returning != null && engine == Engine.MARIADB && !t.dataTable().equals(t.table())) {
@@ -408,12 +423,18 @@ final class Writes {
             ast,
             t,
             engine == Engine.POSTGRESQL, // MySQL's and MariaDB's INSERT take no alias
-            returns
-                ? source.substring(0, end)
-                    + (returning == null ? " RETURNING " : ", ")
-                    + n.readColumns("")
-                    + source.substring(end)
-                : source);
+            outputs
+                ? source.substring(0, output)
+                    + "OUTPUT "
+                    + n.readColumns("INSERTED")
+                    + " "
+                    + source.substring(output)
+                : returns
+                    ? source.substring(0, end)
+                        + (returning == null ? " RETURNING " : ", ")
+                        + n.readColumns("")
+                        + source.substring(end)
+                    : source);
     if (insert == null) {
       throw refused(tables, "the statement's text cannot be rewritten");
     }
@@ -535,11 +556,15 @@ final class Writes {
         Router.exposed(ref));
   }
 
-  /** Whether a column is single precision: FLOAT on MySQL and MariaDB, REAL on PostgreSQL. */
+  /**
+   * Whether a column is single precision: FLOAT on MySQL and MariaDB, REAL on PostgreSQL and SQL
+   * Server, where FLOAT is double.
+   */
   private static boolean isFloat(
       Engine engine, @Nullable Map<String, String> columns, String column) {
     String type = type(engine, columns, column).replace(" auto_increment", "");
-    return type.equals("float") || type.equals("real");
+    return type.equals("real")
+        || (type.equals("float") && (engine == Engine.MYSQL || engine == Engine.MARIADB));
   }
 
   /** A column's entry in {@link #columns}, or "" when unknown. */
@@ -552,6 +577,25 @@ final class Writes {
       }
     }
     return "";
+  }
+
+  /**
+   * Where an INSERT's rows start, its VALUES, SELECT or DEFAULT VALUES after the table's name and
+   * column list: SQL Server's OUTPUT goes there. -1 when that cannot be told.
+   */
+  private static int rowsStart(SqlAst ast) {
+    int[] name = ast.nameSpan(ast.tableRefs().get(0));
+    if (name == null) {
+      return -1;
+    }
+    int at = -1;
+    for (String word : List.of("VALUES", "SELECT", "DEFAULT")) {
+      int found = ast.startOfFirstAfter(word, name[1]);
+      if (found >= 0 && (at < 0 || found < at)) {
+        at = found;
+      }
+    }
+    return at;
   }
 
   /** The placeholders in one row's key values. */
@@ -582,6 +626,15 @@ final class Writes {
    */
   private static @Nullable String onDataTable(
       Engine engine, SqlAst ast, TableInfo t, boolean alias, String text) {
+    return onDataTable(engine, ast, t, alias, text, -1);
+  }
+
+  /**
+   * As {@link #onDataTable(Engine, SqlAst, TableInfo, boolean, String)}; {@code from}, where an
+   * UPDATE's WHERE starts in the source, is where SQL Server's FROM clause goes.
+   */
+  private static @Nullable String onDataTable(
+      Engine engine, SqlAst ast, TableInfo t, boolean alias, String text, int where) {
     if (t.dataTable().equals(t.table())) {
       return text;
     }
@@ -593,8 +646,26 @@ final class Writes {
     String data = engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
     String as = ref.hasAlias() || !alias ? "" : " AS " + ref.name();
     String before = text.substring(0, span[0]);
-    if (engine == Engine.MARIADB && !as.isEmpty() && ast.statement() instanceof Delete) {
-      // MariaDB's DELETE of one table takes no alias: DELETE alias FROM table AS alias
+    if (engine == Engine.SQLSERVER && ast.statement() instanceof Update) {
+      // SQL Server's UPDATE takes no alias: UPDATE alias SET ... FROM table AS alias WHERE ...
+      if (ref.hasAlias() || where < span[1]) {
+        return null;
+      }
+      return before
+          + ref.name()
+          + text.substring(span[1], where)
+          + " FROM "
+          + data
+          + " AS "
+          + ref.name()
+          + " "
+          + text.substring(where);
+    }
+    if ((engine == Engine.MARIADB || engine == Engine.SQLSERVER)
+        && !as.isEmpty()
+        && ast.statement() instanceof Delete) {
+      // MariaDB's and SQL Server's DELETE of one table take no alias: DELETE alias FROM table AS
+      // alias
       int from = ast.startOfLastBefore("FROM", span[0]);
       if (from < 0) {
         return null;
@@ -613,17 +684,25 @@ final class Writes {
    * wait timeout, which undoes the statement only unless innodb_rollback_on_timeout is on, and
    * which MariaDB's driver reports as a plain error (todos 204, 211); and MariaDB's 1020, a locking
    * read of a row changed since the snapshot under innodb_snapshot_isolation, which ends it too
-   * (todo 248).
+   * (todo 248). On SQL Server, whatever the error, whether a transaction is left.
    */
   static boolean endsTransaction(Connection vendor, SQLException e) {
     try {
       int code = e.getErrorCode();
-      String product =
-          code == 1205 || code == 1020 ? vendor.getMetaData().getDatabaseProductName() : "";
+      String product = vendor.getMetaData().getDatabaseProductName();
+      if (product.equals("Microsoft SQL Server")) {
+        // a deadlock, and many another error there, a conversion's among them, ends the
+        // transaction: what remains of it says so
+        try (Statement s = vendor.createStatement();
+            ResultSet rs = s.executeQuery("SELECT @@TRANCOUNT")) {
+          return e instanceof SQLTransactionRollbackException || !rs.next() || rs.getInt(1) == 0;
+        }
+      }
       if (code == 1020) {
         return product.equals("MariaDB") || e instanceof SQLTransactionRollbackException;
       }
-      if (product.equals("MySQL") || product.equals("MariaDB")) { // 1205 is a deadlock elsewhere
+      if (code == 1205 && (product.equals("MySQL") || product.equals("MariaDB"))) {
+        // 1205 is a deadlock elsewhere
         try (Statement s = vendor.createStatement();
             ResultSet rs = s.executeQuery("SELECT @@innodb_rollback_on_timeout")) {
           return !rs.next() || rs.getBoolean(1);
@@ -634,6 +713,20 @@ final class Writes {
       return true;
     }
     return e instanceof SQLTransactionRollbackException;
+  }
+
+  /** A query with a row when {@code select} has one, and with none when it has none. */
+  static String anyRow(Engine engine, String select) {
+    return engine == Engine.SQLSERVER
+        ? "SELECT 1 WHERE EXISTS (" + select + ")"
+        : select + " LIMIT 1";
+  }
+
+  /** Releases a savepoint; SQL Server's driver cannot, and the transaction's end does. */
+  static void release(Engine engine, Connection vendor, Savepoint sp) throws SQLException {
+    if (engine != Engine.SQLSERVER) {
+      vendor.releaseSavepoint(sp);
+    }
   }
 
   /** Work run in a write's transaction. */
@@ -650,7 +743,7 @@ final class Writes {
     try {
       long count = plan.apply(new Run(vendor, context));
       if (sp != null) {
-        vendor.releaseSavepoint(sp);
+        release(plan.n.engine, vendor, sp);
       }
       return count;
     } catch (SQLException | RuntimeException e) {
@@ -861,6 +954,11 @@ final class Writes {
 
   /** At most this many keys are bound in one statement, under PostgreSQL's 65,535 parameters. */
   private static final int CHUNK = 1000;
+
+  /** How many keys of {@code n}'s table one statement binds: SQL Server takes 2,100 parameters. */
+  private static int chunk(Names n) {
+    return n.engine == Engine.SQLSERVER ? Math.max(1, 2000 / n.keyColumns.size()) : CHUNK;
+  }
 
   /** Keys read from a result set, and the types of their columns to cast them back to (150). */
   static final class Keys {
@@ -1207,8 +1305,9 @@ final class Writes {
    */
   private static int stampFromData(Run run, Names n, Keys keys) throws SQLException {
     int stamped = 0;
-    for (int from = 0; from < keys.rows.size(); from += CHUNK) {
-      List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
+    int size = chunk(n);
+    for (int from = 0; from < keys.rows.size(); from += size) {
+      List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + size));
       try (PreparedStatement ps =
           run.prepare(
               n.insertStamp(
@@ -1360,7 +1459,7 @@ final class Writes {
         throw e; // the application's duplicate
       } finally {
         try {
-          run.v.releaseSavepoint(sp);
+          release(n.engine, run.v, sp);
         } catch (SQLException ignored) {
           // after another failure the transaction is aborted, and its end releases it
         }
@@ -1433,6 +1532,13 @@ final class Writes {
      * without depending on pgjdbc, or the key MySQL's message names; true when it cannot be told.
      */
     private boolean keyViolated(Run run, SQLException e) throws SQLException {
+      if (n.engine == Engine.SQLSERVER) {
+        // 2627 "Violation of PRIMARY KEY constraint ..." or "... UNIQUE KEY ..."; 2601 is a
+        // unique index's
+        String m = e.getMessage();
+        return e.getErrorCode() == 2627
+            && (m == null || m.contains("PRIMARY KEY") || !m.contains("UNIQUE KEY"));
+      }
       if (n.engine == Engine.MYSQL || n.engine == Engine.MARIADB) {
         // "Duplicate entry '1' for key 'PRIMARY'", the key qualified by the table on MySQL
         String m = e.getMessage();
@@ -1485,7 +1591,7 @@ final class Writes {
         run.v.rollback(sp);
         return true;
       } finally {
-        run.v.releaseSavepoint(sp);
+        release(n.engine, run.v, sp);
       }
     }
 
@@ -1496,10 +1602,11 @@ final class Writes {
       }
       // a metadata row with no data row is an orphan, a tombstone: taken over in place (4.5)
       int taken = 0;
-      for (int from = 0; from < keys.rows.size(); from += CHUNK) {
-        List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
-        // off PostgreSQL the keys drive the update, as dataOf (todo 220), and are bound first
-        boolean pg = n.engine == Engine.POSTGRESQL;
+      int size = chunk(n);
+      for (int from = 0; from < keys.rows.size(); from += size) {
+        List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + size));
+        // on MySQL and MariaDB the keys drive the update, as dataOf (todo 220), and are bound first
+        boolean pg = !n.lookups();
         try (PreparedStatement ps =
             run.prepare(
                 n.stamp(
@@ -1585,7 +1692,7 @@ final class Writes {
                 + n.data
                 + " AS "
                 + q
-                + " WHERE FALSE"
+                + (n.engine == Engine.SQLSERVER ? " WHERE 1 = 0" : " WHERE FALSE")
             : "SELECT "
                 + (items.equals("*") ? q + ".*" : items)
                 + " FROM "
@@ -1685,18 +1792,32 @@ final class Writes {
           // the key, then the two version lookups the anchored read appends
           int from = rs.getMetaData().getColumnCount() - width - 1;
           Keys keys = new Keys();
+          List<Anchors.Version> read = new ArrayList<>();
           while (rs.next()) {
             keys.read(rs, from, width);
+            read.add(
+                new Anchors.Version(rs.getString(from + width), rs.getObject(from + width + 1)));
+          }
+          // SQL Server keeps the lock of a row the statement read and rejected, a row in flight
+          // that
+          // READPAST did not skip, which holds off its ScalarDB commit: every lock goes with the
+          // savepoint, and the rows returned are locked again by key, at the versions returned
+          boolean relocks = inFlight == null && n.engine == Engine.SQLSERVER;
+          if (relocks) {
+            run.v.rollback(sp);
           }
           List<Anchors.Version> versions = new ArrayList<>();
           boolean settled =
-              (inFlight == null || !matchesInFlight(run)) && lockedVersions(run, keys, versions);
+              (inFlight == null || !matchesInFlight(run))
+                  && (relocks
+                      ? relockedAsRead(run, keys, versions, read)
+                      : lockedVersions(run, keys, versions));
           if (settled) {
             if (snapshot != null && !asInSnapshot(run, keys, versions)) {
               throw new Aborted(
                   "a row the statement locks changed after the transaction's snapshot");
             }
-            run.v.releaseSavepoint(sp);
+            release(n.engine, run.v, sp);
             for (int i = 0; i < keys.rows.size(); i++) {
               run.context.anchor(n.table, keys.rows.get(i), versions.get(i));
             }
@@ -1713,7 +1834,7 @@ final class Writes {
         // a skipping read at once, since its rows in flight are now left out (todo 151)
         ps.close();
         run.v.rollback(sp);
-        run.v.releaseSavepoint(sp); // or each attempt leaves a subtransaction open (todo 161)
+        release(n.engine, run.v, sp); // or each attempt leaves a subtransaction open (todo 161)
         if (noWait) {
           throw notAvailable(held);
         }
@@ -1776,6 +1897,8 @@ final class Writes {
           return new SQLException(message, "HY000", 3572);
         case MARIADB:
           return new SQLException(message, "HY000", 1205);
+        case SQLSERVER:
+          return new SQLException(message, "S0005", 1222);
         default:
           return new SQLException(message, "55P03");
       }
@@ -1786,6 +1909,33 @@ final class Writes {
           ResultSet rs = ps.executeQuery()) {
         return rs.next();
       }
+    }
+
+    /**
+     * As {@link #lockedVersions}, the keys locked now: false too when one is no longer at the
+     * version {@code read} returned, or another transaction locked it in between, which READPAST
+     * would have skipped.
+     */
+    private boolean relockedAsRead(
+        Run run, Keys keys, List<Anchors.Version> versions, List<Anchors.Version> read)
+        throws SQLException {
+      try {
+        if (!lockedVersions(run, keys, versions)) {
+          return false;
+        }
+      } catch (SQLException e) {
+        if (e.getErrorCode() == 1222) { // NOWAIT's
+          return false;
+        }
+        throw e;
+      }
+      for (int i = 0; i < read.size(); i++) {
+        Anchors.Version r = read.get(i);
+        if (!versions.get(i).is(r.txId, r.version)) {
+          return false;
+        }
+      }
+      return true;
     }
 
     /**
@@ -1813,17 +1963,25 @@ final class Writes {
       Run run, Names n, Keys keys, @Nullable String lock) throws SQLException {
     int width = n.keyColumns.size();
     Map<List<Object>, Anchors.Version> found = new HashMap<>();
-    for (int from = 0; from < keys.rows.size(); from += CHUNK) {
-      List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + CHUNK));
+    int size = chunk(n);
+    for (int from = 0; from < keys.rows.size(); from += size) {
+      List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + size));
       // the relock goes through the primary key, which a covering index would otherwise stand
       // in for
+      boolean hint = lock != null && n.engine == Engine.SQLSERVER;
       String read =
           n.withMeta(
                   n.dataOf(
-                      lock == null ? "d" : "d FORCE INDEX (PRIMARY)", keys.types, chunk.size()),
+                      lock == null
+                          ? "d"
+                          : hint
+                              ? "d WITH (" + lock + ", INDEX(" + n.primaryIndex(run.v) + "))"
+                              : "d FORCE INDEX (PRIMARY)",
+                      keys.types,
+                      chunk.size()),
                   "d",
                   n.keysOf(keys.types, chunk.size()))
-              + (lock == null ? "" : " " + lock);
+              + (lock == null || hint ? "" : " " + lock);
       try (PreparedStatement ps = run.prepare(read)) {
         bindAll(ps, 1, chunk);
         try (ResultSet m = ps.executeQuery()) {
@@ -1875,6 +2033,30 @@ final class Writes {
       this.txVersion = engine.quote("tx_version");
       this.preparedAt = engine.quote("tx_prepared_at");
       this.committedAt = engine.quote("tx_committed_at");
+    }
+
+    // SQL Server: the data table's primary key index, quoted, read once
+    private volatile @Nullable String primaryIndex;
+
+    /** The data table's primary key index on SQL Server, quoted, for an INDEX hint. */
+    String primaryIndex(Connection vendor) throws SQLException {
+      String known = primaryIndex;
+      if (known == null) {
+        try (PreparedStatement ps =
+            vendor.prepareStatement(
+                "SELECT i.name FROM sys.indexes i WHERE i.object_id = OBJECT_ID(?)"
+                    + " AND i.is_primary_key = 1")) {
+          ps.setString(1, data);
+          try (ResultSet rs = ps.executeQuery()) {
+            if (!rs.next()) {
+              throw Errors.unsupported("the data table " + data + " has no primary key");
+            }
+            known = engine.quote(rs.getString(1));
+          }
+        }
+        primaryIndex = known;
+      }
+      return known;
     }
 
     /** The key columns, each qualified by {@code q} when it is not empty. */
@@ -1977,7 +2159,7 @@ final class Writes {
      * locks (todo 220).
      */
     String dataOf(String dataRef, List<String> types, int count) {
-      return engine == Engine.POSTGRESQL
+      return !lookups()
           ? data + " " + dataRef
           : keyValues(types, count)
               + " STRAIGHT_JOIN "
@@ -1990,11 +2172,24 @@ final class Writes {
 
     /** The condition on {@link #dataOf}'s rows that selects the keys, bound after it. */
     String keysOf(List<String> types, int count) {
-      return engine == Engine.POSTGRESQL ? keyIn("d", types, count) : "TRUE";
+      return !lookups() ? keyIn("d", types, count) : "TRUE";
+    }
+
+    /** Whether keys are looked up one by one behind a table of them, on MySQL and MariaDB. */
+    boolean lookups() {
+      return engine == Engine.MYSQL || engine == Engine.MARIADB;
     }
 
     /** {@code (q.k1, q.k2) IN (SELECT ... FROM <keyValues>)}, the keys bound in order. */
     String keyIn(String q, List<String> types, int count) {
+      if (engine == Engine.SQLSERVER) {
+        // no row value there
+        return "EXISTS (SELECT 1 FROM "
+            + keyValues(types, count)
+            + " WHERE "
+            + keyJoinValues(q)
+            + ")";
+      }
       List<String> cols = new ArrayList<>();
       for (int i = 0; i < types.size(); i++) {
         cols.add("u." + engine.quote("scalardb_native_k" + i));
@@ -2048,9 +2243,15 @@ final class Writes {
 
     /** {@code column} differs from the value bound, NULL included. */
     String distinctFrom(String column) {
-      return engine == Engine.POSTGRESQL
-          ? column + " IS DISTINCT FROM ?"
-          : "NOT (" + column + " <=> ?)";
+      switch (engine) {
+        case POSTGRESQL:
+          return column + " IS DISTINCT FROM ?";
+        case SQLSERVER:
+          // IS DISTINCT FROM is SQL Server 2022's
+          return "EXISTS (SELECT " + column + " EXCEPT SELECT ?)";
+        default:
+          return "NOT (" + column + " <=> ?)";
+      }
     }
 
     /** A committed metadata row, NULL state included (the deemed-committed rule). */
@@ -2089,7 +2290,8 @@ final class Writes {
     String insertStamp(String rows) {
       // IGNORE also turns data errors into warnings, which rows the driver builds do not have
       boolean pg = engine == Engine.POSTGRESQL;
-      return (pg ? "INSERT INTO " : "INSERT IGNORE INTO ")
+      boolean mssql = engine == Engine.SQLSERVER;
+      return (pg || mssql ? "INSERT INTO " : "INSERT IGNORE INTO ")
           + meta
           + " ("
           + columns("")
@@ -2105,7 +2307,16 @@ final class Writes {
           + committedAt
           + ") "
           + rows
-          + (pg ? " ON CONFLICT DO NOTHING" : "");
+          + (pg ? " ON CONFLICT DO NOTHING" : "")
+          // rows from d, with their WHERE: a key with a metadata row, or one being inserted, is
+          // left out, its range held until the end (SQL Server has no insert that skips one)
+          + (mssql
+              ? " AND NOT EXISTS (SELECT 1 FROM "
+                  + meta
+                  + " x WITH (UPDLOCK, HOLDLOCK) WHERE "
+                  + keyJoin("x", "d")
+                  + ")"
+              : "");
     }
   }
 }

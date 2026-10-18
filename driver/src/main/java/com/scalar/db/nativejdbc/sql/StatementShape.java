@@ -6,6 +6,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import net.sf.jsqlparser.expression.CastExpression;
 import net.sf.jsqlparser.expression.DateValue;
 import net.sf.jsqlparser.expression.DoubleValue;
@@ -82,6 +83,20 @@ public final class StatementShape {
   private final boolean grouped;
   private final boolean ordered;
   private final boolean limited;
+
+  /** SQL Server's table hints a locking read of a ScalarDB table takes. */
+  public static final Set<String> LOCK_HINTS =
+      Set.of(
+          "UPDLOCK",
+          "XLOCK",
+          "HOLDLOCK",
+          "SERIALIZABLE",
+          "REPEATABLEREAD",
+          "ROWLOCK",
+          "PAGLOCK",
+          "READPAST",
+          "NOWAIT");
+
   private final @Nullable ForMode lockMode;
   private final boolean skipLocked;
   private final boolean noWait;
@@ -149,6 +164,17 @@ public final class StatementShape {
     if (table.hasHintOrLink()) {
       return Outcome.refused(
           "the table carries a hint, a sample clause, a PIVOT or a database link");
+    }
+    // SQL Server's locking hints, which stand for a locking clause, and nothing else (4.7)
+    List<String> hints = ast.hints(table);
+    if (!LOCK_HINTS.containsAll(hints)) {
+      return Outcome.refused(
+          "only the table hints "
+              + String.join(", ", new TreeSet<>(LOCK_HINTS))
+              + " are supported on a ScalarDB table");
+    }
+    if (!hints.isEmpty() && !(ast.statement() instanceof PlainSelect)) {
+      return Outcome.refused("a table hint on a ScalarDB table is supported in a SELECT only");
     }
     Builder b = new Builder(ast, table, engine);
     if (!b.resolveColumnQualifiers()) {
@@ -619,6 +645,23 @@ public final class StatementShape {
       lockMode = s.getForMode();
       skipLocked = s.isSkipLocked();
       noWait = s.isNoWait();
+      List<String> hints = ast.hints(table);
+      if (!hints.isEmpty()) {
+        // SQL Server: UPDLOCK and XLOCK as FOR UPDATE, the shared ones held as FOR SHARE
+        lockMode =
+            hints.contains("UPDLOCK") || hints.contains("XLOCK")
+                ? ForMode.UPDATE
+                : hints.contains("HOLDLOCK")
+                        || hints.contains("SERIALIZABLE")
+                        || hints.contains("REPEATABLEREAD")
+                    ? ForMode.SHARE
+                    : null;
+        skipLocked = hints.contains("READPAST");
+        noWait = hints.contains("NOWAIT");
+        if (lockMode == null && (skipLocked || noWait)) {
+          return refuse("READPAST and NOWAIT go with a locking hint, UPDLOCK or HOLDLOCK");
+        }
+      }
       if (s.getForUpdateTables() != null) {
         for (Table target : s.getForUpdateTables()) {
           // FOR UPDATE OF names this table, by its alias or its name, or nothing this shape knows

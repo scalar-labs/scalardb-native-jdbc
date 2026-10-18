@@ -253,6 +253,9 @@ final class SplitRead {
       cols.add("t." + engine.quote(c));
     }
     sql.append(String.join(", ", cols)).append(" FROM ").append(data(engine, t)).append(" t");
+    if (lock != null && engine == Engine.SQLSERVER) {
+      sql.append(" ").append(lock); // a table hint there
+    }
     switch (check) {
       case NOT_EXISTS:
         sql.append(" WHERE NOT EXISTS (SELECT 1 FROM ")
@@ -303,7 +306,7 @@ final class SplitRead {
       case NONE:
         break;
     }
-    if (lock != null) {
+    if (lock != null && engine != Engine.SQLSERVER) {
       sql.append(" ").append(lock);
     }
     return sql.append(")").toString();

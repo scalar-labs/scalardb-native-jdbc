@@ -209,6 +209,9 @@ public final class SqlAst {
   private final boolean setsSessionInAnExpression;
   private final boolean doubleQuotesQuoteIdentifiers;
 
+  // per table reference, the SQL Server hints blanked out of the source
+  private final Map<TableRef, List<String>> hints = new IdentityHashMap<>();
+
   private SqlAst(
       String source,
       Statement statement,
@@ -392,6 +395,11 @@ public final class SqlAst {
             : engine == Engine.MYSQL || engine == Engine.MARIADB
                 ? lockInShareModeAsForShare(text, doubleQuotesQuoteIdentifiers)
                 : text;
+    // SQL Server's table hints the parser cannot read, blanked out and kept per table (4.7)
+    TableHints.Result hinted = engine == Engine.SQLSERVER ? TableHints.blank(sql) : null;
+    if (hinted != null) {
+      sql = hinted.text;
+    }
     Statement stmt;
     try {
       // parseStatements, not parse: the latter silently keeps only the first of "a; b"
@@ -594,7 +602,7 @@ public final class SqlAst {
         }
       }
     }
-    return Outcome.of(
+    SqlAst out =
         new SqlAst(
             sql,
             stmt,
@@ -612,7 +620,42 @@ public final class SqlAst {
             List.copyOf(forUpdateTables),
             List.copyOf(selects),
             setsSession,
-            doubleQuotesQuoteIdentifiers));
+            doubleQuotesQuoteIdentifiers);
+    if (hinted != null) {
+      for (TableHints.Clause c : hinted.clauses) {
+        TableRef ref = out.hintedTable(c);
+        if (ref == null) {
+          return Outcome.refused(
+              "a table hint list that follows no table is not supported; write table hints as"
+                  + " WITH (...) after the table or its alias");
+        }
+        List<String> all = new ArrayList<>(out.hints.getOrDefault(ref, List.of()));
+        all.addAll(c.hints);
+        out.hints.put(ref, List.copyOf(all));
+      }
+    }
+    return Outcome.of(out);
+  }
+
+  /** The table a hint list follows, its alias between them if any; null when none. */
+  private @Nullable TableRef hintedTable(TableHints.Clause c) {
+    TableRef found = null;
+    int foundEnd = -1;
+    for (TableRef r : tableRefs) {
+      int[] name = nameSpan(r);
+      if (name != null && name[1] <= c.start && name[1] > foundEnd) {
+        found = r;
+        foundEnd = name[1];
+      }
+    }
+    if (found == null) {
+      return null;
+    }
+    int between = TableHints.tokensBetween(source, foundEnd, c.start);
+    boolean as = TableHints.firstBetween(source, foundEnd, c.start).equals("AS");
+    return between == 0 || (found.hasAlias() && (between == 1 || (between == 2 && as)))
+        ? found
+        : null;
   }
 
   /**
@@ -1079,11 +1122,6 @@ public final class SqlAst {
     return end;
   }
 
-  /**
-   * Whether a SELECT reads tables of information_schema only, which MySQL refuses to lock (error
-   * 3550) and which hold no rows a transaction writes (todo 241): true, false for none of them, and
-   * {@code null} for both kinds, whose other tables would go unlocked.
-   */
   /** Whether a block's locking clause, with an {@code OF} list or none, covers all its tables. */
   private static boolean locksAllOf(Select s) {
     List<Table> of = s.getForUpdateTables();
@@ -1099,6 +1137,11 @@ public final class SqlAst {
     return named.size() >= tables;
   }
 
+  /**
+   * Whether a SELECT reads tables of information_schema only, which MySQL refuses to lock (error
+   * 3550) and which hold no rows a transaction writes (todo 241): true, false for none of them, and
+   * {@code null} for both kinds, whose other tables would go unlocked.
+   */
   private static @Nullable Boolean readsInformationSchema(Select s) {
     List<FromItem> items = new ArrayList<>();
     if (s instanceof PlainSelect) {
@@ -1178,6 +1221,24 @@ public final class SqlAst {
       }
     }
     return found;
+  }
+
+  /**
+   * Returns where the first token spelled {@code word}, case aside, that starts at or after {@code
+   * at} starts in {@link #source}: a keyword, as for {@link #startOfLastBefore}.
+   *
+   * @param word the keyword
+   * @param at the offset it must start at or after
+   * @return its start, or -1 when there is none
+   */
+  public int startOfFirstAfter(String word, int at) {
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      int[] s = span(t, t);
+      if (s != null && s[0] >= at && t.image.equalsIgnoreCase(word)) {
+        return s[0];
+      }
+    }
+    return -1;
   }
 
   /**
@@ -1315,7 +1376,45 @@ public final class SqlAst {
    * @return whether a locking or INTO clause appears anywhere
    */
   public boolean hasLockingOrIntoClause() {
-    return lockingOrInto;
+    if (lockingOrInto) {
+      return true;
+    }
+    for (List<String> h : hints.values()) {
+      if (!Collections.disjoint(h, LOCKING_HINTS)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** SQL Server's table hints that hold locks to the transaction's end. */
+  public static final Set<String> LOCKING_HINTS =
+      Set.of("UPDLOCK", "XLOCK", "HOLDLOCK", "SERIALIZABLE", "REPEATABLEREAD", "TABLOCKX");
+
+  /**
+   * Returns the SQL Server table hints written after a table that the parser could not read, upper
+   * case: blanked out of {@link #source}.
+   *
+   * @param r a table reference of this statement
+   * @return its hints, empty when none
+   */
+  public List<String> hints(TableRef r) {
+    return hints.getOrDefault(r, List.of());
+  }
+
+  /**
+   * Returns whether a table other than {@code refs} carries hints blanked out of {@link #source}.
+   *
+   * @param refs table references of this statement
+   * @return whether another one does
+   */
+  public boolean hintsOnOthers(Set<TableRef> refs) {
+    for (TableRef r : hints.keySet()) {
+      if (!refs.contains(r)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

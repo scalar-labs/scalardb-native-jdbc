@@ -29,7 +29,9 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLTransactionRollbackException;
+import java.sql.Savepoint;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
@@ -372,25 +374,40 @@ class WriteIntegrationTest {
           "CREATE SCHEMA rpl",
           "CREATE SCHEMA rsd",
           "CREATE SCHEMA rf",
-          "CREATE TABLE rpl.t (id INT PRIMARY KEY, x TEXT)",
+          "CREATE TABLE rpl.t (id INT PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO rpl.t VALUES (1, 'plain')",
-          "CREATE TABLE rsd.t (id INT PRIMARY KEY, x TEXT)",
+          "CREATE TABLE rsd.t (id INT PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO rsd.t VALUES (1, 'scalardb')",
-          "CREATE TABLE rf.imp (id INT PRIMARY KEY, x TEXT, b " + e.binaryType() + ")",
+          "CREATE TABLE rf.imp (id INT PRIMARY KEY, x "
+              + e.textType()
+              + ", b "
+              + e.binaryType()
+              + ")",
           "INSERT INTO rf.imp VALUES (60, 'a', NULL), (70, 'a', NULL), (80, 'a', NULL),"
               + " (85, 'a', NULL)",
-          "CREATE TABLE rf.ch (k CHAR(4) PRIMARY KEY, x TEXT)",
+          "CREATE TABLE rf.ch (k CHAR(4) PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO rf.ch VALUES ('ab', 'a')",
           // a local date-time: DATETIME on MySQL, whose TIMESTAMP is converted by time zone
           "CREATE TABLE rf.ts (k "
               + (e.engine() == Engine.POSTGRESQL ? "TIMESTAMP" : "DATETIME")
-              + " PRIMARY KEY, x TEXT)",
+              + " PRIMARY KEY, x "
+              + e.textType()
+              + ")",
           "INSERT INTO rf.ts VALUES ('2020-03-08 02:30:00', 'a')",
-          e.engine() == Engine.POSTGRESQL
-              ? "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN AS $$ BEGIN PERFORM pg_sleep(3);"
-                  + " RETURN v = 'a'; END $$ LANGUAGE plpgsql VOLATILE"
-              : "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN NOT DETERMINISTIC NO SQL"
-                  + " BEGIN DO SLEEP(3); RETURN v = 'a'; END");
+          switch (e.engine()) {
+            case POSTGRESQL ->
+                "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN AS $$ BEGIN PERFORM pg_sleep(3);"
+                    + " RETURN v = 'a'; END $$ LANGUAGE plpgsql VOLATILE";
+            // a function cannot WAITFOR there: it spins
+            case SQLSERVER ->
+                "CREATE FUNCTION rf.gate(@v VARCHAR(400)) RETURNS BIT AS BEGIN"
+                    + " DECLARE @t DATETIME2 = SYSDATETIME();"
+                    + " WHILE DATEDIFF(millisecond, @t, SYSDATETIME()) < 3000 SET @t = @t;"
+                    + " RETURN CASE WHEN @v = 'a' THEN 1 ELSE 0 END; END";
+            default ->
+                "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN NOT DETERMINISTIC NO SQL"
+                    + " BEGIN DO SLEEP(3); RETURN v = 'a'; END";
+          });
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
@@ -420,20 +437,23 @@ class WriteIntegrationTest {
     String sdMeta = "rsd." + catalog.lookup(List.of(), "rsd", "t").metadataTable();
     String chMeta = "rf." + catalog.lookup(List.of(), "rf", "ch").metadataTable();
 
-    // 130: a prepared plain write that comes to name a ScalarDB table is refused, not run as text
-    try (Connection d = e.openDriver();
-        Connection v = e.open()) {
-      setSchema(e, d, "rpl");
-      PreparedStatement ps = d.prepareStatement("UPDATE t SET x = ? WHERE id = ?");
-      ps.setString(1, "p");
-      ps.setInt(2, 1);
-      ps.executeUpdate();
-      setSchema(e, d, "rsd");
-      ps.setString(1, "raw");
-      assertThatThrownBy(ps::executeUpdate).hasMessageContaining("prepare it again");
-      assertThat(rows(v, "SELECT x FROM rsd.t WHERE id = 1")).containsExactly("scalardb");
-      assertThat(rows(v, "SELECT tx_version FROM " + sdMeta + " WHERE id = 1"))
-          .containsExactly("1");
+    // 130: a prepared plain write that comes to name a ScalarDB table is refused, not run as text;
+    // SQL Server resolves names through the user's default schema, which a session cannot change
+    if (e.engine() != Engine.SQLSERVER) {
+      try (Connection d = e.openDriver();
+          Connection v = e.open()) {
+        setSchema(e, d, "rpl");
+        PreparedStatement ps = d.prepareStatement("UPDATE t SET x = ? WHERE id = ?");
+        ps.setString(1, "p");
+        ps.setInt(2, 1);
+        ps.executeUpdate();
+        setSchema(e, d, "rsd");
+        ps.setString(1, "raw");
+        assertThatThrownBy(ps::executeUpdate).hasMessageContaining("prepare it again");
+        assertThat(rows(v, "SELECT x FROM rsd.t WHERE id = 1")).containsExactly("scalardb");
+        assertThat(rows(v, "SELECT tx_version FROM " + sdMeta + " WHERE id = 1"))
+            .containsExactly("1");
+      }
     }
     // 131: streams are read once and bound whole into every statement of the write
     try (Connection d = e.openDriver();
@@ -446,7 +466,12 @@ class WriteIntegrationTest {
       ps = d.prepareStatement("UPDATE rf.imp SET x = ? WHERE id IN (60, 90)");
       ps.setCharacterStream(1, new java.io.StringReader("streamed-and-more"), 8);
       assertThat(ps.executeUpdate()).isEqualTo(2);
-      assertThat(rows(v, "SELECT id, x, length(b) FROM rf.imp WHERE id IN (60, 90) ORDER BY id"))
+      assertThat(
+              rows(
+                  v,
+                  "SELECT id, x, "
+                      + (e.engine() == Engine.SQLSERVER ? "datalength(b)" : "length(b)")
+                      + " FROM rf.imp WHERE id IN (60, 90) ORDER BY id"))
           .containsExactly("60/streamed/null", "90/streamed/3");
       e.execute(v, "UPDATE rf.imp SET x = 'a' WHERE id = 60");
     }
@@ -500,7 +525,11 @@ class WriteIntegrationTest {
     try (Connection lock = e.open();
         Connection d = e.openDriver()) {
       lock.setAutoCommit(false);
-      rows(lock, "SELECT x FROM rf.imp WHERE id = 70 FOR UPDATE");
+      rows(
+          lock,
+          e.engine() == Engine.SQLSERVER
+              ? "SELECT x FROM rf.imp WITH (UPDLOCK) WHERE id = 70"
+              : "SELECT x FROM rf.imp WHERE id = 70 FOR UPDATE");
       Statement st = d.createStatement();
       st.setQueryTimeout(1);
       long t0 = System.nanoTime();
@@ -563,7 +592,9 @@ class WriteIntegrationTest {
               () -> {
                 try {
                   return d.createStatement()
-                      .executeUpdate("UPDATE rf.imp SET x = 'drv' WHERE id = 60 AND rf.gate(x)");
+                      .executeUpdate(
+                          "UPDATE rf.imp SET x = 'drv' WHERE id = 60 AND "
+                              + (e.engine() == Engine.SQLSERVER ? "rf.gate(x) = 1" : "rf.gate(x)"));
                 } catch (SQLException ex) {
                   return ex;
                 }
@@ -594,7 +625,7 @@ class WriteIntegrationTest {
       e.execute(
           c,
           "CREATE SCHEMA an",
-          "CREATE TABLE an.imp (id INT PRIMARY KEY, x TEXT)",
+          "CREATE TABLE an.imp (id INT PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO an.imp SELECT g, 'a' FROM " + e.series(1, 11));
     }
     TransactionFactory scalarDb = e.scalarDb();
@@ -780,7 +811,7 @@ class WriteIntegrationTest {
       e.execute(
           c,
           "CREATE SCHEMA aj",
-          "CREATE TABLE aj.p (id INT PRIMARY KEY, x TEXT)",
+          "CREATE TABLE aj.p (id INT PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO aj.p SELECT g, 'a' FROM " + e.series(1, 9));
     }
     TransactionFactory scalarDb = e.scalarDb();
@@ -847,9 +878,11 @@ class WriteIntegrationTest {
         }
         scalarDbSet(tm, ch, 6, "scalardb");
         assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 6");
-        d.setReadOnly(true);
-        assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
-        d.setReadOnly(false);
+        if (e.engine() != Engine.SQLSERVER) { // its driver ignores read-only, and so writes
+          d.setReadOnly(true);
+          assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
+          d.setReadOnly(false);
+        }
       }
       // one that cannot be prepared again, since the application unwrapped it, is refused rather
       // than read without anchors
@@ -860,6 +893,7 @@ class WriteIntegrationTest {
                 switch (e.engine()) {
                   case POSTGRESQL -> "org.postgresql.PGStatement";
                   case MARIADB -> "org.mariadb.jdbc.Statement";
+                  case SQLSERVER -> "com.microsoft.sqlserver.jdbc.ISQLServerStatement";
                   default -> "com.mysql.cj.jdbc.JdbcStatement";
                 })); // the vendor statement
         d.setAutoCommit(false);
@@ -901,7 +935,9 @@ class WriteIntegrationTest {
               rows(
                   d,
                   "SELECT c.id FROM aj.p p JOIN aj.c c ON c.pid = p.id WHERE p.id IN (3, 5)"
-                      + " ORDER BY p.id DESC LIMIT 1"))
+                      + (e.engine() == Engine.SQLSERVER
+                          ? " ORDER BY p.id DESC OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY"
+                          : " ORDER BY p.id DESC LIMIT 1")))
           .containsExactly("5");
       scalarDbSet(tm, ch, 5, "scalardb");
       assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 5");
@@ -966,7 +1002,7 @@ class WriteIntegrationTest {
       e.execute(
           c,
           "CREATE SCHEMA af",
-          "CREATE TABLE af.imp (id INT PRIMARY KEY, x TEXT)",
+          "CREATE TABLE af.imp (id INT PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO af.imp SELECT g, 'a' FROM " + e.series(1, 9));
     }
     TransactionFactory scalarDb = e.scalarDb();
@@ -1001,9 +1037,18 @@ class WriteIntegrationTest {
       d.rollback(d.setSavepoint());
       assertThat(d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w2' WHERE id = 2"))
           .isEqualTo(1);
-      d.createStatement().execute("SAVEPOINT s");
-      d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w3' WHERE id = 2");
-      d.createStatement().execute("ROLLBACK TO SAVEPOINT s");
+      if (e.engine() == Engine.SQLSERVER) {
+        // T-SQL's transaction statements do not parse: refused, the JDBC methods carry them
+        assertThatThrownBy(() -> d.createStatement().execute("SAVE TRANSACTION s"))
+            .isInstanceOf(SQLFeatureNotSupportedException.class);
+        Savepoint s = d.setSavepoint();
+        d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w3' WHERE id = 2");
+        d.rollback(s);
+      } else {
+        d.createStatement().execute("SAVEPOINT s");
+        d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w3' WHERE id = 2");
+        d.createStatement().execute("ROLLBACK TO SAVEPOINT s");
+      }
       assertThat(d.createStatement().executeUpdate("UPDATE af.imp SET x = 'w4' WHERE id = 2"))
           .isEqualTo(1);
       d.commit();
@@ -1029,7 +1074,12 @@ class WriteIntegrationTest {
       d.rollback();
       assertThatThrownBy(
               () ->
-                  d.createStatement(ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_UPDATABLE)
+                  d.createStatement(
+                          // SQL Server updates through a forward-only or sensitive cursor only
+                          e.engine() == Engine.SQLSERVER
+                              ? ResultSet.TYPE_FORWARD_ONLY
+                              : ResultSet.TYPE_SCROLL_INSENSITIVE,
+                          ResultSet.CONCUR_UPDATABLE)
                       .executeQuery("SELECT id, x FROM af.imp WHERE id = 3"))
           .isInstanceOf(SQLException.class)
           .extracting("SQLState")

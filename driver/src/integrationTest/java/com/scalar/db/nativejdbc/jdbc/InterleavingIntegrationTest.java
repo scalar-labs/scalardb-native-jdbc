@@ -18,6 +18,7 @@ import com.scalar.db.api.Update;
 import com.scalar.db.api.UpdateBuilder;
 import com.scalar.db.exception.transaction.CommitConflictException;
 import com.scalar.db.exception.transaction.CrudConflictException;
+import com.scalar.db.exception.transaction.CrudException;
 import com.scalar.db.exception.transaction.PreparationConflictException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.ValidationConflictException;
@@ -118,7 +119,7 @@ class InterleavingIntegrationTest {
         String imp = "il.imp_" + isolation.toLowerCase(Locale.ROOT);
         e.execute(
             c,
-            "CREATE TABLE " + imp + " (id INT PRIMARY KEY, x TEXT, v INT)",
+            "CREATE TABLE " + imp + " (id INT PRIMARY KEY, x " + e.textType() + ", v INT)",
             // rows without metadata, as an imported table has them
             "INSERT INTO " + imp + " SELECT g, 'a', 0 FROM " + e.series(1, 12),
             "INSERT INTO " + imp + " VALUES " + rowsOf(COUNTERS, 0),
@@ -369,7 +370,8 @@ class InterleavingIntegrationTest {
                       "SELECT id FROM "
                           + t.sql()
                           + " WHERE x = 'a' AND id = 12"
-                          + " AND (SELECT il.pause())"));
+                          + " AND "
+                          + e.paused("il.pause")));
       try (Connection v = e.open()) {
         // the read has its snapshot once it is inside pause()
         long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
@@ -735,11 +737,23 @@ class InterleavingIntegrationTest {
 
     @Override
     boolean aborts(Throwable cause) {
-      // conflicts only (UncommittedRecordException is a CrudConflictException)
+      // conflicts only (UncommittedRecordException is a CrudConflictException); and a deadlock
+      // on a read, which ScalarDB does not map to one (design 6): SQL Server's reads hold shared
+      // locks for the call
       return cause instanceof CrudConflictException
           || cause instanceof PreparationConflictException
           || cause instanceof ValidationConflictException
-          || cause instanceof CommitConflictException;
+          || cause instanceof CommitConflictException
+          || (cause instanceof CrudException && deadlock(cause));
+    }
+
+    private static boolean deadlock(Throwable t) {
+      for (Throwable c = t; c != null; c = c.getCause()) {
+        if (c instanceof SQLException && ((SQLException) c).getErrorCode() == 1205) {
+          return true;
+        }
+      }
+      return false;
     }
   }
 

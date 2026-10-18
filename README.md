@@ -102,21 +102,24 @@ holds off every ScalarDB write to the table until commit, and fails with `40001`
 row in flight at all. A ScalarDB table in a derived table or a set operation is refused with `0AN01`,
 and so is a statement with a `#` comment, whose clause the comment would swallow. The driver puts
 the operands of a set operation in parentheses, where each takes a clause of its own, and does not
-lock `information_schema`, which MySQL refuses to; a SELECT joining it to other tables is refused,
+lock `information_schema`, which MySQL refuses to (a view over it, `sys`'s among them, fails there
+with MySQL's error 3550); a SELECT joining it to other tables is refused,
 as is a locking clause whose MySQL `OF` list leaves one of the SELECT's tables out. A level set in
 SQL through passthrough is followed for the session; `SET TRANSACTION` for the next transaction
 alone and `SET GLOBAL` are not, and the driver clears the former.
 
-`TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. The two levels on SQL Server and
-Oracle are accepted, but every statement on a ScalarDB table is refused with `0AN01` there for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot
-isolation; `TRANSACTION_REPEATABLE_READ` will be the level to use there.
+`TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. The other two levels on SQL Server
+and Oracle are accepted, but every statement on a ScalarDB table is refused with `0AN01` there for
+now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot isolation;
+`TRANSACTION_REPEATABLE_READ` will be the level to use there.
 
 ## Preview scope
 
 Certified in 3.19.0-alpha.1: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line. SNAPSHOT
 and SERIALIZABLE on PostgreSQL, and all three levels on MySQL and MariaDB, came after it.
 
-- Reads of ScalarDB tables work on all five engines; writes run on PostgreSQL, MySQL and MariaDB.
+- Reads of ScalarDB tables work on all five engines; writes run on all but Oracle, on SQL Server at
+  READ COMMITTED so far.
   ScalarDB's classic layout is refused with SQLState `0AN01`.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
@@ -125,12 +128,21 @@ and SERIALIZABLE on PostgreSQL, and all three levels on MySQL and MariaDB, came 
   and no `BEFORE INSERT` trigger on the table.
   On MySQL and MariaDB, `useAffectedRows` must stay false, the drivers' default, and a locking read
   takes `FOR UPDATE` or `FOR SHARE` (`LOCK IN SHARE MODE`).
+- On SQL Server an INSERT has no `RETURNING` (the driver reads its keys back with `OUTPUT`, which a
+  table with a trigger refuses), and `XACT_ABORT` must be off. A locking read takes table hints,
+  `UPDLOCK` or `XLOCK` as `FOR UPDATE`, `HOLDLOCK`, `SERIALIZABLE` or `REPEATABLEREAD` as
+  `FOR SHARE`, with `ROWLOCK`, `PAGLOCK`, `READPAST` and `NOWAIT`; any other hint on a ScalarDB table,
+  `NOLOCK` and `READUNCOMMITTED` among them, written with `WITH` or without, is refused, as is a hint
+  the parser cannot read on another table of a statement that reads a ScalarDB table. T-SQL's own
+  transaction statements (`BEGIN TRANSACTION`, `SAVE TRANSACTION`) are refused: use the JDBC methods.
+  The vendor driver ignores `setReadOnly`, so a read-only connection writes there as any other.
 - `setTransactionIsolation` fails with `25001` once the open transaction has run a statement, as
   pgjdbc's does: change the level between transactions.
 - A write that would lose an update, against a ScalarDB transaction or another driver transaction,
   fails with `40001` and leaves the transaction rollback-only: roll back and retry it. A query
   timeout or a cancel during a write does the same. A MySQL or MariaDB lock wait timeout undoes the
-  statement only, unless `innodb_rollback_on_timeout` is on.
+  statement only, unless `innodb_rollback_on_timeout` is on. On SQL Server any error that ends the
+  transaction, a deadlock or a conversion error among them, leaves it rollback-only too.
 - A transaction checks, when it writes a row, that the row is unchanged since it read it. Rows
   returned through a RIGHT or FULL JOIN, a derived table, a CTE or a UNION are read committed, but are
   not checked this way.

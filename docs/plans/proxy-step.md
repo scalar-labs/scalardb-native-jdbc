@@ -482,7 +482,24 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
     `SnapshotIntegrationTest` and `SerializableIntegrationTest` run SERIALIZABLE on both. Not built:
     the row cap that sends a large first arm to the coarse path.
 - **8c: SQL Server**, all three levels: the per-engine row, the `READ_COMMITTED_SNAPSHOT` and
-  `XACT_ABORT` checks, the hint pass of 4.7.
+  `XACT_ABORT` checks, the hint pass of 4.7. Split as 8b was (2026-10-18), each part reviewed
+  before the next:
+  - **8c1: READ COMMITTED.** Writes, anchored reads and locking reads; the insert collision by
+    errors 2627 and 2601, the driver's metadata rows by a guarded insert, keys read back by
+    `OUTPUT`, a savepoint per write; the `XACT_ABORT` check at connect; the hint pass, which
+    refuses `NOLOCK` and `READUNCOMMITTED` on a ScalarDB table and turns `UPDLOCK` or
+    `HOLDLOCK` into the locking read. The write, review and interleaving tests run on SQL Server.
+    **Done (2026-10-18).** As planned, with these found on the engine: keys by `OUTPUT INSERTED`,
+    which also reports `IDENTITY` keys; the metadata rows by `INSERT ... SELECT ... NOT EXISTS` under
+    `UPDLOCK, HOLDLOCK`; the end of the transaction told by `@@TRANCOUNT` after any error, since a
+    deadlock or a conversion error ends it whatever `XACT_ABORT` says; the hint pass also blanks a
+    hint list without `WITH`, which the parser read as a function and so let `t (NOLOCK)` pass the
+    driver by; the rows of a locking read locked again through the primary key's index, past a
+    covering index; under `READPAST` the attempt's locks released by its savepoint and the rows
+    returned locked again by key, since SQL Server keeps the lock of a row in flight it rejected.
+    The tests' FOR UPDATE and LIMIT become hints and paging through a fixture.
+  - **8c2: SNAPSHOT**, SQL Server's SNAPSHOT level with the after-image checks.
+  - **8c3: SERIALIZABLE**, SNAPSHOT plus the locking re-read of 4.2 under `WITH (HOLDLOCK)`.
 - **8d: Oracle**: READ COMMITTED and SNAPSHOT, `TRANSACTION_REPEATABLE_READ` mapped to its
   SERIALIZABLE, the driver's SERIALIZABLE refused.
 
