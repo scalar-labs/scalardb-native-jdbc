@@ -10,6 +10,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLNonTransientException;
 import java.sql.SQLSyntaxErrorException;
 import java.sql.SQLTransientException;
@@ -256,6 +257,9 @@ public final class Setup {
           throw new SQLSyntaxErrorException(
               "the name " + n + " the setup needs is longer than the engine allows", "42622");
         }
+      }
+      if (engine == Engine.SQLSERVER && t.layout() == Layout.DECOUPLED_IMPORTED) {
+        refuseDatetimeKey(t);
       }
       if (found.hasView(ns, view) && !found.viewMatches(ns, view, t.dataColumns())) {
         throw new SQLNonTransientException(
@@ -665,6 +669,34 @@ public final class Setup {
         return false;
     }
     throw new AssertionError(engine);
+  }
+
+  /**
+   * Refuses an imported table keyed by a {@code datetime} (253): ScalarDB's metadata table holds
+   * the key as {@code datetime2(3)}, which SQL Server does not equal to a {@code datetime} ending
+   * in .003 or .007, so no join of the two finds such a row.
+   */
+  private void refuseDatetimeKey(TableInfo t) throws SQLException {
+    String sql =
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND"
+            + " table_name = ? AND data_type = 'datetime'";
+    try (PreparedStatement ps = connection.prepareStatement(sql)) {
+      ps.setString(1, t.namespace());
+      ps.setString(2, t.dataTable());
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String c = rs.getString(1);
+          if (t.keyColumns().stream().anyMatch(c::equalsIgnoreCase)) {
+            throw new SQLFeatureNotSupportedException(
+                "the key column "
+                    + c
+                    + " is a datetime, which ScalarDB's metadata holds as datetime2(3) and SQL"
+                    + " Server does not compare equal; make it datetime2(3)",
+                "0A000");
+          }
+        }
+      }
+    }
   }
 
   private long count(String sql) throws SQLException {

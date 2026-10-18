@@ -481,6 +481,11 @@ public final class SqlAst {
           "a Unicode-escaped identifier (U&\"...\") is not supported: the parser does not read"
               + " the name the database does");
     }
+    if (hasIgnorableInName(root)) {
+      return Outcome.refused(
+          "a name holds an invisible formatting character (such as a zero-width space), which"
+              + " some databases ignore and the parser keeps");
+    }
     String comment = commentAnEngineMayExecute(root, engine);
     if (comment != null) {
       return Outcome.refused(comment);
@@ -488,6 +493,11 @@ public final class SqlAst {
     Set<Object> values = valuesUnder(root);
     boolean setsSession = false;
     for (Object v : values) {
+      if (engine == Engine.SQLSERVER && v instanceof Function && isHintList((Function) v)) {
+        // the hint pass blanks every hint list it finds; one the parser still reads as a call
+        // was lexed differently by the two, so which table it holds is unknown
+        return Outcome.refused("a table hint list that the driver cannot place");
+      }
       if (v instanceof Function) {
         List<String> parts = new ArrayList<>();
         for (String p : functionNameParts((Function) v)) {
@@ -761,6 +771,44 @@ public final class SqlAst {
       }
     }
     return false;
+  }
+
+  /**
+   * Whether an unquoted name holds a formatting character such as U+200B: the parser keeps it in
+   * the name, SQL Server reads it as whitespace, so {@code ns.t\u200B} would name no ScalarDB table
+   * to the driver and {@code ns.t} to the database.
+   */
+  private static boolean hasIgnorableInName(Node root) {
+    for (Token t = root.jjtGetFirstToken(); t != null; t = t.next) {
+      String image = t.image;
+      if (image == null || image.isEmpty() || "'\"[`$".indexOf(image.charAt(0)) >= 0) {
+        continue;
+      }
+      if (image.indexOf('\'') >= 0) {
+        continue; // a prefixed literal, N'..' or E'..'
+      }
+      for (int i = 0; i < image.length(); i++) {
+        char c = image.charAt(i);
+        if (Character.getType(c) == Character.FORMAT || Character.isIdentifierIgnorable(c)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Whether a call's arguments are all table hints, as {@code t(NOLOCK)} read as a call. */
+  static boolean isHintList(Function f) {
+    ExpressionList<?> args = f.getParameters();
+    if (args == null || args.isEmpty()) {
+      return false;
+    }
+    for (Object a : args) {
+      if (!(a instanceof Column) || !TableHints.isHint(((Column) a).getColumnName())) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private static boolean adjacent(Token a, Token b) {

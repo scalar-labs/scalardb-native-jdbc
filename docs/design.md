@@ -281,7 +281,9 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   the answer differs. A batch is checked the same way when it runs, entry by entry, and a statement that
   changes the session or what names resolve to cannot be batched outside passthrough, since the entries
   after it were routed before it ran. On PostgreSQL a Unicode-escaped identifier, `U&"..."`, is refused:
-  the parser reads it as an expression with the escapes undecoded.
+  the parser reads it as an expression with the escapes undecoded. On every engine a name holding a
+  formatting character such as a zero-width space is refused: the parser keeps it in the name, SQL
+  Server reads it as whitespace, so `ns.t\u200B` named no table to the driver and `ns.t` to SQL Server.
   A re-read is a SELECT; inside a transaction it would take the first-statement slot the coarse
   SERIALIZABLE path of 4.2 was designed with on SQL Server, so a session-changing statement inside a
   SERIALIZABLE transaction forces the statement-level path (MySQL and MariaDB, as built, need no slot:
@@ -1430,7 +1432,8 @@ dropping those refusals, with the rules below in place.
   that every offset holds, and records it for the table or alias it follows; `WITH (NOLOCK)` and
   `WITH (INDEX(...))`, which the parser reads, stay. A list without `WITH`, `t (NOLOCK)`, is blanked
   too: the parser would read a function `t`, naming no table, and the statement would pass the driver
-  by. On a ScalarDB table `UPDLOCK` and `XLOCK` stand for `FOR UPDATE`, `HOLDLOCK`, `SERIALIZABLE`
+  by. The pass ends a `--` comment at a carriage return, as SQL Server and the parser do, and a call
+  the parser still reads whose arguments are all hint words is refused, whatever lexed it apart. On a ScalarDB table `UPDLOCK` and `XLOCK` stand for `FOR UPDATE`, `HOLDLOCK`, `SERIALIZABLE`
   and `REPEATABLEREAD` for `FOR SHARE`, with `ROWLOCK`, `PAGLOCK`, `READPAST` and `NOWAIT`; every
   other hint there is refused, and a blanked hint on another table is refused in a statement that
   reads a ScalarDB table, whose rewritten text would lose it. The hints go onto the committed copy's

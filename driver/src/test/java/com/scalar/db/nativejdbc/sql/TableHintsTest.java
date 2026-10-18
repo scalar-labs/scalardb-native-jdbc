@@ -3,6 +3,9 @@ package com.scalar.db.nativejdbc.sql;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.nativejdbc.engine.Engine;
+import net.sf.jsqlparser.JSQLParserException;
+import net.sf.jsqlparser.expression.Function;
+import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.select.ForMode;
 import org.junit.jupiter.api.Test;
 
@@ -48,6 +51,41 @@ class TableHintsTest {
     // a function call's arguments that are no hints stay
     a = ast("SELECT COUNT(x) FROM ns.t");
     assertThat(a.hints(a.tableRefs().get(0))).isEmpty();
+  }
+
+  @Test
+  void hintListsTheParserReadsAsCalls_areRefused() throws JSQLParserException {
+    // SQL Server and the parser end a line comment at a carriage return
+    SqlAst a = ast("SELECT x FROM ns.t --c\r(NOLOCK) WHERE id = 1");
+    assertThat(a.hints(a.tableRefs().get(0))).containsExactly("NOLOCK");
+    a = ast("SELECT x FROM ns.t --c\r\n(UPDLOCK) WHERE id = 1");
+    assertThat(a.hints(a.tableRefs().get(0))).containsExactly("UPDLOCK");
+    // a list the hint pass does not see, however it comes about, is refused as a call
+    assertThat(SqlAst.isHintList(call("t(nolock, rowlock)"))).isTrue();
+    assertThat(SqlAst.isHintList(call("f(nolock, x)"))).isFalse();
+    assertThat(SqlAst.isHintList(call("f()"))).isFalse();
+  }
+
+  private static Function call(String text) throws JSQLParserException {
+    return (Function) CCJSqlParserUtil.parseExpression(text);
+  }
+
+  @Test
+  void formattingCharacterInAName_isRefusedOnEveryEngine() {
+    for (Engine e : Engine.values()) {
+      assertThat(SqlAst.analyze("SELECT x FROM ns.t\u200B WHERE id = 1", e, true).isPresent())
+          .as("%s", e)
+          .isFalse();
+      assertThat(SqlAst.analyze("SELECT x FROM ns.t\u00AD(NOLOCK)", e, true).isPresent())
+          .as("%s", e)
+          .isFalse();
+    }
+    // in a literal or a quoted name it is what it is to both
+    assertThat(
+            SqlAst.analyze(
+                    "SELECT '\u200B', N'\u200B' AS [a\u200B] FROM ns.t", Engine.SQLSERVER, true)
+                .isPresent())
+        .isTrue();
   }
 
   @Test

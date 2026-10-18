@@ -749,7 +749,10 @@ class InterleavingIntegrationTest {
 
     private static boolean deadlock(Throwable t) {
       for (Throwable c = t; c != null; c = c.getCause()) {
-        if (c instanceof SQLException && ((SQLException) c).getErrorCode() == 1205) {
+        // SQL Server's deadlock; MySQL's 1205, a lock wait timeout, is HY000
+        if (c instanceof SQLException
+            && ((SQLException) c).getErrorCode() == 1205
+            && "40001".equals(((SQLException) c).getSQLState())) {
           return true;
         }
       }

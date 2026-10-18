@@ -79,6 +79,11 @@ final class TableHints {
 
   private TableHints() {}
 
+  /** Whether {@code word} is one of SQL Server's table hints, in any case. */
+  static boolean isHint(String word) {
+    return HINTS.contains(word.toUpperCase(Locale.ROOT));
+  }
+
   /** A token: its span, its kind, and its text upper case. */
   private static final class Token {
     final int start;
@@ -219,7 +224,8 @@ final class TableHints {
       if (Character.isWhitespace(c)) {
         i++;
       } else if (c == '-' && i + 1 < n && text.charAt(i + 1) == '-') {
-        while (i < n && text.charAt(i) != '\n') {
+        // a line comment ends at a carriage return too, for SQL Server and the parser alike
+        while (i < n && text.charAt(i) != '\n' && text.charAt(i) != '\r') {
           i++;
         }
       } else if (c == '/' && i + 1 < n && text.charAt(i + 1) == '*') {

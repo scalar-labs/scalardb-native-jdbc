@@ -387,9 +387,14 @@ class WriteIntegrationTest {
               + " (85, 'a', NULL)",
           "CREATE TABLE rf.ch (k CHAR(4) PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO rf.ch VALUES ('ab', 'a')",
-          // a local date-time: DATETIME on MySQL, whose TIMESTAMP is converted by time zone
+          // a local date-time: DATETIME on MySQL, whose TIMESTAMP is converted by time zone; SQL
+          // Server's datetime key is refused (253)
           "CREATE TABLE rf.ts (k "
-              + (e.engine() == Engine.POSTGRESQL ? "TIMESTAMP" : "DATETIME")
+              + switch (e.engine()) {
+                case POSTGRESQL -> "TIMESTAMP";
+                case SQLSERVER -> "DATETIME2(3)";
+                default -> "DATETIME";
+              }
               + " PRIMARY KEY, x "
               + e.textType()
               + ")",

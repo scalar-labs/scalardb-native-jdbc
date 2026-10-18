@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "254"
 tags: [code-review, sqlserver, correctness]
@@ -30,3 +30,4 @@ the equal to operator". Nothing is changed, but such tables can't be written.
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-19: fixed. `Writes.readKey` reads a SQL Server `time` key as text, which converts back exactly; MoreWrites `timeKeys` inserts, updates and deletes by a time(6) key.

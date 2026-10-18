@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "252"
 tags: [code-review, sqlserver, security]
@@ -39,3 +39,4 @@ it either and the parser reads a function. The plain-name form doesn't need hint
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-19: fixed. analyze refuses, on every engine, an unquoted token holding a FORMAT or identifier-ignorable character (`hasIgnorableInName`); literals and quoted names are left. The parser fails on such a character at a name's start, so only inner/trailing ones needed the check.

@@ -136,6 +136,11 @@ and SERIALIZABLE on PostgreSQL, and all three levels on MySQL and MariaDB, came 
   the parser cannot read on another table of a statement that reads a ScalarDB table. T-SQL's own
   transaction statements (`BEGIN TRANSACTION`, `SAVE TRANSACTION`) are refused: use the JDBC methods.
   The vendor driver ignores `setReadOnly`, so a read-only connection writes there as any other.
+  The setup refuses an imported table keyed by a `datetime`, which ScalarDB's metadata holds as
+  `datetime2(3)` and SQL Server does not compare equal for values ending in .003 or .007: use
+  `datetime2(3)`.
+- A name holding an invisible formatting character, such as a zero-width space, is refused: SQL Server
+  reads it as whitespace where the parser keeps it in the name.
 - `setTransactionIsolation` fails with `25001` once the open transaction has run a statement, as
   pgjdbc's does: change the level between transactions.
 - A write that would lose an update, against a ScalarDB transaction or another driver transaction,

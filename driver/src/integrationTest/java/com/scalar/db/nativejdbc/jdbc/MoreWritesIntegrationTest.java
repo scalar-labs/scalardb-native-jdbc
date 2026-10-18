@@ -129,6 +129,15 @@ class MoreWritesIntegrationTest {
                 default -> "DOUBLE";
               }
               + " PRIMARY KEY, x INT)");
+      if (e.engine() == Engine.SQLSERVER) {
+        // the review of 8c1: a datetime key, which datetime2 does not equal, and a time key
+        e.execute(
+            c,
+            "CREATE TABLE wb.dt (k DATETIME PRIMARY KEY, x INT)",
+            "INSERT INTO wb.dt VALUES ('2024-01-01T00:00:00.003', 0), ('2024-01-01T00:00:00.007', 0)",
+            "CREATE TABLE wb.tk (k TIME(6) PRIMARY KEY, x INT)",
+            "INSERT INTO wb.tk VALUES ('09:00:00.123456', 0)");
+      }
       if (e.engine() == Engine.MYSQL) {
         // the review of 4a62f9e: a trigger that changes the key
         e.execute(
@@ -152,6 +161,10 @@ class MoreWritesIntegrationTest {
       admin.importTable("wb", "tz", DECOUPLED, Map.of());
       for (String table : List.of("ord", "nn", "vk", "fl", "dbl")) {
         admin.importTable("wb", table, DECOUPLED, Map.of());
+      }
+      if (e.engine() == Engine.SQLSERVER) {
+        admin.importTable("wb", "dt", DECOUPLED, Map.of());
+        admin.importTable("wb", "tk", DECOUPLED, Map.of());
       }
       if (e.engine() == Engine.MYSQL) {
         admin.importTable("wb", "seq", DECOUPLED, Map.of());
@@ -182,9 +195,14 @@ class MoreWritesIntegrationTest {
     }
     Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     try (Connection c = e.open()) {
-      assertThat(
-              Setup.run(
-                  catalog, c, t -> t.namespace().equals("wb"), Duration.ofMinutes(1), List.of()))
+      List<Setup.Result> set =
+          Setup.run(catalog, c, t -> t.namespace().equals("wb"), Duration.ofMinutes(1), List.of());
+      // the review of 8c1 (253): a datetime key, which ScalarDB's metadata does not equal
+      assertThat(set)
+          .filteredOn(r -> r.toString().startsWith("wb.dt:"))
+          .allMatch(r -> !r.succeeded() && r.toString().contains("is a datetime"));
+      assertThat(set)
+          .filteredOn(r -> !r.toString().startsWith("wb.dt:"))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     TableInfo imp = catalog.lookup(List.of(), "wb", "imp");
@@ -228,7 +246,22 @@ class MoreWritesIntegrationTest {
       reviewOf8aFixes2(e);
       if (e.engine() == Engine.SQLSERVER) {
         tableHints(e);
+        timeKeys(e);
       }
+    }
+  }
+
+  /**
+   * The review of 8c1 (254): mssql-jdbc binds a time read back as datetime, which no time equals.
+   */
+  private static void timeKeys(Engines e) throws Exception {
+    try (Connection d = e.openDriver();
+        Statement s = d.createStatement()) {
+      assertThat(s.executeUpdate("INSERT INTO wb.tk VALUES ('10:00:00.000001', 1)")).isEqualTo(1);
+      assertThat(s.executeUpdate("UPDATE wb.tk SET x = 2 WHERE k = '09:00:00.123456'"))
+          .isEqualTo(1);
+      assertThat(s.executeUpdate("DELETE FROM wb.tk WHERE k = '10:00:00.000001'")).isEqualTo(1);
+      assertThat(rows(d, "SELECT x FROM wb.tk")).containsExactly("2");
     }
   }
 
@@ -238,14 +271,18 @@ class MoreWritesIntegrationTest {
         Connection v = e.open()) {
       e.execute(v, "INSERT INTO wb.plain VALUES (1, 'p')");
       // a dirty read of a ScalarDB table, however the hint is written; without WITH the parser
-      // would read a function, naming no table
+      // would read a function, naming no table; a carriage return ends a line comment, and SQL
+      // Server reads a zero-width space as whitespace
       for (String hinted :
           List.of(
               "wb.imp (NOLOCK)",
               "wb.imp a (NOLOCK)",
               "wb.imp WITH (NOLOCK)",
               "wb.imp WITH (READUNCOMMITTED)",
-              "wb.imp WITH (ROWLOCK, READUNCOMMITTED)")) {
+              "wb.imp WITH (ROWLOCK, READUNCOMMITTED)",
+              "wb.imp --c\r(NOLOCK)",
+              "wb.imp\u200B",
+              "wb.imp\u200B(NOLOCK)")) {
         assertRefused(() -> rows(d, "SELECT x FROM " + hinted + " WHERE id = 1"));
       }
       // FOR UPDATE is not T-SQL; nor does a write take a hint

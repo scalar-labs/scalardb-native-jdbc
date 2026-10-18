@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "255"
 tags: [code-review, sqlserver, tests]
@@ -30,3 +30,4 @@ MySQL/MariaDB coverage.
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-19: fixed. `deadlock` also requires SQLState 40001 (MySQL's 1205 is HY000).

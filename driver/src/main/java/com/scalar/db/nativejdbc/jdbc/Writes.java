@@ -1042,6 +1042,11 @@ final class Writes {
         key[i] = rs.getObject(c, OffsetTime.class);
         continue;
       }
+      if ("time".equals(name) && onSqlServer(rs)) {
+        // mssql-jdbc binds a LocalTime as datetime, which a time cannot be compared with (254)
+        key[i] = rs.getString(c);
+        continue;
+      }
       switch (md.getColumnType(c)) {
         case Types.TIMESTAMP:
           key[i] = rs.getObject(c, LocalDateTime.class);
@@ -1057,6 +1062,12 @@ final class Writes {
       }
     }
     return key[0] == null ? null : key;
+  }
+
+  private static boolean onSqlServer(ResultSet rs) throws SQLException {
+    Statement st = rs.getStatement();
+    return st != null
+        && "Microsoft SQL Server".equals(st.getConnection().getMetaData().getDatabaseProductName());
   }
 
   static boolean inFlight(@Nullable Object state) {

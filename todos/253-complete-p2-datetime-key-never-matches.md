@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "253"
 tags: [code-review, sqlserver, correctness]
@@ -38,3 +38,4 @@ backfill fails the same way on such a table.
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-19: the reviewer's fix (bind as text) is not enough: ScalarDB's metadata of an imported datetime key is datetime2(3), which SQL Server never equals to a datetime .003/.007 (setup backfill fails, and ScalarDB's own joins miss the row). Fixed by refusing such tables at setup (`Setup.refuseDatetimeKey`, 0A000), README note; test in MoreWrites setup.

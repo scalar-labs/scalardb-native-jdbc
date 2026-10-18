@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "251"
 tags: [code-review, sqlserver, security]
@@ -38,3 +38,4 @@ table. `(UPDLOCK)` the same way gives an unlocked read where a lock was asked fo
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-19: fixed. TableHints ends a `--` comment at `\r`; on SQL Server analyze refuses a call whose arguments are all hint words (`SqlAst.isHintList`), whatever lexed it apart. Unit tests in TableHintsTest, driver cases in MoreWrites tableHints.
