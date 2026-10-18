@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "241"
 tags: [code-review, mysql, mariadb, serializable]
@@ -28,3 +28,4 @@ Skip blocks whose tables are all in information_schema (and performance_schema, 
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 77e2295 (probes on MySQL 8.4 and MariaDB 11.4).
+- 2026-10-18: fixed: a SELECT block reading information_schema gets no clause (MySQL refuses it per block); tested.

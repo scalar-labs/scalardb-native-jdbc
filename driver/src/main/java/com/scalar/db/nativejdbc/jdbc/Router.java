@@ -492,7 +492,7 @@ final class Router {
     if (kind == SqlAst.Kind.SELECT && lockingSerializable()) {
       // other tables are locked as they are read too, as the engine's SERIALIZABLE would lock them;
       // a write's own reads take next-key locks at REPEATABLE READ (todo 229)
-      routed = ast.lockingEverySelect(" LOCK IN SHARE MODE");
+      routed = ast.lockingEverySelect(sql, " LOCK IN SHARE MODE");
       if (routed == null) {
         throw Errors.unsupported(LOCKS_EVERY_SELECT);
       }
@@ -1139,7 +1139,8 @@ final class Router {
             : SqlAst.parse(rewritten, engine, session.doubleQuotesQuoteIdentifiersAsLastRead())
                 .orElse(null);
     // every SELECT locked, a subquery's too: none reads in the snapshot (todo 229)
-    String locked = again == null ? null : again.lockingEverySelect(" LOCK IN SHARE MODE");
+    String locked =
+        again == null ? null : again.lockingEverySelect(rewritten, " LOCK IN SHARE MODE");
     if (locked == null) {
       throw Errors.unsupported("the statement cannot be rewritten onto the data tables" + tables);
     }
@@ -1164,8 +1165,8 @@ final class Router {
   }
 
   private static final String LOCKS_EVERY_SELECT =
-      "at SERIALIZABLE on MySQL and MariaDB every SELECT is read under a lock, and an operand of a"
-          + " set operation takes one only in parentheses: write (SELECT ...) UNION (SELECT ...)";
+      "at SERIALIZABLE on MySQL and MariaDB every SELECT is read under a lock, which a statement"
+          + " with a # comment cannot be given; use -- or /* */ comments";
 
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
@@ -1698,7 +1699,11 @@ final class Router {
       if (route.changesNames) {
         catalog.invalidateResolutions();
       }
-      if (route.passthrough && SETS_LEVEL.matcher(route.source.toLowerCase(Locale.ROOT)).find()) {
+      String text = route.source.toLowerCase(Locale.ROOT);
+      if (route.passthrough
+          && SETS_LEVEL.matcher(text).find()
+          // there a SELECT sets no level, as PostgreSQL's set_config does (todo 244)
+          && (!locksAtSerializable() || text.strip().startsWith("set"))) {
         // passthrough may set the level, or reset it, in SQL: follow the session (todos 184, 222)
         try {
           int level = vendor.getTransactionIsolation();
@@ -1709,7 +1714,7 @@ final class Router {
           } else if (!(level == Connection.TRANSACTION_REPEATABLE_READ
               && isolation == Connection.TRANSACTION_SERIALIZABLE
               && locksAtSerializable()
-              && !route.source.toLowerCase(Locale.ROOT).contains("repeatable"))) {
+              && !text.contains("repeatable"))) {
             // REPEATABLE READ is also what SERIALIZABLE runs at on MySQL and MariaDB, unless that
             // is the level the statement named
             isolation = level;

@@ -22,7 +22,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.AnalyticExpression;
 import net.sf.jsqlparser.expression.ConnectByRootOperator;
@@ -89,7 +88,9 @@ import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.select.SelectItem;
 import net.sf.jsqlparser.statement.select.SetOperationList;
+import net.sf.jsqlparser.statement.select.TableStatement;
 import net.sf.jsqlparser.statement.select.Top;
+import net.sf.jsqlparser.statement.select.Values;
 import net.sf.jsqlparser.statement.select.WithItem;
 import net.sf.jsqlparser.statement.truncate.Truncate;
 import net.sf.jsqlparser.statement.update.Update;
@@ -204,7 +205,7 @@ public final class SqlAst {
   private final boolean positionalParameters;
   private final boolean lockingOrInto;
   private final List<Table> forUpdateTables;
-  private final List<PlainSelect> plainSelects;
+  private final List<Select> selects;
   private final boolean setsSessionInAnExpression;
   private final boolean doubleQuotesQuoteIdentifiers;
 
@@ -221,7 +222,7 @@ public final class SqlAst {
       boolean positionalParameters,
       boolean lockingOrInto,
       List<Table> forUpdateTables,
-      List<PlainSelect> plainSelects,
+      List<Select> selects,
       boolean setsSessionInAnExpression,
       boolean doubleQuotesQuoteIdentifiers) {
     this.setsSessionInAnExpression = setsSessionInAnExpression;
@@ -238,7 +239,7 @@ public final class SqlAst {
     this.positionalParameters = positionalParameters;
     this.lockingOrInto = lockingOrInto;
     this.forUpdateTables = forUpdateTables;
-    this.plainSelects = plainSelects;
+    this.selects = selects;
   }
 
   /** Parses with PostgreSQL's identifier rules; a convenience for the tests of this package. */
@@ -609,10 +610,7 @@ public final class SqlAst {
                     p -> p instanceof JdbcParameter && !((JdbcParameter) p).isUseFixedIndex()),
             lockingOrInto,
             List.copyOf(forUpdateTables),
-            selects.stream()
-                .filter(PlainSelect.class::isInstance)
-                .map(PlainSelect.class::cast)
-                .collect(Collectors.toList()),
+            List.copyOf(selects),
             setsSession,
             doubleQuotesQuoteIdentifiers));
   }
@@ -985,37 +983,120 @@ public final class SqlAst {
   }
 
   /**
-   * Returns the statement with {@code clause} after every SELECT that has no locking clause: its
-   * subqueries, derived tables and CTEs too, whose rows a clause on the outer SELECT does not lock
-   * on MySQL and MariaDB.
+   * Returns {@code text} with {@code clause} after every SELECT and TABLE that has no locking
+   * clause: its subqueries, derived tables and CTEs too, whose rows a clause on the outer SELECT
+   * does not lock on MySQL and MariaDB; an operand of a set operation is put in parentheses, the
+   * only place it takes a clause of its own.
    *
+   * @param text the statement as {@link #source}, every offset the same: the application's own,
+   *     which the parser's spelling of a locking clause may differ from
    * @param clause the locking clause, with a leading space
-   * @return the text, or {@code null} when a SELECT cannot take a clause there: an operand of a set
-   *     operation not in parentheses, or one that cannot be placed in the text
+   * @return the text, or {@code null} when some read cannot be placed in it: a {@code #} comment,
+   *     which the parser does not read as one, or a form that holds no SELECT the clause follows
    */
-  public @Nullable String lockingEverySelect(String clause) {
-    List<Integer> ends = new ArrayList<>();
-    for (PlainSelect s : plainSelects) {
-      if (s.getForMode() != null) {
-        continue;
+  public @Nullable String lockingEverySelect(String text, String clause) {
+    if (hasMisreadHashComment()) {
+      return null;
+    }
+    // the operands of set operations not in parentheses, which take them
+    Set<Select> operands = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (Select s : selects) {
+      if (s instanceof SetOperationList) {
+        operands.addAll(((SetOperationList) s).getSelects());
       }
-      Node n = s.getASTNode();
-      Token last = n == null ? null : n.jjtGetLastToken();
-      Token next = last == null ? null : last.next;
-      int[] span = last == null ? null : span(last, last);
-      if (span == null
-          || next == null
-          || !(next.kind == 0 || next.image.equals(")") || next.image.equals(";"))) {
+    }
+    // where each piece goes, inserted from the end so the offsets hold
+    List<Map.Entry<Integer, String>> inserts = new ArrayList<>();
+    for (Select s : selects) {
+      if (s instanceof SetOperationList || s instanceof ParenthesedSelect || s instanceof Values) {
+        continue; // the SELECTs in them are visited themselves; VALUES reads no table
+      }
+      if (!(s instanceof PlainSelect || s instanceof TableStatement)) {
         return null;
       }
-      ends.add(span[1]);
+      if (s.getForMode() != null || readsInformationSchema(s)) {
+        continue;
+      }
+      // a TABLE statement has no node of its own; nested in another, it is refused
+      Node n = s.getASTNode() != null ? s.getASTNode() : s == statement ? root : null;
+      Token first = n == null ? null : n.jjtGetFirstToken();
+      Token last = n == null ? null : n.jjtGetLastToken();
+      int[] span = first == null || last == null ? null : span(first, last);
+      Token next = last == null ? null : last.next;
+      if (span == null) {
+        return null;
+      }
+      if (operands.contains(s)) {
+        // the parser gives the operation's own ORDER BY and LIMIT to its last operand
+        int[] body = span(first, operandEnd(first, last));
+        if (body == null) {
+          return null;
+        }
+        inserts.add(Map.entry(body[0], "("));
+        inserts.add(Map.entry(body[1], clause + ")"));
+      } else if (next == null // the end, not read ahead
+          || next.kind == 0
+          || next.image.equals(")")
+          || next.image.equals(";")) {
+        inserts.add(Map.entry(span[1], clause));
+      } else {
+        return null;
+      }
     }
-    ends.sort(Collections.reverseOrder());
-    StringBuilder out = new StringBuilder(source);
-    for (int end : ends) {
-      out.insert(end, clause);
+    inserts.sort(Map.Entry.<Integer, String>comparingByKey().reversed());
+    StringBuilder out = new StringBuilder(text);
+    for (Map.Entry<Integer, String> i : inserts) {
+      out.insert(i.getKey(), i.getValue());
     }
     return out.toString();
+  }
+
+  /**
+   * The last token of a set operation's operand before an ORDER BY or LIMIT outside parentheses.
+   */
+  private static Token operandEnd(Token first, Token last) {
+    Token end = first;
+    int depth = 0;
+    for (Token t = first; t != null && t != last.next; t = t.next) {
+      if (depth == 0
+          && t != first
+          && (t.image.equalsIgnoreCase("ORDER")
+              || t.image.equalsIgnoreCase("LIMIT")
+              || t.image.equalsIgnoreCase("OFFSET")
+              || t.image.equalsIgnoreCase("FETCH"))) {
+        break;
+      }
+      depth += t.image.equals("(") ? 1 : t.image.equals(")") ? -1 : 0;
+      end = t;
+    }
+    return end;
+  }
+
+  /**
+   * Whether a SELECT reads a table of information_schema, which MySQL refuses to lock (error 3550)
+   * and which holds no rows a transaction writes (todo 241).
+   */
+  private static boolean readsInformationSchema(Select s) {
+    List<FromItem> items = new ArrayList<>();
+    if (s instanceof PlainSelect) {
+      PlainSelect p = (PlainSelect) s;
+      items.add(p.getFromItem());
+      if (p.getJoins() != null) {
+        for (Join j : p.getJoins()) {
+          items.add(j.getFromItem());
+        }
+      }
+    } else if (s instanceof TableStatement) {
+      items.add(((TableStatement) s).getTable());
+    }
+    for (FromItem item : items) {
+      if (item instanceof Table
+          && ((Table) item).getSchemaName() != null
+          && unquoted(((Table) item).getSchemaName()).equalsIgnoreCase("information_schema")) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

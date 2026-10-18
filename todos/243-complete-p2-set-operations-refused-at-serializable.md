@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "243"
 tags: [code-review, mysql, mariadb, serializable]
@@ -31,3 +31,4 @@ Skip operands with no base table; document the rest.
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 77e2295 (probes on MySQL 8.4 and MariaDB 11.4).
+- 2026-10-18: fixed: set-operation operands are put in parentheses, ending before the operation's ORDER BY/LIMIT the parser gives the last operand; UNION ... ORDER BY and WITH RECURSIVE tested.

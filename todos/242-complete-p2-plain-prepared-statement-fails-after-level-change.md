@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "242"
 tags: [code-review, mysql, mariadb, serializable]
@@ -30,3 +30,4 @@ Give plain routes identity parameter sources, or allow preparing again when ther
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 77e2295 (probes on MySQL 8.4 and MariaDB 11.4).
+- 2026-10-18: fixed: plain SELECTs on MySQL/MariaDB are kept for preparing again, their parameters recorded and replayed (null sources forwarded); not with a stream bound; tested.

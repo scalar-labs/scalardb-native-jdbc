@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "234"
 tags: [code-review, tests]
@@ -35,3 +35,4 @@ Add the tests listed, using a short innodb_lock_wait_timeout for driver connecti
 - 2026-10-18: filed by the 8b2 review (cb4844f).
 - 2026-10-18: partly done: the write-lock abort is tested (fails with the abort disabled), and plain-table locking against another connection; driver-vs-driver and the P3 items remain.
 - 2026-10-18: a two-driver write-skew test on plain and ScalarDB tables would have caught 239; still worth adding.
+- 2026-10-18: two driver transactions at SERIALIZABLE: each one's read holds off the other's write, on a plain and a ScalarDB table. P3 sub-items left as minor.

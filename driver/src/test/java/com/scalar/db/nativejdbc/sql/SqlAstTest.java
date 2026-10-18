@@ -515,40 +515,40 @@ class SqlAstTest {
 
   @Test
   void lockingEverySelect_locksEachSelectWhereItEnds() {
-    String l = " LOCK IN SHARE MODE";
     assertThat(
-            SqlAst.analyze(
-                    "SELECT a.x FROM a WHERE a.id IN (SELECT id FROM b WHERE v > 1 LIMIT 3)"
-                        + " AND EXISTS (SELECT 1 FROM c) ORDER BY 1 -- c",
-                    Engine.MYSQL,
-                    false)
-                .get()
-                .lockingEverySelect(l))
+            locked(
+                "SELECT a.x FROM a WHERE a.id IN (SELECT id FROM b WHERE v > 1 LIMIT 3)"
+                    + " AND EXISTS (SELECT 1 FROM c) ORDER BY 1 -- c",
+                Engine.MYSQL))
         .isEqualTo(
-            "SELECT a.x FROM a WHERE a.id IN (SELECT id FROM b WHERE v > 1 LIMIT 3"
-                + l
-                + ") AND EXISTS (SELECT 1 FROM c"
-                + l
-                + ") ORDER BY 1"
-                + l
-                + " -- c");
+            "SELECT a.x FROM a WHERE a.id IN (SELECT id FROM b WHERE v > 1 LIMIT 3 L) AND EXISTS"
+                + " (SELECT 1 FROM c L) ORDER BY 1 L -- c");
+    assertThat(locked("SELECT * FROM (SELECT x FROM b) d, a FOR UPDATE;", Engine.MARIADB))
+        .isEqualTo("SELECT * FROM (SELECT x FROM b L) d, a FOR UPDATE;");
+    // the application's own spelling of a locking clause is kept (todo 240)
+    assertThat(locked("SELECT x FROM a LOCK IN SHARE MODE", Engine.MARIADB))
+        .isEqualTo("SELECT x FROM a LOCK IN SHARE MODE");
+    assertThat(locked("(SELECT x FROM a) UNION (SELECT x FROM b)", Engine.MYSQL))
+        .isEqualTo("(SELECT x FROM a L) UNION (SELECT x FROM b L)");
+    // an operand not in parentheses is put in them (todo 243)
+    assertThat(locked("SELECT x FROM a UNION SELECT x FROM b ORDER BY 1", Engine.MYSQL))
+        .isEqualTo("(SELECT x FROM a L) UNION (SELECT x FROM b L) ORDER BY 1");
+    // TABLE too; a # comment, which the parser reads as code, is refused (todo 239)
+    assertThat(locked("TABLE a", Engine.MYSQL)).isEqualTo("TABLE a L");
+    assertThat(locked("SELECT x FROM a WHERE id = 1 # c", Engine.MYSQL)).isNull();
+    // MySQL does not lock information_schema (todo 241)
     assertThat(
-            SqlAst.analyze(
-                    "SELECT * FROM (SELECT x FROM b) d, a FOR UPDATE;", Engine.MARIADB, false)
-                .get()
-                .lockingEverySelect(l))
-        .isEqualTo("SELECT * FROM (SELECT x FROM b" + l + ") d, a FOR UPDATE;");
-    assertThat(
-            SqlAst.analyze("(SELECT x FROM a) UNION (SELECT x FROM b)", Engine.MYSQL, false)
-                .get()
-                .lockingEverySelect(l))
-        .isEqualTo("(SELECT x FROM a" + l + ") UNION (SELECT x FROM b" + l + ")");
-    // an operand not in parentheses cannot take a clause of its own
-    assertThat(
-            SqlAst.analyze("SELECT x FROM a UNION SELECT x FROM b", Engine.MYSQL, false)
-                .get()
-                .lockingEverySelect(l))
-        .isNull();
+            locked(
+                "SELECT x FROM a WHERE x IN (SELECT ordinal_position FROM"
+                    + " `information_schema`.columns)",
+                Engine.MYSQL))
+        .isEqualTo(
+            "SELECT x FROM a WHERE x IN (SELECT ordinal_position FROM"
+                + " `information_schema`.columns) L");
+  }
+
+  private static @Nullable String locked(String sql, Engine engine) {
+    return SqlAst.analyze(sql, engine, false).get().lockingEverySelect(sql, " L");
   }
 
   @Test

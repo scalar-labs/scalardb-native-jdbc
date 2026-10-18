@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "246"
 tags: [code-review, mysql, mariadb, serializable]
@@ -30,3 +30,4 @@ Fix the comment; poll for the wait; add the tests with 239-243.
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 77e2295 (probes on MySQL 8.4 and MariaDB 11.4).
+- 2026-10-18: fixed: Catalog comment; the deadlock test waits for the lock wait in performance_schema / information_schema; tests added with 239-243.

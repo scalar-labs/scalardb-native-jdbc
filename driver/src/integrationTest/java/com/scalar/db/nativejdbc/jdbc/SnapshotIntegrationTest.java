@@ -23,6 +23,7 @@ import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
@@ -376,6 +377,11 @@ class SnapshotIntegrationTest {
           assertThat(rows(d, "SELECT @@transaction_isolation"))
               .as("%s: run at REPEATABLE READ", at)
               .containsExactly("REPEATABLE-READ");
+          // a SELECT that names a level sets none (todo 244)
+          rows(d, "SELECT @@transaction_isolation = 'REPEATABLE-READ'");
+          assertThat(d.getTransactionIsolation())
+              .as("%s: after a SELECT naming REPEATABLE READ", at)
+              .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
           st.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ");
           assertThat(d.getTransactionIsolation())
               .as("%s: REPEATABLE READ set in SQL", at)
@@ -604,25 +610,77 @@ class SnapshotIntegrationTest {
               "SELECT SUM(v) FROM sn_plain.p",
               "SELECT v FROM sn_plain.p WHERE id = 4 AND EXISTS (SELECT 1 FROM sn_plain.p q"
                   + " WHERE q.id = 1)",
-              "SELECT x FROM sn.t WHERE id IN (SELECT id FROM sn_plain.p WHERE v = 1)")) {
+              "SELECT x FROM sn.t WHERE id IN (SELECT id FROM sn_plain.p WHERE v = 1)",
+              // the application's own clause, kept as written on MariaDB (todo 240)
+              "SELECT v FROM sn_plain.p WHERE id = 1 LOCK IN SHARE MODE",
+              // an operand of a set operation, put in parentheses (todo 243)
+              "SELECT id FROM sn_plain.p WHERE id = 3 UNION SELECT id FROM sn_plain.p WHERE id = 1"
+                  + " ORDER BY 1",
+              "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 2)"
+                  + " SELECT v FROM sn_plain.p JOIN r ON p.id = r.n",
+              // MySQL's TABLE statement, which MariaDB does not have
+              e.engine() == Engine.MYSQL ? "TABLE sn_plain.p" : "SELECT * FROM sn_plain.p")) {
         rows(d, read);
         assertThatThrownBy(() -> st.execute("UPDATE sn_plain.p SET v = 0 WHERE id = 1"))
             .as("%s: a write of a row %s read", at, read)
             .isInstanceOf(SQLException.class);
         d.rollback();
       }
-      assertThatThrownBy(() -> rows(d, "SELECT id FROM sn_plain.p UNION SELECT id FROM sn_plain.p"))
-          .as("%s: a set operation without parentheses", at)
-          .isInstanceOf(SQLFeatureNotSupportedException.class);
-      d.rollback();
       assertThat(
               rows(
                   d,
-                  "(SELECT id FROM sn_plain.p WHERE id = 1) UNION (SELECT id FROM sn_plain.p"
-                      + " WHERE id = 2)"))
-          .as("%s: a set operation in parentheses", at)
-          .containsExactlyInAnyOrder("1", "2");
+                  "SELECT id FROM sn_plain.p WHERE id = 2 UNION SELECT id FROM sn_plain.p WHERE id"
+                      + " = 1 ORDER BY 1 LIMIT 1"))
+          .as("%s: a set operation's own ORDER BY and LIMIT", at)
+          .containsExactly("1");
       d.rollback();
+      // a # comment, which the parser reads as an operator, cannot take the clause (todo 239)
+      assertThatThrownBy(() -> rows(d, "SELECT v FROM sn_plain.p WHERE id = 1 # c"))
+          .as("%s: a # comment", at)
+          .isInstanceOf(SQLFeatureNotSupportedException.class);
+      d.rollback();
+      // MySQL locks no information_schema table, nor needs to (todo 241)
+      assertThat(
+              rows(
+                  d,
+                  "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'sn_plain'"))
+          .as("%s: information_schema", at)
+          .containsExactly("1");
+      d.rollback();
+      // a statement prepared at another level is prepared again, locked (todo 242)
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      try (PreparedStatement ps = d.prepareStatement("SELECT v FROM sn_plain.p WHERE id = ?")) {
+        ps.setInt(1, 1);
+        ps.executeQuery().close();
+        d.rollback();
+        d.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+        ps.executeQuery().close();
+        assertThatThrownBy(() -> st.execute("UPDATE sn_plain.p SET v = 0 WHERE id = 1"))
+            .as("%s: a write of a row a statement prepared at READ COMMITTED read", at)
+            .isInstanceOf(SQLException.class);
+        d.rollback();
+      }
+      // two driver transactions: the reads of each hold off the other's write (todo 234)
+      try (Connection d2 = e.openDriver();
+          Statement s2 = d2.createStatement()) {
+        d2.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+        d2.setAutoCommit(false);
+        ds.execute("SET SESSION innodb_lock_wait_timeout = 1");
+        for (String read :
+            List.of(
+                "SELECT SUM(v) FROM sn_plain.p WHERE id IN (1, 2)",
+                "SELECT SUM(v) FROM sn.t WHERE id IN (1, 2)")) {
+          String table = read.contains("sn.t") ? "sn.t" : "sn_plain.p";
+          rows(d, read);
+          rows(d2, read);
+          assertThatThrownBy(() -> ds.executeUpdate("UPDATE " + table + " SET v = 7 WHERE id = 1"))
+              .as("%s: write skew between drivers on %s", at, table)
+              .isInstanceOf(SQLException.class);
+          d.rollback();
+          d2.rollback();
+        }
+        ds.execute("SET SESSION innodb_lock_wait_timeout = 50");
+      }
       // a deadlock ends the transaction: what follows fails, never runs in a new one (todo 230)
       o.setAutoCommit(false);
       st.execute("UPDATE sn_plain.p SET v = 2 WHERE id >= 2"); // the heavier side, not the victim
@@ -637,7 +695,7 @@ class SnapshotIntegrationTest {
                 }
               });
       other.start();
-      Thread.sleep(300);
+      awaitLockWait(e);
       assertThatThrownBy(() -> ds.executeUpdate("UPDATE sn_plain.p SET v = 3 WHERE id = 2"))
           .as("%s: the deadlock", at)
           .isInstanceOf(SQLException.class)
@@ -650,6 +708,26 @@ class SnapshotIntegrationTest {
           .isInstanceOf(SQLTransactionRollbackException.class);
       d.rollback();
     }
+  }
+
+  /** Waits until a transaction waits on a lock, so that the next one forms the deadlock. */
+  private static void awaitLockWait(Engines e) throws Exception {
+    String waits =
+        e.engine() == Engine.MYSQL
+            ? "SELECT COUNT(*) FROM performance_schema.data_lock_waits"
+            : "SELECT COUNT(*) FROM information_schema.innodb_lock_waits";
+    try (Connection c = e.open();
+        Statement st = c.createStatement()) {
+      for (int i = 0; i < 500; i++) {
+        try (ResultSet rs = st.executeQuery(waits)) {
+          if (rs.next() && rs.getInt(1) > 0) {
+            return;
+          }
+        }
+        Thread.sleep(2);
+      }
+    }
+    throw new AssertionError("no lock wait");
   }
 
   private static void assertAborts(Connection d, String sql, String what) {

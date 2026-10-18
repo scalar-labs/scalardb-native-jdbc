@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "239"
 tags: [code-review, mysql, mariadb, serializable]
@@ -31,3 +31,4 @@ lockingEverySelect returns null on hasMisreadHashComment(); TableStatement gets 
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 77e2295 (probes on MySQL 8.4 and MariaDB 11.4).
+- 2026-10-18: fixed: a # comment is refused (hasMisreadHashComment); a top-level TABLE takes the clause, a nested one or any other Select kind is refused; tested.

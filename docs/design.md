@@ -1455,8 +1455,11 @@ SERIALIZABLE on MySQL and MariaDB, as built (milestone 8b2): the connection runs
 same way (todo 232). Every SELECT block of a statement, its subqueries, derived tables and CTEs
 included, gets `LOCK IN SHARE MODE` unless it has a locking clause, since a clause on the outer SELECT
 does not lock them; tables ScalarDB does not manage are so locked as the engine's SERIALIZABLE would
-lock them, and a set operation must put its operands in parentheses, the only place each takes a
-clause of its own (todo 229). A write's own reads take next-key locks at REPEATABLE READ. A read of one ScalarDB table row by row runs as that
+lock them (todo 229). The operands of a set operation are put in parentheses, the only place each
+takes a clause of its own, a MySQL `TABLE` statement takes one too, `information_schema`, which MySQL
+refuses to lock, is left alone, and a `#` comment, which the parser reads as an operator, is refused
+(todos 239, 241, 243). The application's own spelling of a clause is kept (todo 240), and a plain
+statement prepared at another level is prepared again (todo 242). A write's own reads take next-key locks at REPEATABLE READ. A read of one ScalarDB table row by row runs as that
 read under `FOR SHARE`, by the path of a user's locking read: the predicate locked on the data table,
 each row's metadata row locked again by primary key, and the rows compared with the same read in the
 snapshot, a row in flight that the predicate matches aborting it; the keys are held in memory, with

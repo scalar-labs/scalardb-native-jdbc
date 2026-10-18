@@ -67,11 +67,11 @@ import org.slf4j.LoggerFactory;
  * the catalog tables, would produce, and on Oracle "does not exist" is the answer to both.
  *
  * <p>Nothing runs on the user's connection: the catalog's queries would otherwise fix the snapshot
- * of the user's transaction before the statement the design requires to come first, and a failure
- * would abort that transaction. The session schemas are read from the user's connection by the
- * caller, outside a transaction ({@link Engine#sessionSchemas}), and passed in. No lock is held
- * across a round trip: a stale catalog is served while one thread reloads it, and a name is
- * resolved on the catalog connection outside the cache's lock.
+ * of the user's transaction before the user's own first statement, and a failure would abort that
+ * transaction. The session schemas are read from the user's connection by the caller, outside a
+ * transaction ({@link Engine#sessionSchemas}), and passed in. No lock is held across a round trip:
+ * a stale catalog is served while one thread reloads it, and a name is resolved on the catalog
+ * connection outside the cache's lock.
  */
 public final class Catalog implements AutoCloseable {
 

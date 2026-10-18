@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "240"
 tags: [code-review, mysql, mariadb, serializable]
@@ -29,3 +29,4 @@ Splice the clause into the original sql at the same offsets (the rewrite pads, k
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 77e2295 (probes on MySQL 8.4 and MariaDB 11.4).
+- 2026-10-18: fixed: the clause is spliced into the application's own text, offsets the same; tested on MariaDB.

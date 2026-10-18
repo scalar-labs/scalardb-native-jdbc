@@ -100,8 +100,9 @@ row by row locks its rows and checks every row its `WHERE` matches for a ScalarD
 `LIMIT` aside. Any other read first locks the in-flight index of each ScalarDB table it reads, which
 holds off every ScalarDB write to the table until commit, and fails with `40001` if the table has a
 row in flight at all. A ScalarDB table in a derived table or a set operation is refused with `0AN01`,
-and so is a set operation whose operands are not in parentheses, `(SELECT ...) UNION (SELECT ...)`,
-since only those take a locking clause each.
+and so is a statement with a `#` comment, whose clause the comment would swallow. The driver puts
+the operands of a set operation in parentheses, where each takes a clause of its own, and does not
+lock `information_schema`, which MySQL refuses to.
 
 `TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. The two levels on SQL Server and
 Oracle are accepted, but every statement on a ScalarDB table is refused with `0AN01` there for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot

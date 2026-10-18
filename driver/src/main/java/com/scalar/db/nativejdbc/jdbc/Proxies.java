@@ -221,9 +221,14 @@ public final class Proxies {
                 new StatementHandler((Statement) created(vendor, method, routed), me, this, route);
             h.keysAsked = keys;
             // only a route that depends on the in-flight counts, or on whether its anchors are
-            // recorded, is ever prepared again
+            // recorded, or a plain read, whose text a level locks on MySQL and MariaDB (todo 242),
+            // is ever prepared again
             if (method.getName().equals("prepareStatement")
-                && (route.recheckAt != 0 || route.anchoring != null)) {
+                && (route.recheckAt != 0
+                    || route.anchoring != null
+                    || (route.kind == SqlAst.Kind.SELECT
+                        && StatementHandler.plain(route)
+                        && router.locksAtSerializable()))) {
               h.preparedWith = method;
               h.preparedArgs = args.clone();
             }
@@ -632,6 +637,15 @@ public final class Proxies {
               ParameterMetaData.class,
               new ParameterHandler(created(vendor(), method, args), split));
         }
+      } else if (preparedWith != null
+          && name.startsWith("set")
+          && args != null
+          && args.length >= 2
+          && args[0] instanceof Integer) {
+        // kept to bind again when the statement is prepared again
+        Object r = forward(vendor(), method, args);
+        parameters.put((Integer) args[0], new Call(method, args));
+        return r;
       }
       if (takesSql && name.equals("addBatch")) {
         Router.Route route = owner.route((String) args[0]);
@@ -1151,8 +1165,29 @@ public final class Proxies {
           && !unwrapped
           && !vendor().isClosed()
           && !batchPending
-          && old.parameterSources != null
-          && old.parameterSources.equals(now.parameterSources);
+          && (old.parameterSources != null
+              ? old.parameterSources.equals(now.parameterSources)
+              : now.parameterSources == null && plain(old) && plain(now) && !streamBound());
+    }
+
+    /**
+     * Whether a route with its placeholders as the application's runs as the vendor statement
+     * alone: no checks nor anchors, as the locked form of a plain read at SERIALIZABLE (todo 242).
+     */
+    private static boolean plain(Router.Route r) {
+      return r.checks.isEmpty() && r.anchored == null && r.write == null;
+    }
+
+    /** Whether a bound value is a stream, which the vendor statement consumed and cannot replay. */
+    private boolean streamBound() {
+      for (Call c : parameters.values()) {
+        for (Object a : c.args) {
+          if (a instanceof InputStream || a instanceof Reader) {
+            return true;
+          }
+        }
+      }
+      return false;
     }
 
     /**
@@ -1172,7 +1207,11 @@ public final class Proxies {
         }
         target = fresh;
         for (Call c : parameters.values()) {
-          bind(route, c.method, c.args);
+          if (route.parameterSources == null) {
+            forward(fresh, c.method, c.args);
+          } else {
+            bind(route, c.method, c.args);
+          }
         }
       } catch (Throwable t) {
         target = old;

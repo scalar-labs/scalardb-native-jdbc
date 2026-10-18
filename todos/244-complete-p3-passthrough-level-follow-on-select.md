@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "244"
 tags: [code-review, mysql, mariadb, serializable]
@@ -27,3 +27,4 @@ Follow only statements that start with SET (or RESET).
 ## Work Log
 
 - 2026-10-18: filed by the focused review of 77e2295 (probes on MySQL 8.4 and MariaDB 11.4).
+- 2026-10-18: fixed: on MySQL/MariaDB only passthrough statements starting with SET are followed; tested.
