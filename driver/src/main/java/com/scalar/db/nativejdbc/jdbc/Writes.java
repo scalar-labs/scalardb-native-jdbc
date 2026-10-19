@@ -174,8 +174,10 @@ final class Writes {
           tables, "RETURNING on an UPDATE or DELETE of a ScalarDB table is not supported");
     }
     Names n = new Names(engine, t);
-    if (engine == Engine.MYSQL && vendor != null && shape.kind() == StatementShape.Kind.INSERT) {
-      String why = storesOtherKeys(vendor, n);
+    if ((engine == Engine.MYSQL || engine == Engine.ORACLE)
+        && vendor != null
+        && shape.kind() == StatementShape.Kind.INSERT) {
+      String why = engine == Engine.ORACLE ? oracleTrigger(vendor, n) : storesOtherKeys(vendor, n);
       if (why != null) {
         throw refused(tables, why);
       }
@@ -214,6 +216,26 @@ final class Writes {
   }
 
   /**
+   * Why Oracle may store other key values than an INSERT gives, as MySQL may (todo 201): a BEFORE
+   * INSERT trigger on the data table; null when there is none.
+   */
+  private static @Nullable String oracleTrigger(Connection vendor, Names n) throws SQLException {
+    try (PreparedStatement ps =
+        vendor.prepareStatement(
+            "SELECT 1 FROM all_triggers WHERE table_owner = ? AND table_name = ? AND"
+                + " triggering_event LIKE '%INSERT%' AND trigger_type LIKE 'BEFORE%'")) {
+      ps.setString(1, n.namespace);
+      ps.setString(2, n.dataTable);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next()
+            ? "an INSERT of a ScalarDB table whose data table has a BEFORE INSERT trigger is not"
+                + " supported on Oracle"
+            : null;
+      }
+    }
+  }
+
+  /**
    * The data table's columns in their own order with their types (todos 203, 208), an
    * AUTO_INCREMENT one's followed by {@code " auto_increment"} (todo 218).
    */
@@ -221,15 +243,19 @@ final class Writes {
     Map<String, String> out = new LinkedHashMap<>();
     try (PreparedStatement ps =
         vendor.prepareStatement(
-            "SELECT column_name, data_type, "
-                + (n.engine == Engine.POSTGRESQL
-                    ? "FALSE"
-                    : n.engine == Engine.SQLSERVER
-                        ? "COLUMNPROPERTY(OBJECT_ID(QUOTENAME(table_schema) + '.'"
-                            + " + QUOTENAME(table_name)), column_name, 'IsIdentity')"
-                        : "extra LIKE '%auto_increment%'")
-                + " FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER"
-                + " BY ordinal_position")) {
+            n.engine == Engine.ORACLE
+                ? "SELECT column_name, data_type, CASE identity_column WHEN 'YES' THEN 1 ELSE 0"
+                    + " END FROM all_tab_columns WHERE owner = ? AND table_name = ? ORDER BY"
+                    + " column_id"
+                : "SELECT column_name, data_type, "
+                    + (n.engine == Engine.POSTGRESQL
+                        ? "FALSE"
+                        : n.engine == Engine.SQLSERVER
+                            ? "COLUMNPROPERTY(OBJECT_ID(QUOTENAME(table_schema) + '.'"
+                                + " + QUOTENAME(table_name)), column_name, 'IsIdentity')"
+                            : "extra LIKE '%auto_increment%'")
+                    + " FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER"
+                    + " BY ordinal_position")) {
       ps.setString(1, n.namespace);
       ps.setString(2, n.dataTable);
       try (ResultSet rs = ps.executeQuery()) {
@@ -560,12 +586,13 @@ final class Writes {
 
   /**
    * Whether a column is single precision: FLOAT on MySQL and MariaDB, REAL on PostgreSQL and SQL
-   * Server, where FLOAT is double.
+   * Server, where FLOAT is double, BINARY_FLOAT on Oracle.
    */
   private static boolean isFloat(
       Engine engine, @Nullable Map<String, String> columns, String column) {
     String type = type(engine, columns, column).replace(" auto_increment", "");
     return type.equals("real")
+        || type.equals("binary_float")
         || (type.equals("float") && (engine == Engine.MYSQL || engine == Engine.MARIADB));
   }
 
@@ -646,7 +673,9 @@ final class Writes {
       return null;
     }
     String data = engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
-    String as = ref.hasAlias() || !alias ? "" : " AS " + ref.name();
+    // a table alias: PostgreSQL's INSERT takes it with AS only, Oracle takes no AS
+    String as =
+        ref.hasAlias() || !alias ? "" : (engine == Engine.ORACLE ? " " : " AS ") + ref.name();
     String before = text.substring(0, span[0]);
     if (engine == Engine.SQLSERVER && ast.statement() instanceof Update) {
       // SQL Server's UPDATE takes no alias: UPDATE alias SET ... FROM table AS alias WHERE ...
@@ -730,14 +759,21 @@ final class Writes {
 
   /** A query with a row when {@code select} has one, and with none when it has none. */
   static String anyRow(Engine engine, String select) {
-    return engine == Engine.SQLSERVER
-        ? "SELECT 1 WHERE EXISTS (" + select + ")"
-        : select + " LIMIT 1";
+    switch (engine) {
+      case SQLSERVER:
+        return "SELECT 1 WHERE EXISTS (" + select + ")";
+      case ORACLE:
+        return "SELECT 1 FROM dual WHERE EXISTS (" + select + ")";
+      default:
+        return select + " LIMIT 1";
+    }
   }
 
-  /** Releases a savepoint; SQL Server's driver cannot, and the transaction's end does. */
+  /**
+   * Releases a savepoint; SQL Server's and Oracle's drivers cannot, and the transaction's end does.
+   */
   static void release(Engine engine, Connection vendor, Savepoint sp) throws SQLException {
-    if (engine != Engine.SQLSERVER) {
+    if (engine != Engine.SQLSERVER && engine != Engine.ORACLE) {
       vendor.releaseSavepoint(sp);
     }
   }
@@ -877,20 +913,26 @@ final class Writes {
 
     /** As {@link #prepare(String)}; a scrollable one's rows can be read twice. */
     PreparedStatement prepare(String sql, boolean scrollable) throws SQLException {
-      return prepare(sql, scrollable, false);
+      return prepare(sql, scrollable, null);
     }
 
-    /** As {@link #prepare(String, boolean)}, reporting the keys the database generates. */
-    private PreparedStatement prepare(String sql, boolean scrollable, boolean generated)
+    /**
+     * As {@link #prepare(String, boolean)}, reporting the keys the database generates: those of
+     * {@code generated}'s columns, or the vendor's choice when it names none, as MySQL reports its
+     * AUTO_INCREMENT and Oracle a ROWID unless asked for columns.
+     */
+    private PreparedStatement prepare(String sql, boolean scrollable, String @Nullable [] generated)
         throws SQLException {
       checkCancelled();
       PreparedStatement ps =
           scrollable
               ? v.prepareStatement(
                   sql, ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY)
-              : generated
-                  ? v.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)
-                  : v.prepareStatement(sql);
+              : generated == null
+                  ? v.prepareStatement(sql)
+                  : generated.length == 0
+                      ? v.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)
+                      : v.prepareStatement(sql, generated);
       try {
         if (deadline != 0) {
           long left = deadline - System.nanoTime();
@@ -914,11 +956,11 @@ final class Writes {
 
     PreparedStatement prepare(Step step, Object @Nullable [] key, boolean scrollable)
         throws SQLException {
-      return prepare(step, key, scrollable, false);
+      return prepare(step, key, scrollable, null);
     }
 
     PreparedStatement prepare(
-        Step step, Object @Nullable [] key, boolean scrollable, boolean generated)
+        Step step, Object @Nullable [] key, boolean scrollable, String @Nullable [] generated)
         throws SQLException {
       PreparedStatement ps = prepare(step.sql, scrollable, generated);
       try {
@@ -1430,11 +1472,16 @@ final class Writes {
           if (!autoIncrement(run)) {
             throw Errors.unsupported(
                 "an INSERT of a ScalarDB table that leaves out its key needs an AUTO_INCREMENT"
-                    + " key on this engine");
+                    + " or IDENTITY key on this engine");
           }
           // ponytail: the vendor driver numbers the rows from the first value by the increment it
           // read at connect; a session that changes auto_increment_increment gets wrong keys
-          ps = run.prepare(insert, null, false, true);
+          ps =
+              run.prepare(
+                  insert,
+                  null,
+                  false,
+                  n.engine == Engine.ORACLE ? n.keyColumns.toArray(new String[0]) : new String[0]);
           long count = ps.executeLargeUpdate();
           try (ResultSet k = ps.getGeneratedKeys()) {
             while (k.next()) {
@@ -1536,9 +1583,9 @@ final class Writes {
       return keys.rows.size();
     }
 
-    /** Whether the database generates the key: MySQL, keys not read back. */
+    /** Whether the database generates the key: MySQL or Oracle, keys not read back. */
     private boolean generated() {
-      return n.engine == Engine.MYSQL && readBack.isEmpty();
+      return (n.engine == Engine.MYSQL || n.engine == Engine.ORACLE) && readBack.isEmpty();
     }
 
     private boolean autoIncrement(Run run) throws SQLException {
@@ -1546,8 +1593,11 @@ final class Writes {
       if (known == null) {
         try (PreparedStatement ps =
             run.v.prepareStatement(
-                "SELECT 1 FROM information_schema.columns WHERE table_schema = ? AND table_name = ?"
-                    + " AND column_name = ? AND extra LIKE '%auto_increment%'")) {
+                n.engine == Engine.ORACLE
+                    ? "SELECT 1 FROM all_tab_identity_cols WHERE owner = ? AND table_name = ? AND"
+                        + " column_name = ?"
+                    : "SELECT 1 FROM information_schema.columns WHERE table_schema = ? AND"
+                        + " table_name = ? AND column_name = ? AND extra LIKE '%auto_increment%'")) {
           ps.setString(1, n.namespace);
           ps.setString(2, n.dataTable);
           ps.setString(3, n.keyColumns.get(0));
@@ -1571,6 +1621,26 @@ final class Writes {
         String m = e.getMessage();
         return e.getErrorCode() == 2627
             && (m == null || m.contains("PRIMARY KEY") || !m.contains("UNIQUE KEY"));
+      }
+      if (n.engine == Engine.ORACLE) {
+        // "ORA-00001: unique constraint (OWNER.NAME) violated ...": the constraint's type
+        String m = e.getMessage();
+        int open = m == null ? -1 : m.indexOf("constraint (");
+        int close = open < 0 ? -1 : m.indexOf(')', open);
+        int dot = close < 0 ? -1 : m.lastIndexOf('.', close);
+        if (dot < open) {
+          return true;
+        }
+        try (PreparedStatement ps =
+            run.v.prepareStatement(
+                "SELECT constraint_type FROM all_constraints WHERE owner = ? AND"
+                    + " constraint_name = ?")) {
+          ps.setString(1, m.substring(open + "constraint (".length(), dot));
+          ps.setString(2, m.substring(dot + 1, close));
+          try (ResultSet rs = ps.executeQuery()) {
+            return !rs.next() || "P".equals(rs.getString(1));
+          }
+        }
       }
       if (n.engine == Engine.MYSQL || n.engine == Engine.MARIADB) {
         // "Duplicate entry '1' for key 'PRIMARY'", the key qualified by the table on MySQL
@@ -1685,7 +1755,9 @@ final class Writes {
     if (request instanceof String[]) {
       List<String> names = new ArrayList<>();
       for (String c : (String[]) request) {
-        names.add(plan.n.engine.quote(c));
+        // ojdbc reads a name as Oracle reads it unquoted, folded to upper case
+        boolean folds = plan.n.engine == Engine.ORACLE && c.matches("[A-Za-z][A-Za-z0-9_$#]*");
+        names.add(plan.n.engine.quote(folds ? c.toUpperCase(Locale.ROOT) : c));
       }
       items = names.isEmpty() ? null : String.join(", ", names);
     } else if (request instanceof int[]) {
@@ -1723,14 +1795,14 @@ final class Writes {
                 + (items.equals("*") ? q + ".*" : items)
                 + " FROM "
                 + n.data
-                + " AS "
+                + " "
                 + q
-                + (n.engine == Engine.SQLSERVER ? " WHERE 1 = 0" : " WHERE FALSE")
+                + " WHERE 1 = 0"
             : "SELECT "
                 + (items.equals("*") ? q + ".*" : items)
                 + " FROM "
                 + n.data
-                + " AS "
+                + " " // a table alias without AS, which Oracle has not
                 + q
                 + " JOIN "
                 + n.keyValues(keys.types, keys.rows.size())
@@ -1932,6 +2004,8 @@ final class Writes {
           return new SQLException(message, "HY000", 1205);
         case SQLSERVER:
           return new SQLException(message, "S0005", 1222);
+        case ORACLE:
+          return new SQLException(message, "61000", 54);
         default:
           return new SQLException(message, "55P03");
       }
@@ -2118,7 +2192,10 @@ final class Writes {
      */
     String key(String q, String k) {
       String c = (q.isEmpty() ? "" : q + ".") + engine.quote(k);
-      return engine != Engine.POSTGRESQL && floatKeys.contains(k) ? "(" + c + " + 0E0)" : c;
+      if (engine == Engine.POSTGRESQL || !floatKeys.contains(k)) {
+        return c;
+      }
+      return engine == Engine.ORACLE ? "TO_BINARY_DOUBLE(" + c + ")" : "(" + c + " + 0E0)";
     }
 
     /** {@code k1 = ? AND k2 = ?}. */
@@ -2152,6 +2229,10 @@ final class Writes {
         for (int j = 0; j < types.size(); j++) {
           first.append(", ? AS ").append(engine.quote("scalardb_native_k" + j));
           rest.append(", ?");
+        }
+        if (engine == Engine.ORACLE) {
+          first.append(" FROM dual");
+          rest.append(" FROM dual");
         }
         List<String> rows = new ArrayList<>(List.of(first.toString()));
         for (int i = 1; i < count; i++) {
@@ -2291,6 +2372,9 @@ final class Writes {
         case SQLSERVER:
           // IS DISTINCT FROM is SQL Server 2022's
           return "EXISTS (SELECT " + column + " EXCEPT SELECT ?)";
+        case ORACLE:
+          // DECODE takes two NULLs as equal; Oracle has no IS DISTINCT FROM
+          return "DECODE(" + column + ", ?, 0, 1) = 1";
         default:
           return "NOT (" + column + " <=> ?)";
       }
@@ -2333,8 +2417,15 @@ final class Writes {
       // IGNORE also turns data errors into warnings, which rows the driver builds do not have
       boolean pg = engine == Engine.POSTGRESQL;
       boolean mssql = engine == Engine.SQLSERVER;
-      return (pg || mssql ? "INSERT INTO " : "INSERT IGNORE INTO ")
+      boolean oracle = engine == Engine.ORACLE;
+      // Oracle's hint skips a key that has a row, waiting on one being inserted, as IGNORE does
+      return (pg || mssql
+              ? "INSERT INTO "
+              : oracle
+                  ? "INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (" + columns("") + ")) */ INTO "
+                  : "INSERT IGNORE INTO ")
           + meta
+          + (oracle ? " x" : "")
           + " ("
           + columns("")
           + ", "

@@ -912,6 +912,22 @@ public final class Proxies {
       }
     }
 
+    /**
+     * Closes the vendor statement's current result set, if any: ojdbc fails to report none for a
+     * statement not executed yet (ORA-17144).
+     */
+    private void closeCurrentResult() throws SQLException {
+      ResultSet open;
+      try {
+        open = vendor().getResultSet();
+      } catch (SQLException e) {
+        return;
+      }
+      if (open != null) {
+        open.close();
+      }
+    }
+
     /** Runs a write the driver plans, and answers as the vendor's statement would. */
     private @Nullable Object runWrite(
         Object proxy, String name, @Nullable Object[] args, Router.Route route)
@@ -924,10 +940,7 @@ public final class Proxies {
       String keys =
           bound ? keysAsked : asksForGeneratedKeys(args) ? Writes.keysAsked(plan, args[1]) : null;
       // an execute closes the statement's current result set
-      ResultSet open = vendor().getResultSet();
-      if (open != null) {
-        open.close();
-      }
+      closeCurrentResult();
       Writes.Keys inserted = new Writes.Keys();
       Out out = new Out();
       Writes.Context context = writeContext(bound ? parameters : null, inserted, out);
@@ -1093,10 +1106,7 @@ public final class Proxies {
         IntFunction<@Nullable Map<Integer, Call>> parameters,
         @Nullable String keys)
         throws SQLException {
-      ResultSet open = vendor().getResultSet();
-      if (open != null) {
-        open.close();
-      }
+      closeCurrentResult();
       for (int i = 0; i < size; i++) {
         Writes.Plan plan = routes.apply(i).write;
         if (plan != null && plan.returnsRows()) {

@@ -31,9 +31,11 @@ public final class Rows {
     try (Statement st = c.createStatement()) {
       return rows(
           st.executeQuery(
-              c.getMetaData().getDatabaseProductName().equals("Microsoft SQL Server")
-                  ? tsql(sql)
-                  : sql));
+              switch (c.getMetaData().getDatabaseProductName()) {
+                case "Microsoft SQL Server" -> tsql(sql);
+                case "Oracle" -> oracle(sql);
+                default -> sql;
+              }));
     }
   }
 
@@ -46,6 +48,30 @@ public final class Rows {
       Pattern.compile(
           "(?i)\\bFROM\\s+[\\w.\\[\\]]+(\\s+(?:AS\\s+)?(?!WHERE\\b|ORDER\\b|JOIN\\b|GROUP\\b|LEFT\\b"
               + "|INNER\\b|ON\\b)\\w+)?");
+
+  /**
+   * A test's query in Oracle's dialect: LIMIT, with its OFFSET, as {@code OFFSET ... FETCH}, before
+   * a trailing locking clause, which Oracle takes after it.
+   *
+   * @param sql a query with PostgreSQL's and MySQL's clauses
+   * @return the query as Oracle takes it
+   */
+  public static String oracle(String sql) {
+    Matcher m = ORACLE_LIMIT.matcher(sql);
+    if (!m.find()) {
+      return sql;
+    }
+    String offset = m.group(2) == null ? "" : " OFFSET " + m.group(2) + " ROWS";
+    return sql.substring(0, m.start())
+        + offset
+        + " FETCH NEXT "
+        + m.group(1)
+        + " ROWS ONLY"
+        + sql.substring(m.end());
+  }
+
+  private static final Pattern ORACLE_LIMIT =
+      Pattern.compile("(?i)\\s+LIMIT\\s+(\\d+)(?:\\s+OFFSET\\s+(\\d+))?(?=\\s+FOR\\s|\\s*;?$)");
 
   /**
    * A test's query in T-SQL: its trailing locking clause as table hints on the first table it

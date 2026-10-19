@@ -172,9 +172,9 @@ public enum Engines {
     return engine;
   }
 
-  /** Whether the driver writes ScalarDB tables on this engine yet (milestone 8). */
+  /** Whether the driver writes ScalarDB tables on this engine: every one since milestone 8d1. */
   public boolean writes() {
-    return engine != Engine.ORACLE;
+    return true;
   }
 
   private Started started() throws SQLException {
@@ -329,7 +329,11 @@ public enum Engines {
       return "generate_series(" + from + ", " + to + ") g";
     }
     if (engine == Engine.ORACLE) {
-      throw new UnsupportedOperationException(engine + " (milestone 8)");
+      return "(SELECT LEVEL + "
+          + (from - 1)
+          + " AS g FROM dual CONNECT BY LEVEL <= "
+          + (to - from + 1)
+          + ") g";
     }
     // a digit per power of ten, cross joined: MySQL limits a recursive CTE to 1,000 rows
     String digits =
@@ -353,9 +357,13 @@ public enum Engines {
         + ") g";
   }
 
-  /** A test's statement in the engine's dialect: T-SQL's hints and paging on SQL Server. */
+  /** A test's statement in the engine's dialect: T-SQL's hints and paging, Oracle's paging. */
   public String sql(String statement) {
-    return engine == Engine.SQLSERVER ? Rows.tsql(statement) : statement;
+    return switch (engine) {
+      case SQLSERVER -> Rows.tsql(statement);
+      case ORACLE -> Rows.oracle(statement);
+      default -> statement;
+    };
   }
 
   /** A binary column type. */
@@ -369,12 +377,18 @@ public enum Engines {
 
   /** A text column type that compares with {@code =}, which SQL Server's TEXT does not. */
   public String textType() {
-    return engine == Engine.SQLSERVER ? "VARCHAR(400)" : "TEXT";
+    return switch (engine) {
+      case SQLSERVER -> "VARCHAR(400)";
+      case ORACLE -> "VARCHAR2(400)";
+      default -> "TEXT";
+    };
   }
 
   /** A predicate that calls a function of {@link #pauseFunction}. */
   public String paused(String name) {
-    return engine == Engine.SQLSERVER ? name + "() = 1" : "(SELECT " + name + "())";
+    return engine == Engine.SQLSERVER || engine == Engine.ORACLE
+        ? name + "() = 1"
+        : "(SELECT " + name + "())";
   }
 
   /**
@@ -382,6 +396,13 @@ public enum Engines {
    * call: a window inside a running statement.
    */
   public String pauseFunction(String name, int seconds) {
+    if (engine == Engine.ORACLE) {
+      return "CREATE OR REPLACE FUNCTION "
+          + name
+          + " RETURN NUMBER IS BEGIN DBMS_SESSION.SLEEP("
+          + seconds
+          + "); RETURN 1; END;";
+    }
     if (engine == Engine.SQLSERVER) {
       // a function cannot WAITFOR there: it spins
       return "CREATE FUNCTION "
@@ -406,6 +427,10 @@ public enum Engines {
 
   /** A query with a row while some session sleeps in a function of {@link #pauseFunction}. */
   public String sleeping() {
+    if (engine == Engine.ORACLE) {
+      return "SELECT 1 FROM v$session WHERE event = 'PL/SQL lock timer'"
+          + " AND sid <> SYS_CONTEXT('USERENV', 'SID')";
+    }
     if (engine == Engine.SQLSERVER) {
       return "SELECT 1 FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t"
           + " WHERE r.session_id <> @@SPID AND t.text LIKE '%pause()%'"

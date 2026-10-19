@@ -547,11 +547,6 @@ final class Router {
       names.add(t.namespace() + "." + t.table());
     }
     String tables = " (" + String.join(", ", names) + ")";
-    if (!writes()) {
-      throw Errors.unsupported(
-          "writes of ScalarDB tables are supported on PostgreSQL, MySQL and MariaDB only so far"
-              + tables);
-    }
     if (!levelSupported()) {
       throw Errors.unsupported(LEVELS + tables);
     }
@@ -603,8 +598,7 @@ final class Router {
   private SqlAst.@Nullable TableRef lockable(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
     Optional<StatementShape> shape = StatementShape.of(ast);
-    if (!writes()
-        || scalarDb.size() != 1
+    if (scalarDb.size() != 1
         || shape.isEmpty()
         || shape.get().kind() != StatementShape.Kind.SELECT
         || !ast.rowPerRow()
@@ -626,7 +620,7 @@ final class Router {
    * anchored.
    */
   private List<SqlAst.TableRef> anchorable(SqlAst ast, SqlAst.Split split) {
-    if (!writes() || !ast.rowPerRow()) {
+    if (!ast.rowPerRow()) {
       return List.of();
     }
     List<SqlAst.TableRef> out = new ArrayList<>();
@@ -639,11 +633,6 @@ final class Router {
       }
     }
     return out;
-  }
-
-  /** Whether the engine runs the driver's writes, and so its anchors and locking reads. */
-  private boolean writes() {
-    return engine != Engine.ORACLE;
   }
 
   /**
@@ -780,6 +769,13 @@ final class Router {
           (mode == ForMode.UPDATE ? "UPDLOCK" : "REPEATABLEREAD")
               + ", ROWLOCK"
               + (shape.noWait() || shape.skipLocked() ? ", NOWAIT" : "");
+    } else if (engine == Engine.ORACLE) {
+      // the clause stays at the end, as on PostgreSQL: Oracle takes it on the outer query only,
+      // and locks there the rows of the committed copy's data table that the predicate matches
+      if (mode != ForMode.UPDATE) {
+        throw Errors.unsupported(
+            "only FOR UPDATE locks a ScalarDB table on Oracle, which has no FOR SHARE" + tables);
+      }
     } else if (engine != Engine.POSTGRESQL) {
       boolean update = mode == ForMode.UPDATE;
       if (!update && mode != ForMode.SHARE) {

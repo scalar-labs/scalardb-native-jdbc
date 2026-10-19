@@ -3396,6 +3396,24 @@ public final class SqlAst {
     // the last copy, every table at its last piece, holds
     int lastCopy = countInner(split) == split.places.size() ? 0 : copies.size() - 1;
     PlainSelect s = (PlainSelect) statement;
+    if (engine == Engine.ORACLE && !copies.get(0).selectExtra().isEmpty()) {
+      // Oracle takes no bare * beside another item: each FROM item's columns, by its name
+      for (SelectItem<?> item : s.getSelectItems()) {
+        if (item.getExpression() instanceof AllColumns
+            && !(item.getExpression() instanceof AllTableColumns)) {
+          String all = qualifiedStar(s);
+          Node n = item.getASTNode();
+          Token star = n == null ? null : n.jjtGetFirstToken();
+          if (all == null || star == null) {
+            return null;
+          }
+          for (Edits e : edits) {
+            e.from.put(star, all);
+            e.to.put(star, star);
+          }
+        }
+      }
+    }
     Grouping grouping = null;
     if (isGrouped(s)) {
       grouping = grouping(s);
@@ -3523,6 +3541,32 @@ public final class SqlAst {
             && (lastCopy == 0 || parses(head + texts.get(lastCopy) + end))
         : head + texts.get(lastCopy) + end;
     return checked(head + String.join(" UNION ALL ", texts) + end, sources);
+  }
+
+  /**
+   * {@code *} as {@code a.*, b.*}: each FROM item's columns by the name it is exposed by, in order;
+   * null where that is not what {@code *} is, a join USING or NATURAL, or an item has no name.
+   */
+  private static @Nullable String qualifiedStar(PlainSelect s) {
+    List<FromItem> from = new ArrayList<>(List.of(s.getFromItem()));
+    if (s.getJoins() != null) {
+      for (Join j : s.getJoins()) {
+        if (j.isNatural() || (j.getUsingColumns() != null && !j.getUsingColumns().isEmpty())) {
+          return null;
+        }
+        from.add(j.getFromItem());
+      }
+    }
+    List<String> out = new ArrayList<>();
+    for (FromItem f : from) {
+      Alias a = f.getAlias();
+      String name = a != null ? a.getName() : f instanceof Table ? ((Table) f).getName() : null;
+      if (name == null) {
+        return null;
+      }
+      out.add(name + ".*");
+    }
+    return String.join(", ", out);
   }
 
   /** The label of a copy's appended select item {@code i}. */

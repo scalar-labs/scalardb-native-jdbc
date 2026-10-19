@@ -528,7 +528,13 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
     under concurrency, `getGeneratedKeys` on the data table, and which of 23's additions (`BOOLEAN`,
     `IF NOT EXISTS`) the driver may use without excluding older releases. The write, review and
     interleaving tests run on Oracle, the tests' `LIMIT` and `FOR SHARE` through a fixture as for
-    SQL Server.
+    SQL Server. **Done (2026-10-19).** As planned, with these found on the engine: no `AS` before a
+    table alias and no bare `*` beside other items, which the driver now writes per table; the
+    metadata rows by `IGNORE_ROW_ON_DUPKEY_INDEX`; the locking read on PostgreSQL's path, since
+    Oracle takes `FOR UPDATE` on the outer query only; `getResultSet` failing on a statement not
+    executed (ORA-17144). The tests give ScalarDB upper-case names and BIGINT integers on Oracle
+    (`ScalarDbNames`), since its SQL folds names and ScalarDB imports a `NUMBER` as BIGINT only;
+    the query timeout's test is skipped there, the containerised server taking no cancel.
   - **8d2: SNAPSHOT**, Oracle's SERIALIZABLE; `TRANSACTION_SERIALIZABLE` refused with `0AN01` in
     `setTransactionIsolation`, naming `TRANSACTION_REPEATABLE_READ`, and reported unsupported by
     `DatabaseMetaData.supportsTransactionIsolationLevel`. First-committer-wins is native,

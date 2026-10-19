@@ -1,5 +1,10 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.M;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.N;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.Q;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.id;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.intType;
 import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -17,7 +22,6 @@ import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.api.Update;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.io.DataType;
-import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
@@ -73,26 +77,27 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void writes_onBothLayouts(Engines e) throws Exception {
+    ScalarDbNames.on(e);
     assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
           e.createSchema("wr"),
-          "CREATE TABLE wr.imp (id INT PRIMARY KEY, x VARCHAR(10))",
+          "CREATE TABLE wr.imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
           "INSERT INTO wr.imp VALUES (1, 'a'), (2, 'b'), (3, 'c')");
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
-      admin.createNamespace("wr", true);
-      admin.importTable("wr", "imp", DECOUPLED, Map.of());
+      admin.createNamespace(N("wr"), true);
+      admin.importTable(N("wr"), N("imp"), DECOUPLED, Map.of());
       admin.createTable(
-          "wr",
-          "made",
+          N("wr"),
+          N("made"),
           TableMetadata.newBuilder()
-              .addColumn("id", DataType.INT)
-              .addColumn("x", DataType.TEXT)
-              .addPartitionKey("id")
+              .addColumn(N("id"), intType())
+              .addColumn(N("x"), DataType.TEXT)
+              .addPartitionKey(N("id"))
               .build(),
           DECOUPLED);
     }
@@ -101,10 +106,10 @@ class WriteIntegrationTest {
       for (int i = 1; i <= 3; i++) {
         tx.insert(
             Insert.newBuilder()
-                .namespace("wr")
-                .table("made")
-                .partitionKey(Key.ofInt("id", i))
-                .textValue("x", String.valueOf((char) ('a' + i - 1)))
+                .namespace(N("wr"))
+                .table(N("made"))
+                .partitionKey(id(i))
+                .textValue(N("x"), String.valueOf((char) ('a' + i - 1)))
                 .build());
       }
       tx.commit();
@@ -113,16 +118,18 @@ class WriteIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals("wr"), Duration.ofMinutes(1), List.of()))
+                  catalog, c, t -> t.namespace().equals(N("wr")), Duration.ofMinutes(1), List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
-    TableInfo imp = catalog.lookup(List.of(), "wr", "imp");
-    TableInfo made = catalog.lookup(List.of(), "wr", "made");
+    TableInfo imp = catalog.lookup(List.of(), N("wr"), N("imp"));
+    TableInfo made = catalog.lookup(List.of(), N("wr"), N("made"));
     List<Table> tables =
         List.of(
             new Table(
-                "wr.imp", "wr." + imp.metadataTable(), Objects.requireNonNull(imp.virtualTable())),
-            new Table("wr.made", "wr." + made.metadataTable(), "made"));
+                "wr.imp",
+                "wr." + Q(imp.metadataTable()),
+                Objects.requireNonNull(imp.virtualTable())),
+            new Table("wr.made", "wr." + Q(made.metadataTable()), N("made")));
     try (DistributedTransactionManager tm = scalarDb.getTransactionManager();
         TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager()) {
       for (Table t : tables) {
@@ -136,8 +143,8 @@ class WriteIntegrationTest {
 
   /** Makes {@code schema} the session's for unqualified names: a database on MySQL. */
   private static void setSchema(Engines e, Connection d, String schema) throws SQLException {
-    if (e.engine() == Engine.POSTGRESQL) {
-      d.setSchema(schema);
+    if (e.engine() == Engine.POSTGRESQL || e.engine() == Engine.ORACLE) {
+      d.setSchema(N(schema));
     } else {
       d.setCatalog(schema);
     }
@@ -187,7 +194,7 @@ class WriteIntegrationTest {
     }
     // ScalarDB reads the driver's writes as committed values
     try (Connection v = e.open()) {
-      assertThat(rows(v, "SELECT tx_state, tx_version FROM " + t.meta + " WHERE id = 10"))
+      assertThat(rows(v, M("SELECT tx_state, tx_version FROM ") + t.meta + " WHERE id = 10"))
           .containsExactly("3/2");
       // a DELETE on an imported table keeps the metadata row as a tombstone (4.5, todo 132)
       assertThat(rows(v, "SELECT COUNT(*) FROM " + t.meta + " WHERE id = 12"))
@@ -197,21 +204,16 @@ class WriteIntegrationTest {
     assertThat(scalarDbX(tm, t, 12)).isEmpty();
     // a ScalarDB update that read the row before the driver wrote it cannot commit
     DistributedTransaction tx = tm.begin();
-    tx.get(
-        Get.newBuilder()
-            .namespace("wr")
-            .table(t.scalarDbName)
-            .partitionKey(Key.ofInt("id", 11))
-            .build());
+    tx.get(Get.newBuilder().namespace(N("wr")).table(t.scalarDbName).partitionKey(id(11)).build());
     try (Connection d = e.openDriver()) {
       d.createStatement().executeUpdate("UPDATE " + t.sql + " SET x = 'driver' WHERE id = 11");
     }
     tx.update(
         Update.newBuilder()
-            .namespace("wr")
+            .namespace(N("wr"))
             .table(t.scalarDbName)
-            .partitionKey(Key.ofInt("id", 11))
-            .textValue("x", "scalardb")
+            .partitionKey(id(11))
+            .textValue(N("x"), "scalardb")
             .build());
     assertThatThrownBy(tx::commit).isInstanceOf(TransactionException.class);
     assertThat(scalarDbX(tm, t, 11)).contains("driver");
@@ -222,10 +224,10 @@ class WriteIntegrationTest {
     TwoPhaseCommitTransaction tx = tpc.begin();
     tx.update(
         Update.newBuilder()
-            .namespace("wr")
+            .namespace(N("wr"))
             .table(t.scalarDbName)
-            .partitionKey(Key.ofInt("id", 1))
-            .textValue("x", "held")
+            .partitionKey(id(1))
+            .textValue(N("x"), "held")
             .build());
     tx.prepare();
     try (Connection d = e.openDriver()) {
@@ -278,10 +280,10 @@ class WriteIntegrationTest {
       TwoPhaseCommitTransaction tx = tpc.begin();
       tx.insert(
           Insert.newBuilder()
-              .namespace("wr")
+              .namespace(N("wr"))
               .table(t.scalarDbName)
-              .partitionKey(Key.ofInt("id", 20))
-              .textValue("x", "s")
+              .partitionKey(id(20))
+              .textValue(N("x"), "s")
               .build());
       tx.prepare();
       try {
@@ -316,7 +318,7 @@ class WriteIntegrationTest {
       assertThat(
               rows(
                   v,
-                  "SELECT id, tx_state, tx_version FROM "
+                  M("SELECT id, tx_state, tx_version FROM ")
                       + t.meta
                       + " WHERE id IN (30, 31) ORDER BY id"))
           .containsExactly("30/3/1", "31/3/1");
@@ -327,9 +329,9 @@ class WriteIntegrationTest {
     assertThat(
             tx.get(
                 Get.newBuilder()
-                    .namespace("wr")
+                    .namespace(N("wr"))
                     .table(t.scalarDbName)
-                    .partitionKey(Key.ofInt("id", 32))
+                    .partitionKey(id(32))
                     .build()))
         .isPresent();
     try (Connection d = e.openDriver()) {
@@ -337,15 +339,15 @@ class WriteIntegrationTest {
           .isEqualTo(1);
     }
     try (Connection v = e.open()) {
-      assertThat(rows(v, "SELECT tx_state, tx_version FROM " + t.meta + " WHERE id = 32"))
+      assertThat(rows(v, M("SELECT tx_state, tx_version FROM ") + t.meta + " WHERE id = 32"))
           .containsExactly("3/1");
     }
     tx.update(
         Update.newBuilder()
-            .namespace("wr")
+            .namespace(N("wr"))
             .table(t.scalarDbName)
-            .partitionKey(Key.ofInt("id", 32))
-            .textValue("x", "back")
+            .partitionKey(id(32))
+            .textValue(N("x"), "back")
             .build());
     assertThatThrownBy(tx::commit).isInstanceOf(TransactionException.class);
     assertThat(scalarDbX(tm, t, 32)).isEmpty();
@@ -357,7 +359,7 @@ class WriteIntegrationTest {
           .isEqualTo(1);
     }
     try (Connection v = e.open()) {
-      assertThat(rows(v, "SELECT tx_state, tx_version FROM " + t.meta + " WHERE id = 32"))
+      assertThat(rows(v, M("SELECT tx_state, tx_version FROM ") + t.meta + " WHERE id = 32"))
           .containsExactly("3/2");
     }
     assertThat(scalarDbX(tm, t, 32)).contains("again");
@@ -367,18 +369,21 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void reviewFindings(Engines e) throws Exception {
+    ScalarDbNames.on(e);
     assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
-          "CREATE SCHEMA rpl",
-          "CREATE SCHEMA rsd",
-          "CREATE SCHEMA rf",
-          "CREATE TABLE rpl.t (id INT PRIMARY KEY, x " + e.textType() + ")",
+          e.createSchema("rpl"),
+          e.createSchema("rsd"),
+          e.createSchema("rf"),
+          "CREATE TABLE rpl.t (id " + e.intType() + " PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO rpl.t VALUES (1, 'plain')",
-          "CREATE TABLE rsd.t (id INT PRIMARY KEY, x " + e.textType() + ")",
+          "CREATE TABLE rsd.t (id " + e.intType() + " PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO rsd.t VALUES (1, 'scalardb')",
-          "CREATE TABLE rf.imp (id INT PRIMARY KEY, x "
+          "CREATE TABLE rf.imp (id "
+              + e.intType()
+              + " PRIMARY KEY, x "
               + e.textType()
               + ", b "
               + e.binaryType()
@@ -393,12 +398,15 @@ class WriteIntegrationTest {
               + switch (e.engine()) {
                 case POSTGRESQL -> "TIMESTAMP";
                 case SQLSERVER -> "DATETIME2(3)";
+                case ORACLE -> "TIMESTAMP(3)";
                 default -> "DATETIME";
               }
               + " PRIMARY KEY, x "
               + e.textType()
               + ")",
-          "INSERT INTO rf.ts VALUES ('2020-03-08 02:30:00', 'a')",
+          "INSERT INTO rf.ts VALUES ("
+              + (e.engine() == Engine.ORACLE ? "TIMESTAMP " : "")
+              + "'2020-03-08 02:30:00', 'a')",
           switch (e.engine()) {
             case POSTGRESQL ->
                 "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN AS $$ BEGIN PERFORM pg_sleep(3);"
@@ -409,6 +417,9 @@ class WriteIntegrationTest {
                     + " DECLARE @t DATETIME2 = SYSDATETIME();"
                     + " WHILE DATEDIFF(millisecond, @t, SYSDATETIME()) < 3000 SET @t = @t;"
                     + " RETURN CASE WHEN @v = 'a' THEN 1 ELSE 0 END; END";
+            case ORACLE ->
+                "CREATE OR REPLACE FUNCTION rf.gate(v VARCHAR2) RETURN NUMBER IS BEGIN"
+                    + " DBMS_SESSION.SLEEP(3); RETURN CASE WHEN v = 'a' THEN 1 ELSE 0 END; END;";
             default ->
                 "CREATE FUNCTION rf.gate(v TEXT) RETURNS BOOLEAN NOT DETERMINISTIC NO SQL"
                     + " BEGIN DO SLEEP(3); RETURN v = 'a'; END";
@@ -417,12 +428,12 @@ class WriteIntegrationTest {
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
-      admin.createNamespace("rsd", true);
-      admin.createNamespace("rf", true);
-      admin.importTable("rsd", "t", DECOUPLED, Map.of());
-      admin.importTable("rf", "imp", DECOUPLED, Map.of());
-      admin.importTable("rf", "ch", DECOUPLED, Map.of());
-      admin.importTable("rf", "ts", DECOUPLED, Map.of());
+      admin.createNamespace(N("rsd"), true);
+      admin.createNamespace(N("rf"), true);
+      admin.importTable(N("rsd"), N("t"), DECOUPLED, Map.of());
+      admin.importTable(N("rf"), N("imp"), DECOUPLED, Map.of());
+      admin.importTable(N("rf"), N("ch"), DECOUPLED, Map.of());
+      admin.importTable(N("rf"), N("ts"), DECOUPLED, Map.of());
     }
     Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     try (Connection c = e.open()) {
@@ -430,17 +441,17 @@ class WriteIntegrationTest {
               Setup.run(
                   catalog,
                   c,
-                  t -> t.namespace().equals("rsd") || t.namespace().equals("rf"),
+                  t -> t.namespace().equals(N("rsd")) || t.namespace().equals(N("rf")),
                   Duration.ofMinutes(1),
                   List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
-    TableInfo imp = catalog.lookup(List.of(), "rf", "imp");
+    TableInfo imp = catalog.lookup(List.of(), N("rf"), N("imp"));
     Table t =
         new Table(
-            "rf.imp", "rf." + imp.metadataTable(), Objects.requireNonNull(imp.virtualTable()));
-    String sdMeta = "rsd." + catalog.lookup(List.of(), "rsd", "t").metadataTable();
-    String chMeta = "rf." + catalog.lookup(List.of(), "rf", "ch").metadataTable();
+            "rf.imp", "rf." + Q(imp.metadataTable()), Objects.requireNonNull(imp.virtualTable()));
+    String sdMeta = "rsd." + Q(catalog.lookup(List.of(), N("rsd"), N("t")).metadataTable());
+    String chMeta = "rf." + Q(catalog.lookup(List.of(), N("rf"), N("ch")).metadataTable());
 
     // 130: a prepared plain write that comes to name a ScalarDB table is refused, not run as text;
     // SQL Server resolves names through the user's default schema, which a session cannot change
@@ -456,7 +467,7 @@ class WriteIntegrationTest {
         ps.setString(1, "raw");
         assertThatThrownBy(ps::executeUpdate).hasMessageContaining("prepare it again");
         assertThat(rows(v, "SELECT x FROM rsd.t WHERE id = 1")).containsExactly("scalardb");
-        assertThat(rows(v, "SELECT tx_version FROM " + sdMeta + " WHERE id = 1"))
+        assertThat(rows(v, M("SELECT tx_version FROM ") + sdMeta + " WHERE id = 1"))
             .containsExactly("1");
       }
     }
@@ -486,27 +497,22 @@ class WriteIntegrationTest {
         e.execute(v, "INSERT INTO rf.imp (id, x) VALUES (50, 'n')");
       }
       DistributedTransaction z = tm.begin();
-      z.get(
-          Get.newBuilder()
-              .namespace("rf")
-              .table(t.scalarDbName)
-              .partitionKey(Key.ofInt("id", 50))
-              .build());
+      z.get(Get.newBuilder().namespace(N("rf")).table(t.scalarDbName).partitionKey(id(50)).build());
       try (Connection d = e.openDriver()) {
         d.createStatement().executeUpdate("UPDATE rf.imp SET x = 'u' WHERE id = 50");
         d.createStatement().executeUpdate("DELETE FROM rf.imp WHERE id = 50");
       }
       z.update(
           Update.newBuilder()
-              .namespace("rf")
+              .namespace(N("rf"))
               .table(t.scalarDbName)
-              .partitionKey(Key.ofInt("id", 50))
-              .textValue("x", "back")
+              .partitionKey(id(50))
+              .textValue(N("x"), "back")
               .build());
       assertThatThrownBy(z::commit).isInstanceOf(TransactionException.class);
       assertThat(scalarDbX(tm, t, 50)).isEmpty();
       try (Connection v = e.open()) {
-        assertThat(rows(v, "SELECT tx_state, tx_version FROM " + t.meta + " WHERE id = 50"))
+        assertThat(rows(v, M("SELECT tx_state, tx_version FROM ") + t.meta + " WHERE id = 50"))
             .containsExactly("3/2");
       }
     }
@@ -524,25 +530,29 @@ class WriteIntegrationTest {
         Connection v = e.open()) {
       assertThat(d.createStatement().executeUpdate("UPDATE rf.ch SET x = 'z' WHERE x = 'a'"))
           .isEqualTo(1);
-      assertThat(rows(v, "SELECT tx_version FROM " + chMeta)).containsExactly("2");
+      assertThat(rows(v, M("SELECT tx_version FROM ") + chMeta)).containsExactly("2");
     }
-    // 136: the query timeout bounds the write's own statements
-    try (Connection lock = e.open();
-        Connection d = e.openDriver()) {
-      lock.setAutoCommit(false);
-      rows(
-          lock,
-          e.engine() == Engine.SQLSERVER
-              ? "SELECT x FROM rf.imp WITH (UPDLOCK) WHERE id = 70"
-              : "SELECT x FROM rf.imp WHERE id = 70 FOR UPDATE");
-      Statement st = d.createStatement();
-      st.setQueryTimeout(1);
-      long t0 = System.nanoTime();
-      assertThatThrownBy(() -> st.executeUpdate("UPDATE rf.imp SET x = 't' WHERE id = 70"))
-          .isInstanceOf(SQLException.class);
-      assertThat((System.nanoTime() - t0) / 1_000_000).isLessThan(3000);
-      lock.rollback();
-      assertThat(d.getAutoCommit()).isTrue();
+    // 136: the query timeout bounds the write's own statements; not on Oracle here, whose
+    // containerised server takes no cancel at all: ojdbc's break never reaches it, and a plain
+    // DBMS_SESSION.SLEEP under a one-second timeout runs its ten seconds
+    if (e.engine() != Engine.ORACLE) {
+      try (Connection lock = e.open();
+          Connection d = e.openDriver()) {
+        lock.setAutoCommit(false);
+        rows(
+            lock,
+            e.engine() == Engine.SQLSERVER
+                ? "SELECT x FROM rf.imp WITH (UPDLOCK) WHERE id = 70"
+                : "SELECT x FROM rf.imp WHERE id = 70 FOR UPDATE");
+        Statement st = d.createStatement();
+        st.setQueryTimeout(1);
+        long t0 = System.nanoTime();
+        assertThatThrownBy(() -> st.executeUpdate("UPDATE rf.imp SET x = 't' WHERE id = 70"))
+            .isInstanceOf(SQLException.class);
+        assertThat((System.nanoTime() - t0) / 1_000_000).isLessThan(3000);
+        lock.rollback();
+        assertThat(d.getAutoCommit()).isTrue();
+      }
     }
     // 137: SQL ROLLBACK ends rollback-only; a write closes the statement's earlier result set
     try (TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();
@@ -550,10 +560,10 @@ class WriteIntegrationTest {
       TwoPhaseCommitTransaction held = tpc.begin();
       held.update(
           Update.newBuilder()
-              .namespace("rf")
+              .namespace(N("rf"))
               .table(t.scalarDbName)
-              .partitionKey(Key.ofInt("id", 85))
-              .textValue("x", "held")
+              .partitionKey(id(85))
+              .textValue(N("x"), "held")
               .build());
       held.prepare();
       try {
@@ -575,7 +585,7 @@ class WriteIntegrationTest {
     // 138: a metadata row with a tx_id and a NULL state is committed
     try (Connection d = e.openDriver();
         Connection v = e.open()) {
-      e.execute(v, "UPDATE " + t.meta + " SET tx_state = NULL WHERE id = 80");
+      e.execute(v, "UPDATE " + t.meta + M(" SET tx_state = NULL WHERE id = 80"));
       assertThat(d.createStatement().executeUpdate("UPDATE rf.imp SET x = 'n' WHERE id = 80"))
           .isEqualTo(1);
     }
@@ -599,7 +609,9 @@ class WriteIntegrationTest {
                   return d.createStatement()
                       .executeUpdate(
                           "UPDATE rf.imp SET x = 'drv' WHERE id = 60 AND "
-                              + (e.engine() == Engine.SQLSERVER ? "rf.gate(x) = 1" : "rf.gate(x)"));
+                              + (e.engine() == Engine.SQLSERVER || e.engine() == Engine.ORACLE
+                                  ? "rf.gate(x) = 1"
+                                  : "rf.gate(x)"));
                 } catch (SQLException ex) {
                   return ex;
                 }
@@ -608,10 +620,10 @@ class WriteIntegrationTest {
       TwoPhaseCommitTransaction tx = tpc.begin();
       tx.update(
           Update.newBuilder()
-              .namespace("rf")
+              .namespace(N("rf"))
               .table(t.scalarDbName)
-              .partitionKey(Key.ofInt("id", 60))
-              .textValue("x", "held")
+              .partitionKey(id(60))
+              .textValue(N("x"), "held")
               .build());
       tx.prepare();
       Thread.sleep(3000); // the per-key UPDATE reads the image in flight
@@ -625,26 +637,27 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void anchorsFromReads(Engines e) throws Exception {
+    ScalarDbNames.on(e);
     assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
-          "CREATE SCHEMA an",
-          "CREATE TABLE an.imp (id INT PRIMARY KEY, x " + e.textType() + ")",
+          e.createSchema("an"),
+          "CREATE TABLE an.imp (id " + e.intType() + " PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO an.imp SELECT g, 'a' FROM " + e.series(1, 11));
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
-      admin.createNamespace("an", true);
-      admin.importTable("an", "imp", DECOUPLED, Map.of());
+      admin.createNamespace(N("an"), true);
+      admin.importTable(N("an"), N("imp"), DECOUPLED, Map.of());
       admin.createTable(
-          "an",
-          "made",
+          N("an"),
+          N("made"),
           TableMetadata.newBuilder()
-              .addColumn("id", DataType.INT)
-              .addColumn("x", DataType.TEXT)
-              .addPartitionKey("id")
+              .addColumn(N("id"), intType())
+              .addColumn(N("x"), DataType.TEXT)
+              .addPartitionKey(N("id"))
               .build(),
           DECOUPLED);
     }
@@ -653,10 +666,10 @@ class WriteIntegrationTest {
       for (int i = 1; i <= 11; i++) {
         tx.insert(
             Insert.newBuilder()
-                .namespace("an")
-                .table("made")
-                .partitionKey(Key.ofInt("id", i))
-                .textValue("x", "a")
+                .namespace(N("an"))
+                .table(N("made"))
+                .partitionKey(id(i))
+                .textValue(N("x"), "a")
                 .build());
       }
       tx.commit();
@@ -665,18 +678,20 @@ class WriteIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals("an"), Duration.ofMinutes(1), List.of()))
+                  catalog, c, t -> t.namespace().equals(N("an")), Duration.ofMinutes(1), List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
-    TableInfo imp = catalog.lookup(List.of(), "an", "imp");
+    TableInfo imp = catalog.lookup(List.of(), N("an"), N("imp"));
     List<Table> tables =
         List.of(
             new Table(
-                "an.imp", "an." + imp.metadataTable(), Objects.requireNonNull(imp.virtualTable())),
+                "an.imp",
+                "an." + Q(imp.metadataTable()),
+                Objects.requireNonNull(imp.virtualTable())),
             new Table(
                 "an.made",
-                "an." + catalog.lookup(List.of(), "an", "made").metadataTable(),
-                "made"));
+                "an." + Q(catalog.lookup(List.of(), N("an"), N("made")).metadataTable()),
+                N("made")));
     try (DistributedTransactionManager tm = scalarDb.getTransactionManager();
         TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager()) {
       for (Table t : tables) {
@@ -698,8 +713,8 @@ class WriteIntegrationTest {
           try (ResultSet rs =
               d.createStatement().executeQuery("SELECT * FROM " + t.sql + " WHERE id = 1")) {
             assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);
-            assertThat(rs.getMetaData().getColumnLabel(1)).isEqualTo("id");
-            assertThat(rs.getMetaData().getColumnLabel(2)).isEqualTo("x");
+            assertThat(rs.getMetaData().getColumnLabel(1)).isEqualTo(N("id"));
+            assertThat(rs.getMetaData().getColumnLabel(2)).isEqualTo(N("x"));
           }
           d.setAutoCommit(false);
           // SELECT * and a row-wise function anchor too, each in a transaction of its own
@@ -767,10 +782,10 @@ class WriteIntegrationTest {
             TwoPhaseCommitTransaction held = tpc.begin();
             held.update(
                 Update.newBuilder()
-                    .namespace("an")
+                    .namespace(N("an"))
                     .table(t.scalarDbName)
-                    .partitionKey(Key.ofInt("id", id))
-                    .textValue("x", "held")
+                    .partitionKey(id(id))
+                    .textValue(N("x"), "held")
                     .build());
             held.prepare();
             assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = " + id))
@@ -811,27 +826,28 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void anchorsFromJoins(Engines e) throws Exception {
+    ScalarDbNames.on(e);
     assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
-          "CREATE SCHEMA aj",
-          "CREATE TABLE aj.p (id INT PRIMARY KEY, x " + e.textType() + ")",
+          e.createSchema("aj"),
+          "CREATE TABLE aj.p (id " + e.intType() + " PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO aj.p SELECT g, 'a' FROM " + e.series(1, 9));
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
-      admin.createNamespace("aj", true);
-      admin.importTable("aj", "p", DECOUPLED, Map.of());
+      admin.createNamespace(N("aj"), true);
+      admin.importTable(N("aj"), N("p"), DECOUPLED, Map.of());
       admin.createTable(
-          "aj",
-          "c",
+          N("aj"),
+          N("c"),
           TableMetadata.newBuilder()
-              .addColumn("id", DataType.INT)
-              .addColumn("pid", DataType.INT)
-              .addColumn("x", DataType.TEXT)
-              .addPartitionKey("id")
+              .addColumn(N("id"), intType())
+              .addColumn(N("pid"), DataType.INT)
+              .addColumn(N("x"), DataType.TEXT)
+              .addPartitionKey(N("id"))
               .build(),
           DECOUPLED);
     }
@@ -841,11 +857,11 @@ class WriteIntegrationTest {
         if (i != 4) { // parent 4 has no child
           tx.insert(
               Insert.newBuilder()
-                  .namespace("aj")
-                  .table("c")
-                  .partitionKey(Key.ofInt("id", i))
-                  .intValue("pid", i)
-                  .textValue("x", "c")
+                  .namespace(N("aj"))
+                  .table(N("c"))
+                  .partitionKey(id(i))
+                  .intValue(N("pid"), i)
+                  .textValue(N("x"), "c")
                   .build());
         }
       }
@@ -855,14 +871,16 @@ class WriteIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals("aj"), Duration.ofMinutes(1), List.of()))
+                  catalog, c, t -> t.namespace().equals(N("aj")), Duration.ofMinutes(1), List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
-    TableInfo pInfo = catalog.lookup(List.of(), "aj", "p");
+    TableInfo pInfo = catalog.lookup(List.of(), N("aj"), N("p"));
     Table p =
         new Table(
-            "aj.p", "aj." + pInfo.metadataTable(), Objects.requireNonNull(pInfo.virtualTable()));
-    Table ch = new Table("aj.c", "aj." + catalog.lookup(List.of(), "aj", "c").metadataTable(), "c");
+            "aj.p", "aj." + Q(pInfo.metadataTable()), Objects.requireNonNull(pInfo.virtualTable()));
+    Table ch =
+        new Table(
+            "aj.c", "aj." + Q(catalog.lookup(List.of(), N("aj"), N("c")).metadataTable()), N("c"));
     String join = "SELECT p.x, c.x FROM aj.p p JOIN aj.c c ON c.pid = p.id WHERE p.id = ";
     String leftJoin =
         "SELECT p.id, c.id FROM aj.p p LEFT JOIN aj.c c ON c.pid = p.id WHERE p.id = ";
@@ -899,6 +917,7 @@ class WriteIntegrationTest {
                   case POSTGRESQL -> "org.postgresql.PGStatement";
                   case MARIADB -> "org.mariadb.jdbc.Statement";
                   case SQLSERVER -> "com.microsoft.sqlserver.jdbc.ISQLServerStatement";
+                  case ORACLE -> "oracle.jdbc.OracleStatement";
                   default -> "com.mysql.cj.jdbc.JdbcStatement";
                 })); // the vendor statement
         d.setAutoCommit(false);
@@ -963,10 +982,10 @@ class WriteIntegrationTest {
         TwoPhaseCommitTransaction held = tpc.begin();
         held.update(
             Update.newBuilder()
-                .namespace("aj")
-                .table("c")
-                .partitionKey(Key.ofInt("id", id))
-                .textValue("x", "held")
+                .namespace(N("aj"))
+                .table(N("c"))
+                .partitionKey(id(id))
+                .textValue(N("x"), "held")
                 .build());
         held.prepare();
         assertThat(
@@ -1002,28 +1021,30 @@ class WriteIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void anchorReviewFindings(Engines e) throws Exception {
+    ScalarDbNames.on(e);
     assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
-          "CREATE SCHEMA af",
-          "CREATE TABLE af.imp (id INT PRIMARY KEY, x " + e.textType() + ")",
+          e.createSchema("af"),
+          "CREATE TABLE af.imp (id " + e.intType() + " PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO af.imp SELECT g, 'a' FROM " + e.series(1, 9));
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
-      admin.createNamespace("af", true);
-      admin.importTable("af", "imp", DECOUPLED, Map.of());
+      admin.createNamespace(N("af"), true);
+      admin.importTable(N("af"), N("imp"), DECOUPLED, Map.of());
     }
     Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals("af"), Duration.ofMinutes(1), List.of()))
+                  catalog, c, t -> t.namespace().equals(N("af")), Duration.ofMinutes(1), List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
-    String sdb = Objects.requireNonNull(catalog.lookup(List.of(), "af", "imp").virtualTable());
+    String sdb =
+        Objects.requireNonNull(catalog.lookup(List.of(), N("af"), N("imp")).virtualTable());
     try (Connection d = e.openDriver();
         Connection other = e.openDriver()) {
       d.setAutoCommit(false);
@@ -1072,7 +1093,7 @@ class WriteIntegrationTest {
           assertThat(st.getGeneratedKeys().getMetaData().getColumnCount()).isZero();
         }
       }
-      assertThat(rows(d, "SELECT x FROM af.imp AS scalardb_native_meta WHERE id = 3"))
+      assertThat(rows(d, "SELECT x FROM af.imp scalardb_native_meta WHERE id = 3"))
           .containsExactly("a");
       assertThatThrownBy(() -> rows(d, "SELECT x FROM af.imp ORDER BY 2"))
           .isInstanceOf(SQLException.class);
@@ -1098,14 +1119,13 @@ class WriteIntegrationTest {
     try (TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();
         Connection d = e.openDriver()) {
       TwoPhaseCommitTransaction held = tpc.begin();
-      held.get(
-          Get.newBuilder().namespace("af").table(sdb).partitionKey(Key.ofInt("id", 20)).build());
+      held.get(Get.newBuilder().namespace(N("af")).table(sdb).partitionKey(id(20)).build());
       held.update(
           Update.newBuilder()
-              .namespace("af")
+              .namespace(N("af"))
               .table(sdb)
-              .partitionKey(Key.ofInt("id", 20))
-              .textValue("x", "held")
+              .partitionKey(id(20))
+              .textValue(N("x"), "held")
               .build());
       held.prepare();
       d.setAutoCommit(false);
@@ -1123,16 +1143,16 @@ class WriteIntegrationTest {
     DistributedTransaction tx = tm.begin();
     tx.get(
         Get.newBuilder()
-            .namespace(namespace)
+            .namespace(N(namespace))
             .table(t.scalarDbName)
-            .partitionKey(Key.ofInt("id", id))
+            .partitionKey(id(id))
             .build());
     tx.update(
         Update.newBuilder()
-            .namespace(namespace)
+            .namespace(N(namespace))
             .table(t.scalarDbName)
-            .partitionKey(Key.ofInt("id", id))
-            .textValue("x", x)
+            .partitionKey(id(id))
+            .textValue(N("x"), x)
             .build());
     tx.commit();
   }
@@ -1142,12 +1162,8 @@ class WriteIntegrationTest {
     DistributedTransaction tx = tm.begin();
     Optional<Result> r =
         tx.get(
-            Get.newBuilder()
-                .namespace("wr")
-                .table(t.scalarDbName)
-                .partitionKey(Key.ofInt("id", id))
-                .build());
+            Get.newBuilder().namespace(N("wr")).table(t.scalarDbName).partitionKey(id(id)).build());
     tx.commit();
-    return r.map(x -> x.getText("x"));
+    return r.map(x -> x.getText(N("x")));
   }
 }

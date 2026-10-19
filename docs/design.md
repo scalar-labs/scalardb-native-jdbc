@@ -1502,6 +1502,21 @@ the session's: after a passthrough statement that may set it, the driver reads i
 `sys.dm_exec_sessions`, SQL Server's lock-based REPEATABLE READ refusing every statement on a
 ScalarDB table (todo 264).
 
+Writes on Oracle at READ COMMITTED, as built (milestone 8d1): the driver's own SQL in Oracle's
+dialect, measured on Oracle 23: `FROM dual` in the key tables, `FETCH FIRST` and `1 = 0`, no `AS`
+before a table alias, a NULL-safe comparison by `DECODE`, a bare `*` beside the driver's appended
+columns written per table, `t.*`, which Oracle requires. An error rolls back the statement only,
+ORA-00001 and the deadlock ORA-00060 included, so a write runs under a savepoint as on MySQL, never
+released, which ojdbc cannot. The metadata rows are inserted under `IGNORE_ROW_ON_DUPKEY_INDEX`,
+which skips a key that has a row and waits on one being inserted, as `INSERT IGNORE` does; the
+keys are read back by the statement's values, or are an `IDENTITY` key's, from `getGeneratedKeys`
+by column name, a name the application asks for folded as Oracle folds it; an ORA-00001 is told
+from the primary key's by its constraint's type. A locking read keeps the user's `FOR UPDATE` where
+it stands, as on PostgreSQL: Oracle takes it on the outer query only, and locks there the base rows
+of the committed copy that the predicate matches; `FOR SHARE` does not exist there. The tests run
+with an Oracle whose server takes no cancel (Oracle Free in a container on macOS): a query timeout
+cannot be tested there, and stays the vendor's.
+
 SERIALIZABLE on SQL Server, as built (milestone 8c3), is 8b2's below with `HOLDLOCK` for `LOCK IN
 SHARE MODE`: the connection runs at SNAPSHOT, `getTransactionIsolation` reports SERIALIZABLE, and SQL
 Server's own SERIALIZABLE set in SQL is taken as the driver's. Every table a read reaches gets

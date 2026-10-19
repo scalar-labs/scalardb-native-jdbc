@@ -664,11 +664,16 @@ public final class StatementShape {
       }
       if (s.getForUpdateTables() != null) {
         for (Table target : s.getForUpdateTables()) {
-          // FOR UPDATE OF names this table, by its alias or its name, or nothing this shape knows
+          // FOR UPDATE OF names this table, by its alias or its name, or nothing this shape knows;
+          // on Oracle it names a column, alone or by this table's alias or name, which locks the
+          // one table the read has
           String alias = table.alias();
-          boolean byAlias = alias != null && sameIdentifier(target.getName(), alias);
-          boolean byName = alias == null && sameIdentifier(target.getName(), table.name());
-          if (target.getSchemaName() != null || !(byAlias || byName)) {
+          String named = engine == Engine.ORACLE ? target.getSchemaName() : target.getName();
+          boolean byAlias = alias != null && named != null && sameIdentifier(named, alias);
+          boolean byName = alias == null && named != null && sameIdentifier(named, table.name());
+          boolean column = engine == Engine.ORACLE && named == null;
+          boolean qualified = engine != Engine.ORACLE && target.getSchemaName() != null;
+          if (qualified || !(byAlias || byName || column)) {
             return refuse("FOR UPDATE OF " + target + " does not name this table");
           }
         }

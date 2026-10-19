@@ -133,7 +133,7 @@ Certified in 3.19.0-alpha.1: PostgreSQL at READ COMMITTED, against the ScalarDB 
 and SERIALIZABLE on PostgreSQL, and all three levels on MySQL, MariaDB and SQL Server, came after
 it.
 
-- Reads of ScalarDB tables work on all five engines; writes run on all but Oracle.
+- Reads and writes of ScalarDB tables work on all five engines, Oracle's at READ COMMITTED so far.
   ScalarDB's classic layout is refused with SQLState `0AN01`.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
@@ -153,6 +153,12 @@ it.
   The setup refuses an imported table keyed by a `datetime`, which ScalarDB's metadata holds as
   `datetime2(3)` and SQL Server does not compare equal for values ending in .003 or .007: use
   `datetime2(3)`.
+- On Oracle an INSERT has no `RETURNING` (`RETURNING ... INTO` does not parse): the keys are read back
+  by the values the statement gives them, as on MySQL, or come from an `IDENTITY` key the INSERT
+  leaves out, which a multi-row `VALUES` cannot return (Oracle's ORA-63809); no `BEFORE INSERT`
+  trigger on the table. A locking read takes `FOR UPDATE`, with `OF` a column, `NOWAIT` and `SKIP
+  LOCKED`, not `WAIT n`, and no row limit, which Oracle refuses with it; Oracle has no `FOR SHARE`,
+  and the driver refuses it.
 - A name holding an invisible formatting character, such as a zero-width space, is refused: SQL Server
   reads it as whitespace where the parser keeps it in the name.
 - `setTransactionIsolation` fails with `25001` once the open transaction has run a statement, as

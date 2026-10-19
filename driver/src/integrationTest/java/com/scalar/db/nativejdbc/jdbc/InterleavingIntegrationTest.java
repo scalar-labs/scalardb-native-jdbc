@@ -1,5 +1,12 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.M;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.N;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.Q;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.id;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.intColumn;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.intOf;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.intType;
 import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -18,12 +25,10 @@ import com.scalar.db.api.Update;
 import com.scalar.db.api.UpdateBuilder;
 import com.scalar.db.exception.transaction.CommitConflictException;
 import com.scalar.db.exception.transaction.CrudConflictException;
-import com.scalar.db.exception.transaction.CrudException;
 import com.scalar.db.exception.transaction.PreparationConflictException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.ValidationConflictException;
 import com.scalar.db.io.DataType;
-import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
@@ -108,18 +113,27 @@ class InterleavingIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void interleavings(Engines e) throws Exception {
+    ScalarDbNames.on(e);
     assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
-          "CREATE SCHEMA il",
+          e.createSchema("il"),
           // run once per statement, after its snapshot: opens a window inside one read
           e.pauseFunction("il.pause", 1));
       for (String isolation : ISOLATIONS) {
         String imp = "il.imp_" + isolation.toLowerCase(Locale.ROOT);
         e.execute(
             c,
-            "CREATE TABLE " + imp + " (id INT PRIMARY KEY, x " + e.textType() + ", v INT)",
+            "CREATE TABLE "
+                + imp
+                + " (id "
+                + e.intType()
+                + " PRIMARY KEY, x "
+                + e.textType()
+                + ", v "
+                + e.intType()
+                + ")",
             // rows without metadata, as an imported table has them
             "INSERT INTO " + imp + " SELECT g, 'a', 0 FROM " + e.series(1, 12),
             "INSERT INTO " + imp + " VALUES " + rowsOf(COUNTERS, 0),
@@ -128,18 +142,18 @@ class InterleavingIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
-      admin.createNamespace("il", true);
+      admin.createNamespace(N("il"), true);
       for (String isolation : ISOLATIONS) {
         String suffix = "_" + isolation.toLowerCase(Locale.ROOT);
-        admin.importTable("il", "imp" + suffix, DECOUPLED, Map.of());
+        admin.importTable(N("il"), N("imp" + suffix), DECOUPLED, Map.of());
         admin.createTable(
-            "il",
-            "made" + suffix,
+            N("il"),
+            N("made" + suffix),
             TableMetadata.newBuilder()
-                .addColumn("id", DataType.INT)
-                .addColumn("x", DataType.TEXT)
-                .addColumn("v", DataType.INT)
-                .addPartitionKey("id")
+                .addColumn(N("id"), intType())
+                .addColumn(N("x"), DataType.TEXT)
+                .addColumn(N("v"), intType())
+                .addPartitionKey(N("id"))
                 .build(),
             DECOUPLED);
       }
@@ -163,23 +177,23 @@ class InterleavingIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals("il"), Duration.ofMinutes(1), List.of()))
+                  catalog, c, t -> t.namespace().equals(N("il")), Duration.ofMinutes(1), List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     for (String isolation : ISOLATIONS) {
       String suffix = "_" + isolation.toLowerCase(Locale.ROOT);
-      TableInfo imp = catalog.lookup(List.of(), "il", "imp" + suffix);
+      TableInfo imp = catalog.lookup(List.of(), N("il"), N("imp" + suffix));
       List<Table> tables =
           List.of(
               new Table(
                   "il.imp" + suffix,
-                  "il." + imp.metadataTable(),
+                  "il." + Q(imp.metadataTable()),
                   Objects.requireNonNull(imp.virtualTable()),
                   true),
               new Table(
                   "il.made" + suffix,
-                  "il." + catalog.lookup(List.of(), "il", "made" + suffix).metadataTable(),
-                  "made" + suffix,
+                  "il." + Q(catalog.lookup(List.of(), N("il"), N("made" + suffix)).metadataTable()),
+                  N("made" + suffix),
                   false));
       Properties scalarDb = new Properties();
       scalarDb.setProperty("scalar.db.consensus_commit.isolation_level", isolation);
@@ -213,11 +227,11 @@ class InterleavingIntegrationTest {
 
   private static Insert made(String isolation, int id, int v) {
     return Insert.newBuilder()
-        .namespace("il")
-        .table("made_" + isolation.toLowerCase(Locale.ROOT))
-        .partitionKey(Key.ofInt("id", id))
-        .textValue("x", "a")
-        .intValue("v", v)
+        .namespace(N("il"))
+        .table(N("made_" + isolation.toLowerCase(Locale.ROOT)))
+        .partitionKey(id(id))
+        .textValue(N("x"), "a")
+        .value(intColumn("v", v))
         .build();
   }
 
@@ -244,10 +258,10 @@ class InterleavingIntegrationTest {
       held = tpc.begin();
       held.insert(
           Insert.newBuilder()
-              .namespace("il")
+              .namespace(N("il"))
               .table(t.scalarDbName())
-              .partitionKey(Key.ofInt("id", 50))
-              .textValue("x", "new")
+              .partitionKey(id(50))
+              .textValue(N("x"), "new")
               .build());
       held.prepare();
       assertThat(rows(d, "SELECT id FROM " + t.sql() + " WHERE id = 50 OR x IS NULL"))
@@ -312,7 +326,8 @@ class InterleavingIntegrationTest {
         // a ScalarDB rollback over a row without metadata leaves NULL metadata, read as committed
         held = prepared(tpc, t, 8, "s");
         held.rollback();
-        assertThat(rows(v, "SELECT tx_id, tx_state, tx_version FROM " + t.meta() + " WHERE id = 8"))
+        assertThat(
+                rows(v, M("SELECT tx_id, tx_state, tx_version FROM ") + t.meta() + " WHERE id = 8"))
             .as("the rollback left NULL metadata")
             .containsExactly("null/null/null");
         assertThat(rows(d, "SELECT x FROM " + t.sql() + " WHERE id = 8"))
@@ -321,7 +336,7 @@ class InterleavingIntegrationTest {
         assertThat(update(d, t, 8)).as("the NULL-pair CAS").isEqualTo(1);
 
         // a ScalarDB transaction read a row without metadata; the driver deletes it
-        assertThat(rows(v, "SELECT tx_id FROM " + t.meta() + " WHERE id = 11")).isEmpty();
+        assertThat(rows(v, M("SELECT tx_id FROM ") + t.meta() + " WHERE id = 11")).isEmpty();
         v.close();
         tx = tm.begin();
         assertThat(tx.get(get(t, 11))).isPresent();
@@ -683,8 +698,11 @@ class InterleavingIntegrationTest {
     @Override
     boolean aborts(Throwable cause) {
       // a conflict the driver decides, or a deadlock PostgreSQL breaks; anything else is a fault
+      // Oracle's deadlock, ORA-00060, rolls back the statement and is retried as one
       return cause instanceof SQLException s
-          && ("40001".equals(s.getSQLState()) || "40P01".equals(s.getSQLState()));
+          && ("40001".equals(s.getSQLState())
+              || "40P01".equals(s.getSQLState())
+              || s.getErrorCode() == 60 && "61000".equals(s.getSQLState()));
     }
 
     @Override
@@ -718,8 +736,8 @@ class InterleavingIntegrationTest {
       }
       TwoPhaseCommitTransaction tx = Objects.requireNonNull(this.tx);
       if (step < n) {
-        int value = tx.get(get(t, rows[step])).orElseThrow().getInt("v");
-        tx.update(update(t, rows[step]).intValue("v", value + deltas[step]).build());
+        int value = intOf(tx.get(get(t, rows[step])).orElseThrow(), "v");
+        tx.update(update(t, rows[step]).value(intColumn("v", value + deltas[step])).build());
       } else if (step == n) {
         tx.prepare();
       } else if (abandon) {
@@ -737,22 +755,26 @@ class InterleavingIntegrationTest {
 
     @Override
     boolean aborts(Throwable cause) {
-      // conflicts only (UncommittedRecordException is a CrudConflictException); and a deadlock
-      // on a read, which ScalarDB does not map to one (design 6): SQL Server's reads hold shared
-      // locks for the call
+      // conflicts only (UncommittedRecordException is a CrudConflictException); and a deadlock or a
+      // serialization failure on a read, which ScalarDB does not map to one (design 6): SQL
+      // Server's reads hold shared locks for the call, Oracle's recovery runs at SERIALIZABLE
       return cause instanceof CrudConflictException
           || cause instanceof PreparationConflictException
           || cause instanceof ValidationConflictException
           || cause instanceof CommitConflictException
-          || (cause instanceof CrudException && deadlock(cause));
+          || (cause instanceof TransactionException && deadlock(cause));
     }
 
     private static boolean deadlock(Throwable t) {
       for (Throwable c = t; c != null; c = c.getCause()) {
-        // SQL Server's deadlock; MySQL's 1205, a lock wait timeout, is HY000
-        if (c instanceof SQLException
-            && ((SQLException) c).getErrorCode() == 1205
-            && "40001".equals(((SQLException) c).getSQLState())) {
+        // SQL Server's deadlock, MySQL's 1205 being a lock wait timeout, HY000; Oracle's deadlock
+        // and its serialization failure at the SERIALIZABLE ScalarDB needs there, a recovery's
+        // included
+        int code = c instanceof SQLException ? ((SQLException) c).getErrorCode() : 0;
+        String state = c instanceof SQLException ? ((SQLException) c).getSQLState() : null;
+        if ((code == 1205 && "40001".equals(state))
+            || (code == 60 && "61000".equals(state))
+            || (code == 8177 && "72000".equals(state))) {
           return true;
         }
       }
@@ -778,7 +800,7 @@ class InterleavingIntegrationTest {
             + t.meta()
             + " WHERE id IN ("
             + String.join(", ", ids)
-            + ") AND tx_state IN (1, 2)";
+            + M(") AND tx_state IN (1, 2)");
     // ponytail: past ScalarDB's 15 s expiry, after which a rollback that left no state recovers
     for (int attempt = 0; ; attempt++) {
       boolean settled;
@@ -790,7 +812,7 @@ class InterleavingIntegrationTest {
       try {
         int[] out = new int[rows.length];
         for (int i = 0; i < rows.length; i++) {
-          out[i] = tx.get(get(t, rows[i])).orElseThrow().getInt("v");
+          out[i] = intOf(tx.get(get(t, rows[i])).orElseThrow(), "v");
         }
         if (settled) {
           return out;
@@ -810,22 +832,15 @@ class InterleavingIntegrationTest {
   }
 
   private static Get get(Table t, int id) {
-    return Get.newBuilder()
-        .namespace("il")
-        .table(t.scalarDbName())
-        .partitionKey(Key.ofInt("id", id))
-        .build();
+    return Get.newBuilder().namespace(N("il")).table(t.scalarDbName()).partitionKey(id(id)).build();
   }
 
   private static Update set(Table t, int id, String x) {
-    return update(t, id).textValue("x", x).build();
+    return update(t, id).textValue(N("x"), x).build();
   }
 
   private static UpdateBuilder.Buildable update(Table t, int id) {
-    return Update.newBuilder()
-        .namespace("il")
-        .table(t.scalarDbName())
-        .partitionKey(Key.ofInt("id", id));
+    return Update.newBuilder().namespace(N("il")).table(t.scalarDbName()).partitionKey(id(id));
   }
 
   private static void scalarDbSet(DistributedTransactionManager tm, Table t, int id, String x)
@@ -855,6 +870,6 @@ class InterleavingIntegrationTest {
     DistributedTransaction tx = tm.begin();
     Optional<Result> r = tx.get(get(t, id));
     tx.commit();
-    return r.map(x -> x.getText("x"));
+    return r.map(x -> x.getText(N("x")));
   }
 }
