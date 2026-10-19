@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "276"
 tags: [code-review, oracle, correctness]
@@ -35,3 +35,4 @@ StringIndexOutOfBoundsException instead of SQLIntegrityConstraintViolationExcept
 ## Work Log
 
 - 2026-10-19: found in the review of 2ce2755 (8d1), verified as stated above.
+- 2026-10-19: fixed. The constraint is found by its (OWNER.NAME) pattern, whatever the language; none found is "cannot be told", true. Tested in MoreWrites reviewOf8d1 with NLS_LANGUAGE GERMAN (the JVM default locale did not change the messages in the test JVM); fails with the old parsing (StringIndexOutOfBounds).

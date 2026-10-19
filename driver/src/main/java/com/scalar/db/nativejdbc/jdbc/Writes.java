@@ -32,6 +32,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.statement.delete.Delete;
@@ -216,20 +218,22 @@ final class Writes {
   }
 
   /**
-   * Why Oracle may store other key values than an INSERT gives, as MySQL may (todo 201): a BEFORE
-   * INSERT trigger on the data table; null when there is none.
+   * Why Oracle may store other key values than an INSERT gives, as MySQL may (todo 201): a row
+   * trigger on INSERT that runs before the row is stored, BEFORE EACH ROW or a COMPOUND trigger's
+   * section (todo 275); null when there is none.
    */
   private static @Nullable String oracleTrigger(Connection vendor, Names n) throws SQLException {
     try (PreparedStatement ps =
         vendor.prepareStatement(
             "SELECT 1 FROM all_triggers WHERE table_owner = ? AND table_name = ? AND"
-                + " triggering_event LIKE '%INSERT%' AND trigger_type LIKE 'BEFORE%'")) {
+                + " triggering_event LIKE '%INSERT%' AND trigger_type IN ('BEFORE EACH ROW',"
+                + " 'COMPOUND')")) {
       ps.setString(1, n.namespace);
       ps.setString(2, n.dataTable);
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next()
-            ? "an INSERT of a ScalarDB table whose data table has a BEFORE INSERT trigger is not"
-                + " supported on Oracle"
+            ? "an INSERT of a ScalarDB table whose data table has a BEFORE INSERT or COMPOUND"
+                + " trigger is not supported on Oracle"
             : null;
       }
     }
@@ -244,9 +248,13 @@ final class Writes {
     try (PreparedStatement ps =
         vendor.prepareStatement(
             n.engine == Engine.ORACLE
-                ? "SELECT column_name, data_type, CASE identity_column WHEN 'YES' THEN 1 ELSE 0"
-                    + " END FROM all_tab_columns WHERE owner = ? AND table_name = ? ORDER BY"
-                    + " column_id"
+                // the full type, as a cast takes it, its length included (todo 277)
+                ? "SELECT column_name, CASE WHEN data_type IN ('CHAR', 'VARCHAR2') THEN data_type"
+                    + " || '(' || char_length || ' CHAR)' WHEN data_type IN ('NCHAR', 'NVARCHAR2')"
+                    + " THEN data_type || '(' || char_length || ')' WHEN data_type = 'RAW' THEN"
+                    + " 'RAW(' || data_length || ')' ELSE data_type END, CASE identity_column WHEN"
+                    + " 'YES' THEN 1 ELSE 0 END FROM all_tab_columns WHERE owner = ? AND"
+                    + " table_name = ? ORDER BY column_id"
                 : "SELECT column_name, data_type, "
                     + (n.engine == Engine.POSTGRESQL
                         ? "FALSE"
@@ -495,15 +503,23 @@ final class Writes {
             floatKeys.add(inside.get(0));
           }
           String k = engine.quote(t.keyColumns().get(i));
-          terms.add(k + " = " + source.substring(span[0], span[1]));
-          termsData.add("d." + k + " = " + source.substring(span[0], span[1]));
+          String value = source.substring(span[0], span[1]);
+          String full =
+              type(engine, tableColumns, t.keyColumns().get(i)).replace(" auto_increment", "");
+          if (engine == Engine.ORACLE && !full.isEmpty()) {
+            // as the column holds it: a VARCHAR2 bind does not equal a blank-padded CHAR key, and
+            // a number bound for a text key would convert every key to a number (todo 277)
+            value = "CAST(" + value + " AS " + full + ")";
+          }
+          terms.add(k + " = " + value);
+          termsData.add("d." + k + " = " + value);
           if (!returns
               && type(engine, tableColumns, t.keyColumns().get(i)).endsWith(" auto_increment")) {
             // MySQL generates a key given as 0, and the read-back by 0 would find an older row
             // with key 0 (todo 218): read back no row, which refuses the write
             readBackOnly.append(" AND d.").append(k).append(" <> 0");
           }
-          values.add(source.substring(span[0], span[1]));
+          values.add(value);
           matchBinds.addAll(inside);
         }
         match.add("(" + String.join(" AND ", terms) + ")");
@@ -756,6 +772,10 @@ final class Writes {
     }
     return e;
   }
+
+  /** An Oracle constraint as its messages name it, {@code (OWNER.NAME)}. */
+  private static final Pattern ORA_CONSTRAINT =
+      Pattern.compile("\\(([A-Za-z0-9_$#]+)\\.([A-Za-z0-9_$#]+)\\)");
 
   /** A query with a row when {@code select} has one, and with none when it has none. */
   static String anyRow(Engine engine, String select) {
@@ -1623,20 +1643,18 @@ final class Writes {
             && (m == null || m.contains("PRIMARY KEY") || !m.contains("UNIQUE KEY"));
       }
       if (n.engine == Engine.ORACLE) {
-        // "ORA-00001: unique constraint (OWNER.NAME) violated ...": the constraint's type
-        String m = e.getMessage();
-        int open = m == null ? -1 : m.indexOf("constraint (");
-        int close = open < 0 ? -1 : m.indexOf(')', open);
-        int dot = close < 0 ? -1 : m.lastIndexOf('.', close);
-        if (dot < open) {
+        // "ORA-00001: unique constraint (OWNER.NAME) violated ...", in the session's language:
+        // the constraint by its (OWNER.NAME) alone (todo 276), and its type
+        Matcher m = ORA_CONSTRAINT.matcher(String.valueOf(e.getMessage()));
+        if (!m.find()) {
           return true;
         }
         try (PreparedStatement ps =
             run.v.prepareStatement(
                 "SELECT constraint_type FROM all_constraints WHERE owner = ? AND"
                     + " constraint_name = ?")) {
-          ps.setString(1, m.substring(open + "constraint (".length(), dot));
-          ps.setString(2, m.substring(dot + 1, close));
+          ps.setString(1, m.group(1));
+          ps.setString(2, m.group(2));
           try (ResultSet rs = ps.executeQuery()) {
             return !rs.next() || "P".equals(rs.getString(1));
           }

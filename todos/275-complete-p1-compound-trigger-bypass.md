@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "275"
 tags: [code-review, oracle, correctness]
@@ -36,3 +36,4 @@ version 2); row 105 gets no metadata; getGeneratedKeys reports 5.
 ## Work Log
 
 - 2026-10-19: found in the review of 2ce2755 (8d1), verified as stated above.
+- 2026-10-19: fixed. oracleTrigger refuses trigger_type BEFORE EACH ROW or COMPOUND on INSERT. Tested in MoreWrites reviewOf8d1 (wb.ct, a COMPOUND trigger adding 100 to the key); fails without the fix.

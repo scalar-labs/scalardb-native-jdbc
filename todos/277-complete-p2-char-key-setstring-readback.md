@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "277"
 tags: [code-review, oracle, correctness]
@@ -32,3 +32,4 @@ fails with ORA-01722 on a key like 'abc' (the vendor inserts '7').
 ## Work Log
 
 - 2026-10-19: found in the review of 2ce2755 (8d1), verified as stated above.
+- 2026-10-19: fixed. On Oracle the read-back casts each key value to the column full type (columns() reads char_length and RAW length): a CHAR key pads, a number for a text key converts to text. Tested: CHAR(5) key with setString, VARCHAR key with setInt beside a key abc; fails without the fix.

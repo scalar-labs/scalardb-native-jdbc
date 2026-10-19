@@ -156,7 +156,7 @@ it.
 - On Oracle an INSERT has no `RETURNING` (`RETURNING ... INTO` does not parse): the keys are read back
   by the values the statement gives them, as on MySQL, or come from an `IDENTITY` key the INSERT
   leaves out, which a multi-row `VALUES` cannot return (Oracle's ORA-63809); no `BEFORE INSERT`
-  trigger on the table. A locking read takes `FOR UPDATE`, with `OF` a column, `NOWAIT` and `SKIP
+  or `COMPOUND` trigger on the table. A locking read takes `FOR UPDATE`, with `OF` a column, `NOWAIT` and `SKIP
   LOCKED`, not `WAIT n`, and no row limit, which Oracle refuses with it; Oracle has no `FOR SHARE`,
   and the driver refuses it.
 - A name holding an invisible formatting character, such as a zero-width space, is refused: SQL Server

@@ -166,6 +166,16 @@ class MoreWritesIntegrationTest {
             "CREATE TABLE wb.tk (k TIME(6) PRIMARY KEY, x " + e.intType() + ")",
             "INSERT INTO wb.tk VALUES ('09:00:00.123456', 0)");
       }
+      if (e.engine() == Engine.ORACLE) {
+        // the review of 8d1: a COMPOUND trigger that changes the key, a CHAR key
+        e.execute(
+            c,
+            "CREATE TABLE wb.ct (k " + e.intType() + " PRIMARY KEY, x " + e.intType() + ")",
+            "INSERT INTO wb.ct VALUES (5, 0)",
+            "CREATE TRIGGER wb.ct_k FOR INSERT ON wb.ct COMPOUND TRIGGER BEFORE EACH ROW IS"
+                + " BEGIN :NEW.k := :NEW.k + 100; END BEFORE EACH ROW; END ct_k;",
+            "CREATE TABLE wb.ch (k CHAR(5) PRIMARY KEY, x " + e.intType() + ")");
+      }
       if (e.engine() == Engine.MYSQL) {
         // the review of 4a62f9e: a trigger that changes the key
         e.execute(
@@ -199,6 +209,10 @@ class MoreWritesIntegrationTest {
       if (e.engine() == Engine.SQLSERVER) {
         admin.importTable(N("wb"), N("dt"), DECOUPLED, Map.of());
         admin.importTable(N("wb"), N("tk"), DECOUPLED, Map.of());
+      }
+      if (e.engine() == Engine.ORACLE) {
+        admin.importTable(N("wb"), N("ct"), DECOUPLED, Map.of());
+        admin.importTable(N("wb"), N("ch"), DECOUPLED, Map.of());
       }
       if (e.engine() == Engine.MYSQL) {
         admin.importTable(N("wb"), N("seq"), DECOUPLED, Map.of());
@@ -285,6 +299,9 @@ class MoreWritesIntegrationTest {
       reviewOf8a(e, catalog);
       reviewOf8aFixes(e, catalog, tpc);
       reviewOf8aFixes2(e);
+      if (e.engine() == Engine.ORACLE) {
+        reviewOf8d1(e);
+      }
       if (e.engine() == Engine.SQLSERVER) {
         tableHints(e);
         timeKeys(e);
@@ -303,6 +320,37 @@ class MoreWritesIntegrationTest {
           .isEqualTo(1);
       assertThat(s.executeUpdate("DELETE FROM wb.tk WHERE k = '10:00:00.000001'")).isEqualTo(1);
       assertThat(rows(d, "SELECT x FROM wb.tk")).containsExactly("2");
+    }
+  }
+
+  /** The review of 8d1 on Oracle (todos 275-277). */
+  private static void reviewOf8d1(Engines e) throws Exception {
+    try (Connection d = e.openDriver();
+        Statement st = d.createStatement()) {
+      // 275: a COMPOUND trigger may change the key as a BEFORE one may: refused
+      assertThatThrownBy(() -> st.executeUpdate("INSERT INTO wb.ct (k, x) VALUES (5, 1)"))
+          .isInstanceOf(SQLFeatureNotSupportedException.class);
+      // 277: a CHAR key bound as a string, read back padded; a text key bound as a number
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO wb.ch (k, x) VALUES (?, 0)")) {
+        ps.setString(1, "a");
+        assertThat(ps.executeUpdate()).isEqualTo(1);
+      }
+      e.execute(d, "INSERT INTO wb.vk (k, x) VALUES ('abc', 0)");
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO wb.vk (k, x) VALUES (?, 0)")) {
+        ps.setInt(1, 7);
+        assertThat(ps.executeUpdate()).isEqualTo(1);
+      }
+    }
+    // 276: a duplicate is told in any language the session's messages are in, as ojdbc sets it
+    // from the JVM's locale
+    try (Connection d = e.openDriver();
+        Statement st = d.createStatement()) {
+      st.execute("ALTER SESSION SET NLS_LANGUAGE = GERMAN");
+      assertThatThrownBy(() -> st.executeUpdate("INSERT INTO wb.imp (id, x) VALUES (1, 'z')"))
+          .isInstanceOf(SQLException.class)
+          .satisfies(ex -> assertThat(ex.getMessage()).doesNotContain("constraint ("))
+          .extracting("SQLState")
+          .isEqualTo("23000");
     }
   }
 
