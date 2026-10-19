@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "263"
 tags: [code-review, sqlserver, correctness]
@@ -43,3 +43,4 @@ locking reads are fetched whole inside `Writes.within` and are covered.
 ## Work Log
 
 - 2026-10-19: found in the review of 51e1c51 (8c2), verified as stated above.
+- 2026-10-19: fixed. Result sets from a statement carry a failure hook (ChildHandler, AnchoredHandler): an error that ends the transaction marks it rollback-only, as at the execute, and 3960 comes as 40001. SnapshotIntegrationTest.sqlServerSession streams 20000 rows into a 3960; fails without the fix.

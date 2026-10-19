@@ -111,7 +111,10 @@ alone and `SET GLOBAL` are not, and the driver clears the former.
 `TRANSACTION_READ_UNCOMMITTED` is refused with SQLState `0AN01`. On SQL Server
 `TRANSACTION_REPEATABLE_READ` runs at SQL Server's SNAPSHOT level, which the database must allow
 (`ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON`, else `55000`); its update conflict, error
-3960, comes as `40001`, and `READPAST` is not available there. SERIALIZABLE on SQL Server, and the
+3960, comes as `40001`, even when it arrives with a row rather than at the execute, and `READPAST`
+is not available there. A level set in SQL through passthrough is read back from the session;
+SQL Server's own REPEATABLE READ, which locks and keeps no snapshot, refuses statements on
+ScalarDB tables with `0AN01`. SERIALIZABLE on SQL Server, and the
 levels above READ COMMITTED on Oracle, are accepted, but every statement on a ScalarDB table is
 refused with `0AN01` there for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot isolation;
 `TRANSACTION_REPEATABLE_READ` will be the level to use there.

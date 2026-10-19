@@ -422,6 +422,9 @@ class SnapshotIntegrationTest {
         d.setTransactionIsolation(level);
         d.setAutoCommit(false);
       }
+      if (e.engine() == Engine.SQLSERVER) {
+        sqlServerSession(e, d, at, text, snapshotText);
+      }
       // the level is not changed once the transaction ran a statement, which MySQL and MariaDB
       // would apply to the next transaction only (todo 219)
       rows(d, text);
@@ -772,6 +775,87 @@ class SnapshotIntegrationTest {
           d.rollback();
         }
       }
+    }
+  }
+
+  /**
+   * SQL Server at SNAPSHOT: a level set in SQL through passthrough, which the vendor driver does
+   * not read back (todo 264), and an update conflict that comes with a row rather than at the
+   * execute (todo 263).
+   */
+  private static void sqlServerSession(
+      Engines e, Connection d, String at, String text, String snapshotText) throws Exception {
+    d.setAutoCommit(true);
+    d.setClientInfo("scalardbnative.passthrough", "true");
+    try (Statement st = d.createStatement()) {
+      st.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+      assertThat(d.getTransactionIsolation())
+          .as("%s: READ COMMITTED set in SQL", at)
+          .isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
+      st.execute("SET TRANSACTION ISOLATION LEVEL SNAPSHOT");
+      assertThat(d.getTransactionIsolation())
+          .as("%s: SNAPSHOT set in SQL", at)
+          .isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
+      st.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+    }
+    d.setClientInfo("scalardbnative.passthrough", "false");
+    assertThat(d.nativeSQL(text))
+        .as("%s: read as READ COMMITTED after passthrough", at)
+        .isNotEqualTo(snapshotText);
+    // SQL Server's own REPEATABLE READ locks and has no snapshot: refused
+    d.setClientInfo("scalardbnative.passthrough", "true");
+    try (Statement st = d.createStatement()) {
+      st.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+    }
+    d.setClientInfo("scalardbnative.passthrough", "false");
+    assertThatThrownBy(() -> rows(d, text))
+        .as("%s: at SQL Server's REPEATABLE READ", at)
+        .isInstanceOf(SQLFeatureNotSupportedException.class);
+    d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+    assertThat(
+            rows(
+                d,
+                "SELECT transaction_isolation_level FROM sys.dm_exec_sessions WHERE"
+                    + " session_id = @@SPID"))
+        .as("%s: SNAPSHOT again", at)
+        .containsExactly("5");
+
+    // the conflict comes with the row the read reaches, after rows streamed: the transaction is
+    // over, and so is what it wrote
+    try (Connection o = e.open()) {
+      e.execute(
+          o,
+          "IF SCHEMA_ID('sn_plain') IS NULL EXEC('CREATE SCHEMA sn_plain')",
+          "DROP TABLE IF EXISTS sn_plain.big",
+          "DROP TABLE IF EXISTS sn_plain.log",
+          "CREATE TABLE sn_plain.big (id INT PRIMARY KEY, v INT)",
+          "INSERT INTO sn_plain.big SELECT g, 0 FROM " + e.series(1, 20000),
+          "CREATE TABLE sn_plain.log (id INT)");
+      d.setAutoCommit(false);
+      try (Statement st = d.createStatement()) {
+        st.executeUpdate("INSERT INTO sn_plain.log VALUES (1)");
+        e.execute(o, "UPDATE sn_plain.big SET v = 1 WHERE id = 19999");
+        assertThatThrownBy(
+                () -> {
+                  try (ResultSet rs =
+                      st.executeQuery("SELECT id FROM sn_plain.big WITH (UPDLOCK) ORDER BY id")) {
+                    while (rs.next()) {
+                      rs.getInt(1);
+                    }
+                  }
+                })
+            .as("%s: a conflict at a row", at)
+            .isInstanceOf(SQLTransactionRollbackException.class)
+            .extracting(ex -> ((SQLException) ex).getErrorCode())
+            .isEqualTo(3960);
+        assertThatThrownBy(() -> st.executeUpdate("INSERT INTO sn_plain.log VALUES (2)"))
+            .as("%s: rollback-only after it", at)
+            .isInstanceOf(SQLTransactionRollbackException.class);
+      }
+      d.rollback();
+      assertThat(rows(o, "SELECT COUNT(*) FROM sn_plain.log"))
+          .as("%s: nothing of it committed", at)
+          .containsExactly("0");
     }
   }
 

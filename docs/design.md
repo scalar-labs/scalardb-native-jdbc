@@ -1495,7 +1495,13 @@ read of a row changed since the snapshot fails with error 3960, which ends the t
 the driver reports as `40001`. A shared-lock hint (`HOLDLOCK`, `REPEATABLEREAD`) reads the rows
 committed now, as on MySQL, and takes the same comparison with the snapshot, the metadata row
 locked by the same hint as its data row so that its version is the latest. SQL Server refuses
-`READPAST` at SNAPSHOT itself. An `OFFSET 0`, SQL Server's first page, skips no rows.
+`READPAST` at SNAPSHOT itself. An `OFFSET 0`, SQL Server's first page, skips no rows. SQL Server
+streams rows, and a 3960 or a deadlock can come with one, after others: an error from a result set
+marks the transaction rollback-only as one at the execute does, so that what follows does not run,
+and commit, in a new transaction (todo 263). The vendor driver reports the level it last set, not
+the session's: after a passthrough statement that may set it, the driver reads it from
+`sys.dm_exec_sessions`, SQL Server's lock-based REPEATABLE READ refusing every statement on a
+ScalarDB table (todo 264).
 
 SERIALIZABLE on MySQL and MariaDB, as built (milestone 8b2): the connection runs at REPEATABLE READ and
 `getTransactionIsolation` reports SERIALIZABLE; a level set in SQL through passthrough is followed the

@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.function.IntFunction;
+import java.util.function.UnaryOperator;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -270,8 +271,13 @@ public final class Proxies {
         case "getTransactionIsolation":
           {
             // the vendor connection's own level, unless the driver runs SERIALIZABLE at another
-            int level = Router.driverLevel(vendor.getTransactionIsolation());
             int driver = router.isolation();
+            if (driver == Connection.TRANSACTION_NONE) {
+              // SQL Server's lock-based REPEATABLE READ, set in SQL, at which the driver does not
+              // run (todo 264)
+              return Connection.TRANSACTION_REPEATABLE_READ;
+            }
+            int level = Router.driverLevel(vendor.getTransactionIsolation());
             return driver == Connection.TRANSACTION_SERIALIZABLE
                     && level == Connection.TRANSACTION_REPEATABLE_READ
                     && router.locksAtSerializable()
@@ -862,8 +868,17 @@ public final class Proxies {
       // only the statement's own result is anchored, not getGeneratedKeys' (todo 144)
       Router.Anchored a =
           name.startsWith("execute") || name.equals("getResultSet") ? anchored : null;
+      // a vendor error a row brings can end the transaction too, as SQL Server's 3960 and
+      // deadlocks do while rows stream: marked as at the execute (todo 263)
+      UnaryOperator<SQLException> failed =
+          e -> {
+            if (marks && owner.anchors.epoch() == at && Writes.endsTransaction(owner.vendor, e)) {
+              owner.rollbackOnly = true;
+            }
+            return Writes.asRetryable(e);
+          };
       return a == null
-          ? proxy(ResultSet.class, new ChildHandler(result, connection, (Statement) proxy))
+          ? proxy(ResultSet.class, new ChildHandler(result, connection, (Statement) proxy, failed))
           : proxy(
               ResultSet.class,
               new AnchoredHandler(
@@ -877,7 +892,8 @@ public final class Proxies {
                     if (marks && owner.anchors.epoch() == at) {
                       owner.rollbackOnly = true;
                     }
-                  }));
+                  },
+                  failed));
     }
 
     /** Ends the transaction a checked read ran in, in autocommit, and restores autocommit. */
@@ -966,7 +982,8 @@ public final class Proxies {
               new Router.Anchored(plan.n.table, plan.n.keyColumns.size(), hidden),
               null,
               0,
-              () -> {});
+              () -> {},
+              UnaryOperator.identity());
       h.closesStatement = vendor().isCloseOnCompletion();
       return (ResultSet) proxy(ResultSet.class, h);
     }
@@ -1306,6 +1323,8 @@ public final class Proxies {
     final long epoch;
     // marks the transaction rollback-only when a row in flight aborts the read
     final Runnable aborts;
+    // what a vendor error the rows bring means for the transaction
+    final UnaryOperator<SQLException> failed;
     int visible = -1;
     // closing the rows closes the statement: a driver's rows under closeOnCompletion (todo 155)
     boolean closesStatement;
@@ -1317,7 +1336,8 @@ public final class Proxies {
         Router.Anchored anchored,
         @Nullable Anchors anchors,
         long epoch,
-        Runnable aborts) {
+        Runnable aborts,
+        UnaryOperator<SQLException> failed) {
       super(vendor);
       this.connection = connection;
       this.statement = statement;
@@ -1325,6 +1345,7 @@ public final class Proxies {
       this.anchors = anchors;
       this.epoch = epoch;
       this.aborts = aborts;
+      this.failed = failed;
     }
 
     @Override
@@ -1390,7 +1411,12 @@ public final class Proxies {
           throw new SQLException("no column " + args[0] + " in the result", "22023");
         }
       }
-      Object result = forward(target, method, args);
+      Object result;
+      try {
+        result = forward(target, method, args);
+      } catch (SQLException e) {
+        throw failed.apply(e);
+      }
       if ((anchors != null || anchored.states)
           && Boolean.TRUE.equals(result)
           && (name.equals("next")
@@ -1465,11 +1491,21 @@ public final class Proxies {
   private static final class ChildHandler extends Handler {
     final Connection connection;
     final @Nullable Statement statement;
+    final UnaryOperator<SQLException> failed;
 
     ChildHandler(Object vendor, Connection connection, @Nullable Statement statement) {
+      this(vendor, connection, statement, UnaryOperator.identity());
+    }
+
+    ChildHandler(
+        Object vendor,
+        Connection connection,
+        @Nullable Statement statement,
+        UnaryOperator<SQLException> failed) {
       super(vendor);
       this.connection = connection;
       this.statement = statement;
+      this.failed = failed;
     }
 
     @Override
@@ -1481,7 +1517,12 @@ public final class Proxies {
           return statement;
         default:
           {
-            Object result = forward(target, method, args);
+            Object result;
+            try {
+              result = forward(target, method, args);
+            } catch (SQLException e) {
+              throw failed.apply(e);
+            }
             return result instanceof ResultSet
                 ? proxy(ResultSet.class, new ChildHandler(result, connection, null))
                 : result;

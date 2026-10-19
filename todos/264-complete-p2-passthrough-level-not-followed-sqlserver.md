@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "264"
 tags: [code-review, sqlserver, isolation]
@@ -40,3 +40,4 @@ SnapshotIntegrationTest's passthrough block is gated to MySQL/MariaDB (l.374).
 ## Work Log
 
 - 2026-10-19: found in the review of 51e1c51 (8c2), verified as stated above.
+- 2026-10-19: fixed. Router.ran reads the level from sys.dm_exec_sessions on SQL Server, resets the vendor driver to it, and maps lock-based REPEATABLE READ to TRANSACTION_NONE, which refuses ScalarDB statements (getTransactionIsolation reports REPEATABLE READ, true for JDBC). Tested in SnapshotIntegrationTest.sqlServerSession; fails without the fix.

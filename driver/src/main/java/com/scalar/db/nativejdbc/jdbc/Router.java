@@ -1237,6 +1237,32 @@ final class Router {
     }
   }
 
+  /**
+   * The session's level on SQL Server, read from the server, since the vendor driver reports the
+   * level it last set itself (todo 264): its lock-based REPEATABLE READ, at which the driver does
+   * not run, as {@code TRANSACTION_NONE}, which refuses every statement on a ScalarDB table.
+   */
+  private static int sqlServerLevel(Connection vendor) throws SQLException {
+    try (Statement st = vendor.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT transaction_isolation_level FROM sys.dm_exec_sessions"
+                    + " WHERE session_id = @@SPID")) {
+      switch (rs.next() ? rs.getInt(1) : 0) {
+        case 1:
+          return Connection.TRANSACTION_READ_UNCOMMITTED;
+        case 2:
+          return Connection.TRANSACTION_READ_COMMITTED;
+        case 4:
+          return Connection.TRANSACTION_SERIALIZABLE;
+        case 5:
+          return Connection.TRANSACTION_REPEATABLE_READ;
+        default:
+          return Connection.TRANSACTION_NONE;
+      }
+    }
+  }
+
   /** SQL Server's SNAPSHOT level, the vendor driver's {@code TRANSACTION_SNAPSHOT}. */
   private static final int SQLSERVER_SNAPSHOT = 4096;
 
@@ -1777,9 +1803,16 @@ final class Router {
       if (route.passthrough && SETS_LEVEL.matcher(text).find()) {
         // passthrough may set the level, or reset it, in SQL: follow the session (todos 184, 222)
         try {
-          int level = driverLevel(vendor.getTransactionIsolation());
+          int level =
+              engine == Engine.SQLSERVER
+                  ? sqlServerLevel(vendor)
+                  : driverLevel(vendor.getTransactionIsolation());
           if (!locksAtSerializable()) {
             isolation = level;
+            if (engine == Engine.SQLSERVER && level != Connection.TRANSACTION_NONE) {
+              // the vendor driver's own idea of the level, which it never reads back
+              vendor.setTransactionIsolation(vendorLevel(level));
+            }
           } else {
             // the level is read, not the text, which a comment or a SELECT may name it in; what
             // SERIALIZABLE runs at, REPEATABLE READ, is followed only where the statement set it
