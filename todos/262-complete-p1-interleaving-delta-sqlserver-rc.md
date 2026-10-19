@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "262"
 tags: [code-review, sqlserver, interleaving, isolation]
@@ -38,3 +38,12 @@ committed s3:0 s2:2 aborted s3:1 s3:2 s3:3 rolled back
 ## Work Log
 
 - 2026-10-19: seen once; rerun passed.
+- 2026-10-19: reproduced (seed 18, 8th repeat of the full made_read_committed sequence) with a
+  per-transaction log. Test accounting, not an isolation break: s2's transfer b97019dd [202,201]
+  committed at the coordinator, then ScalarDB's record commit for 202 failed ("Committing records
+  failed ... NoMutationException", racing the roll-forward the final read had started on 201). The
+  test's final read through ScalarDB at READ_COMMITTED returned 202's committed before image, and
+  the roll-forward it started completed 20 ms later; the dump showed 202 committed by b97019dd with
+  the counted value. Fixed in the test: `values` reads only once no row of the schedule is in
+  flight in the metadata table (reading meanwhile to start the recovery), up to 30 s.
+- 2026-10-19: verified: 20 repeats of the full sequence on SQL Server passed (ScalarDB logged 45 failed record commits along the way); the class passed on every engine.

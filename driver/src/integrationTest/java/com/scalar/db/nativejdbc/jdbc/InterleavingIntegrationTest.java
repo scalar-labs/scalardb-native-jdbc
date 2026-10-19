@@ -428,7 +428,7 @@ class InterleavingIntegrationTest {
       throws Exception {
     String where = at + ", seed " + seed;
     Random random = new Random(seed);
-    int[] start = values(tpc, t, rows);
+    int[] start = values(e, tpc, t, rows);
     List<Actor> actors = new ArrayList<>();
     StringBuilder trace = new StringBuilder();
     try {
@@ -446,7 +446,7 @@ class InterleavingIntegrationTest {
       } catch (AssertionError ex) {
         throw new AssertionError(ex.getMessage() + "\nsteps: " + trace, ex);
       }
-      int[] end = values(tpc, t, rows);
+      int[] end = values(e, tpc, t, rows);
       for (int i = 0; i < rows.length; i++) {
         int expected = 0;
         for (Actor a : actors) {
@@ -761,29 +761,47 @@ class InterleavingIntegrationTest {
   }
 
   /**
-   * The rows' committed values, read through ScalarDB, never the data table: a ScalarDB rollback
-   * after its prepare is best effort, and may leave a record prepared, its after image in the data
-   * table, until a read recovers it (todo 217). The read recovers it, and is tried again until no
-   * record is left uncommitted.
+   * The rows' committed values, read through ScalarDB, never the data table, once none of them is
+   * in flight: a ScalarDB rollback after its prepare is best effort, and so is the commit of the
+   * records after the coordinator's (todos 217, 262), so a record may stay prepared until a read
+   * recovers it. At SNAPSHOT that read conflicts; at READ_COMMITTED it returns the before image,
+   * and the recovery it starts runs in the background. The reads go on until no row is in flight.
    */
-  private static int[] values(TwoPhaseCommitTransactionManager tpc, Table t, int[] rows)
+  private static int[] values(Engines e, TwoPhaseCommitTransactionManager tpc, Table t, int[] rows)
       throws Exception {
+    List<String> ids = new ArrayList<>();
+    for (int id : rows) {
+      ids.add(String.valueOf(id));
+    }
+    String inFlight =
+        "SELECT COUNT(*) FROM "
+            + t.meta()
+            + " WHERE id IN ("
+            + String.join(", ", ids)
+            + ") AND tx_state IN (1, 2)";
+    // ponytail: past ScalarDB's 15 s expiry, after which a rollback that left no state recovers
     for (int attempt = 0; ; attempt++) {
+      boolean settled;
+      try (Connection v = e.open()) {
+        settled = rows(v, inFlight).equals(List.of("0"));
+      }
+      // with nothing running, a row not in flight now stays so: the read is the committed value
       TwoPhaseCommitTransaction tx = tpc.begin();
       try {
         int[] out = new int[rows.length];
         for (int i = 0; i < rows.length; i++) {
           out[i] = tx.get(get(t, rows[i])).orElseThrow().getInt("v");
         }
-        return out;
-      } catch (CrudConflictException ex) {
-        if (attempt >= 50) {
-          throw ex;
+        if (settled) {
+          return out;
         }
-        Thread.sleep(100);
+      } catch (CrudConflictException ex) {
+        // recovering
       } finally {
         tx.rollback();
       }
+      assertThat(attempt).as("rows %s settle", ids).isLessThan(300);
+      Thread.sleep(100);
     }
   }
 
