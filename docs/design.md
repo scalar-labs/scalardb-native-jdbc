@@ -1506,7 +1506,13 @@ SERIALIZABLE on SQL Server, as built (milestone 8c3), is 8b2's below with `HOLDL
 SHARE MODE`: the connection runs at SNAPSHOT, `getTransactionIsolation` reports SERIALIZABLE, and SQL
 Server's own SERIALIZABLE set in SQL is taken as the driver's. Every table a read reaches gets
 `WITH (HOLDLOCK)`, added to a hint list it has, `sys` and `information_schema` aside; a `NOLOCK` or
-`INDEX` hint, which the parser keeps, cannot take it and is refused. A read of one ScalarDB table row
+`INDEX` hint, which the parser keeps, cannot take it and is refused. So does every table of a write
+to tables ScalarDB does not manage, its target included: at SNAPSHOT its subqueries, joins and
+`INSERT ... SELECT` sources read the snapshot unlocked, and its predicate's range is not locked,
+where MySQL's REPEATABLE READ takes next-key locks for a write's reads (todo 268). A call of a
+function of the application's own, a schema-qualified one outside `sys` or a table function other
+than `OPENJSON`, `STRING_SPLIT` and `GENERATE_SERIES`, is refused: SQL Server takes no hint on it,
+and its body's reads would go unlocked (todo 269). A read of one ScalarDB table row
 by row is the locking read of 8c1 with `HOLDLOCK` added to its hints; the coarse path reads each
 table's in-flight index `WITH (HOLDLOCK, INDEX(...))`, whose range lock on the filtered index holds
 off every prepare of the table, then the statement on the data tables; an UPDATE or DELETE reads its

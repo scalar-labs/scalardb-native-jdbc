@@ -118,8 +118,10 @@ ScalarDB tables with `0AN01`. SERIALIZABLE on SQL Server runs at SNAPSHOT and ta
 on every table each read reaches, as SQL Server's own SERIALIZABLE would; otherwise as the MySQL
 paragraph above says: a read of one ScalarDB table row by row locks its rows, any other locks the
 in-flight index of each ScalarDB table it reads, and a ScalarDB table in a derived table or a set
-operation is refused. A table with a `NOLOCK` or `INDEX` hint is refused at that level, and
-`sys` and `information_schema` are not locked. ScalarDB's own connections wait on these locks up to
+operation is refused. A write to tables ScalarDB does not manage is held too, its target and
+every table it reads, since SNAPSHOT would read them unlocked. A table with a `NOLOCK` or `INDEX`
+hint, and a call of a function of your own, whose reads no hint reaches, are refused at that
+level; `sys` and `information_schema` are not locked. ScalarDB's own connections wait on these locks up to
 their lock timeout (none by default): give them a short one, `lockTimeout` in the URL. The levels above READ COMMITTED on Oracle
 are accepted, but every statement on a ScalarDB table is refused with `0AN01` there for now.
 Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot isolation;

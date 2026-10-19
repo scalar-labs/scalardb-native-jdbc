@@ -507,9 +507,12 @@ final class Router {
           forcedAnchoring != null ? forcedAnchoring : anchoring(vendor));
     }
     String routed = sql;
-    if (kind == SqlAst.Kind.SELECT && lockingSerializable()) {
-      // other tables are locked as they are read too, as the engine's SERIALIZABLE would lock them;
-      // a write's own reads take next-key locks at REPEATABLE READ (todo 229)
+    if ((kind == SqlAst.Kind.SELECT || (kind == SqlAst.Kind.DML && engine == Engine.SQLSERVER))
+        && lockingSerializable()) {
+      // other tables are locked as they are read too, as the engine's SERIALIZABLE would lock them
+      // (todo 229); a write's own reads take next-key locks at REPEATABLE READ on MySQL and
+      // MariaDB, but read the snapshot unlocked at SQL Server's SNAPSHOT: there its target and
+      // every table it reads are held too, its predicate's range with them (todo 268)
       routed = lockingEveryRead(ast, sql);
       if (routed == null) {
         throw Errors.unsupported(LOCKS_EVERY_SELECT);
@@ -1247,9 +1250,10 @@ final class Router {
   private static final String LOCKS_EVERY_SELECT =
       "at SERIALIZABLE on MySQL, MariaDB and SQL Server every read is under a lock, which a"
           + " statement with a # comment, a SELECT joining information_schema to other tables, a"
-          + " locking clause whose OF list leaves a table out, or a table with SQL Server's NOLOCK"
-          + " or INDEX hint, cannot be given; use -- or /* */ comments, read information_schema on"
-          + " its own, name every table in OF, and leave those hints out";
+          + " locking clause whose OF list leaves a table out, a table with SQL Server's NOLOCK"
+          + " or INDEX hint, or a call of a SQL Server function of your own, whose reads no lock"
+          + " hint reaches, cannot be given; use -- or /* */ comments, read information_schema on"
+          + " its own, name every table in OF, and leave those hints and functions out";
 
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"

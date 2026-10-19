@@ -909,6 +909,23 @@ class SnapshotIntegrationTest {
           .as("%s: NOLOCK", at)
           .isInstanceOf(SQLFeatureNotSupportedException.class);
       d.rollback();
+      // a function of the application's own reads where no hint reaches (todo 269)
+      e.execute(
+          o,
+          "CREATE OR ALTER FUNCTION sn_plain.tvf(@x INT) RETURNS TABLE AS RETURN"
+              + " (SELECT v FROM sn_plain.p WHERE id = @x)",
+          "CREATE OR ALTER FUNCTION sn_plain.fsum() RETURNS INT AS BEGIN"
+              + " RETURN (SELECT SUM(v) FROM sn_plain.p) END");
+      for (String call :
+          List.of(
+              "SELECT v FROM sn_plain.tvf(1)",
+              "SELECT a.v FROM sn_plain.p CROSS APPLY sn_plain.tvf(p.id) a WHERE p.id = 1",
+              "SELECT sn_plain.fsum()")) {
+        assertThatThrownBy(() -> rows(d, call))
+            .as("%s: %s", at, call)
+            .isInstanceOf(SQLFeatureNotSupportedException.class);
+        d.rollback();
+      }
       // a statement prepared at another level is prepared again, locked (todo 242)
       d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
       try (PreparedStatement ps = d.prepareStatement("SELECT v FROM sn_plain.p WHERE id = ?")) {
@@ -939,6 +956,35 @@ class SnapshotIntegrationTest {
               .isInstanceOf(SQLException.class);
           d.rollback();
           d2.rollback();
+        }
+        // a write's own reads, its target's predicate among them, are held too (todo 268)
+        try (Statement s2 = d2.createStatement()) {
+          for (String[] pair :
+              List.of(
+                  new String[] {
+                    "UPDATE sn_plain.p SET v = 0 WHERE id = 1 AND (SELECT SUM(v) FROM sn_plain.p) >= 2",
+                    "UPDATE sn_plain.p SET v = 0 WHERE id = 2 AND (SELECT SUM(v) FROM sn_plain.p) >= 2"
+                  },
+                  new String[] {
+                    "INSERT INTO sn_plain.p SELECT 10, 1 WHERE NOT EXISTS (SELECT 1 FROM sn_plain.p"
+                        + " WHERE id >= 10)",
+                    "INSERT INTO sn_plain.p SELECT 11, 1 WHERE NOT EXISTS (SELECT 1 FROM sn_plain.p"
+                        + " WHERE id >= 10)"
+                  },
+                  new String[] {
+                    "UPDATE a SET v = 0 FROM sn_plain.p a JOIN sn_plain.p b ON b.id = 2 WHERE a.id"
+                        + " = 1 AND b.v = 1",
+                    "UPDATE a SET v = 0 FROM sn_plain.p a JOIN sn_plain.p b ON b.id = 1 WHERE a.id"
+                        + " = 2 AND b.v = 1"
+                  })) {
+            s2.execute("SET LOCK_TIMEOUT 1000");
+            ds.executeUpdate(pair[0]);
+            assertThatThrownBy(() -> s2.executeUpdate(pair[1]))
+                .as("%s: write skew between drivers' writes: %s", at, pair[1])
+                .isInstanceOf(SQLException.class);
+            d.rollback();
+            d2.rollback();
+          }
         }
         ds.execute("SET LOCK_TIMEOUT -1");
       }

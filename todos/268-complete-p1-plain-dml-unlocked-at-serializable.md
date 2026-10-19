@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "268"
 tags: [code-review, sqlserver, serializable, isolation]
@@ -42,3 +42,4 @@ single-table and unaffected. No test covers DML in sqlServerPlainTables.
 ## Work Log
 
 - 2026-10-19: found in the review of 5acbf90 (8c3), verified as stated above.
+- 2026-10-19: fixed. Plain DML at SERIALIZABLE on SQL Server goes through holdingEveryTable too (target and every table it reads; probed: every UPDATE/DELETE/INSERT form takes the hint, and the mirrored statements then block). Tested in SnapshotIntegrationTest.sqlServerPlainTables (three mirrored write pairs between two drivers; fails without the fix) and TableHintsTest.

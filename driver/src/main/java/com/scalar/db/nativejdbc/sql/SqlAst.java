@@ -88,6 +88,7 @@ import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.select.SelectItem;
 import net.sf.jsqlparser.statement.select.SetOperationList;
+import net.sf.jsqlparser.statement.select.TableFunction;
 import net.sf.jsqlparser.statement.select.TableStatement;
 import net.sf.jsqlparser.statement.select.Top;
 import net.sf.jsqlparser.statement.select.Values;
@@ -1163,18 +1164,52 @@ public final class SqlAst {
     return out.toString();
   }
 
+  /** SQL Server's built-in table functions, which read no table. */
+  private static final Set<String> BUILT_IN_TABLE_FUNCTIONS =
+      Set.of("openjson", "string_split", "generate_series");
+
   /**
-   * Returns {@code text} with SQL Server's {@code HOLDLOCK} on every table the statement reads, as
-   * that engine's SERIALIZABLE would lock them, its key-range locks covering the predicate: added
-   * to a hint list the table has, or after the table and its alias. {@code information_schema} and
-   * {@code sys}, which take no lock, are left as they are.
+   * Returns whether the statement calls a function of the application's own on SQL Server: a
+   * schema-qualified call outside {@code sys}, as a scalar user function must be written, or a
+   * table function other than a built-in one. Its body may read tables, which no hint reaches.
+   *
+   * @return whether it calls one
+   */
+  public boolean callsUserFunction() {
+    for (Object v : valuesUnder(root)) {
+      if (v instanceof TableFunction) {
+        List<String> parts = functionNameParts(((TableFunction) v).getFunction());
+        String name = unquoted(parts.get(parts.size() - 1).strip()).toLowerCase(Locale.ROOT);
+        if (!BUILT_IN_TABLE_FUNCTIONS.contains(name)) {
+          return true;
+        }
+      } else if (v instanceof Function) {
+        List<String> parts = functionNameParts((Function) v);
+        if (parts.size() > 1
+            && !unquoted(parts.get(parts.size() - 2).strip()).equalsIgnoreCase("sys")) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns {@code text} with SQL Server's {@code HOLDLOCK} on every table the statement reads or
+   * writes, as that engine's SERIALIZABLE would lock them, its key-range locks covering the
+   * predicate: added to a hint list the table has, or after the table and its alias. {@code
+   * information_schema} and {@code sys}, which take no lock, are left as they are.
    *
    * @param text the statement as {@link #source}, every offset the same: the application's own, its
    *     hint lists not blanked
    * @return the text, or {@code null} when a table carries a hint the parser reads, {@code NOLOCK}
-   *     or {@code INDEX}, or cannot be placed in the text
+   *     or {@code INDEX}, or cannot be placed in the text, or the statement calls a function of the
+   *     application's own
    */
   public @Nullable String holdingEveryTable(String text) {
+    if (callsUserFunction()) {
+      return null; // its body's reads take no hint (todo 269)
+    }
     List<Map.Entry<Integer, String>> inserts = new ArrayList<>();
     for (TableRef r : tableRefs) {
       String named = r.schema();

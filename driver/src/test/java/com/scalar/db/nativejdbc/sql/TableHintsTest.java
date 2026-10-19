@@ -106,9 +106,30 @@ class TableHintsTest {
         .isEqualTo("SELECT x FROM p WITH (UPDLOCK, HOLDLOCK) WHERE id = 1");
     assertThat(hold("SELECT x FROM p a (UPDLOCK, ROWLOCK)"))
         .isEqualTo("SELECT x FROM p a (UPDLOCK, ROWLOCK, HOLDLOCK)");
+    // a write's target and every table it reads (todo 268)
+    assertThat(hold("UPDATE p SET v = 0 WHERE id = 1 AND (SELECT SUM(v) FROM p) >= 2"))
+        .isEqualTo(
+            "UPDATE p WITH (HOLDLOCK) SET v = 0 WHERE id = 1 AND (SELECT SUM(v) FROM p WITH"
+                + " (HOLDLOCK)) >= 2");
+    assertThat(hold("INSERT INTO q (id) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM q WHERE id >= 1)"))
+        .isEqualTo(
+            "INSERT INTO q WITH (HOLDLOCK) (id) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM q WITH"
+                + " (HOLDLOCK) WHERE id >= 1)");
+    assertThat(hold("DELETE FROM p WHERE id IN (SELECT id FROM q)"))
+        .isEqualTo("DELETE FROM p WITH (HOLDLOCK) WHERE id IN (SELECT id FROM q WITH (HOLDLOCK))");
     // the catalog takes no lock; a hint the parser keeps cannot be merged
     assertThat(hold("SELECT name FROM sys.tables")).isEqualTo("SELECT name FROM sys.tables");
     assertThat(hold("SELECT x FROM p WITH (NOLOCK)")).isNull();
+    // a function of the application's own, whose reads take no hint (todo 269)
+    assertThat(hold("SELECT v FROM pp.tvf(1)")).isNull();
+    assertThat(hold("SELECT a.v FROM p CROSS APPLY tvf(p.id) a")).isNull();
+    assertThat(hold("SELECT pp.fsum()")).isNull();
+    assertThat(hold("UPDATE p SET v = dbo.f(v)")).isNull();
+    // built-in ones read no table
+    assertThat(hold("SELECT ISNULL(v, 0), sys.fn_varbintohexstr(0x1) FROM p"))
+        .isEqualTo("SELECT ISNULL(v, 0), sys.fn_varbintohexstr(0x1) FROM p WITH (HOLDLOCK)");
+    assertThat(hold("SELECT value FROM STRING_SPLIT('a,b', ',')"))
+        .isEqualTo("SELECT value FROM STRING_SPLIT('a,b', ',')");
   }
 
   private static @Nullable String hold(String sql) {
