@@ -514,7 +514,29 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
     SQL Server; ScalarDB's connections there take a short `lockTimeout`, and a ScalarDB step that
     waits on the driver's lock counts as its conflict.
 - **8d: Oracle**: READ COMMITTED and SNAPSHOT, `TRANSACTION_REPEATABLE_READ` mapped to its
-  SERIALIZABLE, the driver's SERIALIZABLE refused.
+  SERIALIZABLE, the driver's SERIALIZABLE refused. Split as 8c was (2026-10-19), each part reviewed
+  before the next:
+  - **8d1: READ COMMITTED.** Writes, anchored reads and locking reads on Oracle: the driver's own SQL
+    in Oracle's dialect (`FETCH FIRST` for `LIMIT`, `FROM dual`, `1 = 0` for `FALSE`, a NULL-safe
+    comparison without `IS DISTINCT FROM`, `''` read as NULL); the insert collision by ORA-00001
+    under the write's savepoint, the metadata rows by a guarded insert, keys read back by the
+    statement's own key values as on MySQL, an `IDENTITY` key through the vendor's
+    `getGeneratedKeys` with column names, since `RETURNING ... INTO` does not parse; `FOR UPDATE`
+    (with `OF`, `NOWAIT`, `WAIT n`, `SKIP LOCKED`) as the locking read, `FOR SHARE`, which Oracle
+    lacks, refused. To measure first on the container: ojdbc's savepoints and `releaseSavepoint`,
+    which errors end the transaction (ORA-00060 rolls back the statement only), the guarded insert
+    under concurrency, `getGeneratedKeys` on the data table, and which of 23's additions (`BOOLEAN`,
+    `IF NOT EXISTS`) the driver may use without excluding older releases. The write, review and
+    interleaving tests run on Oracle, the tests' `LIMIT` and `FOR SHARE` through a fixture as for
+    SQL Server.
+  - **8d2: SNAPSHOT**, Oracle's SERIALIZABLE; `TRANSACTION_SERIALIZABLE` refused with `0AN01` in
+    `setTransactionIsolation`, naming `TRANSACTION_REPEATABLE_READ`, and reported unsupported by
+    `DatabaseMetaData.supportsTransactionIsolationLevel`. First-committer-wins is native,
+    ORA-08177, reported as `40001`. To measure first: whether ORA-08177 leaves the transaction
+    usable (the driver's checks and anchors then), and whether the driver's own statements hit the
+    hard-parse ORA-08177 on `SYS.USER$` that ScalarDB's record commit does (todos 083, 105).
+    `SnapshotIntegrationTest` runs SNAPSHOT on Oracle, and `SerializableIntegrationTest` checks the
+    refusal.
 
 ### Milestone 9: tools and acceptance
 
