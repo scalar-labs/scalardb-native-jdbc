@@ -327,6 +327,8 @@ class MoreWritesIntegrationTest {
   private static void reviewOf8d1(Engines e) throws Exception {
     try (Connection d = e.openDriver();
         Statement st = d.createStatement()) {
+      // 282: DUAL, a public synonym of a table ScalarDB does not manage
+      assertThat(rows(d, "SELECT 1 FROM dual")).containsExactly("1");
       // 275: a COMPOUND trigger may change the key as a BEFORE one may: refused
       assertThatThrownBy(() -> st.executeUpdate("INSERT INTO wb.ct (k, x) VALUES (5, 1)"))
           .isInstanceOf(SQLFeatureNotSupportedException.class);

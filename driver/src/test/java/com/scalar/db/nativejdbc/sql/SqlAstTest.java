@@ -667,4 +667,17 @@ class SqlAstTest {
             .orElseThrow();
     assertThat(next.skipsRows()).isTrue();
   }
+
+  @Test
+  void oraclesIsolationLevelSetInSql_isRefused() {
+    // ojdbc does not read the level back: the session would run at one the driver does not know
+    assertThat(
+            SqlAst.analyze("ALTER SESSION SET ISOLATION_LEVEL = SERIALIZABLE", Engine.ORACLE, true)
+                .isPresent())
+        .isFalse();
+    assertThat(
+            SqlAst.analyze("ALTER SESSION SET NLS_LANGUAGE = GERMAN", Engine.ORACLE, true)
+                .isPresent())
+        .isTrue();
+  }
 }

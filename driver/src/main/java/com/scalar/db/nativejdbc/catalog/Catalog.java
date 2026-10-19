@@ -809,8 +809,14 @@ public final class Catalog implements AutoCloseable {
     TableInfo classify(QualifiedName q) throws SQLException {
       String full = q.schema() + "." + q.table();
       if (q.isSynonym()) {
-        throw new SQLSyntaxErrorException(
-            full + " is a synonym; name the table it stands for instead", "42000");
+        // a synonym of a table ScalarDB does not manage reads as that table, DUAL's among them
+        // (todo 282); one of a ScalarDB table, or of what is not known, is refused
+        QualifiedName target = q.target();
+        if (target == null || classify(target).layout() != Layout.PLAIN) {
+          throw new SQLSyntaxErrorException(
+              full + " is a synonym; name the table it stands for instead", "42000");
+        }
+        return plain(q);
       }
       String k = key(full);
       VirtualTable v = byName.get(k);
@@ -893,6 +899,10 @@ public final class Catalog implements AutoCloseable {
             columns.floats,
             true);
       }
+      return plain(q);
+    }
+
+    private static TableInfo plain(QualifiedName q) {
       return new TableInfo(
           q.schema(),
           q.table(),

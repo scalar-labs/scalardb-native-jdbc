@@ -228,8 +228,11 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   A name as written is first resolved by **the engine's own catalog** ("Identifiers per engine"): which
   stored table or view it denotes, given the session's schemas, in the stored spelling. Only that answer
   is looked up in ScalarDB's catalog, in this order:
-  0. A synonym is **refused** with SQLSTATE `42000`, "name the table it stands for", whatever it stands
-     for: which table a synonym denotes, chains included, is the engine's to say.
+  0. A synonym is **refused** with SQLSTATE `42000`, "name the table it stands for", where it may stand
+     for a ScalarDB table: which table a synonym denotes, chains included, is the engine's to say. On
+     Oracle the driver asks: a synonym of a table or view in the database that ScalarDB does not
+     manage reads as that table, `DUAL`, PUBLIC's synonym of `SYS.DUAL`, among them (todo 282); one
+     of a ScalarDB table or of its tables, of another synonym, or over a database link is refused.
   1. A `virtual_tables` row whose **virtual table name** is the user's name: a created decoupled table.
      Its left source is `T_data`, its right source `T_tx_metadata`, join type INNER. This is also ScalarDB's
      own test for "decoupling applied" (`ConsensusCommitAdmin.throwIfTransactionMetadataDecouplingApplied`).
@@ -325,7 +328,7 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   | `"x"` | an identifier | a string, unless `sql_mode` has `ANSI_QUOTES` | an identifier while `QUOTED_IDENTIFIER` is on | an identifier |
   | Unqualified name resolves through | `search_path` in order; a plain table earlier shadows a ScalarDB table later | the current database | the user's default schema, then `dbo` | the current schema, then a private synonym, then a public one |
   | How the driver asks | `pg_class` ordered by `array_position` over `current_schemas(false)` | `information_schema.tables`; `database()`, since Connector/J's `getCatalog()` does not follow `USE` | `sys.objects` over the default schema and `dbo`, one query | `all_objects` and `all_synonyms`, one query |
-  | Synonyms | none | none | refused | refused |
+  | Synonyms | none | none | refused | of a ScalarDB table, another synonym or a database link refused; of another table, that table |
 
   ScalarDB keeps names exactly as given on every engine and quotes the names it creates, so its own
   catalog columns are lower case on Oracle, where the driver quotes them; its catalog compares
@@ -1509,7 +1512,10 @@ insert's hint skipped a key added since the snapshot, likewise. In autocommit th
 READ COMMITTED instead: at SERIALIZABLE ojdbc commits after a write only, so a read in autocommit
 opens a transaction whose snapshot every later autocommit read keeps, and in which `SET
 TRANSACTION` then fails (ORA-01453), measured; one statement's snapshot is READ COMMITTED's own.
-`TRANSACTION_SERIALIZABLE` is refused with `0AN01` and reported unsupported by `DatabaseMetaData`,
+The checks and the read of an autocommit read share a transaction of their own, which runs at
+SERIALIZABLE too, as the session does in a transaction (todo 283). `ALTER SESSION SET
+ISOLATION_LEVEL` is refused outside passthrough, as the transaction mode set in SQL is elsewhere
+(todo 284). `TRANSACTION_SERIALIZABLE` is refused with `0AN01` and reported unsupported by `DatabaseMetaData`,
 which reports REPEATABLE READ supported where ojdbc says not. ojdbc reports the level it last set
 and Oracle shows no session's own, so a level set in SQL through passthrough is not followed: the
 connection's is set again.

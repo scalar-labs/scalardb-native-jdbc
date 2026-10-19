@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "284"
 tags: [code-review, oracle, isolation]
@@ -37,3 +37,4 @@ COMMITTED in a transaction, reads became repeatable, also after commit + setTran
 ## Work Log
 
 - 2026-10-20: found in the review of d18b58c (8d2), verified as stated above.
+- 2026-10-20: fixed. SqlAst refuses an ALTER SESSION naming ISOLATION_LEVEL with the transaction-mode message (0AN01); other ALTER SESSIONs pass. Unit test in SqlAstTest; fails without the fix.

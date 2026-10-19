@@ -36,6 +36,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -247,6 +249,9 @@ class SnapshotIntegrationTest {
       }
       d.rollback();
       held.rollback();
+      if (level == Connection.TRANSACTION_REPEATABLE_READ) {
+        scrollableInAutocommit(d, tpc, at);
+      }
 
       // an unmatched row of an outer join that a row in flight would match (todo 167)
       TwoPhaseCommitTransaction matching = tpc.begin();
@@ -1018,6 +1023,63 @@ class SnapshotIntegrationTest {
         ds.execute("SET LOCK_TIMEOUT -1");
       }
     }
+  }
+
+  /**
+   * In autocommit a scrollable read's check and its rows share one snapshot: a ScalarDB insert
+   * prepared between them, and rolled back, is never among the rows (todo 283, where Oracle's
+   * session ran the two at READ COMMITTED). A race, run for a few seconds.
+   */
+  private static void scrollableInAutocommit(
+      Connection d, TwoPhaseCommitTransactionManager tpc, String at) throws Exception {
+    d.setAutoCommit(true);
+    String count = "SELECT id FROM sn.t ORDER BY id";
+    int committed;
+    try (Statement st =
+            d.createStatement(ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY);
+        ResultSet rs = st.executeQuery(count)) {
+      rs.last();
+      committed = rs.getRow();
+    }
+    AtomicBoolean stop = new AtomicBoolean();
+    Thread writer =
+        new Thread(
+            () -> {
+              while (!stop.get()) {
+                try {
+                  TwoPhaseCommitTransaction tx = tpc.begin();
+                  tx.insert(insert("t", 0, "never"));
+                  tx.prepare();
+                  tx.rollback();
+                } catch (TransactionException ignored) {
+                  // a conflict with the read: the next round
+                }
+              }
+            });
+    writer.start();
+    int seen = 0;
+    try {
+      long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+      while (System.nanoTime() < until) {
+        try (Statement st =
+                d.createStatement(ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY);
+            ResultSet rs = st.executeQuery(count)) {
+          rs.last();
+          if (rs.getRow() != committed) {
+            seen++;
+          }
+        } catch (SQLTransactionRollbackException aborted) {
+          // the row in flight seen: the read aborts, as it should
+        }
+      }
+    } finally {
+      stop.set(true);
+      writer.join();
+      d.setAutoCommit(false);
+    }
+    assertThat(seen)
+        .as("%s: scrollable reads in autocommit counting an uncommitted row", at)
+        .isZero();
   }
 
   /** Waits until a transaction waits on a lock, so that the next one forms the deadlock. */

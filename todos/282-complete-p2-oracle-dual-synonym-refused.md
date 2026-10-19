@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "282"
 tags: [oracle, usability, catalog]
@@ -35,3 +35,4 @@ Oracle dialect all fail through the driver; only `FROM sys.dual` works. Predates
 ## Work Log
 
 - 2026-10-19: found while building 8d2.
+- 2026-10-20: fixed. The Oracle resolver follows a synonym to its target table or view in the database (no chain, no db link); the catalog refuses it when the target is a ScalarDB table or one of its tables, and reads it as a plain table otherwise. Tested: CatalogIntegrationTest (plain_syn, dual plain; orders_syn/orders_priv still refused) and SELECT 1 FROM dual through the driver.

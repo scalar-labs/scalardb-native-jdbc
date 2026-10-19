@@ -89,6 +89,7 @@ class CatalogIntegrationTest {
               c,
               "CREATE PUBLIC SYNONYM orders_syn FOR app.orders",
               "CREATE SYNONYM app.orders_priv FOR app.orders",
+              "CREATE SYNONYM app.plain_syn FOR app.plain",
               // an unquoted name beyond ASCII, folded by Oracle itself
               "CREATE TABLE app.größe (id NUMBER(10) PRIMARY KEY)");
         }
@@ -344,7 +345,11 @@ class CatalogIntegrationTest {
           assertThat(session).containsExactly("APP");
           assertThat(catalog.lookup(session, null, "orders").layout())
               .isEqualTo(Layout.DECOUPLED_IMPORTED);
-          // a synonym is refused, public or private, qualified or not
+          // a synonym of a ScalarDB table is refused, public or private, qualified or not; one of
+          // a table ScalarDB does not manage reads as that table, DUAL's among them (todo 282)
+          assertThat(catalog.lookup(List.of("APP"), null, "plain_syn").layout())
+              .isEqualTo(Layout.PLAIN);
+          assertThat(catalog.lookup(List.of("APP"), null, "dual").layout()).isEqualTo(Layout.PLAIN);
           assertRefusedAsSynonym(catalog, List.of("SYSTEM"), null, "orders_syn");
           assertRefusedAsSynonym(catalog, List.of("APP"), null, "orders_priv");
           assertRefusedAsSynonym(catalog, NO_SESSION, "app", "orders_priv");

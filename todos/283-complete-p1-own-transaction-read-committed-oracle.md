@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "283"
 tags: [code-review, oracle, isolation]
@@ -39,3 +39,4 @@ autocommit off, 0. Other engines' autocommit runs at the snapshot level.
 ## Work Log
 
 - 2026-10-20: found in the review of d18b58c (8d2), verified as stated above.
+- 2026-10-20: fixed. The own transaction of an autocommit checked read sets the Oracle session to SERIALIZABLE, and back to READ COMMITTED at its end. Tested in SnapshotIntegrationTest.scrollableInAutocommit (all engines, an 8 s race); without the fix 20 reads in 8 s counted the uncommitted row.

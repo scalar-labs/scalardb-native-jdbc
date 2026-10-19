@@ -430,6 +430,12 @@ public final class SqlAst {
         return Outcome.refused(why);
       }
     }
+    if (stmt instanceof AlterSession
+        && stmt.toString().toUpperCase(Locale.ROOT).contains("ISOLATION_LEVEL")) {
+      // Oracle's level, which ojdbc does not read back: the session would run at one the driver
+      // does not know, SERIALIZABLE among them (todo 284)
+      return Outcome.refused(TRANSACTION_MODE);
+    }
     if (stmt instanceof ResetStatement) {
       // RESET ALL reverts the session's isolation level too, which the driver would not know
       String name = String.valueOf(((ResetStatement) stmt).getName()).strip();

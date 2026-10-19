@@ -161,7 +161,9 @@ COMMITTED and SNAPSHOT on Oracle, came after it.
   leaves out, which a multi-row `VALUES` cannot return (Oracle's ORA-63809); no `BEFORE INSERT`
   or `COMPOUND` trigger on the table. A locking read takes `FOR UPDATE`, with `OF` a column, `NOWAIT` and `SKIP
   LOCKED`, not `WAIT n`, and no row limit, which Oracle refuses with it; Oracle has no `FOR SHARE`,
-  and the driver refuses it.
+  and the driver refuses it. A synonym of a table ScalarDB does not manage, `DUAL` among them, reads
+  as that table; one of a ScalarDB table is refused. `ALTER SESSION SET ISOLATION_LEVEL` is refused:
+  use `setTransactionIsolation`.
 - A name holding an invisible formatting character, such as a zero-width space, is refused: SQL Server
   reads it as whitespace where the parser keeps it in the name.
 - `setTransactionIsolation` fails with `25001` once the open transaction has run a statement, as

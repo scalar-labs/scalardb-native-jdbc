@@ -55,6 +55,7 @@ public enum Engine {
     private final String schema;
     private final String table;
     private final boolean synonym;
+    private final @Nullable QualifiedName target;
 
     /**
      * Creates a stored name of a table or view.
@@ -74,19 +75,35 @@ public enum Engine {
      * @param synonym whether the name is a synonym rather than a table or view
      */
     public QualifiedName(String schema, String table, boolean synonym) {
+      this(schema, table, synonym, null);
+    }
+
+    private QualifiedName(
+        String schema, String table, boolean synonym, @Nullable QualifiedName target) {
       this.schema = schema;
       this.table = table;
       this.synonym = synonym;
+      this.target = target;
     }
 
     /**
-     * Returns whether the name is a synonym. The driver refuses a statement that names a table
-     * through a synonym: which table it stands for is the engine's to say, chains included.
+     * Returns whether the name is a synonym. The driver refuses a statement that names a ScalarDB
+     * table through a synonym, and any whose table is not known: a chain or a database link.
      *
      * @return whether it is a synonym
      */
     public boolean isSynonym() {
       return synonym;
+    }
+
+    /**
+     * Returns the table or view a synonym stands for, in this database, or {@code null} when it is
+     * none of those (another synonym, a database link) or the name is no synonym.
+     *
+     * @return the target
+     */
+    public @Nullable QualifiedName target() {
+      return target;
     }
 
     /**
@@ -755,7 +772,7 @@ public enum Engine {
   private static @Nullable QualifiedName resolveOracle(
       Connection c, List<String> sessionSchemas, @Nullable String schema, String table)
       throws SQLException {
-    // a synonym is reported as one, never followed: the driver refuses it
+    // a synonym is reported as one, with the table it stands for (todo 282)
     String own =
         "SELECT owner, object_name, object_type, 0 pri FROM all_objects"
             + " WHERE owner = ? AND object_name = ? AND object_type IN ('TABLE', 'VIEW', 'SYNONYM')";
@@ -783,9 +800,37 @@ public enum Engine {
         ps.setString(3, table);
       }
       try (ResultSet rs = ps.executeQuery()) {
-        return rs.next()
-            ? new QualifiedName(rs.getString(1), rs.getString(2), "SYNONYM".equals(rs.getString(3)))
-            : null;
+        if (!rs.next()) {
+          return null;
+        }
+        if (!"SYNONYM".equals(rs.getString(3))) {
+          return new QualifiedName(rs.getString(1), rs.getString(2));
+        }
+        return new QualifiedName(
+            rs.getString(1),
+            rs.getString(2),
+            true,
+            synonymTarget(c, rs.getString(1), rs.getString(2)));
+      }
+    }
+  }
+
+  /**
+   * The table or view a synonym stands for in this database, as PUBLIC.DUAL stands for SYS.DUAL
+   * (todo 282), or {@code null} for another synonym or a database link.
+   */
+  private static @Nullable QualifiedName synonymTarget(Connection c, String owner, String name)
+      throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT o.owner, o.object_name FROM all_synonyms s JOIN all_objects o ON o.owner ="
+                + " s.table_owner AND o.object_name = s.table_name WHERE s.owner = ? AND"
+                + " s.synonym_name = ? AND s.db_link IS NULL AND o.object_type IN ('TABLE',"
+                + " 'VIEW')")) {
+      ps.setString(1, owner);
+      ps.setString(2, name);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? new QualifiedName(rs.getString(1), rs.getString(2)) : null;
       }
     }
   }

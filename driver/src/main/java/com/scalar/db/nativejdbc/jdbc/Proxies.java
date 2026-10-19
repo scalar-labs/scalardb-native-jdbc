@@ -836,6 +836,11 @@ public final class Proxies {
       int fetchSize = own ? vendor().getFetchSize() : 0;
       if (own) {
         owner.vendor.setAutoCommit(false);
+        if (owner.router.engine() == Engine.ORACLE) {
+          // the session runs at READ COMMITTED in autocommit: the checks and the read need one
+          // snapshot, Oracle's SERIALIZABLE (todo 283)
+          owner.vendor.setTransactionIsolation(owner.router.oracleSessionLevel(false));
+        }
       }
       Object result;
       try {
@@ -925,6 +930,9 @@ public final class Proxies {
       } finally {
         owner.router.transactionEnded();
         owner.vendor.setAutoCommit(true);
+        if (owner.router.engine() == Engine.ORACLE) {
+          owner.vendor.setTransactionIsolation(owner.router.oracleSessionLevel(true));
+        }
         vendor().setFetchSize(fetchSize);
       }
     }
