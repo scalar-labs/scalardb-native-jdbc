@@ -29,7 +29,11 @@ class SqlServerDatabaseIntegrationTest {
   static void setUp() throws SQLException {
     Assumptions.assumeTrue(Engines.selected().contains(MS), "SQL Server is not selected");
     try (Connection c = MS.open()) {
-      MS.execute(c, "IF DB_ID('nosnap') IS NULL CREATE DATABASE nosnap");
+      MS.execute(
+          c,
+          "IF DB_ID('nosnap') IS NULL CREATE DATABASE nosnap",
+          "IF DB_ID('nosi') IS NULL CREATE DATABASE nosi",
+          "ALTER DATABASE nosi SET READ_COMMITTED_SNAPSHOT ON");
     }
     appdb = "jdbc:scalardb-native:" + MS.url().substring("jdbc:".length());
     nosnap = appdb.replace("databaseName=appdb", "databaseName=nosnap");
@@ -52,6 +56,32 @@ class SqlServerDatabaseIntegrationTest {
         .hasMessageContaining("READ_COMMITTED_SNAPSHOT")
         .extracting("SQLState")
         .isEqualTo("08004");
+  }
+
+  @Test
+  void repeatableReadWithoutSnapshotIsolation_isRefused() throws SQLException {
+    try (Connection c =
+        DriverManager.getConnection(
+            appdb.replace("databaseName=appdb", "databaseName=nosi"), props)) {
+      assertThatThrownBy(() -> c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ))
+          .isInstanceOf(SQLException.class)
+          .hasMessageContaining("ALLOW_SNAPSHOT_ISOLATION")
+          .extracting("SQLState")
+          .isEqualTo("55000");
+      assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
+    }
+    try (Connection c = DriverManager.getConnection(appdb, props)) {
+      c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
+      try (Statement st = c.createStatement();
+          ResultSet rs =
+              st.executeQuery(
+                  "SELECT transaction_isolation_level FROM sys.dm_exec_sessions"
+                      + " WHERE session_id = @@SPID")) {
+        assertThat(rs.next()).isTrue();
+        assertThat(rs.getInt(1)).as("SNAPSHOT").isEqualTo(5);
+      }
+    }
   }
 
   @Test

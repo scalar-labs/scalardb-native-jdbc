@@ -715,6 +715,17 @@ final class Writes {
     return e instanceof SQLTransactionRollbackException;
   }
 
+  /**
+   * SQL Server's update conflict at SNAPSHOT, error 3960, which its driver reports under a plain
+   * SQLState, as the retryable conflict it is: first-committer-wins (design 5).
+   */
+  static SQLException asRetryable(SQLException e) {
+    if (e.getErrorCode() == 3960 && String.valueOf(e.getSQLState()).startsWith("S0")) {
+      return new SQLTransactionRollbackException(e.getMessage(), "40001", 3960, e);
+    }
+    return e;
+  }
+
   /** A query with a row when {@code select} has one, and with none when it has none. */
   static String anyRow(Engine engine, String select) {
     return engine == Engine.SQLSERVER
@@ -804,6 +815,9 @@ final class Writes {
         // way ends the transaction on PostgreSQL, and is undone to the write's start elsewhere,
         // but a deadlock there ends it, which the application must see too (todo 199)
         rollbackOnly.run();
+      }
+      if (e instanceof SQLException) {
+        throw asRetryable((SQLException) e);
       }
       throw e;
     }
@@ -1980,6 +1994,7 @@ final class Writes {
       // the relock goes through the primary key, which a covering index would otherwise stand
       // in for
       boolean hint = lock != null && n.engine == Engine.SQLSERVER;
+      // and the metadata row under the lock too, which SNAPSHOT would read in its snapshot
       String read =
           n.withMeta(
                   n.dataOf(
@@ -1990,6 +2005,7 @@ final class Writes {
                               : "d FORCE INDEX (PRIMARY)",
                       keys.types,
                       chunk.size()),
+                  hint ? " WITH (" + lock + ")" : "",
                   "d",
                   n.keysOf(keys.types, chunk.size()))
               + (lock == null || hint ? "" : " " + lock);
@@ -2225,6 +2241,11 @@ final class Writes {
 
     /** As {@link #withMeta(String, String)}, the data table as d in {@code source}. */
     String withMeta(String source, String keyQualifier, String where) {
+      return withMeta(source, "", keyQualifier, where);
+    }
+
+    /** As {@link #withMeta(String, String, String)}, the metadata table under {@code hint}. */
+    String withMeta(String source, String hint, String keyQualifier, String where) {
       return "SELECT "
           + readColumns(keyQualifier)
           + ", m."
@@ -2237,7 +2258,9 @@ final class Writes {
           + source
           + " LEFT JOIN "
           + meta
-          + " m ON "
+          + " m"
+          + hint
+          + " ON "
           + keyJoin("m", "d")
           + " WHERE "
           + where;

@@ -1469,7 +1469,7 @@ coverage of each engine's syntax is therefore part of the certification of that 
 One setting, the native connection's isolation level, selects everything else.
 
 Built so far: all three levels on PostgreSQL, MySQL and MariaDB, the latter two's writes and locking
-reads as on PostgreSQL; READ COMMITTED on SQL Server and Oracle. Elsewhere the
+reads as on PostgreSQL; READ COMMITTED and SNAPSHOT on SQL Server; READ COMMITTED on Oracle. Elsewhere the
 levels are accepted by `setTransactionIsolation`, and every statement on a ScalarDB table is refused
 with `0AN01`; the locking re-reads, Oracle's refusal of SERIALIZABLE and the translation of
 `TRANSACTION_REPEATABLE_READ` below come with milestone 8.
@@ -1486,6 +1486,16 @@ d.k = u.k0`, each key a lookup that locks its row alone, where a semi-join or an
 scan, and lock, the whole table when they are a large share of it (todo 220); concurrent INSERTs
 then neither wait on nor deadlock with them. A connection's level is changed between transactions
 only: these engines' `SET SESSION TRANSACTION` applies to the next one (todo 219).
+
+SNAPSHOT on SQL Server, as built (milestone 8c2): `TRANSACTION_REPEATABLE_READ` sets the vendor
+connection to SNAPSHOT (4096), refused with `55000` where the database does not allow snapshot
+isolation, and `getTransactionIsolation` reports it back as REPEATABLE READ. SQL Server's own
+first-committer-wins does the rest of what MySQL needs the driver for: an `UPDATE` or an `UPDLOCK`
+read of a row changed since the snapshot fails with error 3960, which ends the transaction and which
+the driver reports as `40001`. A shared-lock hint (`HOLDLOCK`, `REPEATABLEREAD`) reads the rows
+committed now, as on MySQL, and takes the same comparison with the snapshot, the metadata row
+locked by the same hint as its data row so that its version is the latest. SQL Server refuses
+`READPAST` at SNAPSHOT itself. An `OFFSET 0`, SQL Server's first page, skips no rows.
 
 SERIALIZABLE on MySQL and MariaDB, as built (milestone 8b2): the connection runs at REPEATABLE READ and
 `getTransactionIsolation` reports SERIALIZABLE; a level set in SQL through passthrough is followed the

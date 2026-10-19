@@ -1120,11 +1120,13 @@ final class Router {
     Set<String> out = new TreeSet<>();
     for (TableInfo t : scalarDb.values()) {
       out.add(
-          "SELECT 1 FROM "
-              + SplitRead.meta(engine, t)
-              + " WHERE "
-              + engine.quote("tx_state")
-              + " IN (1, 2) LIMIT 1");
+          Writes.anyRow(
+              engine,
+              "SELECT 1 FROM "
+                  + SplitRead.meta(engine, t)
+                  + " WHERE "
+                  + engine.quote("tx_state")
+                  + " IN (1, 2)"));
     }
     return List.copyOf(out);
   }
@@ -1209,18 +1211,15 @@ final class Router {
 
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
-          + " PostgreSQL, MySQL and MariaDB, at READ COMMITTED elsewhere so far; set one of those"
-          + " levels on the connection";
+          + " PostgreSQL, MySQL and MariaDB, at READ COMMITTED and REPEATABLE READ on SQL Server,"
+          + " at READ COMMITTED on Oracle so far; set one of those levels on the connection";
 
   /** Whether statements on ScalarDB tables run at the connection's level on this engine yet. */
   private boolean levelSupported() {
     lock.lock();
     try {
       return isolation == Connection.TRANSACTION_READ_COMMITTED
-          || (isolation == Connection.TRANSACTION_REPEATABLE_READ
-              && (engine == Engine.POSTGRESQL
-                  || engine == Engine.MYSQL
-                  || engine == Engine.MARIADB))
+          || (isolation == Connection.TRANSACTION_REPEATABLE_READ && engine != Engine.ORACLE)
           || (isolation == Connection.TRANSACTION_SERIALIZABLE
               && (engine == Engine.POSTGRESQL || locksAtSerializable()));
     } finally {
@@ -1236,6 +1235,29 @@ final class Router {
     } finally {
       lock.unlock();
     }
+  }
+
+  /** SQL Server's SNAPSHOT level, the vendor driver's {@code TRANSACTION_SNAPSHOT}. */
+  private static final int SQLSERVER_SNAPSHOT = 4096;
+
+  /**
+   * The vendor connection's level for the driver's {@code level} (design 5): SNAPSHOT is SQL
+   * Server's SNAPSHOT level, its REPEATABLE READ being lock-based; SERIALIZABLE on MySQL and
+   * MariaDB is REPEATABLE READ with the driver's locking re-reads.
+   */
+  int vendorLevel(int level) {
+    if (level == Connection.TRANSACTION_SERIALIZABLE && locksAtSerializable()) {
+      return Connection.TRANSACTION_REPEATABLE_READ;
+    }
+    if (level == Connection.TRANSACTION_REPEATABLE_READ && engine == Engine.SQLSERVER) {
+      return SQLSERVER_SNAPSHOT;
+    }
+    return level;
+  }
+
+  /** The driver's level for a vendor connection's: SQL Server's SNAPSHOT is REPEATABLE READ. */
+  static int driverLevel(int vendorLevel) {
+    return vendorLevel == SQLSERVER_SNAPSHOT ? Connection.TRANSACTION_REPEATABLE_READ : vendorLevel;
   }
 
   /**
@@ -1488,12 +1510,14 @@ final class Router {
     try (Statement st = vendor.createStatement();
         ResultSet rs =
             st.executeQuery(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM "
+                "SELECT COUNT(*) FROM (SELECT "
+                    + (engine == Engine.SQLSERVER ? "TOP " + (PER_ROW_ABOVE_IN_RANGES + 1) : "")
+                    + " 1 AS one FROM "
                     + meta
                     + " WHERE "
                     + engine.quote("tx_state")
-                    + " IN (1, 2) LIMIT "
-                    + (PER_ROW_ABOVE_IN_RANGES + 1)
+                    + " IN (1, 2)"
+                    + (engine == Engine.SQLSERVER ? "" : " LIMIT " + (PER_ROW_ABOVE_IN_RANGES + 1))
                     + ") x")) {
       rs.next();
       count = rs.getLong(1);
@@ -1753,7 +1777,7 @@ final class Router {
       if (route.passthrough && SETS_LEVEL.matcher(text).find()) {
         // passthrough may set the level, or reset it, in SQL: follow the session (todos 184, 222)
         try {
-          int level = vendor.getTransactionIsolation();
+          int level = driverLevel(vendor.getTransactionIsolation());
           if (!locksAtSerializable()) {
             isolation = level;
           } else {

@@ -40,7 +40,8 @@ public final class Rows {
   private static final Pattern LOCK =
       Pattern.compile(
           "(?i)\\s+FOR\\s+(UPDATE|SHARE)(?:\\s+OF\\s+\\S+)?(\\s+NOWAIT|\\s+SKIP\\s+LOCKED)?\\s*(;?)$");
-  private static final Pattern LIMIT = Pattern.compile("(?i)\\s+LIMIT\\s+(\\d+)$");
+  private static final Pattern LIMIT =
+      Pattern.compile("(?i)\\s+LIMIT\\s+(\\d+)(?:\\s+OFFSET\\s+(\\d+))?$");
   private static final Pattern TABLE =
       Pattern.compile(
           "(?i)\\bFROM\\s+[\\w.\\[\\]]+(\\s+(?:AS\\s+)?(?!WHERE\\b|ORDER\\b|JOIN\\b|GROUP\\b|LEFT\\b"
@@ -48,7 +49,8 @@ public final class Rows {
 
   /**
    * A test's query in T-SQL: its trailing locking clause as table hints on the first table it
-   * reads, FOR UPDATE as UPDLOCK, FOR SHARE as REPEATABLEREAD, and LIMIT as TOP or FETCH.
+   * reads, FOR UPDATE as UPDLOCK, FOR SHARE as REPEATABLEREAD, and LIMIT, with its OFFSET, as TOP
+   * or FETCH.
    *
    * @param sql a query with PostgreSQL's and MySQL's clauses
    * @return the query as SQL Server takes it
@@ -71,10 +73,11 @@ public final class Rows {
     Matcher limit = LIMIT.matcher(s);
     if (limit.find()) {
       String n = limit.group(1);
+      String offset = limit.group(2) == null ? "0" : limit.group(2);
       s = s.substring(0, limit.start());
       s =
           s.toUpperCase(Locale.ROOT).contains(" ORDER BY ")
-              ? s + " OFFSET 0 ROWS FETCH NEXT " + n + " ROWS ONLY"
+              ? s + " OFFSET " + offset + " ROWS FETCH NEXT " + n + " ROWS ONLY"
               : s.replaceFirst("(?i)\\bSELECT\\s+", "SELECT TOP " + n + " ");
     }
     if (!hints.isEmpty()) {

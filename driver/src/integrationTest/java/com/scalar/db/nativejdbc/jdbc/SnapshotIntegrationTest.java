@@ -60,9 +60,10 @@ class SnapshotIntegrationTest {
   @MethodSource("engines")
   void snapshotLevels(Engines e) throws Exception {
     boolean pg = e.engine() == Engine.POSTGRESQL;
+    boolean mysqlLike = e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB;
     assumeTrue(
-        pg || e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB,
-        "the snapshot levels are PostgreSQL, MySQL and MariaDB only so far");
+        pg || mysqlLike || e.engine() == Engine.SQLSERVER,
+        "the snapshot levels are PostgreSQL, MySQL, MariaDB and SQL Server only so far");
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace("sn", true);
@@ -80,7 +81,7 @@ class SnapshotIntegrationTest {
       }
     }
     Properties shortWait = new Properties();
-    if (!pg) {
+    if (mysqlLike) {
       // a ScalarDB write that waits on the driver's lock fails at once, as a conflict: the test
       // runs both sides in one thread
       shortWait.setProperty(
@@ -121,8 +122,13 @@ class SnapshotIntegrationTest {
         }
       }
     }
+    // ponytail: SERIALIZABLE on SQL Server is milestone 8c3
     for (int level :
-        new int[] {Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE}) {
+        e.engine() == Engine.SQLSERVER
+            ? new int[] {Connection.TRANSACTION_REPEATABLE_READ}
+            : new int[] {
+              Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE
+            }) {
       String at = level == Connection.TRANSACTION_SERIALIZABLE ? "SERIALIZABLE" : "SNAPSHOT";
       try (DistributedTransactionManager tm = factory.getTransactionManager();
           TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
@@ -139,6 +145,7 @@ class SnapshotIntegrationTest {
       String at)
       throws Exception {
     boolean pg = e.engine() == Engine.POSTGRESQL;
+    boolean mysqlLike = e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB;
     // SERIALIZABLE on MySQL and MariaDB: every read locks, anything but one table row by row on the
     // coarse path
     boolean coarse = !pg && level == Connection.TRANSACTION_SERIALIZABLE;
@@ -364,7 +371,7 @@ class SnapshotIntegrationTest {
           .isNotEqualTo(snapshotText);
       d.setTransactionIsolation(level);
       assertThat(d.nativeSQL(text)).as("%s: nativeSQL back", at).isEqualTo(snapshotText);
-      if (!pg) {
+      if (mysqlLike) {
         // passthrough may set the level in SQL here too (todos 222, 232): SERIALIZABLE as
         // setTransactionIsolation sets it, REPEATABLE READ as SNAPSHOT
         d.setAutoCommit(true);
@@ -529,9 +536,9 @@ class SnapshotIntegrationTest {
               .isEqualTo("40001");
         }
         d.rollback();
-        // a locking read of a row changed after the snapshot, which MySQL and MariaDB would return
-        // as committed now
-        for (String lock : List.of("FOR UPDATE", pg ? "FOR SHARE" : "LOCK IN SHARE MODE")) {
+        // a locking read of a row changed after the snapshot, which MySQL, MariaDB and SQL Server
+        // would return as committed now
+        for (String lock : List.of("FOR UPDATE", mysqlLike ? "LOCK IN SHARE MODE" : "FOR SHARE")) {
           rows(d, "SELECT x FROM sn.t WHERE id = 4");
           scalarDbSet(tm, 4, lock);
           assertThatThrownBy(() -> rows(d, "SELECT x FROM sn.t WHERE id = 4 " + lock))
@@ -543,7 +550,7 @@ class SnapshotIntegrationTest {
         }
       }
 
-      if (!pg) {
+      if (mysqlLike) {
         // the driver's key lookups of many keys lock those rows alone, not the table: a write
         // below the table, which only a scan of it would lock, does not wait (todo 220)
         StringBuilder many = new StringBuilder("INSERT INTO sn.t (id, x, v) VALUES ");
@@ -567,18 +574,31 @@ class SnapshotIntegrationTest {
         d.rollback();
       }
 
-      // SKIP LOCKED with LIMIT returns the first row not locked, the queue (todo 221)
-      try (Connection other = e.openDriver()) {
-        other.setAutoCommit(false);
-        rows(other, "SELECT x FROM sn.t WHERE id = 7 FOR UPDATE");
-        assertThat(
-                rows(
-                    d,
-                    "SELECT id FROM sn.t WHERE id >= 7 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED"))
-            .as("%s: SKIP LOCKED with LIMIT", at)
-            .containsExactly("8");
+      // SKIP LOCKED with LIMIT returns the first row not locked, the queue (todo 221); SQL
+      // Server has no READPAST at SNAPSHOT, and says so
+      if (e.engine() == Engine.SQLSERVER) {
+        assertThatThrownBy(
+                () ->
+                    rows(
+                        d,
+                        "SELECT id FROM sn.t WHERE id >= 7 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED"))
+            .as("%s: READPAST", at)
+            .isInstanceOf(SQLException.class)
+            .hasMessageContaining("READPAST");
         d.rollback();
-        other.rollback();
+      } else {
+        try (Connection other = e.openDriver()) {
+          other.setAutoCommit(false);
+          rows(other, "SELECT x FROM sn.t WHERE id = 7 FOR UPDATE");
+          assertThat(
+                  rows(
+                      d,
+                      "SELECT id FROM sn.t WHERE id >= 7 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED"))
+              .as("%s: SKIP LOCKED with LIMIT", at)
+              .containsExactly("8");
+          d.rollback();
+          other.rollback();
+        }
       }
 
       // a write to a row in flight aborts at once, whatever the wait allows

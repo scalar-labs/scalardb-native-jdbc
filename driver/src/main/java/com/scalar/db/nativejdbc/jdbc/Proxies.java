@@ -253,19 +253,24 @@ public final class Proxies {
           }
           {
             int level = (Integer) args[0];
-            // SERIALIZABLE on MySQL and MariaDB runs at REPEATABLE READ with the driver's locking
-            // re-reads; their own SERIALIZABLE would lock covering index entries only (design 4.2)
-            vendor.setTransactionIsolation(
-                level == Connection.TRANSACTION_SERIALIZABLE && router.locksAtSerializable()
-                    ? Connection.TRANSACTION_REPEATABLE_READ
-                    : level);
+            int vendorLevel = router.vendorLevel(level);
+            if (vendorLevel != level && level == Connection.TRANSACTION_REPEATABLE_READ) {
+              session.requireSnapshotIsolation(vendor);
+            }
+            if (!vendor.getAutoCommit()) {
+              // nothing of the application's ran, but the driver's own lookups, of index columns
+              // say, may have opened the transaction at the old level, which SQL Server then
+              // refuses to go on at SNAPSHOT in (error 3951)
+              vendor.rollback();
+            }
+            vendor.setTransactionIsolation(vendorLevel);
             router.setIsolation(level);
             return null;
           }
         case "getTransactionIsolation":
           {
             // the vendor connection's own level, unless the driver runs SERIALIZABLE at another
-            int level = vendor.getTransactionIsolation();
+            int level = Router.driverLevel(vendor.getTransactionIsolation());
             int driver = router.isolation();
             return driver == Connection.TRANSACTION_SERIALIZABLE
                     && level == Connection.TRANSACTION_REPEATABLE_READ
@@ -846,7 +851,7 @@ public final class Proxies {
           // passed and the anchors read hold no more (todo 230)
           owner.rollbackOnly = true;
         }
-        throw e;
+        throw e instanceof SQLException ? Writes.asRetryable((SQLException) e) : e;
       }
       if (own) {
         endOwn(true, fetchSize);

@@ -1045,7 +1045,8 @@ public final class SqlAst {
   }
 
   /**
-   * Returns whether the statement is a select that skips rows before its first: an OFFSET.
+   * Returns whether the statement is a select that skips rows before its first: an OFFSET other
+   * than a literal 0, which SQL Server's first page, {@code OFFSET 0 ROWS FETCH ...}, carries.
    *
    * @return whether rows the result does not return still count toward it
    */
@@ -1054,7 +1055,12 @@ public final class SqlAst {
       return false;
     }
     PlainSelect s = (PlainSelect) statement;
-    return s.getOffset() != null || (s.getLimit() != null && s.getLimit().getOffset() != null);
+    return skips(s.getOffset() == null ? null : s.getOffset().getOffset())
+        || skips(s.getLimit() == null ? null : s.getLimit().getOffset());
+  }
+
+  private static boolean skips(@Nullable Expression offset) {
+    return offset != null && !(offset instanceof LongValue && ((LongValue) offset).getValue() == 0);
   }
 
   /**

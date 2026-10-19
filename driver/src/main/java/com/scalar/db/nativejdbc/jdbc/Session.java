@@ -5,6 +5,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLNonTransientConnectionException;
+import java.sql.SQLNonTransientException;
 import java.sql.Statement;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
@@ -126,6 +127,31 @@ final class Session {
   private void markStale() {
     stale = true;
     generation++;
+  }
+
+  /**
+   * On SQL Server, as SNAPSHOT is set: the database must allow snapshot isolation, or the first
+   * statement fails (design 5).
+   *
+   * @throws SQLException 55000 if it does not
+   */
+  void requireSnapshotIsolation(Connection vendor) throws SQLException {
+    try (Statement st = vendor.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT name, snapshot_isolation_state FROM sys.databases"
+                    + " WHERE database_id = DB_ID()")) {
+      if (rs.next() && rs.getInt(2) != 1) {
+        throw new SQLNonTransientException(
+            "database "
+                + rs.getString(1)
+                + " does not allow snapshot isolation, which REPEATABLE READ runs at on SQL"
+                + " Server: ALTER DATABASE "
+                + rs.getString(1)
+                + " SET ALLOW_SNAPSHOT_ISOLATION ON",
+            "55000");
+      }
+    }
   }
 
   /**

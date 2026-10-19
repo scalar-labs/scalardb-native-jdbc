@@ -498,7 +498,13 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
     covering index; under `READPAST` the attempt's locks released by its savepoint and the rows
     returned locked again by key, since SQL Server keeps the lock of a row in flight it rejected.
     The tests' FOR UPDATE and LIMIT become hints and paging through a fixture.
-  - **8c2: SNAPSHOT**, SQL Server's SNAPSHOT level with the after-image checks.
+  - **8c2: SNAPSHOT**, SQL Server's SNAPSHOT level with the after-image checks. **Done
+    (2026-10-19).** As planned, first-committer-wins native (error 3960, reported as `40001`), with
+    these found on the engine: a shared-lock hint reads the rows committed now, so the locking read
+    is compared with the snapshot as on MySQL, the metadata row relocked under the same hint; SQL
+    Server refuses `READPAST` at SNAPSHOT; `OFFSET 0` is no skip; the driver's in-flight checks and
+    counts were written with `LIMIT`, which SQL Server does not have. `SnapshotIntegrationTest` runs
+    SNAPSHOT on SQL Server.
   - **8c3: SERIALIZABLE**, SNAPSHOT plus the locking re-read of 4.2 under `WITH (HOLDLOCK)`.
 - **8d: Oracle**: READ COMMITTED and SNAPSHOT, `TRANSACTION_REPEATABLE_READ` mapped to its
   SERIALIZABLE, the driver's SERIALIZABLE refused.

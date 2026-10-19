@@ -649,4 +649,22 @@ class SqlAstTest {
     assertThat(ast.joinTokens(r -> "[su].[rc_imp]"))
         .isEqualTo("SELECT x FROM [su].[rc_imp] WHERE id = 1");
   }
+
+  @Test
+  void skipsRows_onlyForAnOffsetPastTheFirstRow() {
+    assertThat(parse("SELECT x FROM t ORDER BY x LIMIT 3 OFFSET 3").skipsRows()).isTrue();
+    assertThat(parse("SELECT x FROM t ORDER BY x LIMIT 3 OFFSET 0").skipsRows()).isFalse();
+    assertThat(parse("SELECT x FROM t ORDER BY x LIMIT 3 OFFSET ?").skipsRows()).isTrue();
+    // SQL Server's first page, as Spring Data writes it
+    SqlAst first =
+        SqlAst.parse(
+                "SELECT x FROM t ORDER BY x OFFSET 0 ROWS FETCH NEXT 2 ROWS ONLY", Engine.SQLSERVER)
+            .orElseThrow();
+    assertThat(first.skipsRows()).isFalse();
+    SqlAst next =
+        SqlAst.parse(
+                "SELECT x FROM t ORDER BY x OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY", Engine.SQLSERVER)
+            .orElseThrow();
+    assertThat(next.skipsRows()).isTrue();
+  }
 }

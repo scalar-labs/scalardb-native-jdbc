@@ -80,6 +80,8 @@ public enum Engines {
         st.execute("CREATE DATABASE appdb");
         // the driver refuses a database without it (design section 1)
         st.execute("ALTER DATABASE appdb SET READ_COMMITTED_SNAPSHOT ON");
+        // REPEATABLE READ runs at SNAPSHOT there (design 5)
+        st.execute("ALTER DATABASE appdb SET ALLOW_SNAPSHOT_ISOLATION ON");
       }
       return c.getJdbcUrl() + ";databaseName=appdb";
     }
