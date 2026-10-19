@@ -7,6 +7,7 @@ import net.sf.jsqlparser.JSQLParserException;
 import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.select.ForMode;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
 class TableHintsTest {
@@ -86,6 +87,32 @@ class TableHintsTest {
                     "SELECT '\u200B', N'\u200B' AS [a\u200B] FROM ns.t", Engine.SQLSERVER, true)
                 .isPresent())
         .isTrue();
+  }
+
+  @Test
+  void holdingEveryTable_locksEachTableItReads() {
+    assertThat(hold("SELECT x FROM ns.t WHERE id = 1"))
+        .isEqualTo("SELECT x FROM ns.t WITH (HOLDLOCK) WHERE id = 1");
+    assertThat(hold("SELECT a.x FROM ns.t AS a JOIN p b ON b.id = a.id"))
+        .isEqualTo(
+            "SELECT a.x FROM ns.t AS a WITH (HOLDLOCK) JOIN p b WITH (HOLDLOCK) ON b.id = a.id");
+    // a subquery's too, a CTE's tables but not the CTE
+    assertThat(hold("WITH c AS (SELECT id FROM p) SELECT id FROM c WHERE id IN (SELECT id FROM q)"))
+        .isEqualTo(
+            "WITH c AS (SELECT id FROM p WITH (HOLDLOCK)) SELECT id FROM c WHERE id IN (SELECT id"
+                + " FROM q WITH (HOLDLOCK))");
+    // into a hint list the table has, either form
+    assertThat(hold("SELECT x FROM p WITH (UPDLOCK) WHERE id = 1"))
+        .isEqualTo("SELECT x FROM p WITH (UPDLOCK, HOLDLOCK) WHERE id = 1");
+    assertThat(hold("SELECT x FROM p a (UPDLOCK, ROWLOCK)"))
+        .isEqualTo("SELECT x FROM p a (UPDLOCK, ROWLOCK, HOLDLOCK)");
+    // the catalog takes no lock; a hint the parser keeps cannot be merged
+    assertThat(hold("SELECT name FROM sys.tables")).isEqualTo("SELECT name FROM sys.tables");
+    assertThat(hold("SELECT x FROM p WITH (NOLOCK)")).isNull();
+  }
+
+  private static @Nullable String hold(String sql) {
+    return ast(sql).holdingEveryTable(sql);
   }
 
   @Test

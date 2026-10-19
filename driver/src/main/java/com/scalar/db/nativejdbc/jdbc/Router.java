@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
@@ -509,7 +510,7 @@ final class Router {
     if (kind == SqlAst.Kind.SELECT && lockingSerializable()) {
       // other tables are locked as they are read too, as the engine's SERIALIZABLE would lock them;
       // a write's own reads take next-key locks at REPEATABLE READ (todo 229)
-      routed = ast.lockingEverySelect(sql, " LOCK IN SHARE MODE");
+      routed = lockingEveryRead(ast, sql);
       if (routed == null) {
         throw Errors.unsupported(LOCKS_EVERY_SELECT);
       }
@@ -756,15 +757,20 @@ final class Router {
         throw Errors.unsupported(
             "the locking read cannot be rewritten onto the committed rows" + tables);
       }
-      if (ast.hints(ref).isEmpty()) {
+      if (ast.hints(ref).isEmpty() && !plain) {
         throw Errors.unsupported(
             "SQL Server locks with table hints, not FOR UPDATE or FOR SHARE: write WITH (UPDLOCK)"
                 + " or WITH (HOLDLOCK) after the table"
                 + tables);
       }
       // the hints, blanked out of the text, go onto the committed copy's data table, which the
-      // optimizer folds into the statement, the user's predicate with it (4.7)
-      inner = "WITH (" + String.join(", ", ast.hints(ref)) + ")";
+      // optimizer folds into the statement, the user's predicate with it (4.7); at SERIALIZABLE
+      // with a range lock, which holds off a ScalarDB insert into the predicate's range
+      List<String> hints = new ArrayList<>(ast.hints(ref));
+      if (lockingSerializable() && !hints.contains("HOLDLOCK") && !hints.contains("SERIALIZABLE")) {
+        hints.add("HOLDLOCK");
+      }
+      inner = "WITH (" + String.join(", ", hints) + ")";
       // a lock read through a covering index there locks that index's keys only, an update lock
       // too: the rows are locked again through the primary key as their versions are read
       relock =
@@ -1178,8 +1184,7 @@ final class Router {
             : SqlAst.parse(rewritten, engine, session.doubleQuotesQuoteIdentifiersAsLastRead())
                 .orElse(null);
     // every SELECT locked, a subquery's too: none reads in the snapshot (todo 229)
-    String locked =
-        again == null ? null : again.lockingEverySelect(rewritten, " LOCK IN SHARE MODE");
+    String locked = again == null ? null : lockingEveryRead(again, rewritten);
     if (locked == null) {
       throw Errors.unsupported("the statement cannot be rewritten onto the data tables" + tables);
     }
@@ -1197,22 +1202,59 @@ final class Router {
             List.of(),
             true);
     List<String> checks = new ArrayList<>();
-    for (String check : checks(scalarDb)) {
-      checks.add(check + " LOCK IN SHARE MODE");
+    if (engine == Engine.SQLSERVER) {
+      // the in-flight index read under a range lock, which holds off every prepare of the table
+      for (TableInfo t : byName(scalarDb).values()) {
+        checks.add(
+            Writes.anyRow(
+                engine,
+                "SELECT 1 FROM "
+                    + SplitRead.meta(engine, t)
+                    + " WITH (HOLDLOCK, INDEX("
+                    + engine.quote(t.inflightIndex(engine))
+                    + ")) WHERE "
+                    + engine.quote("tx_state")
+                    + " IN (1, 2)"));
+      }
+    } else {
+      for (String check : checks(scalarDb)) {
+        checks.add(check + " LOCK IN SHARE MODE");
+      }
     }
     return r.checked(checks);
   }
 
+  /** Each ScalarDB table of a read once, in the order of their names, which locks follow. */
+  private static Map<String, TableInfo> byName(IdentityHashMap<SqlAst.TableRef, TableInfo> refs) {
+    Map<String, TableInfo> out = new TreeMap<>();
+    for (TableInfo t : refs.values()) {
+      out.put(t.namespace() + "." + t.table(), t);
+    }
+    return out;
+  }
+
+  /**
+   * {@code text} with every read under a shared lock, as the engine's SERIALIZABLE would take it
+   * (todo 229): {@code LOCK IN SHARE MODE} after every SELECT on MySQL and MariaDB, {@code
+   * HOLDLOCK} on every table on SQL Server; null when one cannot be placed.
+   */
+  private @Nullable String lockingEveryRead(SqlAst ast, String text) {
+    return engine == Engine.SQLSERVER
+        ? ast.holdingEveryTable(text)
+        : ast.lockingEverySelect(text, " LOCK IN SHARE MODE");
+  }
+
   private static final String LOCKS_EVERY_SELECT =
-      "at SERIALIZABLE on MySQL and MariaDB every SELECT is read under a lock, which a statement"
-          + " with a # comment, a SELECT joining information_schema to other tables, or a locking"
-          + " clause whose OF list leaves a table out, cannot be given; use -- or /* */ comments,"
-          + " read information_schema on its own, and name every table in OF";
+      "at SERIALIZABLE on MySQL, MariaDB and SQL Server every read is under a lock, which a"
+          + " statement with a # comment, a SELECT joining information_schema to other tables, a"
+          + " locking clause whose OF list leaves a table out, or a table with SQL Server's NOLOCK"
+          + " or INDEX hint, cannot be given; use -- or /* */ comments, read information_schema on"
+          + " its own, name every table in OF, and leave those hints out";
 
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
-          + " PostgreSQL, MySQL and MariaDB, at READ COMMITTED and REPEATABLE READ on SQL Server,"
-          + " at READ COMMITTED on Oracle so far; set one of those levels on the connection";
+          + " PostgreSQL, MySQL, MariaDB and SQL Server, at READ COMMITTED on Oracle so far; set"
+          + " one of those levels on the connection";
 
   /** Whether statements on ScalarDB tables run at the connection's level on this engine yet. */
   private boolean levelSupported() {
@@ -1264,16 +1306,16 @@ final class Router {
   }
 
   /** SQL Server's SNAPSHOT level, the vendor driver's {@code TRANSACTION_SNAPSHOT}. */
-  private static final int SQLSERVER_SNAPSHOT = 4096;
+  static final int SQLSERVER_SNAPSHOT = 4096;
 
   /**
    * The vendor connection's level for the driver's {@code level} (design 5): SNAPSHOT is SQL
-   * Server's SNAPSHOT level, its REPEATABLE READ being lock-based; SERIALIZABLE on MySQL and
-   * MariaDB is REPEATABLE READ with the driver's locking re-reads.
+   * Server's SNAPSHOT level, its REPEATABLE READ being lock-based; SERIALIZABLE on MySQL, MariaDB
+   * and SQL Server is the snapshot level with the driver's locking re-reads.
    */
   int vendorLevel(int level) {
     if (level == Connection.TRANSACTION_SERIALIZABLE && locksAtSerializable()) {
-      return Connection.TRANSACTION_REPEATABLE_READ;
+      level = Connection.TRANSACTION_REPEATABLE_READ;
     }
     if (level == Connection.TRANSACTION_REPEATABLE_READ && engine == Engine.SQLSERVER) {
       return SQLSERVER_SNAPSHOT;
@@ -1288,10 +1330,10 @@ final class Router {
 
   /**
    * Whether SERIALIZABLE runs at the engine's snapshot level with the driver's locking re-reads, on
-   * MySQL and MariaDB (design 4.2), rather than at the engine's own SERIALIZABLE.
+   * MySQL, MariaDB and SQL Server (design 4.2), rather than at the engine's own SERIALIZABLE.
    */
   boolean locksAtSerializable() {
-    return engine == Engine.MYSQL || engine == Engine.MARIADB;
+    return engine == Engine.MYSQL || engine == Engine.MARIADB || engine == Engine.SQLSERVER;
   }
 
   /** Whether the connection runs SERIALIZABLE by the driver's locking re-reads. */
@@ -1639,6 +1681,9 @@ final class Router {
   private static final Pattern SETS_LEVEL =
       Pattern.compile("isolation|set_config|\\b(reset|discard)\\b");
 
+  private static final Pattern SETS_SNAPSHOT =
+      Pattern.compile("\\bisolation\\s+level\\s+snapshot\\b");
+
   private static final Pattern SETS_SESSION_REPEATABLE =
       Pattern.compile("\\bsession\\s+transaction\\s+isolation\\s+level\\s+repeatable\\b");
 
@@ -1807,12 +1852,21 @@ final class Router {
               engine == Engine.SQLSERVER
                   ? sqlServerLevel(vendor)
                   : driverLevel(vendor.getTransactionIsolation());
-          if (!locksAtSerializable()) {
-            isolation = level;
-            if (engine == Engine.SQLSERVER && level != Connection.TRANSACTION_NONE) {
-              // the vendor driver's own idea of the level, which it never reads back
-              vendor.setTransactionIsolation(vendorLevel(level));
+          if (engine == Engine.SQLSERVER) {
+            // SNAPSHOT, what SERIALIZABLE runs at, is followed only where the statement names it;
+            // SQL Server's own SERIALIZABLE is the driver's
+            if (level != Connection.TRANSACTION_REPEATABLE_READ
+                || isolation != Connection.TRANSACTION_SERIALIZABLE
+                || SETS_SNAPSHOT.matcher(text).find()) {
+              isolation = level;
             }
+            if (isolation != Connection.TRANSACTION_NONE) {
+              // the vendor driver's own idea of the level, which it never reads back, and the
+              // session at the level the driver runs it at
+              vendor.setTransactionIsolation(vendorLevel(isolation));
+            }
+          } else if (!locksAtSerializable()) {
+            isolation = level;
           } else {
             // the level is read, not the text, which a comment or a SELECT may name it in; what
             // SERIALIZABLE runs at, REPEATABLE READ, is followed only where the statement set it

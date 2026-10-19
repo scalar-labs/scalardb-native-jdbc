@@ -309,6 +309,20 @@ public enum Engines {
     };
   }
 
+  /**
+   * The URL with a lock wait of about a second, for ScalarDB's storage connections where a test
+   * runs both sides in one thread: a write that waits on the driver's lock fails rather than hangs.
+   *
+   * @return the URL
+   * @throws SQLException if the URL cannot be read
+   */
+  public String shortLockWait() throws SQLException {
+    String url = url();
+    return engine == Engine.SQLSERVER
+        ? url + ";lockTimeout=1000"
+        : url + (url.contains("?") ? "&" : "?") + "sessionVariables=innodb_lock_wait_timeout=1";
+  }
+
   /** A FROM item of the integers {@code from} to {@code to}, column {@code g}, alias {@code g}. */
   public String series(int from, int to) {
     if (engine == Engine.POSTGRESQL) {

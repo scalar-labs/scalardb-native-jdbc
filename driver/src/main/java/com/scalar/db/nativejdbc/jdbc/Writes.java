@@ -339,9 +339,10 @@ final class Writes {
                         + (span == null ? "" : " WHERE " + source.substring(span[0], span[1]))),
                 inWhere)
             : null;
-    // at SERIALIZABLE on MySQL and MariaDB the predicate is read again on the data table under a
-    // shared lock, whose next-key locks hold off a ScalarDB insert into its range, and must
-    // return what the snapshot does (design 4.2)
+    // at SERIALIZABLE on MySQL, MariaDB and SQL Server the predicate is read again on the data
+    // table under a shared lock, whose next-key or key-range locks hold off a ScalarDB insert into
+    // its range, and must return what the snapshot does (design 4.2)
+    boolean hint = engine == Engine.SQLSERVER;
     Step locked =
         locks
             ? new Step(
@@ -351,8 +352,9 @@ final class Writes {
                     + n.data
                     + " "
                     + exposed
+                    + (hint ? " WITH (HOLDLOCK)" : "")
                     + (span == null ? "" : " WHERE " + source.substring(span[0], span[1]))
-                    + " LOCK IN SHARE MODE",
+                    + (hint ? "" : " LOCK IN SHARE MODE"),
                 inWhere)
             : null;
     return new KeyedPlan(
@@ -1243,7 +1245,13 @@ final class Writes {
         }
       }
       Map<List<Object>, Anchors.Version> out =
-          versions(run, n, keys, n.engine == Engine.MARIADB ? "LOCK IN SHARE MODE" : "FOR SHARE");
+          versions(
+              run,
+              n,
+              keys,
+              n.engine == Engine.MARIADB
+                  ? "LOCK IN SHARE MODE"
+                  : n.engine == Engine.SQLSERVER ? "REPEATABLEREAD, ROWLOCK" : "FOR SHARE");
       if (out == null) {
         throw new Aborted(
             "a row the statement's predicate matches is being written by a ScalarDB transaction");

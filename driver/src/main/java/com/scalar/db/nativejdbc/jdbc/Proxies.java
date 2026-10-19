@@ -255,7 +255,7 @@ public final class Proxies {
           {
             int level = (Integer) args[0];
             int vendorLevel = router.vendorLevel(level);
-            if (vendorLevel != level && level == Connection.TRANSACTION_REPEATABLE_READ) {
+            if (vendorLevel == Router.SQLSERVER_SNAPSHOT) {
               session.requireSnapshotIsolation(vendor);
             }
             if (!vendor.getAutoCommit()) {

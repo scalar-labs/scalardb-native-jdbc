@@ -1468,11 +1468,10 @@ coverage of each engine's syntax is therefore part of the certification of that 
 
 One setting, the native connection's isolation level, selects everything else.
 
-Built so far: all three levels on PostgreSQL, MySQL and MariaDB, the latter two's writes and locking
-reads as on PostgreSQL; READ COMMITTED and SNAPSHOT on SQL Server; READ COMMITTED on Oracle. Elsewhere the
-levels are accepted by `setTransactionIsolation`, and every statement on a ScalarDB table is refused
-with `0AN01`; the locking re-reads, Oracle's refusal of SERIALIZABLE and the translation of
-`TRANSACTION_REPEATABLE_READ` below come with milestone 8.
+Built so far: all three levels on PostgreSQL, MySQL, MariaDB and SQL Server, the others' writes and
+locking reads as on PostgreSQL; READ COMMITTED on Oracle. Elsewhere the levels are accepted by
+`setTransactionIsolation`, and every statement on a ScalarDB table is refused with `0AN01`; Oracle's
+refusal of SERIALIZABLE and its translation of `TRANSACTION_REPEATABLE_READ` come with milestone 8d.
 
 SNAPSHOT on MySQL and MariaDB needs two things PostgreSQL gives natively. A locking read there returns
 the rows committed now, not the snapshot's, and raises nothing for a row changed since: the driver
@@ -1502,6 +1501,20 @@ and commit, in a new transaction (todo 263). The vendor driver reports the level
 the session's: after a passthrough statement that may set it, the driver reads it from
 `sys.dm_exec_sessions`, SQL Server's lock-based REPEATABLE READ refusing every statement on a
 ScalarDB table (todo 264).
+
+SERIALIZABLE on SQL Server, as built (milestone 8c3), is 8b2's below with `HOLDLOCK` for `LOCK IN
+SHARE MODE`: the connection runs at SNAPSHOT, `getTransactionIsolation` reports SERIALIZABLE, and SQL
+Server's own SERIALIZABLE set in SQL is taken as the driver's. Every table a read reaches gets
+`WITH (HOLDLOCK)`, added to a hint list it has, `sys` and `information_schema` aside; a `NOLOCK` or
+`INDEX` hint, which the parser keeps, cannot take it and is refused. A read of one ScalarDB table row
+by row is the locking read of 8c1 with `HOLDLOCK` added to its hints; the coarse path reads each
+table's in-flight index `WITH (HOLDLOCK, INDEX(...))`, whose range lock on the filtered index holds
+off every prepare of the table, then the statement on the data tables; an UPDATE or DELETE reads its
+predicate `WITH (HOLDLOCK)` and compares it with the snapshot. Measured on SQL Server: a `HOLDLOCK`
+read takes key-range locks at SNAPSHOT, reaches the base tables through a view, and, as a locking
+read on MySQL, does not take the snapshot, which the first plain read does; SQL Server's guarded
+metadata insert takes a range lock too, so a ScalarDB prepare or validation near a key the driver
+inserted may wait on it until the driver commits, a false conflict.
 
 SERIALIZABLE on MySQL and MariaDB, as built (milestone 8b2): the connection runs at REPEATABLE READ and
 `getTransactionIsolation` reports SERIALIZABLE; a level set in SQL through passthrough is followed the

@@ -185,9 +185,7 @@ class SerializableIntegrationTest {
   @MethodSource("engines")
   void ssiBreaksTheCycles(Engines e) throws Exception {
     boolean pg = e.engine() == Engine.POSTGRESQL;
-    assumeTrue(
-        pg || e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB,
-        "SERIALIZABLE is PostgreSQL's, MySQL's and MariaDB's so far");
+    assumeTrue(e.engine() != Engine.ORACLE, "SERIALIZABLE is refused on Oracle");
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace("sz", true);
@@ -223,11 +221,7 @@ class SerializableIntegrationTest {
       if (!pg) {
         // a prepare that waits on the driver's lock fails at once, as a conflict: the test runs
         // both sides in one thread
-        p.setProperty(
-            "scalar.db.contact_points",
-            e.url()
-                + (e.url().contains("?") ? "&" : "?")
-                + "sessionVariables=innodb_lock_wait_timeout=1");
+        p.setProperty("scalar.db.contact_points", e.shortLockWait());
       }
       TransactionFactory factory = e.scalarDb(p);
       try (DistributedTransactionManager tm = factory.getTransactionManager();
@@ -268,7 +262,11 @@ class SerializableIntegrationTest {
                 if (ssi || !timing.needsSsi) {
                   assertThat(holds).as("%s: the rule holds; steps: %s", at, trace).isTrue();
                   assertThat(trace).as("%s: one side commits", at).contains("commit ok");
-                } else {
+                } else if (e.engine() != Engine.SQLSERVER
+                    || !trace.matches(".*s\\.\\w+ aborts.*")) {
+                  // on SQL Server ScalarDB's prepare or validation may wait on a lock of the
+                  // driver's write instead, the range lock of its guarded metadata insert, which
+                  // holds the anomaly off
                   assertThat(holds)
                       .as("%s: the scenario reaches the anomaly; steps: %s", at, trace)
                       .isFalse();
@@ -343,9 +341,14 @@ class SerializableIntegrationTest {
             throw ex;
           }
           trace.append("aborts ").append(ex.getClass().getSimpleName()).append(", ");
-          rollback(s);
           sLive = false;
         }
+      }
+      // ScalarDB's rollback after the driver's transaction ends: on SQL Server it would wait on
+      // the driver's locks as its prepare did, time out, and leave records prepared
+      d.c.rollback();
+      if (!sLive) {
+        rollback(s);
       }
       return trace.toString();
     }
@@ -489,12 +492,23 @@ class SerializableIntegrationTest {
     }
   }
 
-  /** Whether ScalarDB aborted for a conflict, not for any other failure. */
+  /**
+   * Whether ScalarDB aborted for a conflict, not for any other failure: or on SQL Server for the
+   * short lock wait on the driver's lock, error 1222, which ScalarDB reports as a plain failure.
+   */
   private static boolean conflict(TransactionException ex) {
-    return ex instanceof CrudConflictException
+    if (ex instanceof CrudConflictException
         || ex instanceof PreparationConflictException
         || ex instanceof ValidationConflictException
-        || ex instanceof CommitConflictException;
+        || ex instanceof CommitConflictException) {
+      return true;
+    }
+    for (Throwable c = ex; c != null; c = c.getCause()) {
+      if (c instanceof SQLException && ((SQLException) c).getErrorCode() == 1222) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static int sum(Map<Integer, Integer> rows) {

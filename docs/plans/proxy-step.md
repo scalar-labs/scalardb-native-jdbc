@@ -506,6 +506,13 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
     counts were written with `LIMIT`, which SQL Server does not have. `SnapshotIntegrationTest` runs
     SNAPSHOT on SQL Server.
   - **8c3: SERIALIZABLE**, SNAPSHOT plus the locking re-read of 4.2 under `WITH (HOLDLOCK)`.
+    **Done (2026-10-19).** As 8b2 with `HOLDLOCK` for `LOCK IN SHARE MODE`, after measuring that a
+    `HOLDLOCK` read at SNAPSHOT takes key-range locks, reaches the base tables through a view, and
+    does not take the snapshot: every table a read reaches is held, added to a hint list it has;
+    the coarse path locks the filtered in-flight index by an `INDEX` hint. `SnapshotIntegrationTest`
+    (with SQL Server's own plain-table checks) and `SerializableIntegrationTest` run SERIALIZABLE on
+    SQL Server; ScalarDB's connections there take a short `lockTimeout`, and a ScalarDB step that
+    waits on the driver's lock counts as its conflict.
 - **8d: Oracle**: READ COMMITTED and SNAPSHOT, `TRANSACTION_REPEATABLE_READ` mapped to its
   SERIALIZABLE, the driver's SERIALIZABLE refused.
 

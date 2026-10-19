@@ -211,6 +211,8 @@ public final class SqlAst {
 
   // per table reference, the SQL Server hints blanked out of the source
   private final Map<TableRef, List<String>> hints = new IdentityHashMap<>();
+  // where the last hint list blanked for each table ends in the text, past its parenthesis
+  private final Map<TableRef, Integer> hintEnds = new IdentityHashMap<>();
 
   private SqlAst(
       String source,
@@ -642,6 +644,7 @@ public final class SqlAst {
         List<String> all = new ArrayList<>(out.hints.getOrDefault(ref, List.of()));
         all.addAll(c.hints);
         out.hints.put(ref, List.copyOf(all));
+        out.hintEnds.merge(ref, c.end, Math::max);
       }
     }
     return Outcome.of(out);
@@ -1007,19 +1010,24 @@ public final class SqlAst {
    * @return the span, or {@code null} when its tokens cannot be placed in the text
    */
   public int @Nullable [] nameSpan(TableRef r) {
+    Token last = lastNameToken(r);
+    return last == null ? null : span(r.node.getASTNode().jjtGetFirstToken(), last);
+  }
+
+  /** The last token of a table reference's name, or {@code null} when it cannot be found. */
+  private static @Nullable Token lastNameToken(TableRef r) {
     Node n = r.node.getASTNode();
-    Token first = n == null ? null : n.jjtGetFirstToken();
-    if (first == null) {
+    Token last = n == null ? null : n.jjtGetFirstToken();
+    if (last == null) {
       return null;
     }
-    Token last = first;
     while (last.next != null
         && last.next.image.equals(".")
         && last.next.next != null
         && last.next.next.kind != 0) {
       last = last.next.next;
     }
-    return last.image.equals(r.name()) ? span(first, last) : null;
+    return last.image.equals(r.name()) ? last : null;
   }
 
   /**
@@ -1146,6 +1154,56 @@ public final class SqlAst {
       } else {
         return null;
       }
+    }
+    inserts.sort(Map.Entry.<Integer, String>comparingByKey().reversed());
+    StringBuilder out = new StringBuilder(text);
+    for (Map.Entry<Integer, String> i : inserts) {
+      out.insert(i.getKey(), i.getValue());
+    }
+    return out.toString();
+  }
+
+  /**
+   * Returns {@code text} with SQL Server's {@code HOLDLOCK} on every table the statement reads, as
+   * that engine's SERIALIZABLE would lock them, its key-range locks covering the predicate: added
+   * to a hint list the table has, or after the table and its alias. {@code information_schema} and
+   * {@code sys}, which take no lock, are left as they are.
+   *
+   * @param text the statement as {@link #source}, every offset the same: the application's own, its
+   *     hint lists not blanked
+   * @return the text, or {@code null} when a table carries a hint the parser reads, {@code NOLOCK}
+   *     or {@code INDEX}, or cannot be placed in the text
+   */
+  public @Nullable String holdingEveryTable(String text) {
+    List<Map.Entry<Integer, String>> inserts = new ArrayList<>();
+    for (TableRef r : tableRefs) {
+      String named = r.schema();
+      String schema = named == null ? "" : unquoted(named).toLowerCase(Locale.ROOT);
+      if (schema.equals("information_schema") || schema.equals("sys")) {
+        continue;
+      }
+      if (r.hasHintOrLink()) {
+        return null;
+      }
+      Integer listEnd = hintEnds.get(r);
+      if (listEnd != null) {
+        inserts.add(Map.entry(listEnd - 1, ", HOLDLOCK"));
+        continue;
+      }
+      Token last = lastNameToken(r);
+      if (last != null && r.hasAlias()) {
+        Token alias =
+            last.next != null && last.next.image.equalsIgnoreCase("AS")
+                ? last.next.next
+                : last.next;
+        String name = Objects.requireNonNull(r.alias());
+        last = alias != null && unquoted(alias.image).equals(unquoted(name)) ? alias : null;
+      }
+      int[] at = last == null ? null : span(last, last);
+      if (at == null) {
+        return null;
+      }
+      inserts.add(Map.entry(at[1], " WITH (HOLDLOCK)"));
     }
     inserts.sort(Map.Entry.<Integer, String>comparingByKey().reversed());
     StringBuilder out = new StringBuilder(text);

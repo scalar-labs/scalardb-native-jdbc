@@ -114,19 +114,24 @@ alone and `SET GLOBAL` are not, and the driver clears the former.
 3960, comes as `40001`, even when it arrives with a row rather than at the execute, and `READPAST`
 is not available there. A level set in SQL through passthrough is read back from the session;
 SQL Server's own REPEATABLE READ, which locks and keeps no snapshot, refuses statements on
-ScalarDB tables with `0AN01`. SERIALIZABLE on SQL Server, and the
-levels above READ COMMITTED on Oracle, are accepted, but every statement on a ScalarDB table is
-refused with `0AN01` there for now. Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot isolation;
+ScalarDB tables with `0AN01`. SERIALIZABLE on SQL Server runs at SNAPSHOT and takes `HOLDLOCK`
+on every table each read reaches, as SQL Server's own SERIALIZABLE would; otherwise as the MySQL
+paragraph above says: a read of one ScalarDB table row by row locks its rows, any other locks the
+in-flight index of each ScalarDB table it reads, and a ScalarDB table in a derived table or a set
+operation is refused. A table with a `NOLOCK` or `INDEX` hint is refused at that level, and
+`sys` and `information_schema` are not locked. ScalarDB's own connections wait on these locks up to
+their lock timeout (none by default): give them a short one, `lockTimeout` in the URL. The levels above READ COMMITTED on Oracle
+are accepted, but every statement on a ScalarDB table is refused with `0AN01` there for now.
+Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot isolation;
 `TRANSACTION_REPEATABLE_READ` will be the level to use there.
 
 ## Preview scope
 
 Certified in 3.19.0-alpha.1: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line. SNAPSHOT
-and SERIALIZABLE on PostgreSQL, all three levels on MySQL and MariaDB, and READ COMMITTED and
-SNAPSHOT on SQL Server came after it.
+and SERIALIZABLE on PostgreSQL, and all three levels on MySQL, MariaDB and SQL Server, came after
+it.
 
-- Reads of ScalarDB tables work on all five engines; writes run on all but Oracle, on SQL Server at
-  READ COMMITTED and REPEATABLE READ so far.
+- Reads of ScalarDB tables work on all five engines; writes run on all but Oracle.
   ScalarDB's classic layout is refused with SQLState `0AN01`.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
