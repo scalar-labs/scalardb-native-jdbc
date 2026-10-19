@@ -1468,10 +1468,8 @@ coverage of each engine's syntax is therefore part of the certification of that 
 
 One setting, the native connection's isolation level, selects everything else.
 
-Built so far: all three levels on PostgreSQL, MySQL, MariaDB and SQL Server, the others' writes and
-locking reads as on PostgreSQL; READ COMMITTED on Oracle. Elsewhere the levels are accepted by
-`setTransactionIsolation`, and every statement on a ScalarDB table is refused with `0AN01`; Oracle's
-refusal of SERIALIZABLE and its translation of `TRANSACTION_REPEATABLE_READ` come with milestone 8d.
+Built: all three levels on PostgreSQL, MySQL, MariaDB and SQL Server, the others' writes and locking
+reads as on PostgreSQL; READ COMMITTED and SNAPSHOT on Oracle, which refuses SERIALIZABLE.
 
 SNAPSHOT on MySQL and MariaDB needs two things PostgreSQL gives natively. A locking read there returns
 the rows committed now, not the snapshot's, and raises nothing for a row changed since: the driver
@@ -1501,6 +1499,20 @@ and commit, in a new transaction (todo 263). The vendor driver reports the level
 the session's: after a passthrough statement that may set it, the driver reads it from
 `sys.dm_exec_sessions`, SQL Server's lock-based REPEATABLE READ refusing every statement on a
 ScalarDB table (todo 264).
+
+SNAPSHOT on Oracle, as built (milestone 8d2): `TRANSACTION_REPEATABLE_READ` runs at Oracle's
+SERIALIZABLE in a transaction, whose first-committer-wins is native: an UPDATE, a DELETE or a
+`FOR UPDATE` of a row changed since the snapshot fails with ORA-08177, which the driver reports
+as `40001` and which leaves the transaction rollback-only, since Oracle then fails its later writes
+too, unchanged rows included; ORA-08176, a consistent read that fails, as after the metadata
+insert's hint skipped a key added since the snapshot, likewise. In autocommit the session runs at
+READ COMMITTED instead: at SERIALIZABLE ojdbc commits after a write only, so a read in autocommit
+opens a transaction whose snapshot every later autocommit read keeps, and in which `SET
+TRANSACTION` then fails (ORA-01453), measured; one statement's snapshot is READ COMMITTED's own.
+`TRANSACTION_SERIALIZABLE` is refused with `0AN01` and reported unsupported by `DatabaseMetaData`,
+which reports REPEATABLE READ supported where ojdbc says not. ojdbc reports the level it last set
+and Oracle shows no session's own, so a level set in SQL through passthrough is not followed: the
+connection's is set again.
 
 Writes on Oracle at READ COMMITTED, as built (milestone 8d1): the driver's own SQL in Oracle's
 dialect, measured on Oracle 23: `FROM dual` in the key tables, `FETCH FIRST` and `1 = 0`, no `AS`

@@ -1,7 +1,7 @@
 package com.scalar.db.nativejdbc.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionAdmin;
@@ -28,9 +28,11 @@ import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -185,7 +187,26 @@ class SerializableIntegrationTest {
   @MethodSource("engines")
   void ssiBreaksTheCycles(Engines e) throws Exception {
     boolean pg = e.engine() == Engine.POSTGRESQL;
-    assumeTrue(e.engine() != Engine.ORACLE, "SERIALIZABLE is refused on Oracle");
+    if (e.engine() == Engine.ORACLE) {
+      // refused there, its SERIALIZABLE being snapshot isolation: REPEATABLE READ is that (design
+      // 5)
+      Properties none = new Properties();
+      none.setProperty("scalardbnative.allowNoCatalog", "true");
+      try (Connection c = e.openDriver(none)) {
+        assertThatThrownBy(() -> c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE))
+            .isInstanceOf(SQLFeatureNotSupportedException.class)
+            .hasMessageContaining("TRANSACTION_REPEATABLE_READ");
+        assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
+        DatabaseMetaData md = c.getMetaData();
+        assertThat(md.supportsTransactionIsolationLevel(Connection.TRANSACTION_SERIALIZABLE))
+            .isFalse();
+        assertThat(md.supportsTransactionIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ))
+            .isTrue();
+        c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+        assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
+      }
+      return;
+    }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace("sz", true);

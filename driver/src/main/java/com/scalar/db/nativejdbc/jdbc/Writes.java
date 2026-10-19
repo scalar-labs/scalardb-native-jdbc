@@ -745,6 +745,10 @@ final class Writes {
           return e instanceof SQLTransactionRollbackException || !rs.next() || rs.getInt(1) == 0;
         }
       }
+      if (oracleSerialization(e)) {
+        // the transaction goes on, but its later writes fail as well, rows unchanged included
+        return true;
+      }
       if (code == 1020) {
         return product.equals("MariaDB") || e instanceof SQLTransactionRollbackException;
       }
@@ -764,13 +768,26 @@ final class Writes {
 
   /**
    * SQL Server's update conflict at SNAPSHOT, error 3960, which its driver reports under a plain
-   * SQLState, as the retryable conflict it is: first-committer-wins (design 5).
+   * SQLState, and Oracle's serialization failures, under 72000, as the retryable conflicts they
+   * are: first-committer-wins (design 5).
    */
   static SQLException asRetryable(SQLException e) {
     if (e.getErrorCode() == 3960 && String.valueOf(e.getSQLState()).startsWith("S0")) {
       return new SQLTransactionRollbackException(e.getMessage(), "40001", 3960, e);
     }
+    if (oracleSerialization(e)) {
+      return new SQLTransactionRollbackException(e.getMessage(), "40001", e.getErrorCode(), e);
+    }
     return e;
+  }
+
+  /**
+   * Oracle's serialization failures at its SERIALIZABLE, the driver's SNAPSHOT: ORA-08177, a row
+   * changed since the snapshot, and ORA-08176, a consistent read that fails; ScalarDB retries both.
+   */
+  private static boolean oracleSerialization(SQLException e) {
+    return (e.getErrorCode() == 8177 || e.getErrorCode() == 8176)
+        && "72000".equals(e.getSQLState());
   }
 
   /** An Oracle constraint as its messages name it, {@code (OWNER.NAME)}. */

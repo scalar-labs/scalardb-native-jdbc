@@ -240,7 +240,10 @@ public final class Proxies {
           return router.nativeSql(vendor, (String) args[0]);
         case "getMetaData":
           return proxy(
-              DatabaseMetaData.class, new ChildHandler(created(vendor, method, args), me, null));
+              DatabaseMetaData.class,
+              router.engine() == Engine.ORACLE
+                  ? new OracleMetaData(created(vendor, method, args), me)
+                  : new ChildHandler(created(vendor, method, args), me, null));
         case "setTransactionIsolation":
           if ((Integer) args[0] == Connection.TRANSACTION_READ_UNCOMMITTED) {
             throw Errors.unsupported(
@@ -254,6 +257,11 @@ public final class Proxies {
           }
           {
             int level = (Integer) args[0];
+            if (level == Connection.TRANSACTION_SERIALIZABLE && router.engine() == Engine.ORACLE) {
+              throw Errors.unsupported(
+                  "SERIALIZABLE is not supported on Oracle, whose SERIALIZABLE is snapshot"
+                      + " isolation: set TRANSACTION_REPEATABLE_READ for that (design 5)");
+            }
             int vendorLevel = router.vendorLevel(level);
             if (vendorLevel == Router.SQLSERVER_SNAPSHOT) {
               session.requireSnapshotIsolation(vendor);
@@ -264,14 +272,20 @@ public final class Proxies {
               // refuses to go on at SNAPSHOT in (error 3951)
               vendor.rollback();
             }
-            vendor.setTransactionIsolation(vendorLevel);
             router.setIsolation(level);
+            vendor.setTransactionIsolation(
+                router.engine() == Engine.ORACLE
+                    ? router.oracleSessionLevel(vendor.getAutoCommit())
+                    : vendorLevel);
             return null;
           }
         case "getTransactionIsolation":
           {
             // the vendor connection's own level, unless the driver runs SERIALIZABLE at another
             int driver = router.isolation();
+            if (router.engine() == Engine.ORACLE) {
+              return driver; // REPEATABLE READ runs at Oracle's SERIALIZABLE
+            }
             if (driver == Connection.TRANSACTION_NONE) {
               // SQL Server's lock-based REPEATABLE READ, set in SQL, at which the driver does not
               // run (todo 264)
@@ -354,6 +368,9 @@ public final class Proxies {
                 router.transactionEnded();
                 anchors.transactionEnded();
                 ranInTransaction = false;
+              }
+              if (router.engine() == Engine.ORACLE) {
+                vendor.setTransactionIsolation(router.oracleSessionLevel(on));
               }
             }
           }
@@ -1494,11 +1511,31 @@ public final class Proxies {
   }
 
   /**
+   * Oracle's database metadata: the driver's levels, REPEATABLE READ, which runs at Oracle's
+   * SERIALIZABLE, supported, and SERIALIZABLE not (design 5).
+   */
+  private static final class OracleMetaData extends ChildHandler {
+    OracleMetaData(Object vendor, Connection connection) {
+      super(vendor, connection, null);
+    }
+
+    @Override
+    @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+      if (method.getName().equals("supportsTransactionIsolationLevel")) {
+        int level = (Integer) Objects.requireNonNull(args)[0];
+        return level == Connection.TRANSACTION_READ_COMMITTED
+            || level == Connection.TRANSACTION_REPEATABLE_READ;
+      }
+      return super.handle(proxy, method, args);
+    }
+  }
+
+  /**
    * Result sets and metadata: they hand back the connection and the statement, and wrap any result
    * set they return, such as one from a {@code DatabaseMetaData} query or a PostgreSQL refcursor,
    * whose own statement is then null rather than the vendor's.
    */
-  private static final class ChildHandler extends Handler {
+  private static class ChildHandler extends Handler {
     final Connection connection;
     final @Nullable Statement statement;
     final UnaryOperator<SQLException> failed;

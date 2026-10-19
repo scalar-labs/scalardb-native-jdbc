@@ -122,18 +122,21 @@ operation is refused. A write to tables ScalarDB does not manage is held too, it
 every table it reads, since SNAPSHOT would read them unlocked. A table with a `NOLOCK` or `INDEX`
 hint, and a call of a function of your own, whose reads no hint reaches, are refused at that
 level; `sys` and `information_schema` are not locked. ScalarDB's own connections wait on these locks up to
-their lock timeout (none by default): give them a short one, `lockTimeout` in the URL. The levels above READ COMMITTED on Oracle
-are accepted, but every statement on a ScalarDB table is refused with `0AN01` there for now.
-Oracle will refuse SERIALIZABLE outright, since its SERIALIZABLE is snapshot isolation;
-`TRANSACTION_REPEATABLE_READ` will be the level to use there.
+their lock timeout (none by default): give them a short one, `lockTimeout` in the URL. On Oracle `TRANSACTION_REPEATABLE_READ` runs at
+Oracle's SERIALIZABLE, which is snapshot isolation, in a transaction, and at READ COMMITTED in
+autocommit, where a statement's snapshot is its own; ORA-08177 and ORA-08176 come as `40001` and
+leave the transaction rollback-only. `TRANSACTION_SERIALIZABLE` is refused there with `0AN01`, and
+`DatabaseMetaData.supportsTransactionIsolationLevel` reports it unsupported, REPEATABLE READ
+supported. A level set in SQL through passthrough on Oracle is not followed: the connection's is
+set again.
 
 ## Preview scope
 
 Certified in 3.19.0-alpha.1: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line. SNAPSHOT
-and SERIALIZABLE on PostgreSQL, and all three levels on MySQL, MariaDB and SQL Server, came after
-it.
+and SERIALIZABLE on PostgreSQL, all three levels on MySQL, MariaDB and SQL Server, and READ
+COMMITTED and SNAPSHOT on Oracle, came after it.
 
-- Reads and writes of ScalarDB tables work on all five engines, Oracle's at READ COMMITTED so far.
+- Reads and writes of ScalarDB tables work on all five engines.
   ScalarDB's classic layout is refused with SQLState `0AN01`.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.

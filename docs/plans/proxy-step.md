@@ -542,7 +542,14 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
     usable (the driver's checks and anchors then), and whether the driver's own statements hit the
     hard-parse ORA-08177 on `SYS.USER$` that ScalarDB's record commit does (todos 083, 105).
     `SnapshotIntegrationTest` runs SNAPSHOT on Oracle, and `SerializableIntegrationTest` checks the
-    refusal.
+    refusal. **Done (2026-10-19).** As planned, with these found on the engine: ORA-08177 fails the
+    transaction's later writes too, so it leaves it rollback-only; ORA-08176 after the metadata
+    insert's hint skipped a key; in autocommit ojdbc never ends a transaction a read opened at
+    SERIALIZABLE, so the session runs at READ COMMITTED there, one statement's snapshot; a level
+    set in SQL is not followed, Oracle showing no session's. The test containers set
+    `_disable_last_successful_login_time`, so the hard-parse ORA-08177 on `SYS.USER$` was not
+    measured on the driver's own statements. `SELECT ... FROM dual` is refused as a synonym (todo
+    282).
 
 ### Milestone 9: tools and acceptance
 

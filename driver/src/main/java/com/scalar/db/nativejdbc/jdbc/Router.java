@@ -1253,15 +1253,15 @@ final class Router {
 
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
-          + " PostgreSQL, MySQL, MariaDB and SQL Server, at READ COMMITTED on Oracle so far; set"
-          + " one of those levels on the connection";
+          + " PostgreSQL, MySQL, MariaDB and SQL Server, at READ COMMITTED and REPEATABLE READ on"
+          + " Oracle; set one of those levels on the connection";
 
   /** Whether statements on ScalarDB tables run at the connection's level on this engine yet. */
   private boolean levelSupported() {
     lock.lock();
     try {
       return isolation == Connection.TRANSACTION_READ_COMMITTED
-          || (isolation == Connection.TRANSACTION_REPEATABLE_READ && engine != Engine.ORACLE)
+          || isolation == Connection.TRANSACTION_REPEATABLE_READ
           || (isolation == Connection.TRANSACTION_SERIALIZABLE
               && (engine == Engine.POSTGRESQL || locksAtSerializable()));
     } finally {
@@ -1320,7 +1320,29 @@ final class Router {
     if (level == Connection.TRANSACTION_REPEATABLE_READ && engine == Engine.SQLSERVER) {
       return SQLSERVER_SNAPSHOT;
     }
+    if (level == Connection.TRANSACTION_REPEATABLE_READ && engine == Engine.ORACLE) {
+      return Connection.TRANSACTION_SERIALIZABLE; // Oracle's snapshot isolation
+    }
     return level;
+  }
+
+  /**
+   * The level an Oracle session runs at for the driver's: REPEATABLE READ is Oracle's SERIALIZABLE
+   * in a transaction, and READ COMMITTED in autocommit, where each statement is one: at
+   * SERIALIZABLE ojdbc commits after a write only, so a read in autocommit would open a transaction
+   * that later reads go on in, at its snapshot, and SET TRANSACTION fails in (ORA-01453); one
+   * statement's snapshot is READ COMMITTED's own.
+   *
+   * @param autocommit whether the connection is in autocommit
+   * @return the JDBC level to set on the vendor connection
+   */
+  int oracleSessionLevel(boolean autocommit) {
+    return autocommit ? Connection.TRANSACTION_READ_COMMITTED : vendorLevel(isolation());
+  }
+
+  /** The engine this router routes for. */
+  Engine engine() {
+    return engine;
   }
 
   /** The driver's level for a vendor connection's: SQL Server's SNAPSHOT is REPEATABLE READ. */
@@ -1852,7 +1874,14 @@ final class Router {
               engine == Engine.SQLSERVER
                   ? sqlServerLevel(vendor)
                   : driverLevel(vendor.getTransactionIsolation());
-          if (engine == Engine.SQLSERVER) {
+          if (engine == Engine.ORACLE) {
+            // ojdbc reports the level it last set, and Oracle shows no session's own: the level
+            // set in SQL is the connection's again, which the driver's reads are written for
+            try (Statement s = vendor.createStatement()) {
+              // passthrough runs in autocommit, whose level is READ COMMITTED
+              s.execute("ALTER SESSION SET ISOLATION_LEVEL = READ COMMITTED");
+            }
+          } else if (engine == Engine.SQLSERVER) {
             // SNAPSHOT, what SERIALIZABLE runs at, is followed only where the statement names it;
             // SQL Server's own SERIALIZABLE is the driver's
             if (level != Connection.TRANSACTION_REPEATABLE_READ

@@ -1,9 +1,12 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.N;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.id;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.intColumn;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.intType;
 import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionAdmin;
@@ -15,7 +18,6 @@ import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.api.Update;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.io.DataType;
-import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
@@ -59,29 +61,28 @@ class SnapshotIntegrationTest {
   @ParameterizedTest
   @MethodSource("engines")
   void snapshotLevels(Engines e) throws Exception {
+    ScalarDbNames.on(e);
     boolean pg = e.engine() == Engine.POSTGRESQL;
     boolean mysqlLike = e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB;
-    assumeTrue(
-        pg || mysqlLike || e.engine() == Engine.SQLSERVER,
-        "the snapshot levels are PostgreSQL, MySQL, MariaDB and SQL Server only so far");
+    boolean oracle = e.engine() == Engine.ORACLE;
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
-      admin.createNamespace("sn", true);
+      admin.createNamespace(N("sn"), true);
       for (String table : List.of("t", "u")) {
         admin.createTable(
-            "sn",
-            table,
+            N("sn"),
+            N(table),
             TableMetadata.newBuilder()
-                .addColumn("id", DataType.INT)
-                .addColumn("x", DataType.TEXT)
-                .addColumn("v", DataType.INT)
-                .addPartitionKey("id")
+                .addColumn(N("id"), intType())
+                .addColumn(N("x"), DataType.TEXT)
+                .addColumn(N("v"), intType())
+                .addPartitionKey(N("id"))
                 .build(),
             Map.of("transaction-metadata-decoupling", "true"));
       }
     }
     Properties shortWait = new Properties();
-    if (!pg) {
+    if (!pg && !oracle) {
       // a ScalarDB write that waits on the driver's lock fails at once, as a conflict: the test
       // runs both sides in one thread
       shortWait.setProperty("scalar.db.contact_points", e.shortLockWait());
@@ -100,7 +101,7 @@ class SnapshotIntegrationTest {
               Setup.run(
                   new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
                   c,
-                  t -> t.namespace().equals("sn"),
+                  t -> t.namespace().equals(N("sn")),
                   Duration.ofMinutes(1),
                   List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
@@ -118,8 +119,13 @@ class SnapshotIntegrationTest {
         }
       }
     }
+    // Oracle refuses SERIALIZABLE (design 5)
     for (int level :
-        new int[] {Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE}) {
+        oracle
+            ? new int[] {Connection.TRANSACTION_REPEATABLE_READ}
+            : new int[] {
+              Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE
+            }) {
       String at = level == Connection.TRANSACTION_SERIALIZABLE ? "SERIALIZABLE" : "SNAPSHOT";
       try (DistributedTransactionManager tm = factory.getTransactionManager();
           TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
@@ -137,6 +143,7 @@ class SnapshotIntegrationTest {
       throws Exception {
     boolean pg = e.engine() == Engine.POSTGRESQL;
     boolean mysqlLike = e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB;
+    boolean oracle = e.engine() == Engine.ORACLE;
     // SERIALIZABLE on MySQL and MariaDB: every read locks, anything but one table row by row on the
     // coarse path
     boolean coarse = !pg && level == Connection.TRANSACTION_SERIALIZABLE;
@@ -286,6 +293,19 @@ class SnapshotIntegrationTest {
         }
         d.rollback();
       }
+
+      // in autocommit each statement reads the rows committed when it runs: Oracle's SERIALIZABLE
+      // would keep a read's snapshot for the reads after it, ojdbc committing after writes only
+      d.setAutoCommit(true);
+      assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 13"))
+          .as("%s: an autocommit read", at)
+          .containsExactly("a");
+      scalarDbSet(tm, 13, "s");
+      assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 13"))
+          .as("%s: the next autocommit read sees the commit between", at)
+          .containsExactly("s");
+      scalarDbSet(tm, 13, "a");
+      d.setAutoCommit(false);
 
       // in autocommit an abort leaves the connection usable (todo 169)
       held = prepared(tpc, "t", 9, "b");
@@ -536,7 +556,11 @@ class SnapshotIntegrationTest {
         d.rollback();
         // a locking read of a row changed after the snapshot, which MySQL, MariaDB and SQL Server
         // would return as committed now
-        for (String lock : List.of("FOR UPDATE", mysqlLike ? "LOCK IN SHARE MODE" : "FOR SHARE")) {
+        // Oracle has no FOR SHARE
+        for (String lock :
+            oracle
+                ? List.of("FOR UPDATE")
+                : List.of("FOR UPDATE", mysqlLike ? "LOCK IN SHARE MODE" : "FOR SHARE")) {
           rows(d, "SELECT x FROM sn.t WHERE id = 4");
           scalarDbSet(tm, 4, lock);
           assertThatThrownBy(() -> rows(d, "SELECT x FROM sn.t WHERE id = 4 " + lock))
@@ -588,10 +612,15 @@ class SnapshotIntegrationTest {
         try (Connection other = e.openDriver()) {
           other.setAutoCommit(false);
           rows(other, "SELECT x FROM sn.t WHERE id = 7 FOR UPDATE");
+          // Oracle takes no row limit with FOR UPDATE: two rows, the one locked skipped
           assertThat(
                   rows(
                       d,
-                      "SELECT id FROM sn.t WHERE id >= 7 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED"))
+                      oracle
+                          ? "SELECT id FROM sn.t WHERE id IN (7, 8) ORDER BY id FOR UPDATE SKIP"
+                              + " LOCKED"
+                          : "SELECT id FROM sn.t WHERE id >= 7 ORDER BY id LIMIT 1 FOR UPDATE"
+                              + " SKIP LOCKED"))
               .as("%s: SKIP LOCKED with LIMIT", at)
               .containsExactly("8");
           d.rollback();
@@ -1049,20 +1078,20 @@ class SnapshotIntegrationTest {
 
   private static Insert insert(String table, int id, String x, int v) {
     return Insert.newBuilder()
-        .namespace("sn")
-        .table(table)
-        .partitionKey(Key.ofInt("id", id))
-        .textValue("x", x)
-        .intValue("v", v)
+        .namespace(N("sn"))
+        .table(N(table))
+        .partitionKey(id(id))
+        .textValue(N("x"), x)
+        .value(intColumn("v", v))
         .build();
   }
 
   private static Update update(String table, int id, String x) {
     return Update.newBuilder()
-        .namespace("sn")
-        .table(table)
-        .partitionKey(Key.ofInt("id", id))
-        .textValue("x", x)
+        .namespace(N("sn"))
+        .table(N(table))
+        .partitionKey(id(id))
+        .textValue(N("x"), x)
         .build();
   }
 }
