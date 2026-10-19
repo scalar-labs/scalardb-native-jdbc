@@ -467,12 +467,15 @@ public final class Catalog implements AutoCloseable {
   }
 
   private static boolean sameName(@Nullable QualifiedName a, @Nullable QualifiedName b) {
+    // a synonym redefined to stand for another table is another name: one that stood for a plain
+    // table may stand for a ScalarDB table now (todo 282's follow-up)
     return a == null
         ? b == null
         : b != null
             && a.schema().equals(b.schema())
             && a.table().equals(b.table())
-            && a.isSynonym() == b.isSynonym();
+            && a.isSynonym() == b.isSynonym()
+            && sameName(a.target(), b.target());
   }
 
   private Resolution resolve(List<String> sessionSchemas, @Nullable String schema, String table)

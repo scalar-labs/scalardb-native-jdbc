@@ -600,6 +600,41 @@ class CatalogIntegrationTest {
     }
   }
 
+  @ParameterizedTest
+  @MethodSource("engines")
+  void aSynonymRedefined_toAScalarDbTable_isRefusedOnceResolvedAnew(Engines e) throws Exception {
+    Assumptions.assumeTrue(e == Engines.ORACLE, "the driver follows synonyms on Oracle only");
+    prepare(e);
+    Instant[] now = {Instant.parse("2026-10-20T00:00:00Z")};
+    Catalog catalog =
+        new Catalog(
+            e.engine(),
+            Catalog.DEFAULT_METADATA_SCHEMA,
+            e::open,
+            Duration.ofSeconds(60),
+            fixedClock(now),
+            false);
+    List<String> app = List.of("APP");
+    try (Connection c = e.open()) {
+      e.execute(c, "CREATE OR REPLACE SYNONYM app.moving FOR app.plain");
+      catalog.lookup(app, null, "plain"); // the catalog loaded at 0 s
+      now[0] = now[0].plusSeconds(10);
+      assertThat(catalog.lookup(app, null, "moving").layout()).isEqualTo(Layout.PLAIN); // at 10 s
+      now[0] = now[0].plusSeconds(51);
+      catalog.lookup(app, null, "plain"); // loaded again at 61 s
+      long before = catalog.generation();
+      // the same synonym, standing for a ScalarDB table now: refused when its resolution expires
+      // at 70 s, and what was prepared on the old answer is routed again
+      e.execute(c, "CREATE OR REPLACE SYNONYM app.moving FOR app.orders");
+      now[0] = now[0].plusSeconds(10);
+      assertThatThrownBy(() -> catalog.lookup(app, null, "moving"))
+          .isInstanceOf(SQLException.class)
+          .extracting("SQLState")
+          .isEqualTo("42000");
+      assertThat(catalog.generation()).isGreaterThan(before);
+    }
+  }
+
   private static Layout layout(Catalog catalog, String rawSchema, String rawTable)
       throws SQLException {
     return catalog.lookup(NO_SESSION, rawSchema, rawTable).layout();
