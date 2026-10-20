@@ -725,7 +725,7 @@ class ReadOverheadBenchmark {
           .append("\n\n")
           .append(environment(e, c))
           .append(
-              "\nMedian ms over up to 200 runs (ratio to BASE); p95 in brackets. `!` marks rows"
+              "\nMedian ms over up to 300 runs (ratio to BASE); p95 in brackets. `!` marks rows"
                   + " that differ from BASE.\n\n| query |");
       List<Mode> modes = modes();
       for (Mode m : modes) {
@@ -1917,13 +1917,15 @@ class ReadOverheadBenchmark {
   private static String settingsQuery(Engine engine) {
     switch (engine) {
       case POSTGRESQL:
-        return "SELECT name || '=' || setting || COALESCE(unit, '') FROM pg_settings WHERE name IN"
+        return "SELECT name || '=' || current_setting(name) FROM pg_settings WHERE name IN"
             + " ('shared_buffers', 'effective_cache_size', 'work_mem', 'random_page_cost',"
             + " 'max_parallel_workers_per_gather', 'jit') ORDER BY name";
       case MYSQL:
       case MARIADB:
-        return "SELECT CONCAT(variable_name, '=', variable_value)"
-            + " FROM performance_schema.global_variables WHERE variable_name IN"
+        // MariaDB has no performance_schema.global_variables
+        return "SELECT CONCAT(LOWER(variable_name), '=', variable_value) FROM "
+            + (engine == Engine.MARIADB ? "information_schema" : "performance_schema")
+            + ".global_variables WHERE LOWER(variable_name) IN"
             + " ('innodb_buffer_pool_size', 'innodb_redo_log_capacity', 'innodb_log_file_size',"
             + " 'optimizer_switch', 'join_buffer_size', 'sort_buffer_size') ORDER BY 1";
       case ORACLE:

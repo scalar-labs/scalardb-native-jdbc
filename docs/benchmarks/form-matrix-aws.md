@@ -14,6 +14,84 @@ form whose rows equal BASE's; the flag is DRIVER's time over the best form's, sh
 A ratio of 0.0x is a form faster than BASE by three orders of magnitude, which happens where the
 plain-table plan is itself poor (MariaDB's paged join: BASE 204 ms, VIEW_CASE 0.4 ms).
 
+## Setup, to rerun
+
+Everything below is what this run used; `bench-env/` builds it with `run.sh plan` and `run.sh run`
+([the plan](../plans/benchmark-environment.md) has the account setup).
+
+### Code
+
+- The working tree as of commit `3a99c6e`, copied to the client by `run.sh`, **plus the uncommitted
+  Oracle fixed statistics of todo 094** (`Setup.java`), which the DRIVER mode runs: Oracle's DRIVER
+  rows measure that change. A rerun without it measures Oracle's gathered statistics instead.
+- `bench-env/matrix.sh` with `REPS=1 INFLIGHT="100 10000"`, passing `-Dnativejdbc.bench.timeoutSeconds=30`;
+  VIEW_CASE with its `COALESCE` filter (`-Dnativejdbc.bench.plainCaseFilter` unset).
+
+```sh
+cd bench-env
+BENCH_DB_PASSWORD=$(cat secrets/db_password) SSH_KEY=$PWD/ssh/bench MAX_RUN_MINUTES=480 \
+  REPS=1 INFLIGHT="100 10000" bash run.sh run -Dnativejdbc.bench.timeoutSeconds=30
+```
+
+with `terraform/bench.tfvars`: `tier_a = ["postgresql", "mysql", "mariadb"]`,
+`tier_b = ["postgresql", "oracle", "mysql", "mariadb"]`, `region = "us-east-1"` (the default).
+
+### Machines
+
+All in one VPC, one subnet and one availability zone of us-east-1, the client in the same zone.
+
+| Role | Type | vCPU | Memory | Storage | Software |
+|---|---|---|---|---|---|
+| Client, both tiers' JVMs | EC2 m6i.4xlarge | 16 | 64 GiB | 50 GB gp3 | Ubuntu 24.04, Temurin 25 JDK, Gradle wrapper |
+| Tier A, one per engine | EC2 m6id.2xlarge | 8 | 32 GiB | data on the 474 GB instance-store NVMe (ext4) | Ubuntu 24.04, Docker, the official image, host networking |
+| Tier B, one per engine | RDS db.m5.2xlarge, single-AZ | 8 | 32 GiB | 100 GB gp3 (3,000 IOPS, 125 MiB/s baseline) | default parameter group, no backups |
+
+### Databases
+
+| Engine | Tier A (EC2) | Tier B (RDS) |
+|---|---|---|
+| PostgreSQL | 16.15 (`postgres:16`): `shared_buffers=8GB`, `effective_cache_size=24GB`, `work_mem=64MB`, `maintenance_work_mem=1GB`, `random_page_cost=1.1`, `jit=on` | 16.13: `shared_buffers` 7.6 GB, `effective_cache_size` 15.2 GB, `work_mem=4MB`, `random_page_cost=4`, `jit=off` |
+| Oracle | not run (needs a 23ai Enterprise Edition image) | SE2 19.32, licence included: `sga_target` 23 GB, `pga_aggregate_target` 3.8 GB, `cpu_count=8` |
+| MySQL | 8.4.11 (`mysql:8.4`): `innodb_buffer_pool_size=20G`, `innodb_redo_log_capacity=4G` | 8.4.11: `innodb_buffer_pool_size` 22.5 GB |
+| MariaDB | 11.4.13 (`mariadb:11.4`): `innodb_buffer_pool_size=20G`, `innodb_log_file_size=4G` | 11.4.13: defaults (this run's reports could not read MariaDB's settings; fixed since) |
+
+Every report's first line records the version and these settings as the database reported them.
+The PostgreSQL values in this run's reports are mis-printed: the setting and its unit are joined, so
+`shared_buffers=10485768kB` is 1,048,576 blocks of 8 kB (8 GB). Fixed since, with `current_setting`.
+
+### Data
+
+Loaded by bulk `INSERT ... SELECT` before any read, not through ScalarDB, into the schema `bn`; each
+ScalarDB table has a metadata table with one row per data row, all committed (`tx_state` 3), then a
+fixed count set in flight.
+
+| Table | Rows | Columns | In flight |
+|---|---|---|---|
+| `o` orders | 500,000 | `id` key, `customer_id` (5 per customer), `total` | the run's count (100 or 10,000), evenly spread |
+| `c` customers | 100,000 | `id` key, `name`, `region` (1,000 regions) | the run's count, evenly spread |
+| `w` wide | 100,000 | `id` key and 49 non-key columns | the run's count, at `c`'s ids |
+| `k` composite key | 100,000 | `(pid, cid)` key, `grp`, `val` | the run's count, at `c`'s ids |
+| `h` hot | 20,000 | `id` key, `qty`, `grp` (200 groups) | the run's count, from a 20,000-row table |
+| `r` regions | 1,000 | `id` key, `label` | 10 (every 100th) |
+| `p`, `d` | 10 each | plain tables, no metadata | none |
+
+A row in flight is prepared (`tx_state` 1) with a before image equal to its current values, so every
+form must return BASE's rows; the reports mark any difference with `!`. The driver's setup gathers
+statistics with the rows in flight (`-Dnativejdbc.bench.gatherInflight` defaults to the run's count).
+
+### Workload
+
+- 41 queries (the report's rows) by 33 forms, each through the vendor JDBC driver except DRIVER,
+  which goes through this driver.
+- Per engine, one vendor connection and one driver connection, one query at a time: latency, not
+  throughput. The seven engines ran
+  side by side, each in its own test JVM on the client.
+- Per query, every form runs once per round in a rotating order with the same random parameters:
+  10 rounds of warm-up (fewer past 5 s), then up to 300 rounds or 20 s, at least three. The report
+  gives the median and p95 in ms and the ratio of the median to BASE's.
+- A 30-second query timeout; a form that times out or fails is left out of the ranking.
+- One repetition at each in-flight count: a gain under 2x may be noise.
+
 ## Findings
 
 1. **Paging is where DRIVER loses most, on every engine.** VIEW_CASE wins the `ORDER BY key ... 20 rows`
