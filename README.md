@@ -161,9 +161,10 @@ COMMITTED and SNAPSHOT on Oracle, came after it.
   the inline layout, the metadata columns in the row, they are kept from the application: `SELECT *`
   and `RETURNING *` give the data columns, an `INSERT` names its columns, and a statement naming a
   `tx_` or `before_` column ScalarDB keeps is refused with `0AN01`.
-- On MySQL and MariaDB a read at SERIALIZABLE in a read-only transaction (`setReadOnly(true)`,
-  Spring's `@Transactional(readOnly = true)`) is refused with `25006`, as the driver's reads lock at
-  that level; leave such a transaction read-write.
+- On MySQL a read at SERIALIZABLE in a read-only transaction (`setReadOnly(true)`, Spring's
+  `@Transactional(readOnly = true)`) is refused with `25006`: the driver's reads lock at that level
+  under savepoints, which MySQL Connector/J refuses on a read-only connection. Leave such a
+  transaction read-write. MariaDB, PostgreSQL and SQL Server run it.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
 - On MySQL an INSERT has no `RETURNING`, and gives each key column a literal or a placeholder of the

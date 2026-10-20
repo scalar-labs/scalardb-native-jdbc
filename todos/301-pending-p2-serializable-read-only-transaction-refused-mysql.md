@@ -29,3 +29,13 @@ Found by the 9c Spring Data sample; documented in the README as a limitation for
 
 - 2026-10-20: found by SpringDataSampleIntegrationTest (9c); the sample's SERIALIZABLE read is
   read-write, and the README says so.
+- 2026-10-20: measured on m8-mysql and m8-mariadb: in a READ ONLY transaction a shared locking read
+  (FOR SHARE, LOCK IN SHARE MODE) runs and holds off a writer; FOR UPDATE fails with 1792 (25006).
+  Fixed: the read-only guard applies to plans that write; a locking read (LockPlan) writes nothing
+  and passes. The Spring sample's SERIALIZABLE read is read-only again, on every engine.
+- 2026-10-20: partly: with the guard on writing plans only, MariaDB, PostgreSQL and SQL Server run a
+  read-only SERIALIZABLE read (the Spring sample, mutation of readOnly). MySQL fails in Connector/J:
+  setSavepoint sends SAVEPOINT through executeUpdate, refused on a read-only connection, and every
+  plan runs under savepoints. The driver now refuses it on MySQL itself (25006, naming the cause);
+  README says so. Open: savepoints as SQL (SAVEPOINT / ROLLBACK TO / RELEASE through execute) on
+  MySQL in read-only transactions.

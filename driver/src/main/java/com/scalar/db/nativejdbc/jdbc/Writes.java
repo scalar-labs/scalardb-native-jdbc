@@ -137,6 +137,11 @@ final class Writes {
       return returning() != null;
     }
 
+    /** Whether the plan writes rows; a locking read only reads and locks them. */
+    boolean writes() {
+      return true;
+    }
+
     abstract long apply(Run run) throws SQLException;
 
     /** The texts of the statements planned ahead, for tests; the CAS is chosen per key. */
@@ -965,14 +970,27 @@ final class Writes {
    *
    * @param vendor the vendor connection
    * @param rollbackOnly marks the application's transaction rollback-only
+   * @param writes whether the work writes rows, which a read-only connection refuses
    * @param work the writes
    * @throws SQLException a database error, a timeout, or {@code 40001} for an abort the driver
    *     decides
    */
   // ponytail: autocommit is off on the vendor connection while the write runs; another thread
   // sharing the connection then joins its transaction, as with any JDBC transaction
-  static void within(Connection vendor, Runnable rollbackOnly, Work work) throws SQLException {
-    if (vendor.isReadOnly()) {
+  static void within(Connection vendor, Runnable rollbackOnly, boolean writes, Work work)
+      throws SQLException {
+    if (vendor.isReadOnly()
+        && !writes
+        && "MySQL".equals(vendor.getMetaData().getDatabaseProductName())) {
+      // Connector/J refuses a savepoint, which every plan runs under, on a read-only connection
+      // (it sends SAVEPOINT through executeUpdate); MariaDB's driver does not (todo 301)
+      throw new SQLException(
+          "a locking read of a ScalarDB table, as every read at SERIALIZABLE on MySQL is, is not"
+              + " supported in a read-only transaction on MySQL: MySQL Connector/J refuses the"
+              + " savepoints it runs under; leave the transaction read-write",
+          "25006");
+    }
+    if (writes && vendor.isReadOnly()) {
       // a read-only transaction records no anchors, so its writes would be lost updates where the
       // vendor lets them through, as pgjdbc's readOnlyMode=ignore does (todo 160)
       throw new SQLException("a read-only connection cannot write a ScalarDB table", "25006");
@@ -2075,6 +2093,16 @@ final class Writes {
     @Override
     boolean returnsRows() {
       return true;
+    }
+
+    /**
+     * A locking read writes nothing, so a read-only transaction may run it, as SERIALIZABLE does
+     * every read on MySQL and MariaDB, which take a shared lock in a READ ONLY transaction (todo
+     * 301); FOR UPDATE there, the database refuses itself (1792, 25006).
+     */
+    @Override
+    boolean writes() {
+      return false;
     }
 
     @Override

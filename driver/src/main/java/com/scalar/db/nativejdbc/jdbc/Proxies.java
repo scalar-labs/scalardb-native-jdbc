@@ -981,6 +981,7 @@ public final class Proxies {
         Writes.within(
             owner.vendor,
             () -> owner.rollbackOnly = true,
+            plan.writes(),
             () -> {
               count[0] = Writes.apply(owner.vendor, plan, context);
               if (keys != null && out.rows == null) {
@@ -1156,6 +1157,7 @@ public final class Proxies {
         Writes.within(
             owner.vendor,
             () -> owner.rollbackOnly = true,
+            true,
             () -> {
               for (int i = 0; i < size; i++) {
                 Router.Route route = routes.apply(i);

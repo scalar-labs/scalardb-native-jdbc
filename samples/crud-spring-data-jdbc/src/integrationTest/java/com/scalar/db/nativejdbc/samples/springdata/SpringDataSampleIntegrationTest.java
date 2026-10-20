@@ -169,6 +169,12 @@ class SpringDataSampleIntegrationTest {
       service.restock(appleId, -1);
       if (e.engine() != Engine.ORACLE) { // Oracle's SERIALIZABLE is refused (design 5)
         assertThat(service.total()).isEqualTo(9);
+        // read-only too, but on MySQL, whose Connector/J refuses the savepoints (todo 301)
+        if (e.engine() == Engine.MYSQL) {
+          assertThatThrownBy(service::totalReadOnly).hasMessageContaining("read-only transaction");
+        } else {
+          assertThat(service.totalReadOnly()).isEqualTo(9);
+        }
       }
 
       // a ScalarDB transaction commits between the application's read and its write: @Version
