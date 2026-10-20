@@ -153,9 +153,9 @@ again.
 
 ## Preview scope
 
-Certified in 3.19.0-alpha.1: PostgreSQL at READ COMMITTED, against the ScalarDB 3.19 line. SNAPSHOT
-and SERIALIZABLE on PostgreSQL, all three levels on MySQL, MariaDB and SQL Server, and READ
-COMMITTED and SNAPSHOT on Oracle, came after it.
+Certified in 3.20.0-beta.1, against the ScalarDB 3.20 line: PostgreSQL, MySQL, MariaDB and SQL
+Server at READ COMMITTED, SNAPSHOT and SERIALIZABLE, and Oracle at READ COMMITTED and SNAPSHOT. The
+first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
 
 - Reads and writes of ScalarDB tables work on all five engines, in both of ScalarDB's layouts. In
   the inline layout, the metadata columns in the row, they are kept from the application: `SELECT *`
@@ -216,7 +216,8 @@ COMMITTED and SNAPSHOT on Oracle, came after it.
 
 | Driver version | ScalarDB line | Engines |
 | --- | --- | --- |
-| 3.19.0-alpha.x | 3.19.x | PostgreSQL first; MySQL and MariaDB, SQL Server, Oracle in that order |
+| 3.20.0-beta.x | 3.20.x | PostgreSQL, MySQL, MariaDB, SQL Server, Oracle |
+| 3.19.0-alpha.x | 3.19.x | PostgreSQL |
 
 The driver version mirrors the ScalarDB line it is certified against; certification is per line, and
 the tests run against the line's newest patch.

@@ -469,7 +469,7 @@ exists (`forbidWildcardImports`, doclint with its `missing` group) and by review
 scalardb-native-jdbc/
   settings.gradle.kts           rootProject.name; pluginManagement { includeBuild("build-logic") }; include driver, shell, tools, samples
   build.gradle.kts              no source; a repositories block that exists for Dependabot only
-  gradle.properties             version=3.19.0-alpha.1-SNAPSHOT; org.gradle.parallel, caching, configuration-cache
+  gradle.properties             version=3.20.0-beta.1-SNAPSHOT; org.gradle.parallel, caching, configuration-cache
   gradle/libs.versions.toml     every version, including those used only as strings, so Dependabot can bump them
   .java-version                 25.0
   build-logic/src/main/kotlin/  scalardb-native-jdbc.{base,java,java11,publishing,license-report}-conventions
@@ -542,14 +542,14 @@ and Spring Boot 4 on Java 21, each with its own `release`.
 
 | Module | Runtime | Compile-only | Test |
 |---|---|---|---|
-| `driver` | `jsqlparser`, `slf4j-api`. **No ScalarDB dependency.** | the five vendor JDBC drivers, which the application supplies | `scalardb` (newest 3.19 patch), Testcontainers, the vendor drivers, JUnit, AssertJ, Mockito, `logback-classic` |
+| `driver` | `jsqlparser`, `slf4j-api`. **No ScalarDB dependency.** | the five vendor JDBC drivers, which the application supplies | `scalardb` (newest patch of the certified line), Testcontainers, the vendor drivers, JUnit, AssertJ, Mockito, `logback-classic` |
 | `shell` | the driver, `jline`, `picocli`, `slf4j-nop`; in the distribution zip also pgjdbc, MariaDB Connector/J (for MySQL as well), mssql-jdbc and ojdbc11, at the versions the integration tests run, with their licence files. Not Connector/J, whose GPL the FOSS exception does not lift for a non-FOSS distribution; a user who wants it adds it to `lib/` | | Testcontainers, the vendor drivers, JUnit, AssertJ |
 | `tools` | the driver, `picocli`, `slf4j-nop`, and in the zip the vendor drivers the shell bundles. **No ScalarDB dependency**: settling rows is ScalarDB's (section 6) | | as above |
-| `samples` | Spring Boot and the ORM of each sample; the driver | | the sample's own tests, against the driver and real ScalarDB transactions |
+| `samples` | the driver, HikariCP, and the sample's framework (Spring Data JDBC 4.1, without Spring Boot); not published | | the sample's own tests, against the driver and real ScalarDB transactions |
 
 **Version and compatibility.** The driver version mirrors the ScalarDB line it is certified against:
-`3.19.0-alpha.1`, `3.19.0-alpha.2`, and so on during the preview, where the major and minor say
-"certified against ScalarDB 3.19.x" and the rest is the driver's own numbering. Certification is per
+`3.20.0-beta.1`, `3.20.0-beta.2`, and so on during the preview, where the major and minor say
+"certified against ScalarDB 3.20.x" and the rest is the driver's own numbering. Certification is per
 ScalarDB line, not per patch: patch releases do not change the storage format or the protocol, so the
 contract tests run against the newest patch of the line and the nightly picks each new patch up. A new
 minor or major gets its own certification run, and the README carries the table of certified ScalarDB

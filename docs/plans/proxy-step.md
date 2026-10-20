@@ -606,6 +606,9 @@ with the full check green and a commit; 9a moved to `testing.md`:
     fixed in the driver or documented, not worked around in the sample.
   - **9d: the release.** README's quick start through the tools and a sample; RELEASING.md for the new
     modules; design 1, 3 and 4.6 as built; the next preview, 3.19.0-alpha.2, prepared as alpha.1 was.
+    Done as 3.20.0-beta.1, certified against ScalarDB 3.20 (the user's decision, 2026-10-20): version,
+    README, RELEASING.md (certifying a line, the artifacts) and docs/releases/3.20.0-beta.1.md. Open:
+    the certification run, once ScalarDB 3.20 is published.
 
 ### Milestone 10: the inline layout
 
