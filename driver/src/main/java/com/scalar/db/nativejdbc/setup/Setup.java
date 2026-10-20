@@ -126,9 +126,16 @@ public final class Setup {
   private final String txId;
   private final String txState;
   private final String txVersion;
+  // in a dry run, the statements a table's setup or teardown would run, in place of running them
+  private final @Nullable List<String> planned;
 
   private Setup(
-      Engine engine, Connection connection, Duration backfillWait, List<String> grantees) {
+      Engine engine,
+      Connection connection,
+      Duration backfillWait,
+      List<String> grantees,
+      boolean dryRun) {
+    this.planned = dryRun ? new ArrayList<>() : null;
     this.engine = engine;
     this.connection = connection;
     this.backfillWait = backfillWait;
@@ -171,7 +178,7 @@ public final class Setup {
       Duration backfillWait,
       List<String> grantees)
       throws SQLException {
-    Setup setup = new Setup(catalog.engine(), connection, backfillWait, grantees);
+    Setup setup = new Setup(catalog.engine(), connection, backfillWait, grantees, false);
     List<TableInfo> tables = setup.tables(catalog, which);
     SetupObjects found = setup.list(tables);
     List<Result> results = new ArrayList<>();
@@ -202,7 +209,53 @@ public final class Setup {
    */
   public static List<Result> teardown(
       Catalog catalog, Connection connection, Predicate<TableInfo> which) throws SQLException {
-    Setup setup = new Setup(catalog.engine(), connection, DEFAULT_BACKFILL_WAIT, List.of());
+    return teardown(catalog, connection, which, false);
+  }
+
+  /**
+   * A dry run of {@link #run(Catalog, Connection, Predicate, Duration, List)}: reads what exists
+   * and changes nothing. Each result's actions are the statements the setup would run, in order,
+   * and a comment line with the number of rows the backfill would stamp now.
+   *
+   * @param catalog the catalog of the database, read afresh first
+   * @param connection a connection to the same database, in autocommit
+   * @param which the tables to set up
+   * @param grantees as for {@link #run(Catalog, Connection, Predicate, Duration, List)}
+   * @return one result per table
+   * @throws SQLException if the connection is not in autocommit or the catalogs cannot be read
+   */
+  public static List<Result> plan(
+      Catalog catalog, Connection connection, Predicate<TableInfo> which, List<String> grantees)
+      throws SQLException {
+    Setup setup = new Setup(catalog.engine(), connection, DEFAULT_BACKFILL_WAIT, grantees, true);
+    List<TableInfo> tables = setup.tables(catalog, which);
+    SetupObjects found = setup.list(tables);
+    List<Result> results = new ArrayList<>();
+    for (TableInfo t : tables) {
+      results.add(setup.up(t, found));
+    }
+    return results;
+  }
+
+  /**
+   * A dry run of {@link #teardown(Catalog, Connection, Predicate)}: each result's actions are the
+   * statements it would run.
+   *
+   * @param catalog the catalog of the database, read afresh first
+   * @param connection a connection to the same database, in autocommit
+   * @param which the tables to take down
+   * @return one result per table
+   * @throws SQLException if the connection is not in autocommit or the catalogs cannot be read
+   */
+  public static List<Result> planTeardown(
+      Catalog catalog, Connection connection, Predicate<TableInfo> which) throws SQLException {
+    return teardown(catalog, connection, which, true);
+  }
+
+  private static List<Result> teardown(
+      Catalog catalog, Connection connection, Predicate<TableInfo> which, boolean dryRun)
+      throws SQLException {
+    Setup setup = new Setup(catalog.engine(), connection, DEFAULT_BACKFILL_WAIT, List.of(), dryRun);
     List<TableInfo> tables = setup.tables(catalog, which);
     SetupObjects found = setup.list(tables);
     List<Result> results = new ArrayList<>();
@@ -245,7 +298,8 @@ public final class Setup {
 
   private Result up(TableInfo t, SetupObjects found) {
     String name = t.namespace() + "." + t.table();
-    List<String> actions = new ArrayList<>();
+    List<String> actions = planned != null ? planned : new ArrayList<>();
+    actions.clear();
     long stamped = 0;
     try {
       String ns = t.namespace();
@@ -273,20 +327,20 @@ public final class Setup {
       }
       if (!found.hasIndex(ns, meta, index)) {
         createIndex(t, index);
-        actions.add("created in-flight index " + index);
+        done(actions, "created in-flight index " + index);
       }
       if (t.layout() == Layout.DECOUPLED_IMPORTED) {
         stamped = backfill(t);
-        actions.add("backfilled " + stamped + " rows");
+        done(actions, "backfilled " + stamped + " rows");
       }
       execute(viewDdl(t, view));
-      actions.add((found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);
+      done(actions, (found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);
       if (gatherHistogram(t)) {
-        actions.add("gathered a histogram on " + meta + ".tx_state");
+        done(actions, "gathered a histogram on " + meta + ".tx_state");
       }
       for (String g : grantees) {
         execute("GRANT SELECT ON " + name(ns, view) + " TO " + grantee(g));
-        actions.add("granted SELECT on " + view + " to " + g);
+        done(actions, "granted SELECT on " + view + " to " + g);
       }
       return new Result(name, actions, stamped, null);
     } catch (SQLException e) {
@@ -296,22 +350,23 @@ public final class Setup {
 
   private Result down(TableInfo t, SetupObjects found) {
     String name = t.namespace() + "." + t.table();
-    List<String> actions = new ArrayList<>();
+    List<String> actions = planned != null ? planned : new ArrayList<>();
+    actions.clear();
     try {
       String ns = t.namespace();
       String view = t.readView(engine);
       String index = t.inflightIndex(engine);
       if (found.viewMatches(ns, view, t.dataColumns())) {
         execute("DROP VIEW " + name(ns, view));
-        actions.add("dropped read view " + view);
+        done(actions, "dropped read view " + view);
       }
       if (engine == Engine.POSTGRESQL) {
         // also an invalid index a failed concurrent build left, which the listing omits
         execute("DROP INDEX CONCURRENTLY IF EXISTS " + name(ns, index));
-        actions.add("dropped in-flight index " + index);
+        done(actions, "dropped in-flight index " + index);
       } else if (found.hasIndex(ns, metadataTable(t), index)) {
         execute(dropIndex(t, index));
-        actions.add("dropped in-flight index " + index);
+        done(actions, "dropped in-flight index " + index);
       }
       return new Result(name, actions, 0, null);
     } catch (SQLException e) {
@@ -327,6 +382,23 @@ public final class Setup {
    * @return whether one was gathered
    */
   private boolean gatherHistogram(TableInfo t) throws SQLException {
+    if (planned != null && (engine == Engine.ORACLE || engine == Engine.MYSQL)) {
+      planned.add(
+          engine == Engine.ORACLE
+              ? "BEGIN DBMS_STATS.GATHER_TABLE_STATS(ownname => '\""
+                  + t.namespace()
+                  + "\"', tabname => '\""
+                  + metadataTable(t)
+                  + "\"', method_opt => 'FOR COLUMNS "
+                  + txState
+                  + " SIZE 254'); END;"
+              : "ANALYZE TABLE "
+                  + name(t.namespace(), metadataTable(t))
+                  + " UPDATE HISTOGRAM ON "
+                  + txState
+                  + " WITH 16 BUCKETS");
+      return true;
+    }
     switch (engine) {
       case ORACLE:
         try (PreparedStatement ps =
@@ -587,6 +659,13 @@ public final class Setup {
         String.format(
             "SELECT COUNT(*) FROM %s WHERE %s IN (1, 2) AND %s IS NULL AND %s IS NOT NULL",
             meta, txState, engine.quote("before_tx_id"), engine.quote("before_tx_version"));
+    if (planned != null) {
+      long rows = count(remaining);
+      planned.add("-- the backfill: " + rows + " rows to stamp now, until none is left");
+      planned.add(insert);
+      planned.add(update);
+      return rows;
+    }
     long stamped = 0;
     long deadline = System.nanoTime() + backfillWait.toNanos();
     while (true) {
@@ -707,7 +786,18 @@ public final class Setup {
     }
   }
 
+  /** Records what a step did; a dry run has recorded its statements instead. */
+  private void done(List<String> actions, String action) {
+    if (planned == null) {
+      actions.add(action);
+    }
+  }
+
   private void execute(String sql) throws SQLException {
+    if (planned != null) {
+      planned.add(sql);
+      return;
+    }
     try (Statement st = connection.createStatement()) {
       st.execute(sql);
     }

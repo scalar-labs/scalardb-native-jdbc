@@ -575,7 +575,11 @@ with the full check green and a commit; 9a moved to `testing.md`:
     From 026 also: the logger category `com.scalar.db.nativejdbc` and its events (refusals, catalog
     refreshes, in-flight waits) with their levels, in the design. To decide first: whether a catalog
     refresh through the JDBC surface (a client-info key beside passthrough) is still wanted, or the
-    TTL is enough.
+    TTL is enough. **Done (2026-10-20).** As planned, `scalardb-native-tools` over `Setup` and a new
+    `Check` in the driver, with `Setup.plan` and `planTeardown` for `--dry-run`; the password from
+    `SCALARDB_NATIVE_PASSWORD` or a connect property; `check` also reports XACT_ABORT among SQL Server's
+    user options. `ToolsIntegrationTest` runs on all five engines. Left for later: the catalog refresh,
+    the catalog's TTL being enough so far, and the logger's events, the driver logging nothing yet.
   - **9c: the samples** (design 4.6). `samples/crud-jdbc`, `crud-spring-data-jdbc`, `crud-jpa`
     (Hibernate) and `crud-mybatis`: one entity with a generated key and a version column, its CRUD, an
     optimistic-lock conflict, a `@Transactional` rollback, and a ScalarDB transaction writing the same

@@ -125,3 +125,7 @@ To be filled during triage.
 ## Notes
 
 - Design-only item; schedule it with the first `tools` commit so the contract and the code land together.
+
+### 2026-10-20 - Partly done
+
+- The CLI contract is built (milestone 9b): `setup`, `check` (stuck rows included), `teardown`; `--table`, `--dry-run`, `--json`; exit 0/1/2; never prompts; design section 3 as built. Open: the catalog refresh through the JDBC surface (the TTL is enough so far) and the logger category and events (the driver logs nothing yet).

@@ -464,7 +464,7 @@ scalardb-native-jdbc/
   config/spotbugs/exclude.xml
   driver/                       the published driver: com.scalar-labs:scalardb-native-jdbc, package com.scalar.db.nativejdbc
   shell/                        the snsql interactive shell: com.scalar-labs:scalardb-native-shell, a zip with bin/snsql and lib/; docs/plans/shell.md
-  tools/                        setup command and stuck-row check: com.scalar-labs:scalardb-native-jdbc-tools; no ScalarDB dependency; added with the first tool
+  tools/                        scalardb-native-tools: setup, check (stuck rows included), teardown; a zip with bin/ and lib/; no ScalarDB dependency
   samples/                      crud-jdbc, crud-spring-data-jdbc, crud-jpa, crud-mybatis: the ORM acceptance suite (4.6)
   docs/design.md                this document
   README.md, RELEASING.md                                  (no LICENSE during the private preview)
@@ -532,7 +532,7 @@ and Spring Boot 4 on Java 21, each with its own `release`.
 |---|---|---|---|
 | `driver` | `jsqlparser`, `slf4j-api`. **No ScalarDB dependency.** | the five vendor JDBC drivers, which the application supplies | `scalardb` (newest 3.19 patch), Testcontainers, the vendor drivers, JUnit, AssertJ, Mockito, `logback-classic` |
 | `shell` | the driver, `jline`, `picocli`, `slf4j-nop`; in the distribution zip also pgjdbc, MariaDB Connector/J (for MySQL as well), mssql-jdbc and ojdbc11, at the versions the integration tests run, with their licence files. Not Connector/J, whose GPL the FOSS exception does not lift for a non-FOSS distribution; a user who wants it adds it to `lib/` | | Testcontainers, the vendor drivers, JUnit, AssertJ |
-| `tools` | the driver, `picocli`, `slf4j-api`, `logback-classic`. **No ScalarDB dependency**: settling rows is ScalarDB's (section 6) | | as above |
+| `tools` | the driver, `picocli`, `slf4j-nop`, and in the zip the vendor drivers the shell bundles. **No ScalarDB dependency**: settling rows is ScalarDB's (section 6) | | as above |
 | `samples` | Spring Boot and the ORM of each sample; the driver | | the sample's own tests, against the driver and real ScalarDB transactions |
 
 **Version and compatibility.** The driver version mirrors the ScalarDB line it is certified against:
@@ -595,6 +595,14 @@ the backfill of section 1. The command needs DDL privileges and is run by an ope
 when it loads the catalog the driver only checks that the view and the index exist, and a statement that
 names a table without them is refused with `55000`. Example for `T(id, x, y)`; a composite key joins on
 every key column.
+
+As built (milestone 9b): the command is `scalardb-native-tools setup|check|teardown URL`, over every
+decoupled table of the catalog or those named with `--table`. It never prompts (the password from
+`SCALARDB_NATIVE_PASSWORD`); `--dry-run` prints the statements setup or teardown would run; `--json`
+prints the outcome as JSON; exit 0 when all is well, 1 when `check` finds a table not set up, rows stuck
+or a database setting to fix, 2 on an error. `check` is read-only and never reads the coordinator: SQL
+Server's `READ_COMMITTED_SNAPSHOT`, `ALLOW_SNAPSHOT_ISOLATION` and `XACT_ABORT` among the server's user
+options, each table's setup, and the stuck-row check of 4.4 through the in-flight index.
 
 The setup's names, in the table's schema: the view `rc_T` and, on the metadata table, the index
 `T_inflight`, each affix spelled the way the engine folds an unquoted name and joined to the table's

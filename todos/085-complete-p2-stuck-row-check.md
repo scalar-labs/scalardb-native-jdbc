@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "085"
 tags: [operations, diagnostics, liveness]
@@ -45,3 +45,7 @@ also a driver API or log line, if a monitoring hook is wanted.
 **By:** Claude Code
 - Replaces the driver-side sweeper, which the design dropped so the driver does not depend on the
   coordinator.
+
+### 2026-10-20 - Done
+
+- `scalardb-native-tools check` reports per table the count and oldest age of rows prepared past `--lifetime` (15 s), exits 1 when there are any; `setup.Check` in the driver; `ToolsIntegrationTest` leaves a row prepared and sees it reported on all five engines. README says what to do with a report.

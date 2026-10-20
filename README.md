@@ -55,23 +55,27 @@ driver runs at SERIALIZABLE on PostgreSQL (see [Isolation levels](#isolation-lev
 
 Before the driver serves a table, an operator with DDL privileges runs the setup once. It creates the
 in-flight index and the read view, and on an imported table writes the row metadata ScalarDB has not.
-It is re-runnable, and is run again after a table is added:
+It is re-runnable, and is run again after a table is added. `scalardb-native-tools`, in
+`scalardb-native-tools-<version>.zip` with the vendor drivers whose licences allow bundling, runs it:
 
-```java
-String url = "jdbc:postgresql://host:5432/db";
-try (Connection c = DriverManager.getConnection(url, "admin", password)) {
-  Catalog catalog = new Catalog(Engine.POSTGRESQL, Catalog.DEFAULT_METADATA_SCHEMA,
-      () -> DriverManager.getConnection(url, "admin", password));
-  for (Setup.Result r : Setup.run(catalog, c)) {
-    System.out.println(r);
-  }
-}
+```sh
+export SCALARDB_NATIVE_PASSWORD=...   # it never prompts
+bin/scalardb-native-tools setup jdbc:scalardb-native:postgresql://host:5432/db -U admin
+bin/scalardb-native-tools check jdbc:scalardb-native:postgresql://host:5432/db -U admin
 ```
 
-`Catalog`, `Engine` and `Setup` are in `com.scalar.db.nativejdbc.catalog`, `.engine` and `.setup`.
-`Setup.run(catalog, c, which, backfillWait, grantees)` chooses the tables, and grants SELECT on the
-read views to the application's users. The application then needs the driver jar, JSQLParser 5.4,
-slf4j-api and its vendor driver on the classpath, and connects with `jdbc:scalardb-native:postgresql:...`.
+| Action | What it does |
+| --- | --- |
+| `setup` | sets up every ScalarDB table, or those named with `--table ns.t`; `--grant user` grants SELECT on the read views to the application's users; `--dry-run` prints the statements instead |
+| `check` | read-only: the database settings the driver needs (SQL Server's), whether each table is set up, and the rows ScalarDB left prepared longer ago than `--lifetime` seconds (15), which the driver cannot settle; a ScalarDB read of the rows, or ScalarDB's recovery, settles them |
+| `teardown` | drops the read view and the in-flight index, as ScalarDB's `dropTable` needs on PostgreSQL; `--dry-run` too |
+
+It takes the application's URL or the vendor's, and exits 0 when all is well, 1 when `check` finds
+something to fix, and 2 on an error; `--json` prints the outcome as JSON. The same is available in
+Java as `Setup.run`, `Setup.plan`, `Setup.teardown` and `Check` in `com.scalar.db.nativejdbc.setup`.
+
+The application then needs the driver jar, JSQLParser 5.4, slf4j-api and its vendor driver on the
+classpath, and connects with `jdbc:scalardb-native:postgresql:...`.
 
 ## Isolation levels
 
@@ -215,7 +219,7 @@ runs under emulation on Apple Silicon.
 | --- | --- |
 | `driver/` | the driver, published as `com.scalar-labs:scalardb-native-jdbc` |
 | `shell/` | `snsql`, the psql-like interactive shell, distributed as `scalardb-native-shell-<version>.zip` (`docs/plans/shell.md`) |
-| `tools/` | planned: the setup command and the sweeper, published as `com.scalar-labs:scalardb-native-jdbc-tools`; added with the first tool |
+| `tools/` | `scalardb-native-tools`, the setup, its check and its teardown, distributed as `scalardb-native-tools-<version>.zip` |
 | `docs/design.md` | the design rules |
 | `build-logic/`, `gradle/libs.versions.toml` | shared Gradle conventions and the dependency versions |
 
