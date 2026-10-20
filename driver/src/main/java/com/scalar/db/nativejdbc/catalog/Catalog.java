@@ -56,7 +56,7 @@ import org.slf4j.LoggerFactory;
  *       marks an imported decoupled table (LEFT_OUTER) or the data table of a created one, which a
  *       statement must not name either; a row whose right source it is marks a transaction metadata
  *       table, refused as well; a {@code metadata} entry carrying the transaction columns is a
- *       classic-layout table; anything else is plain. ScalarDB records the spelling the operator
+ *       inline-layout table; anything else is plain. ScalarDB records the spelling the operator
  *       typed, which on an engine that compares table names without regard to case may differ from
  *       the stored one, so where the database compares that way ({@link
  *       Engine#tableNamesCaseInsensitive}) so does this classification.
@@ -625,7 +625,7 @@ public final class Catalog implements AutoCloseable {
         throw e;
       }
       LOG.warn(
-          "{}.virtual_tables is not visible: only classic-layout ScalarDB tables can be"
+          "{}.virtual_tables is not visible: only inline-layout ScalarDB tables can be"
               + " recognised ({})",
           metadataSchema,
           e.getMessage());
@@ -891,7 +891,7 @@ public final class Catalog implements AutoCloseable {
         return new TableInfo(
             q.schema(),
             q.table(),
-            Layout.CLASSIC,
+            Layout.INLINE,
             q.table(),
             null,
             null,

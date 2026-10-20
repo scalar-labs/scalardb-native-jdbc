@@ -57,11 +57,11 @@ class CatalogTest {
     }
     metadata.put("ns.Orders_tx_metadata", ordersMeta);
     metadata.put("app.orders", columns("id:PARTITION", "x", "y"));
-    List<MetadataColumn> classic = columns("id:PARTITION", "x", "before_x");
+    List<MetadataColumn> inline = columns("id:PARTITION", "x", "before_x");
     for (String t : TX) {
-      classic.add(new MetadataColumn(t, null, false, null));
+      inline.add(new MetadataColumn(t, null, false, null));
     }
-    metadata.put("ns.classic", classic);
+    metadata.put("ns.inline", inline);
     metadata.put("app.storage_only", columns("id:PARTITION", "x"));
     return new Snapshot(
         true,
@@ -101,9 +101,9 @@ class CatalogTest {
   }
 
   @Test
-  void classicTable_carriesTheTransactionColumns_whichAreNotDataColumns() throws SQLException {
-    TableInfo t = snapshot().classify(new QualifiedName("ns", "classic"));
-    assertThat(t.layout()).isEqualTo(Layout.CLASSIC);
+  void inlineTable_carriesTheTransactionColumns_whichAreNotDataColumns() throws SQLException {
+    TableInfo t = snapshot().classify(new QualifiedName("ns", "inline"));
+    assertThat(t.layout()).isEqualTo(Layout.INLINE);
     assertThat(t.metadataTable()).isNull();
     assertThat(t.dataColumns()).containsExactly("id", "x");
   }
@@ -153,7 +153,7 @@ class CatalogTest {
     assertThat(imported.metadataTable()).isEqualTo("orders_tx_metadata"); // ScalarDB's for its own
     assertThat(ci.classify(new QualifiedName("ns", "orders")).layout())
         .isEqualTo(Layout.DECOUPLED_CREATED);
-    assertThat(ci.classify(new QualifiedName("NS", "CLASSIC")).layout()).isEqualTo(Layout.CLASSIC);
+    assertThat(ci.classify(new QualifiedName("NS", "INLINE")).layout()).isEqualTo(Layout.INLINE);
   }
 
   @Test

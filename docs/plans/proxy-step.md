@@ -107,8 +107,8 @@ through `setSchema`/`setCatalog`).
 **Done 2026-10-10**, on all five engines rather than PostgreSQL only (user's decision; the rest of
 milestone 8 stays there). `setup.Setup` lives in the main source set without a command line, which
 milestone 9 adds, so the code does not move later. A table without setup is refused with `55000`, not
-`08004`: the refusal comes per statement, and HikariCP evicts a connection on an `08` state. Classic
-tables are not set up yet; they come with classic support.
+`08004`: the refusal comes per statement, and HikariCP evicts a connection on an `08` state. Inline
+tables are not set up yet; they come with inline support.
 
 - **Setup** (`setup.Setup`, in the driver). Per decoupled table, in order: the in-flight index, without
   blocking writes where the engine can; on an imported table the backfill of section 1, at READ
@@ -145,7 +145,7 @@ consume.
 - **Refused, with 0AN01:** a read at any other isolation level; a locking read or `SELECT ... INTO`
   (milestone 4 places the lock); a table hint, sample clause, PIVOT or database link on a ScalarDB
   table, since a hint such as `NOLOCK` would reach the base tables through the view; a table in the
-  classic layout; and every statement on a ScalarDB table that is not a SELECT.
+  inline layout; and every statement on a ScalarDB table that is not a SELECT.
 - **Not done:** distributing a join over the arms. No engine pushes a join predicate into a UNION
   (measured later, `docs/benchmarks/read-overhead.md`; the claim above that every engine pushes the
   predicate holds for filters only), which milestone 3b fixes; `ResultSetMetaData.getTableName` names
@@ -594,6 +594,44 @@ with the full check green and a commit; 9a moved to `testing.md`:
   - **9d: the release.** README's quick start through the tools and a sample; RELEASING.md for the new
     modules; design 1, 3 and 4.6 as built; the next preview, 3.19.0-alpha.2, prepared as alpha.1 was.
 
+### Milestone 10: the inline layout
+
+ScalarDB's default layout, the transaction metadata columns in the data row itself (design section 1,
+Layouts), for a table created through ScalarDB without decoupling or imported without it. Refused
+with `0AN01` until now (decision 1 below, which put it after milestone 6). Wanted in the release with
+milestone 9's samples, so it comes before 9c and 9d.
+
+**Approach: the inline table is both data and metadata table.** Its columns are those of the decoupled
+data table and metadata table together, `tx_*` and `before_*` included, so the driver's statements,
+written for a data table `d` joined by key to a metadata table `m`, run unchanged with both names on
+the one table: a self-join by key, which never misses. The catalog gives an inline table the table
+itself as its metadata table. Only what differs is written anew, behind the layout: an INSERT's stamp
+is an update of the row it inserted, a DELETE leaves no tombstone, and the metadata columns are kept
+out of user statements. The faster one-table forms of design section 1 (no join, the stamp in the
+user's own statement) come later, measured; the self-join costs a key lookup per row.
+
+**Regression guard.** The decoupled paths change as little as possible; a change to code both layouts
+use is its own commit, with the full suite on all five engines, before any inline logic. The inline
+tests are the existing scenarios parameterized by layout, so both layouts pass the same checks, and
+the comparison suites of `testing.md` (T1 to T3) run over both once they exist.
+
+  - **10a: reads.** The catalog (metadata table = the table; set up only with the view and the index),
+    the setup (the in-flight index and `rc_T` on the table; for an imported one, which ScalarDB
+    altered to add the columns, no backfill: a NULL `tx_id` is deemed committed in the row, the
+    deemed-committed rule of section 1), `check`'s stuck rows, and every read at READ COMMITTED:
+    split, anchored, per-row checks, `rc_T` fallback. `SELECT *` and `ResultSetMetaData` show the data
+    columns only. On PostgreSQL first, then the other four. To measure first: what ScalarDB's import
+    without decoupling leaves in the added columns, and which `before_*` indexes ScalarDB creates on
+    the table, a covering index the locking re-read must not stop at (4.2).
+  - **10b: writes.** INSERT stamps by an UPDATE of the rows it inserted, by key; an INSERT without a
+    column list is expanded to the data columns; UPDATE as decoupled, its CAS on the same row; DELETE
+    is the conditional delete of the row itself, no tombstone; a statement naming a `tx_*` or
+    `before_*` column is refused. Batches, generated keys, `RETURNING`/`OUTPUT`, upserts' refusals, as
+    on the decoupled layouts. `WriteIntegrationTest` and `MoreWritesIntegrationTest` by layout.
+  - **10c: locking reads and the other levels.** `FOR UPDATE`/`FOR SHARE` and SQL Server's hints,
+    SNAPSHOT and SERIALIZABLE on all five engines; `SnapshotIntegrationTest`,
+    `SerializableIntegrationTest` and the interleaving suite by layout.
+
 ## Package layout
 
 New packages under `com.scalar.db.nativejdbc`, each depending only on what is listed:
@@ -626,9 +664,9 @@ code they name, not separately.
 
 ## Decisions (accepted 2026-10-09)
 
-1. **Classic-layout tables in the first deliverable.** The design covers them, but the user's main case
+1. **Inline-layout tables in the first deliverable.** The design covers them, but the user's main case
    is the imported decoupled layout. Proposal: milestones 3 and 4 handle the two decoupled layouts and
-   refuse classic tables with `0AN01`; classic support follows in milestone 7 or 8.
+   refuse inline tables with `0AN01`; inline support follows in milestone 7 or 8.
 2. **Setup as a test helper first.** Proposal: yes, promoted to the `tools` module in milestone 9, so the
    protocol is proven before the operator surface is designed.
 3. **The first deliverable stops at milestone 6** with a preview build for PostgreSQL READ COMMITTED,

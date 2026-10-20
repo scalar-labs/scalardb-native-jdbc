@@ -78,7 +78,7 @@ public final class TableInfo {
   /**
    * Returns whether the driver's setup has been run for this table: its in-flight index exists and
    * its read view exists with the table's columns, as seen when the catalog was loaded. Always true
-   * for a table the setup does not concern yet: a plain table, and a classic one until classic
+   * for a table the setup does not concern yet: a plain table, and an inline one until inline
    * support adds its setup.
    *
    * @return whether the table is set up
@@ -147,7 +147,7 @@ public final class TableInfo {
 
   /**
    * Returns the physical table that holds the user's columns: the table itself for the plain,
-   * classic and imported layouts, {@code <name>_data} for a created decoupled table.
+   * inline and imported layouts, {@code <name>_data} for a created decoupled table.
    *
    * @return the data table name, unqualified
    */
@@ -157,7 +157,7 @@ public final class TableInfo {
 
   /**
    * Returns the physical table that holds the transaction metadata for a decoupled layout, or
-   * {@code null} for the plain and classic layouts.
+   * {@code null} for the plain and inline layouts.
    *
    * @return the metadata table name, unqualified, or {@code null}
    */

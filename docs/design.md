@@ -148,12 +148,13 @@ anywhere, because the driver never reads it.
 ### Layouts
 
 The rules are written for ScalarDB's decoupled layout, data table plus `_tx_metadata` plus a virtual
-table, because that is the layout for existing tables: importing a table into the classic layout means
+table, because that is the layout for existing tables: importing a table into the inline layout means
 ScalarDB adds its metadata columns to the table with ALTER TABLE, which the decoupled layout exists to
-avoid. The driver also supports the **classic layout**, metadata columns in the same row, and gets it
+avoid. The driver also supports the **inline layout** (called the classic layout in earlier revisions), metadata
+columns in the same row, ScalarDB's default for a created table, and gets it
 almost for free: the protocol is identical, and every two-table concern in this document collapses.
 
-| Concern | Decoupled layout | Classic layout |
+| Concern | Decoupled layout | Inline layout |
 |---|---|---|
 | Catalog | `virtual_tables` | ScalarDB's `metadata` table, which marks a table as transactional; both layouts may coexist in one database |
 | Views | join of two tables; outer join for an imported table | `cc_T` is the table itself; `rc_T` is the CASE view over it |
@@ -167,7 +168,7 @@ almost for free: the protocol is identical, and every two-table concern in this 
 | Coarse SERIALIZABLE path, stuck-row check, in-flight index | on `T_data` and `T_meta` | on `T` |
 | ScalarDB facts | identical | identical: same composers, conditions, before-image nulling, validation |
 
-Three additions for the classic layout. User statements are kept away from the metadata columns:
+Three additions for the inline layout. User statements are kept away from the metadata columns:
 `SELECT *` is served through `rc_T`, so they never appear, and `ResultSetMetaData` is filtered to match;
 an INSERT without a column list is expanded to one before the stamp columns are added; an UPDATE that
 names a metadata column is refused. The driver must not create, and should warn about, a secondary index
@@ -243,7 +244,7 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
      namespace-qualified full names.
   3. Otherwise a `metadata` entry for the user's name that carries the transaction metadata columns,
      `tx_id`, `tx_state`, `tx_version`, the timestamps, the `before_tx_*` columns and a `before_` twin of
-     each data column: a classic-layout table (`ConsensusCommitUtils.isTransactionTableMetadata`).
+     each data column: an inline-layout table (`ConsensusCommitUtils.isTransactionTableMetadata`).
   4. A name that is the **right source** of a `virtual_tables` row, `T_tx_metadata`, is refused like
      `T_data` and the virtual table of an imported table; the three refusals use SQLSTATE `42000` and
      name the table to use instead.
@@ -257,7 +258,7 @@ can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
   but its tables not visible is SQLSTATE `42501` naming the SELECT grants (Oracle reports a table it
   does not grant as absent), the schema not existing is `08004` naming the property, unless
   `scalardbnative.allowNoCatalog` says the database has no ScalarDB. A database whose `virtual_tables`
-  is missing but `metadata` is present (a ScalarDB older than virtual tables) is logged and has classic
+  is missing but `metadata` is present (a ScalarDB older than virtual tables) is logged and has inline
   layouts only.
 
   The `metadata` table has entries for physical tables only; a virtual table has none, and ScalarDB's

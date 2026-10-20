@@ -5,7 +5,7 @@ public enum Layout {
   /** Not a ScalarDB table: statements pass through unchanged. */
   PLAIN,
   /** A ScalarDB table with the transaction metadata columns in the same row. */
-  CLASSIC,
+  INLINE,
   /**
    * A table created through ScalarDB with transaction metadata decoupling: the user's name is the
    * INNER-join virtual table, the data lives in {@code <name>_data} and the metadata in {@code

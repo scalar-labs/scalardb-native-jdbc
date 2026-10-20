@@ -559,9 +559,8 @@ final class Router {
               + tables);
     }
     TableInfo t = Objects.requireNonNull(scalarDb.get(shape.get().table()));
-    if (t.layout() == Layout.CLASSIC) {
-      throw Errors.unsupported(
-          "tables in ScalarDB's classic layout are not supported yet" + tables);
+    if (t.layout() == Layout.INLINE) {
+      throw Errors.unsupported("tables in ScalarDB's inline layout are not supported yet" + tables);
     }
     Writes.Plan plan =
         Writes.plan(engine, shape.get(), t, tables, snapshot(), lockingSerializable(), vendor);
@@ -708,9 +707,8 @@ final class Router {
       String tables)
       throws SQLException {
     TableInfo t = Objects.requireNonNull(scalarDb.get(ref));
-    if (t.layout() == Layout.CLASSIC) {
-      throw Errors.unsupported(
-          "tables in ScalarDB's classic layout are not supported yet" + tables);
+    if (t.layout() == Layout.INLINE) {
+      throw Errors.unsupported("tables in ScalarDB's inline layout are not supported yet" + tables);
     }
     if (ref.hasHintOrLink()) {
       throw Errors.unsupported(
@@ -977,9 +975,9 @@ final class Router {
     IdentityHashMap<SqlAst.TableRef, String> views = new IdentityHashMap<>();
     for (Map.Entry<SqlAst.TableRef, TableInfo> e : scalarDb.entrySet()) {
       TableInfo t = e.getValue();
-      if (t.layout() == Layout.CLASSIC) {
+      if (t.layout() == Layout.INLINE) {
         throw Errors.unsupported(
-            "tables in ScalarDB's classic layout are not supported yet" + tables);
+            "tables in ScalarDB's inline layout are not supported yet" + tables);
       }
       if (e.getKey().hasHintOrLink()) {
         // a hint such as SQL Server's NOLOCK would reach the base tables through the view
@@ -1179,9 +1177,9 @@ final class Router {
                 + " subquery of its WHERE clause, never in a derived table or a set operation"
                 + tables);
       }
-      if (t.layout() == Layout.CLASSIC) {
+      if (t.layout() == Layout.INLINE) {
         throw Errors.unsupported(
-            "tables in ScalarDB's classic layout are not supported yet" + tables);
+            "tables in ScalarDB's inline layout are not supported yet" + tables);
       }
       if (e.getKey().hasHintOrLink()) {
         throw Errors.unsupported(

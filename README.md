@@ -143,7 +143,7 @@ and SERIALIZABLE on PostgreSQL, all three levels on MySQL, MariaDB and SQL Serve
 COMMITTED and SNAPSHOT on Oracle, came after it.
 
 - Reads and writes of ScalarDB tables work on all five engines.
-  ScalarDB's classic layout is refused with SQLState `0AN01`.
+  ScalarDB's inline layout is refused with SQLState `0AN01`.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
 - On MySQL an INSERT has no `RETURNING`, and gives each key column a literal or a placeholder of the

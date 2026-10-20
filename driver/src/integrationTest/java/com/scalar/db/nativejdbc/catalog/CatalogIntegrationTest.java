@@ -51,9 +51,9 @@ class CatalogIntegrationTest {
 
   /**
    * On each engine: a schema {@code app} with a plain table, a table imported with decoupling and
-   * one imported classic, all created with unquoted DDL so the engine spells them its own way; a
+   * one imported inline, all created with unquoted DDL so the engine spells them its own way; a
    * ScalarDB namespace {@code ns} with a created decoupled table {@code Orders} (columns {@code
-   * Id}, {@code K}, {@code Amount}, spelled as given) and a created classic table; and the engine's
+   * Id}, {@code K}, {@code Amount}, spelled as given) and a created inline table; and the engine's
    * way of shadowing: a plain {@code public.orders} on PostgreSQL, {@code dbo.Orders} on SQL
    * Server, a public synonym on Oracle.
    */
@@ -70,7 +70,7 @@ class CatalogIntegrationTest {
           e.createSchema("app"),
           "CREATE TABLE app.plain (id " + intType + " PRIMARY KEY, x VARCHAR(10))",
           "CREATE TABLE app.Orders (Id " + intType + " PRIMARY KEY, Amount " + intType + ")",
-          "CREATE TABLE app.imported_classic (id " + intType + " PRIMARY KEY, x VARCHAR(10))",
+          "CREATE TABLE app.imported_inline (id " + intType + " PRIMARY KEY, x VARCHAR(10))",
           "CREATE TABLE app.late1 (id " + intType + " PRIMARY KEY)",
           "CREATE TABLE app.late2 (id " + intType + " PRIMARY KEY)",
           "CREATE TABLE app.Mixed_Case (Id " + intType + " PRIMARY KEY)");
@@ -99,7 +99,7 @@ class CatalogIntegrationTest {
     try (DistributedTransactionAdmin admin = e.admin()) {
       String app = e.storedSchema("app");
       admin.importTable(app, e.storedTable("Orders"), DECOUPLED, Map.of());
-      admin.importTable(app, e.storedTable("imported_classic"), Map.of(), Map.of());
+      admin.importTable(app, e.storedTable("imported_inline"), Map.of(), Map.of());
       // where the engine ignores case, ScalarDB accepts a spelling that differs from the stored
       // one and records it as given
       boolean ignoresCase;
@@ -138,7 +138,7 @@ class CatalogIntegrationTest {
           DECOUPLED);
       admin.createTable(
           "ns",
-          "classic",
+          "inline",
           TableMetadata.newBuilder()
               .addColumn("id", DataType.INT)
               .addColumn("x", DataType.TEXT)
@@ -258,17 +258,17 @@ class CatalogIntegrationTest {
 
   @ParameterizedTest
   @MethodSource("engines")
-  void classicTables_createdAndImported(Engines e) throws Exception {
+  void inlineTables_createdAndImported(Engines e) throws Exception {
     Catalog catalog = catalog(e);
     // ScalarDB created it quoted, so only the quoted spelling reaches it where the engine folds
     TableInfo created =
-        catalog.lookup(NO_SESSION, e.engine().quote("ns"), e.engine().quote("classic"));
-    assertThat(created.layout()).isEqualTo(Layout.CLASSIC);
+        catalog.lookup(NO_SESSION, e.engine().quote("ns"), e.engine().quote("inline"));
+    assertThat(created.layout()).isEqualTo(Layout.INLINE);
     assertThat(created.keyColumns()).containsExactly("id");
     assertThat(created.dataColumns()).containsExactly("id", "x");
 
-    TableInfo imported = catalog.lookup(NO_SESSION, "app", "imported_classic");
-    assertThat(imported.layout()).isEqualTo(Layout.CLASSIC);
+    TableInfo imported = catalog.lookup(NO_SESSION, "app", "imported_inline");
+    assertThat(imported.layout()).isEqualTo(Layout.INLINE);
     assertThat(imported.metadataTable()).isNull();
     assertThat(imported.keyColumns()).containsExactly(e.storedColumn("id"));
   }
