@@ -17,13 +17,20 @@ import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLTransactionRollbackException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -33,6 +40,9 @@ import org.junit.jupiter.params.provider.MethodSource;
  * decoupled table does, and the driver reads at READ COMMITTED. The reads with rows in flight run
  * in {@code ReadIntegrationTest}, by layout.
  */
+@SuppressFBWarnings(
+    value = "SQL_INJECTION_JDBC",
+    justification = "fixture DDL and queries written in the test sources")
 class InlineIntegrationTest {
 
   static List<Engines> engines() {
@@ -78,6 +88,23 @@ class InlineIntegrationTest {
       assertThatThrownBy(() -> st.executeUpdate("INSERT INTO inl.imp VALUES (3, 'c')"))
           .isInstanceOf(SQLFeatureNotSupportedException.class);
       assertThatThrownBy(() -> st.executeUpdate("UPDATE inl.imp SET tx_state = 3"))
+          .isInstanceOf(SQLFeatureNotSupportedException.class);
+      // nor reads one, in a SET value, a RETURNING item or the generated keys asked (todo 293)
+      assertThatThrownBy(() -> st.executeUpdate("UPDATE inl.imp SET x = tx_id WHERE id = 1"))
+          .isInstanceOf(SQLFeatureNotSupportedException.class);
+      if (e.engine() == Engine.POSTGRESQL || e.engine() == Engine.MARIADB) {
+        assertThatThrownBy(
+                () -> rows(d, "INSERT INTO inl.imp (id, x) VALUES (8, 'r') RETURNING tx_id"))
+            .isInstanceOf(SQLFeatureNotSupportedException.class);
+      }
+      assertThatThrownBy(
+              () -> {
+                try (PreparedStatement ps =
+                    d.prepareStatement(
+                        "INSERT INTO inl.imp (id, x) VALUES (9, 'k')", new String[] {"tx_id"})) {
+                  ps.executeUpdate();
+                }
+              })
           .isInstanceOf(SQLFeatureNotSupportedException.class);
       assertThat(st.executeUpdate("UPDATE inl.imp SET x = 'z' WHERE id = 1")).isEqualTo(1);
       assertThat(st.executeUpdate("DELETE FROM inl.imp WHERE id = 2")).isEqualTo(1);
@@ -199,6 +226,63 @@ class InlineIntegrationTest {
       tx.commit();
       assertThat(two.map(r -> r.getText(ScalarDbNames.N("x")))).contains("u");
       assertThat(three).isEmpty();
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
+  void aPredicateDelete_racingAnUpdate_abortsOrSkipsAsTheRowNowMatches(Engines e) throws Exception {
+    String ns = e.storedSchema("inl3");
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          e.createSchema("inl3"),
+          "CREATE TABLE inl3.t (id " + e.intType() + " PRIMARY KEY, x " + e.intType() + ")",
+          "INSERT INTO inl3.t VALUES (1, 1)",
+          "INSERT INTO inl3.t VALUES (2, 1)");
+    }
+    try (DistributedTransactionAdmin admin = e.admin()) {
+      admin.createCoordinatorTables(true);
+      admin.importTable(ns, e.storedTable("t"), Map.of(), Map.of());
+    }
+    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog, c, t -> t.namespace().equals(ns), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection writer = e.openDriver();
+        Connection deleter = e.openDriver()) {
+      writer.setAutoCommit(false);
+      deleter.setAutoCommit(false);
+      // another writer changes row 1 so that it still matches, row 2 so that it no longer does,
+      // while the DELETE waits on their locks (todo 292)
+      for (int[] change : new int[][] {{1, 2}, {2, 0}}) {
+        try (Statement st = writer.createStatement()) {
+          st.executeUpdate("UPDATE inl3.t SET x = " + change[1] + " WHERE id = " + change[0]);
+        }
+        Future<Integer> delete =
+            pool.submit(
+                () -> {
+                  try (Statement st = deleter.createStatement()) {
+                    return st.executeUpdate("DELETE FROM inl3.t WHERE x > 0 AND id = " + change[0]);
+                  }
+                });
+        Thread.sleep(500);
+        writer.commit();
+        if (change[1] > 0) {
+          assertThatThrownBy(() -> delete.get(20, TimeUnit.SECONDS))
+              .as("a row that still matches")
+              .hasCauseInstanceOf(SQLTransactionRollbackException.class);
+        } else {
+          assertThat(delete.get(20, TimeUnit.SECONDS)).as("a row that no longer matches").isZero();
+        }
+        deleter.rollback();
+      }
+    } finally {
+      pool.shutdownNow();
     }
   }
 }

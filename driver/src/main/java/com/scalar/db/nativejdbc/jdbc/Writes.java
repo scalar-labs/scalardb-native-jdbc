@@ -208,17 +208,39 @@ final class Writes {
     for (String c : t.dataColumns()) {
       data.add(engine.columnKey(c));
     }
+    // every column the statement names: its lists, and every reference, in a SET value or a
+    // RETURNING item too (todo 293)
     List<String> named = new ArrayList<>(shape.insertColumns());
     named.addAll(shape.setColumns());
     named.addAll(shape.whereColumns());
+    for (SqlAst.ColumnRef c : shape.ast().columnRefs()) {
+      if (!c.isAllColumnsOfTable()) {
+        named.add(unquoted(c.name()));
+      }
+    }
     for (String c : named) {
-      String lower = c.toLowerCase(Locale.ROOT);
-      if (!data.contains(engine.columnKey(c))
-          && (lower.startsWith("tx_") || lower.startsWith("before_"))) {
+      if (metadataColumn(engine, data, c)) {
         throw refused(
             tables, "a write naming ScalarDB's metadata column " + c + " is not supported");
       }
     }
+  }
+
+  /** Whether {@code c}, unquoted, is one of an inline table's metadata columns, not a data one. */
+  private static boolean metadataColumn(Engine engine, Set<String> data, String c) {
+    String lower = c.toLowerCase(Locale.ROOT);
+    return !data.contains(engine.columnKey(c))
+        && (lower.startsWith("tx_") || lower.startsWith("before_"));
+  }
+
+  /** A name without the quotes around it, if any: {@code "x"}, {@code [x]} or {@code `x`}. */
+  private static String unquoted(String name) {
+    if (name.length() >= 2
+        && "\"[`".indexOf(name.charAt(0)) >= 0
+        && "\"]`".indexOf(name.charAt(name.length() - 1)) >= 0) {
+      return name.substring(1, name.length() - 1);
+    }
+    return name;
   }
 
   /** Why the engine may store other key values than an INSERT gives; null when it cannot. */
@@ -434,6 +456,23 @@ final class Writes {
                     + (hint ? "" : " LOCK IN SHARE MODE"),
                 inWhere)
             : null;
+    // an inline DELETE is the anchored delete alone, which never re-applies the predicate: a row
+    // it misses because a writer changed it is checked against the predicate as it is now, and
+    // aborts the statement if it still matches, as the decoupled DML would (todo 292)
+    Step matches =
+        t.layout() == Layout.INLINE && shape.kind() == StatementShape.Kind.DELETE && span != null
+            ? new Step(
+                "SELECT 1 FROM "
+                    + n.data
+                    + " "
+                    + exposed
+                    + " WHERE ("
+                    + source.substring(span[0], span[1])
+                    + ") AND ("
+                    + n.keyEquals(exposed)
+                    + ")",
+                inWhere)
+            : null;
     return new KeyedPlan(
         n,
         shape.kind() == StatementShape.Kind.DELETE,
@@ -443,6 +482,7 @@ final class Writes {
         locked,
         new Step(keys, inWhere),
         new Step(dml, all),
+        matches,
         where != null);
   }
 
@@ -1251,6 +1291,8 @@ final class Writes {
     final @Nullable Step locked;
     final Step keys;
     final Step dml;
+    // an inline DELETE's predicate over one key, as the row is now
+    final @Nullable Step matches;
     final boolean predicate;
 
     KeyedPlan(
@@ -1262,6 +1304,7 @@ final class Writes {
         @Nullable Step locked,
         Step keys,
         Step dml,
+        @Nullable Step matches,
         boolean predicate) {
       super(n);
       this.delete = delete;
@@ -1271,6 +1314,7 @@ final class Writes {
       this.locked = locked;
       this.keys = keys;
       this.dml = dml;
+      this.matches = matches;
       this.predicate = predicate;
     }
 
@@ -1433,6 +1477,14 @@ final class Writes {
               || row.sameAs(
                   readKey(rs, 1, width), rs.getString(width + 1), rs.getObject(width + 2))) {
             throw new Aborted("a row the statement writes showed a value in flight");
+          }
+        }
+      }
+      if (matches != null) {
+        try (PreparedStatement ps = run.prepare(matches, row.key);
+            ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            throw new Aborted("a row the statement deletes changed after it was read");
           }
         }
       }
@@ -1879,7 +1931,15 @@ final class Writes {
     String items;
     if (request instanceof String[]) {
       List<String> names = new ArrayList<>();
+      Set<String> data = new HashSet<>();
+      for (String c : plan.n.dataColumns) {
+        data.add(plan.n.engine.columnKey(c));
+      }
       for (String c : (String[]) request) {
+        if (plan.n.inline && metadataColumn(plan.n.engine, data, c)) {
+          // an inline table's metadata columns are ScalarDB's and the driver's (todo 293)
+          throw Errors.unsupported("generated keys of ScalarDB's metadata column " + c);
+        }
         // ojdbc reads a name as Oracle reads it unquoted, folded to upper case
         boolean folds = plan.n.engine == Engine.ORACLE && c.matches("[A-Za-z][A-Za-z0-9_$#]*");
         names.add(plan.n.engine.quote(folds ? c.toUpperCase(Locale.ROOT) : c));
@@ -2263,7 +2323,7 @@ final class Writes {
     final String committedAt;
     // the metadata in the row: the table is its own metadata table (milestone 10)
     final boolean inline;
-    private final List<String> dataColumns;
+    final List<String> dataColumns;
 
     Names(Engine engine, TableInfo t) {
       this.engine = engine;
