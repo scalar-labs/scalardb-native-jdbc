@@ -51,7 +51,7 @@ class InlineIntegrationTest {
 
   @ParameterizedTest
   @MethodSource("engines")
-  void anImportedTable_isBackfilled_readAtReadCommitted_andRefusedElse(Engines e) throws Exception {
+  void anImportedTable_isBackfilled_andReadAndWritten(Engines e) throws Exception {
     String ns = e.storedSchema("inl");
     String nullTxId =
         "SELECT COUNT(*) FROM inl.imp WHERE " + e.engine().quote("tx_id") + " IS NULL";
@@ -118,11 +118,10 @@ class InlineIntegrationTest {
             .as("the update stamped at the next version, the delete took the row")
             .containsExactly("1/z/2");
       }
-      // the stronger levels come with milestone 10c
+      // and at the stronger levels, a locking read included (10c)
       d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       d.setAutoCommit(false);
-      assertThatThrownBy(() -> rows(d, "SELECT x FROM inl.imp"))
-          .isInstanceOf(SQLFeatureNotSupportedException.class);
+      assertThat(rows(d, "SELECT x FROM inl.imp WHERE id = 1 FOR UPDATE")).containsExactly("z");
       d.rollback();
     }
   }

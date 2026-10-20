@@ -175,6 +175,17 @@ names a metadata column is refused. The driver must not create, and should warn 
 that covers the metadata columns, including ScalarDB's own `before_*` indexes, which live on `T` here and
 can serve a user `FOR UPDATE` as a covering index, for the locking reason above.
 
+As built (milestone 10): the inline table is its own metadata table, so every statement written for a
+data table joined by key to a metadata table runs unchanged on it, a self-join that never misses; the
+one-table forms above are left for later, measured. What differs: an INSERT stamps the rows it
+inserted where they stand; a DELETE is the anchored delete of the row, its predicate read again over
+the key when it misses a row a writer changed; the setup backfills an imported table's NULL metadata
+and, on SQL Server, builds an unfiltered in-flight index on the application's own table. An INSERT
+without a column list is refused rather than expanded, and so is any statement naming a metadata
+column, in a SET value, a RETURNING item or the generated keys asked; `SELECT *`, `RETURNING *` and
+the generated keys give the data columns. No warning about `before_*` indexes yet: the locking re-read
+goes through the primary key.
+
 ### Architecture
 
 - **A JDBC driver in front of the vendor driver, nothing in between.** A `java.sql.Driver` registered

@@ -35,11 +35,13 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.TreeMap;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
@@ -159,6 +161,19 @@ class SerializableIntegrationTest {
         }
       };
 
+  /** The schema of the layout under test: decoupled, or inline (milestone 10c). */
+  private static String SZ = "sz";
+
+  /** Every engine with each layout: decoupled, and inline. */
+  static List<Arguments> layouts() {
+    List<Arguments> out = new ArrayList<>();
+    for (Engines e : Engines.selected()) {
+      out.add(Arguments.of(e, false));
+      out.add(Arguments.of(e, true));
+    }
+    return out;
+  }
+
   /** How the driver reads the group: each of the read paths of design 4.2. */
   private enum Read {
     // row by row
@@ -172,6 +187,11 @@ class SerializableIntegrationTest {
 
     Read(String sql) {
       this.sql = sql;
+    }
+
+    /** The statement over the schema of the layout under test. */
+    String sql() {
+      return sql.replace("sz.", SZ + ".");
     }
   }
 
@@ -207,15 +227,19 @@ class SerializableIntegrationTest {
   }
 
   @ParameterizedTest
-  @MethodSource("engines")
-  void ssiBreaksTheCycles(Engines e) throws Exception {
+  @MethodSource("layouts")
+  @SuppressFBWarnings(
+      value = "ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD",
+      justification = "the layout's schema for the static helpers; the runs are sequential")
+  void ssiBreaksTheCycles(Engines e, boolean inline) throws Exception {
+    SZ = inline ? "szi" : "sz";
     boolean pg = e.engine() == Engine.POSTGRESQL;
     assumeTrue(e.engine() != Engine.ORACLE, "refused there: oracle_refusesSerializable");
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
-      admin.createNamespace("sz", true);
+      admin.createNamespace(SZ, true);
       admin.createTable(
-          "sz",
+          SZ,
           "t",
           TableMetadata.newBuilder()
               .addColumn("g", DataType.INT)
@@ -224,14 +248,14 @@ class SerializableIntegrationTest {
               .addPartitionKey("g")
               .addClusteringKey("id")
               .build(),
-          Map.of("transaction-metadata-decoupling", "true"));
+          inline ? Map.of() : Map.of("transaction-metadata-decoupling", "true"));
     }
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
                   new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
                   c,
-                  t -> t.namespace().equals("sz"),
+                  t -> t.namespace().equals(SZ),
                   Duration.ofMinutes(1),
                   List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
@@ -262,7 +286,8 @@ class SerializableIntegrationTest {
               try (Connection c = e.openDriver()) {
                 c.setTransactionIsolation(level);
                 // the read takes the path its name says: row by row carries each row's state
-                assertThat(c.nativeSQL(read.sql).contains("\"scalardb_native_meta\".\"tx_state\""))
+                assertThat(
+                        c.nativeSQL(read.sql()).contains("\"scalardb_native_meta\".\"tx_state\""))
                     .as("driver %s, %s read row by row", driver, read)
                     .isEqualTo(read != Read.CHECKED);
               }
@@ -454,7 +479,7 @@ class SerializableIntegrationTest {
 
     Map<Integer, Integer> read(int g) throws SQLException {
       Map<Integer, Integer> rows = new TreeMap<>();
-      try (PreparedStatement ps = c.prepareStatement(read.sql)) {
+      try (PreparedStatement ps = c.prepareStatement(read.sql())) {
         for (int i = 1; i <= ps.getParameterMetaData().getParameterCount(); i++) {
           ps.setInt(i, g);
         }
@@ -468,11 +493,11 @@ class SerializableIntegrationTest {
     }
 
     void insert(int g, int key, int v) throws SQLException {
-      execute("INSERT INTO sz.t (g, id, v) VALUES (?, ?, ?)", g, key, v);
+      execute("INSERT INTO " + SZ + ".t (g, id, v) VALUES (?, ?, ?)", g, key, v);
     }
 
     void update(int g, int key, int v) throws SQLException {
-      execute("UPDATE sz.t SET v = ? WHERE g = ? AND id = ?", v, g, key);
+      execute("UPDATE " + SZ + ".t SET v = ? WHERE g = ? AND id = ?", v, g, key);
     }
 
     private void execute(String sql, int... values) throws SQLException {
@@ -518,8 +543,9 @@ class SerializableIntegrationTest {
   }
 
   /**
-   * Whether ScalarDB aborted for a conflict, not for any other failure: or on SQL Server for the
-   * short lock wait on the driver's lock, error 1222, which ScalarDB reports as a plain failure.
+   * Whether ScalarDB aborted for a conflict, not for any other failure: or for the short lock wait
+   * on the driver's lock, SQL Server's 1222 or MySQL's and MariaDB's 1205, which ScalarDB reports
+   * as a plain failure.
    */
   private static boolean conflict(TransactionException ex) {
     if (ex instanceof CrudConflictException
@@ -529,10 +555,13 @@ class SerializableIntegrationTest {
       return true;
     }
     for (Throwable c = ex; c != null; c = c.getCause()) {
-      // 1222 is another error elsewhere, MySQL's among them (todo 273)
-      if (c instanceof SQLException
-          && ((SQLException) c).getErrorCode() == 1222
-          && c.getClass().getName().startsWith("com.microsoft.sqlserver.")) {
+      // 1222 is another error elsewhere, MySQL's among them (todo 273); MySQL's and MariaDB's own
+      // lock wait timeout, 1205 not under 40001 (SQL Server's deadlock), comes the same way where
+      // the prepare updates the row the driver locked, as on an inline table (milestone 10c)
+      String driver = c.getClass().getName();
+      int code = c instanceof SQLException ? ((SQLException) c).getErrorCode() : 0;
+      if ((code == 1222 && driver.startsWith("com.microsoft.sqlserver."))
+          || (code == 1205 && !"40001".equals(((SQLException) c).getSQLState()))) {
         return true;
       }
     }
@@ -560,12 +589,12 @@ class SerializableIntegrationTest {
   }
 
   private static Scan scan(int g) {
-    return Scan.newBuilder().namespace("sz").table("t").partitionKey(Key.ofInt("g", g)).build();
+    return Scan.newBuilder().namespace(SZ).table("t").partitionKey(Key.ofInt("g", g)).build();
   }
 
   private static Get get(int g, int id) {
     return Get.newBuilder()
-        .namespace("sz")
+        .namespace(SZ)
         .table("t")
         .partitionKey(Key.ofInt("g", g))
         .clusteringKey(Key.ofInt("id", id))
@@ -574,7 +603,7 @@ class SerializableIntegrationTest {
 
   private static Insert insert(int g, int id, int v) {
     return Insert.newBuilder()
-        .namespace("sz")
+        .namespace(SZ)
         .table("t")
         .partitionKey(Key.ofInt("g", g))
         .clusteringKey(Key.ofInt("id", id))
@@ -584,7 +613,7 @@ class SerializableIntegrationTest {
 
   private static Update update(int g, int id, int v) {
     return Update.newBuilder()
-        .namespace("sz")
+        .namespace(SZ)
         .table("t")
         .partitionKey(Key.ofInt("g", g))
         .clusteringKey(Key.ofInt("id", id))

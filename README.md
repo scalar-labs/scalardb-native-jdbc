@@ -48,8 +48,9 @@ Java 11 or later. `BEGIN`, `COMMIT` and `ROLLBACK` work as in psql, `\dt` marks 
 
 ## Getting started
 
-The driver serves ScalarDB tables in the decoupled layout: created, or imported, with
-`transaction-metadata-decoupling` set to `true`. ScalarDB itself needs
+The driver serves ScalarDB tables in both layouts: the decoupled one, created or imported with
+`transaction-metadata-decoupling` set to `true`, and the inline one, ScalarDB's default, its metadata
+columns in the row. ScalarDB itself needs
 `scalar.db.jdbc.isolation_level=REPEATABLE_READ` to create or import them, or `SERIALIZABLE` where the
 driver runs at SERIALIZABLE on PostgreSQL (see [Isolation levels](#isolation-levels)).
 
@@ -142,8 +143,10 @@ Certified in 3.19.0-alpha.1: PostgreSQL at READ COMMITTED, against the ScalarDB 
 and SERIALIZABLE on PostgreSQL, all three levels on MySQL, MariaDB and SQL Server, and READ
 COMMITTED and SNAPSHOT on Oracle, came after it.
 
-- Reads and writes of ScalarDB tables work on all five engines.
-  ScalarDB's inline layout is refused with SQLState `0AN01`.
+- Reads and writes of ScalarDB tables work on all five engines, in both of ScalarDB's layouts. In
+  the inline layout, the metadata columns in the row, they are kept from the application: `SELECT *`
+  and `RETURNING *` give the data columns, an `INSERT` names its columns, and a statement naming a
+  `tx_` or `before_` column ScalarDB keeps is refused with `0AN01`.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
 - On MySQL an INSERT has no `RETURNING`, and gives each key column a literal or a placeholder of the

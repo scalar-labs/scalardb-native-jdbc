@@ -2,7 +2,6 @@ package com.scalar.db.nativejdbc.jdbc;
 
 import com.scalar.db.nativejdbc.ScalarDbTables;
 import com.scalar.db.nativejdbc.catalog.Catalog;
-import com.scalar.db.nativejdbc.catalog.Layout;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.Outcome;
@@ -472,13 +471,6 @@ final class Router {
       if (!table.isSetUp()) {
         throw Errors.notSetUp(table.namespace() + "." + table.table());
       }
-      if (table.layout() == Layout.INLINE && snapshot()) {
-        // REPEATABLE READ and SERIALIZABLE come with milestone 10c
-        throw Errors.unsupported(
-            "tables in ScalarDB's inline layout are supported at READ COMMITTED only so far ("
-                + ref.name()
-                + ")");
-      }
       if (table.isScalarDb()) {
         scalarDb.put(ref, table);
       }
@@ -711,10 +703,6 @@ final class Router {
       String tables)
       throws SQLException {
     TableInfo t = Objects.requireNonNull(scalarDb.get(ref));
-    if (t.layout() == Layout.INLINE) {
-      throw Errors.unsupported(
-          "locking reads of tables in ScalarDB's inline layout are not supported yet" + tables);
-    }
     if (ref.hasHintOrLink()) {
       throw Errors.unsupported(
           "a table hint, sample clause, PIVOT or database link on a ScalarDB table is not"

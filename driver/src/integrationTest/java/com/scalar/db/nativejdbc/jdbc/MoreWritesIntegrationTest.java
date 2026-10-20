@@ -295,8 +295,7 @@ class MoreWritesIntegrationTest {
         timeoutMidWrite(e, tpc, t);
         readOnlyWrite(e, t);
       }
-      // the inline layout, the table its own metadata table: the writes without a locking read
-      // (milestone 10b; locking reads and the stronger levels come with 10c)
+      // the inline layout, the table its own metadata table (milestones 10b and 10c)
       for (Table t :
           List.of(
               new Table("wb.impi", "wb.impi", N("impi")),
@@ -307,6 +306,9 @@ class MoreWritesIntegrationTest {
         batches(e, tm, tpc, t);
         returning(e, t);
         inFlightWait(e, tpc, t);
+        lockingReads(e, tm, tpc, t);
+        reviewFindings(e, tpc, t);
+        timeoutMidWrite(e, tpc, t);
         readOnlyWrite(e, t);
       }
       if (e.engine() == Engine.POSTGRESQL) {

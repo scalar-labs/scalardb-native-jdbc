@@ -119,23 +119,28 @@ class InterleavingIntegrationTest {
           e.createSchema("il"),
           // run once per statement, after its snapshot: opens a window inside one read
           e.pauseFunction("il.pause", 1));
+      // imp in the decoupled layout, impi in the inline one (milestone 10c)
       for (String isolation : ISOLATIONS) {
-        String imp = "il.imp_" + isolation.toLowerCase(Locale.ROOT);
-        e.execute(
-            c,
-            "CREATE TABLE "
-                + imp
-                + " (id "
-                + e.intType()
-                + " PRIMARY KEY, x "
-                + e.textType()
-                + ", v "
-                + e.intType()
-                + ")",
-            // rows without metadata, as an imported table has them
-            "INSERT INTO " + imp + " SELECT g, 'a', 0 FROM " + e.series(1, 12),
-            "INSERT INTO " + imp + " VALUES " + rowsOf(COUNTERS, 0),
-            "INSERT INTO " + imp + " VALUES " + rowsOf(ACCOUNTS, 100));
+        for (String imp :
+            List.of(
+                "il.imp_" + isolation.toLowerCase(Locale.ROOT),
+                "il.impi_" + isolation.toLowerCase(Locale.ROOT))) {
+          e.execute(
+              c,
+              "CREATE TABLE "
+                  + imp
+                  + " (id "
+                  + e.intType()
+                  + " PRIMARY KEY, x "
+                  + e.textType()
+                  + ", v "
+                  + e.intType()
+                  + ")",
+              // rows without metadata, as an imported table has them
+              "INSERT INTO " + imp + " SELECT g, 'a', 0 FROM " + e.series(1, 12),
+              "INSERT INTO " + imp + " VALUES " + rowsOf(COUNTERS, 0),
+              "INSERT INTO " + imp + " VALUES " + rowsOf(ACCOUNTS, 100));
+        }
       }
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
@@ -144,6 +149,7 @@ class InterleavingIntegrationTest {
       for (String isolation : ISOLATIONS) {
         String suffix = "_" + isolation.toLowerCase(Locale.ROOT);
         admin.importTable(N("il"), N("imp" + suffix), DECOUPLED, Map.of());
+        admin.importTable(N("il"), N("impi" + suffix), Map.of(), Map.of());
         admin.createTable(
             N("il"),
             N("made" + suffix),
@@ -192,6 +198,13 @@ class InterleavingIntegrationTest {
                   "il.made" + suffix,
                   "il." + Q(catalog.lookup(List.of(), N("il"), N("made" + suffix)).metadataTable()),
                   N("made" + suffix),
+                  false),
+              // the inline layout, its own metadata table; the imported-only scenario below
+              // removes metadata rows, which it has none of apart from its rows
+              new Table(
+                  "il.impi" + suffix,
+                  "il." + Q(catalog.lookup(List.of(), N("il"), N("impi" + suffix)).metadataTable()),
+                  N("impi" + suffix),
                   false));
       Properties scalarDb = new Properties();
       scalarDb.setProperty("scalar.db.consensus_commit.isolation_level", isolation);

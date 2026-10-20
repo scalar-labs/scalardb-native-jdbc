@@ -646,7 +646,13 @@ the comparison suites of `testing.md` (T1 to T3) run over both once they exist.
     imported and a created inline table; the locking ones wait for 10c.
   - **10c: locking reads and the other levels.** `FOR UPDATE`/`FOR SHARE` and SQL Server's hints,
     SNAPSHOT and SERIALIZABLE on all five engines; `SnapshotIntegrationTest`,
-    `SerializableIntegrationTest` and the interleaving suite by layout.
+    `SerializableIntegrationTest` and the interleaving suite by layout. **Done (2026-10-20).** The
+    refusals lifted; nothing else changed in the driver. `SnapshotIntegrationTest` and
+    `SerializableIntegrationTest` run by layout, `MoreWritesIntegrationTest`'s locking scenarios on
+    the two inline tables, and the interleaving suite on an imported inline table beside the two
+    decoupled ones. The SERIALIZABLE test counts MySQL's and MariaDB's lock wait timeout (1205), which
+    ScalarDB reports as a plain failure where its prepare waits on the driver's lock of an inline row,
+    as it counts SQL Server's 1222.
 
 ## Package layout
 
