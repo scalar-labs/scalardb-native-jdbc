@@ -9,6 +9,8 @@ slf4j = "1.7.36"
 logback = "1.5.38"
 hikaricp = "4.0.3"
 picocli = "4.7.7"
+# The Spring Data JDBC sample (docs/plans/proxy-step.md, 9c), on the Spring Framework line it needs
+spring-data-jdbc = "4.1.1"
 # The shell's line editor; JLine 4 is compiled for Java 11
 jline = "4.4.7"
 # Vendor JDBC drivers: the application supplies its own; these are the versions the tests run
@@ -46,6 +48,7 @@ slf4j-nop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
 picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
+spring-data-jdbc = { module = "org.springframework.data:spring-data-jdbc", version.ref = "spring-data-jdbc" }
 jline-reader = { module = "org.jline:jline-reader", version.ref = "jline" }
 jline-terminal = { module = "org.jline:jline-terminal", version.ref = "jline" }
 jline-terminal-jni = { module = "org.jline:jline-terminal-jni", version.ref = "jline" }

@@ -558,6 +558,19 @@ final class Router {
               + tables);
     }
     TableInfo t = Objects.requireNonNull(scalarDb.get(shape.get().table()));
+    // a column qualified by the schema and the table, as Spring Data JDBC writes it, qualified by
+    // the table alone, which the rewrite keeps naming the table (milestone 9c)
+    String text = engine == Engine.SQLSERVER ? sql : ast.source();
+    String unqualified = ast.withoutSchemaQualifiers(shape.get().table(), text);
+    if (unqualified != null && !unqualified.equals(text)) {
+      SqlAst again =
+          SqlAst.parse(unqualified, engine, session.doubleQuotesQuoteIdentifiersAsLastRead())
+              .orElse(null);
+      Outcome<StatementShape> reshaped = again == null ? null : StatementShape.classify(again);
+      if (reshaped != null && reshaped.isPresent()) {
+        shape = reshaped;
+      }
+    }
     Writes.Plan plan =
         Writes.plan(engine, shape.get(), t, tables, snapshot(), lockingSerializable(), vendor);
     return new Route(
@@ -703,6 +716,33 @@ final class Router {
       String tables)
       throws SQLException {
     TableInfo t = Objects.requireNonNull(scalarDb.get(ref));
+    // columns qualified by the schema and the table, as Spring Data JDBC writes them, qualified by
+    // the table alone, as for a write (milestone 9c)
+    // on SQL Server the application's text, whose hints the source has blanked out
+    String original = engine == Engine.SQLSERVER ? sql : ast.source();
+    String unqualified = ast.withoutSchemaQualifiers(ref, original);
+    if (unqualified != null && !unqualified.equals(original)) {
+      SqlAst again =
+          SqlAst.parse(unqualified, engine, session.doubleQuotesQuoteIdentifiersAsLastRead())
+              .orElse(null);
+      List<SqlAst.TableRef> before = ast.tableRefs();
+      if (again != null && again.tableRefs().size() == before.size()) {
+        IdentityHashMap<SqlAst.TableRef, TableInfo> remapped = new IdentityHashMap<>();
+        SqlAst.TableRef target = null;
+        for (int i = 0; i < before.size(); i++) {
+          TableInfo info = scalarDb.get(before.get(i));
+          if (info != null) {
+            remapped.put(again.tableRefs().get(i), info);
+          }
+          if (before.get(i) == ref) {
+            target = again.tableRefs().get(i);
+          }
+        }
+        if (target != null) {
+          return lockingRead(sql, again, remapped, target, tables);
+        }
+      }
+    }
     if (ref.hasHintOrLink()) {
       throw Errors.unsupported(
           "a table hint, sample clause, PIVOT or database link on a ScalarDB table is not"

@@ -587,7 +587,20 @@ with the full check green and a commit; 9a moved to `testing.md`:
     as a test on every engine, so the acceptance suite is the samples themselves. They test how each
     ORM uses JDBC (dialect detection through the metadata, generated keys, batches, transactions,
     exception translation), not SQL coverage: an ORM emits a narrow set of statements, and the coverage
-    corpus of `testing.md` comes from the engines' own suites. To measure first: the
+    corpus of `testing.md` comes from the engines' own suites. **Part 1 done (2026-10-20):**
+    `samples/crud-jdbc` and `samples/crud-spring-data-jdbc` (Spring Data JDBC 4.1 on Spring 7, no
+    Spring Boot), an imported table with a generated key and a version column, each run on every
+    engine on a decoupled and an inline table: generated keys, a derived query, optimistic locking
+    (`@Version`), a `@Transactional` rollback, a ScalarDB commit between the application's read and
+    write, and a row ScalarDB holds prepared (a transient failure). Found and fixed in the driver:
+    Spring Data qualifies a write's columns by schema and table, which writes refused, now rewritten
+    to the table alone; ojdbc's generated keys by column name fail under a quoted table name
+    (ORA-04043), so Oracle's keys are read by the ROWID; a key name the caller quoted is taken as
+    written; the backfill's insert step, which finds nothing on an inline table, is skipped there,
+    as SQL Server refuses it on an IDENTITY key. ScalarDB itself cannot write a SQL Server IDENTITY
+    column (it inserts the key), so the samples' key there comes from a sequence. Todo 298: a table
+    imported after a driver loaded its catalog is read raw until the TTL; the samples set it to 0.
+    JPA and MyBatis follow after the release. To measure first: the
     statements each ORM emits on each engine (Hibernate's sequences and `RETURNING`, Spring Data JDBC's
     generated keys, MyBatis's `useGeneratedKeys`), each against the refusal list, so a refusal found is
     fixed in the driver or documented, not worked around in the sample.

@@ -1651,15 +1651,10 @@ final class Writes {
           }
           // ponytail: the vendor driver numbers the rows from the first value by the increment it
           // read at connect; a session that changes auto_increment_increment gets wrong keys
-          ps =
-              run.prepare(
-                  insert,
-                  null,
-                  false,
-                  // quoted, as ojdbc otherwise folds a lower-case name (todo 278)
-                  n.engine == Engine.ORACLE
-                      ? n.keyColumns.stream().map(n.engine::quote).toArray(String[]::new)
-                      : new String[0]);
+          // on Oracle the ROWID, by which the key is read below: ojdbc asked for the key columns by
+          // name describes the table, which it cannot find under a quoted name such as Spring Data
+          // JDBC writes (ORA-04043, milestone 9c)
+          ps = run.prepare(insert, null, false, new String[0]);
           long count;
           try {
             count = ps.executeLargeUpdate();
@@ -1673,7 +1668,11 @@ final class Writes {
           }
           try (ResultSet k = ps.getGeneratedKeys()) {
             while (k.next()) {
-              keys.read(k, 1, width);
+              if (n.engine == Engine.ORACLE) {
+                keysByRowid(run, k.getObject(1), keys);
+              } else {
+                keys.read(k, 1, width);
+              }
             }
           }
           if (keys.rows.size() != count) {
@@ -1769,6 +1768,20 @@ final class Writes {
         throw e;
       }
       return keys.rows.size();
+    }
+
+    /** Reads the key of the row at {@code rowid}, an Oracle ROWID, into {@code keys}. */
+    private void keysByRowid(Run run, Object rowid, Keys keys) throws SQLException {
+      try (PreparedStatement ps =
+          run.prepare("SELECT " + n.readColumns("") + " FROM " + n.data + " WHERE ROWID = ?")) {
+        ps.setObject(1, rowid);
+        try (ResultSet r = ps.executeQuery()) {
+          if (!r.next()) {
+            throw new SQLException("the row inserted is not found by its ROWID", "0AN01");
+          }
+          keys.read(r, 1, n.keyColumns.size());
+        }
+      }
     }
 
     /** Whether the database generates the key: MySQL or Oracle, keys not read back. */
@@ -1935,13 +1948,17 @@ final class Writes {
       for (String c : plan.n.dataColumns) {
         data.add(plan.n.engine.columnKey(c));
       }
-      for (String c : (String[]) request) {
+      for (String asked : (String[]) request) {
+        // a name the caller quoted, as Spring Data JDBC does, is taken as written (milestone 9c)
+        String c = unquoted(asked);
+        boolean quoted = !c.equals(asked);
         if (plan.n.inline && metadataColumn(plan.n.engine, data, c)) {
           // an inline table's metadata columns are ScalarDB's and the driver's (todo 293)
           throw Errors.unsupported("generated keys of ScalarDB's metadata column " + c);
         }
-        // ojdbc reads a name as Oracle reads it unquoted, folded to upper case
-        boolean folds = plan.n.engine == Engine.ORACLE && c.matches("[A-Za-z][A-Za-z0-9_$#]*");
+        // ojdbc reads an unquoted name as Oracle reads it, folded to upper case
+        boolean folds =
+            plan.n.engine == Engine.ORACLE && !quoted && c.matches("[A-Za-z][A-Za-z0-9_$#]*");
         names.add(plan.n.engine.quote(folds ? c.toUpperCase(Locale.ROOT) : c));
       }
       items = names.isEmpty() ? null : String.join(", ", names);
@@ -2378,7 +2395,6 @@ final class Writes {
       return String.join(", ", out);
     }
 
-    /** The key columns as a select list the driver reads keys from, as {@link #key} reads them. */
     /**
      * Every data column, as {@code SELECT q.*} would give them but for an inline table's metadata
      * columns, which only ScalarDB and the driver see.
@@ -2394,6 +2410,7 @@ final class Writes {
       return String.join(", ", out);
     }
 
+    /** The key columns as a select list the driver reads keys from, as {@link #key} reads them. */
     String readColumns(String q) {
       List<String> out = new ArrayList<>();
       for (String k : keyColumns) {

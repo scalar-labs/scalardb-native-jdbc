@@ -78,6 +78,20 @@ Java as `Setup.run`, `Setup.plan`, `Setup.teardown` and `Check` in `com.scalar.d
 The application then needs the driver jar, JSQLParser 5.4, slf4j-api and its vendor driver on the
 classpath, and connects with `jdbc:scalardb-native:postgresql:...`.
 
+**Adding a table to ScalarDB while applications run.** Each driver loads ScalarDB's catalog once and
+trusts it for `scalardbnative.catalogTtlMs` (60 seconds by default), across connection pools in the
+same JVM. Until then it does not know a newly imported or created ScalarDB table and treats it as a
+plain one: its reads can return rows a ScalarDB transaction holds prepared, and its writes bypass the
+driver. So, in this order:
+
+1. import or create the table in ScalarDB;
+2. run `scalardb-native-tools setup`;
+3. restart every application instance that uses the driver on that database, or wait out the
+   catalog TTL;
+4. only then let ScalarDB transactions write the table.
+
+A table applications start using with a new release is safe by step 3 when that release is deployed.
+
 ## Isolation levels
 
 | `setTransactionIsolation` | Engines | ScalarDB settings |
@@ -147,6 +161,9 @@ COMMITTED and SNAPSHOT on Oracle, came after it.
   the inline layout, the metadata columns in the row, they are kept from the application: `SELECT *`
   and `RETURNING *` give the data columns, an `INSERT` names its columns, and a statement naming a
   `tx_` or `before_` column ScalarDB keeps is refused with `0AN01`.
+- On MySQL and MariaDB a read at SERIALIZABLE in a read-only transaction (`setReadOnly(true)`,
+  Spring's `@Transactional(readOnly = true)`) is refused with `25006`, as the driver's reads lock at
+  that level; leave such a transaction read-write.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
 - On MySQL an INSERT has no `RETURNING`, and gives each key column a literal or a placeholder of the
@@ -229,6 +246,7 @@ Server runs under emulation on Apple Silicon.
 | `driver/` | the driver, published as `com.scalar-labs:scalardb-native-jdbc` |
 | `shell/` | `snsql`, the psql-like interactive shell, distributed as `scalardb-native-shell-<version>.zip` (`docs/plans/shell.md`) |
 | `tools/` | `scalardb-native-tools`, the setup, its check and its teardown, distributed as `scalardb-native-tools-<version>.zip` |
+| `samples/` | `crud-jdbc` and `crud-spring-data-jdbc`: small applications through the driver, each run as an acceptance test on every engine and both layouts beside ScalarDB's own transactions |
 | `docs/design.md` | the design rules |
 | `build-logic/`, `gradle/libs.versions.toml` | shared Gradle conventions and the dependency versions |
 

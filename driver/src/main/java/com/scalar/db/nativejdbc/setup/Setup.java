@@ -670,7 +670,9 @@ public final class Setup {
     if (planned != null) {
       long rows = count(remaining);
       planned.add("-- the backfill: " + rows + " rows to stamp now, until none is left");
-      planned.add(insert);
+      if (t.layout() != Layout.INLINE) {
+        planned.add(insert);
+      }
       planned.add(update);
       return rows;
     }
@@ -678,7 +680,11 @@ public final class Setup {
     long deadline = System.nanoTime() + backfillWait.toNanos();
     while (true) {
       long now = System.currentTimeMillis();
-      stamped += stamp(insert, now);
+      // an inline table is its own metadata table: no row lacks one, and SQL Server refuses the
+      // insert of an IDENTITY key even for no rows (milestone 9c)
+      if (t.layout() != Layout.INLINE) {
+        stamped += stamp(insert, now);
+      }
       stamped += stamp(update, now);
       long left = count(remaining);
       if (left == 0) {

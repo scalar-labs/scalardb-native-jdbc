@@ -20,6 +20,23 @@ class SqlAstTest {
   }
 
   @Test
+  void withoutSchemaQualifiers_qualifiesTheTargetsColumnsByItsNameAlone() {
+    // as Spring Data JDBC writes an UPDATE of an entity with a schema (milestone 9c)
+    String sql =
+        "UPDATE \"s\".\"item\" SET \"qty\" = ? WHERE \"s\".\"item\".\"id\" = ? AND"
+            + " \"s\".\"item\".\"version\" = ?";
+    SqlAst ast = parse(sql);
+    assertThat(ast.withoutSchemaQualifiers(ast.tableRefs().get(0), sql))
+        .isEqualTo(
+            "UPDATE \"s\".\"item\" SET \"qty\" = ? WHERE \"item\".\"id\" = ? AND"
+                + " \"item\".\"version\" = ?");
+    // another schema's table of the name, and no qualifier at all, stay as they are
+    String other = "DELETE FROM s.item WHERE t.item.id = 1 AND id = 2";
+    SqlAst o = parse(other);
+    assertThat(o.withoutSchemaQualifiers(o.tableRefs().get(0), other)).isEqualTo(other);
+  }
+
+  @Test
   void kind_isDecidedByTheTree_notTheFirstWord() {
     assertThat(parse("/* hint */ select 1 from t").kind()).isEqualTo(SqlAst.Kind.SELECT);
     assertThat(parse("-- note\nupdate t set x = 1").kind()).isEqualTo(SqlAst.Kind.DML);

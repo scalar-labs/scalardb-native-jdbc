@@ -44,7 +44,9 @@ import picocli.CommandLine.Parameters;
     description = {
       "Sets up ScalarDB tables for ScalarDB Native JDBC, checks them, or takes the setup down.",
       "The password comes from SCALARDB_NATIVE_PASSWORD, or --property password=...; it never"
-          + " prompts."
+          + " prompts.",
+      "After setting up a newly added table, restart the applications that use the driver, or"
+          + " wait out their catalog TTL (60 s), before ScalarDB transactions write the table."
     },
     exitCodeListHeading = "Exit codes:%n",
     exitCodeList = {

@@ -1795,6 +1795,45 @@ public final class SqlAst {
     return plan;
   }
 
+  /**
+   * Returns {@link #source} with each column qualified by a schema and {@code target}'s name, as
+   * Spring Data JDBC writes {@code "s"."t"."c"} when the entity names its schema, qualified by the
+   * table's name alone, {@code "t"."c"}, which every engine reads as the same column of a write's
+   * one table (milestone 9c).
+   *
+   * @param target the table the statement writes or locks
+   * @param text the statement as {@link #source}, every offset the same: on SQL Server the
+   *     application's own, its hint lists not blanked, which the rewrite must keep
+   * @return the text, unchanged when no column is so qualified, or {@code null} when one cannot be
+   *     placed in it
+   */
+  public @Nullable String withoutSchemaQualifiers(TableRef target, String text) {
+    List<Map.Entry<int[], String>> edits = new ArrayList<>();
+    for (ColumnRef c : columnRefs) {
+      Table q = c.qualifierNode();
+      if (q == null
+          || q.getSchemaName() == null
+          || c.isAllColumnsOfTable()
+          || !qualifies(q, target)) {
+        continue;
+      }
+      Node n = c.columnNode();
+      Token first = n == null ? null : n.jjtGetFirstToken();
+      Token last = n == null ? null : n.jjtGetLastToken();
+      int[] at = first == null || last == null ? null : span(first, last);
+      if (at == null) {
+        return null;
+      }
+      edits.add(Map.entry(at, q.getName() + "." + c.name()));
+    }
+    edits.sort((a, b) -> Integer.compare(b.getKey()[0], a.getKey()[0]));
+    StringBuilder out = new StringBuilder(text);
+    for (Map.Entry<int[], String> e : edits) {
+      out.replace(e.getKey()[0], e.getKey()[1], e.getValue());
+    }
+    return out.toString();
+  }
+
   private boolean usedAsColumnQualifier(TableRef r) {
     for (ColumnRef c : columnRefs) {
       Table q = c.qualifierNode();
