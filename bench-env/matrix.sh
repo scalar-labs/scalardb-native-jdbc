@@ -25,7 +25,7 @@ for n in ${INFLIGHT:-100 10000}; do
       "-Dnativejdbc.bench.tier=$tier" "-Dnativejdbc.bench.inflight=$n" "-Dnativejdbc.bench.rep=$rep" \
       --continue "-Pnativejdbc.parallelEngines=$((${#props[@]} / 3))" "$@" 2>&1 | grep -E 'BUILD|FAILED'
     for f in driver/build/bench/read-overhead-*.md driver/build/bench/explain-*.txt; do
-      [ -e "$f" ] && mv "$f" "results/i$n-$rep-$(basename "$f")"
+      if [ -e "$f" ]; then mv "$f" "results/i$n-$rep-$(basename "$f")"; fi
     done
   done
 done
