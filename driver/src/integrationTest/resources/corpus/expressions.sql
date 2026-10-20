@@ -1,0 +1,12 @@
+SELECT id, total * 2 + 1 AS t FROM {o};
+SELECT id, CAST(total AS VARCHAR(10)) AS t FROM {o};
+SELECT id, UPPER(name) AS u, LOWER(name) AS l FROM {c};
+SELECT id, CASE region WHEN 1 THEN 'one' WHEN 2 THEN 'two' END AS r FROM {c};
+SELECT id FROM {c} WHERE name LIKE 'a%';
+SELECT id FROM {c} WHERE name LIKE '_o_';
+SELECT id FROM {c} WHERE born BETWEEN DATE '1980-01-01' AND DATE '1995-12-31';
+SELECT id FROM {c} WHERE seen >= TIMESTAMP '2026-01-01 10:00:00';
+SELECT id FROM {c} WHERE vip = {TRUE};
+SELECT id FROM {c} WHERE rate = 0.5;
+SELECT id, rate * 3 AS r3 FROM {c};
+SELECT id FROM {o} WHERE total BETWEEN 50 AND 120 AND note IS NOT NULL;

@@ -1,0 +1,12 @@
+SELECT COUNT(*) FROM {c};
+SELECT region, COUNT(*), MIN(id), MAX(id) FROM {c} GROUP BY region;
+SELECT region, COUNT(*) FROM {c} GROUP BY region HAVING COUNT(*) > 1;
+SELECT customer_id, SUM(total) FROM {o} GROUP BY customer_id;
+SELECT customer_id, COUNT(DISTINCT total) FROM {o} GROUP BY customer_id;
+SELECT note, COUNT(*) FROM {o} GROUP BY note HAVING COUNT(*) > 1;
+SELECT a, SUM(v), COUNT(v) FROM {k} GROUP BY a;
+SELECT c.region, SUM(o.total) FROM {c} c JOIN {o} o ON o.customer_id = c.id GROUP BY c.region;
+SELECT MAX(rate), MIN(rate) FROM {c};
+SELECT region, AVG(rate) FROM {c} GROUP BY region;
+SELECT COUNT(*) FROM (SELECT DISTINCT name, region FROM {c}) t;
+SELECT DISTINCT o.customer_id FROM {o} o JOIN {c} c ON c.id = o.customer_id;

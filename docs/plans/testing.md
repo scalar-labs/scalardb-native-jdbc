@@ -41,7 +41,9 @@ first in every milestone, then Oracle, MySQL, MariaDB and SQL Server, in that or
 ### Milestone T0: the harness
 
 **Harness and CI done 2026-10-20** (todos 021, 052): per-engine tasks three at a time, about 13 minutes
-for the driver's suite locally against 45; the external database; the CI matrix. Todo 094 is next, and the seed comes with its first user, T2.
+for the driver's suite locally against 45; the external database; the CI matrix. The seed comes with
+its first user, T2. Todo 094 (2026-10-21): Oracle's fixed, locked statistics measured and reviewed,
+not committed; the review's findings wait for a decision (the todo's work log).
 
 - **Todo 052.** Start the containers in parallel (`Startables.deepStart`); honour
   `-Dnativejdbc.<engine>.url/username/password` and skip the container when set; set up SQL Server's
@@ -60,6 +62,16 @@ for the driver's suite locally against 45; the external database; the CI matrix.
   a run from it.
 
 ### Milestone T1: differential reads, nothing in flight
+
+**First pass done 2026-10-21** (`coverage/CorpusIntegrationTest`, `-Dnativejdbc.coverage=true`): the
+schema in both layouts, the small and the large data set, 90 statements of the shared corpus plus 4-6 of each
+engine's row limits, the comparator (rows, labels and types, SQLState of a failure, refusals apart,
+nullability reported apart), and `build/coverage/<engine>[-large].md` with each statement's route.
+All five engines pass but MySQL and MariaDB, where a `VARCHAR` column comes back as `LONGVARCHAR`
+(todo 303); nullability differs on PostgreSQL and Oracle (todo 302). About a quarter of the
+statements fall back to `rc_T`: right and full joins, CTEs, window functions, GROUP BY an expression,
+a derived table with DISTINCT. Open: decimals and CHAR, the locking clauses, JSON functions, more
+statements per area.
 
 With nothing in flight, the data of a ScalarDB table is its committed image. So each statement runs
 directly through the vendor driver and through the driver, on the same tables, and the two results must
@@ -202,8 +214,8 @@ BenchBase (CMU) is JDBC-based and speaks all five engines. Its configuration tak
   throughput, p50/p95/p99 latency, abort rate. In (e) also ScalarDB's own throughput against a run
   without the driver: the driver's locks must not starve ScalarDB.
 - **Where.** Local containers for smoke runs only; SQL Server runs under x86 emulation there. The
-  numbers come from a cloud environment (see "Cost"), one database per engine, and go to
-  `docs/benchmarks/` with their configuration, as `read-overhead.md` does.
+  numbers come from a cloud environment (see "Cost" and `benchmark-environment.md`), one database
+  per engine, and go to `docs/benchmarks/` with their configuration, as `read-overhead.md` does.
 - **Publishing.** The licences of Oracle and SQL Server restrict publishing benchmark results without
   the vendor's permission. Their numbers stay internal until that is checked.
 

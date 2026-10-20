@@ -1,0 +1,15 @@
+SELECT id FROM {c} WHERE id IN (SELECT customer_id FROM {o});
+SELECT id FROM {c} WHERE id NOT IN (SELECT customer_id FROM {o});
+SELECT id FROM {c} WHERE id NOT IN (SELECT customer_id FROM {o} WHERE customer_id IS NOT NULL);
+SELECT id FROM {c} c WHERE EXISTS (SELECT 1 FROM {o} o WHERE o.customer_id = c.id);
+SELECT id FROM {c} c WHERE NOT EXISTS (SELECT 1 FROM {o} o WHERE o.customer_id = c.id);
+SELECT id FROM {o} WHERE customer_id IN (SELECT id FROM {c} WHERE region = 1);
+SELECT id FROM {o} WHERE total > (SELECT AVG(total) FROM {o});
+SELECT id FROM {o} WHERE total >= ALL (SELECT total FROM {o} WHERE total IS NOT NULL);
+SELECT id FROM {o} WHERE total > ANY (SELECT total FROM {o} WHERE customer_id = 1);
+SELECT c.id, (SELECT COUNT(*) FROM {o} o WHERE o.customer_id = c.id) AS n FROM {c} c;
+SELECT c.id, (SELECT MAX(o.total) FROM {o} o WHERE o.customer_id = c.id) AS m FROM {c} c;
+SELECT t.customer_id, t.s FROM (SELECT customer_id, SUM(total) AS s FROM {o} GROUP BY customer_id) t WHERE t.s > 100;
+SELECT c.id FROM {c} c WHERE c.region IN (SELECT id FROM {r});
+SELECT r.id FROM {r} r WHERE NOT EXISTS (SELECT 1 FROM {c} c WHERE c.region = r.id);
+SELECT id FROM {c} WHERE (region, name) IN (SELECT region, name FROM {c} WHERE id = 1);

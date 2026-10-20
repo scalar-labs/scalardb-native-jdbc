@@ -1,0 +1,15 @@
+SELECT c.id, o.id FROM {c} c JOIN {o} o ON o.customer_id = c.id;
+SELECT c.id, o.id FROM {c} c LEFT JOIN {o} o ON o.customer_id = c.id;
+SELECT c.id, o.id FROM {c} c RIGHT JOIN {o} o ON o.customer_id = c.id;
+SELECT c.id, o.id FROM {c} c FULL JOIN {o} o ON o.customer_id = c.id;
+SELECT c.id, r.label FROM {c} c JOIN {r} r ON r.id = c.region;
+SELECT c.id, r.label FROM {c} c LEFT JOIN {r} r ON r.id = c.region;
+SELECT r.id, c.id FROM {r} r LEFT JOIN {c} c ON c.region = r.id;
+SELECT c.id, o.id FROM {c} c LEFT JOIN {o} o ON o.customer_id = c.id AND o.total > 90;
+SELECT c.id, o.id FROM {c} c LEFT JOIN {o} o ON o.customer_id = c.id WHERE o.id IS NULL;
+SELECT a.id, b.id FROM {c} a JOIN {c} b ON a.name = b.name AND a.id < b.id;
+SELECT c.id, o.id, k.v FROM {c} c JOIN {o} o ON o.customer_id = c.id JOIN {k} k ON k.a = c.id;
+SELECT c.id, o.id, r.label FROM {c} c JOIN {o} o ON o.customer_id = c.id LEFT JOIN {r} r ON r.id = c.region;
+SELECT x.a, x.b, y.b FROM {k} x JOIN {k} y ON y.a = x.a AND y.b <> x.b;
+SELECT c.id, o.id FROM {c} c CROSS JOIN {o} o WHERE o.total = 100;
+SELECT c.id FROM {c} c JOIN {o} o ON o.customer_id = c.id GROUP BY c.id HAVING COUNT(*) > 1;

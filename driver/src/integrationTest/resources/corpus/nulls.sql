@@ -1,0 +1,17 @@
+SELECT id FROM {c} WHERE name = NULL;
+SELECT id FROM {c} WHERE name IS NULL;
+SELECT id FROM {c} WHERE name <> 'ann';
+SELECT id FROM {c} WHERE NOT (name = 'ann');
+SELECT id FROM {c} WHERE region = 1 OR rate > 1;
+SELECT id FROM {c} WHERE NOT (region = 1 OR rate > 1);
+SELECT id FROM {c} WHERE region NOT IN (1, NULL);
+SELECT id FROM {c} WHERE region IN (1, NULL);
+SELECT COUNT(*), COUNT(name), COUNT(region), COUNT(DISTINCT name) FROM {c};
+SELECT COALESCE(name, '?') AS n, COUNT(*) AS k FROM {c} GROUP BY COALESCE(name, '?');
+SELECT name, COUNT(*) FROM {c} GROUP BY name;
+SELECT DISTINCT region FROM {c};
+SELECT o.id, c.name FROM {o} o LEFT JOIN {c} c ON c.id = o.customer_id WHERE c.name IS NULL;
+SELECT id, NULLIF(total, 100) AS t FROM {o};
+SELECT id, CASE WHEN total IS NULL THEN 'none' WHEN total > 99 THEN 'big' ELSE 'small' END AS s FROM {o};
+SELECT SUM(total), AVG(total), MIN(total), MAX(total) FROM {o} WHERE customer_id = 4;
+SELECT SUM(total), COUNT(*) FROM {o} WHERE id < 0;
