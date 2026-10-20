@@ -102,11 +102,11 @@ To be filled during triage.
 ## Acceptance Criteria
 
 - [ ] `./gradlew check` succeeds on a machine without Docker (integration suite skipped with a visible message)
-- [ ] One container per engine per JVM; a second integration class on PostgreSQL adds no container start
-- [ ] An engine system property selects the suite; an external-database property bypasses Testcontainers
+- [x] One container per engine per JVM; a second integration class on PostgreSQL adds no container start
+- [x] An engine system property selects the suite; an external-database property bypasses Testcontainers
 - [ ] Unit-test classpath no longer contains `scalardb` or a vendor driver; `NativeJdbcDriverTest` runs in well under 0.1 s
 - [ ] SpotBugs runs on main sources only, or at default effort on tests, and `exclude.xml` is removed or shrunk accordingly
-- [ ] CI still runs the full integration suite
+- [x] CI still runs the full integration suite
 
 ## Work Log
 
@@ -136,6 +136,16 @@ To be filled during triage.
 
 **Actions:**
 - The second review listed harness gaps for the five-engine matrix in todo 052: serial container start (Startables.deepStart), no external-database override, SQL Server's appdb without READ_COMMITTED_SNAPSHOT / ALLOW_SNAPSHOT_ISOLATION, ScalarDB isolation fixed per engine rather than per test, Oracle run as SYSTEM, and no CI matrix job.
+
+### 2026-10-20 - Per-engine tasks and the CI matrix (testing plan, milestone T0)
+
+**By:** Claude Code
+
+**Actions:**
+- See todo 052's work log of the same day. `./gradlew check -Dnativejdbc.engines=none` runs without
+  Docker; the first criterion asks for a skip without the property, left open. Also left open: ScalarDB,
+  pgjdbc and logback on the unit-test classpath (no unit test uses them, grepped again), SpotBugs on the
+  test source sets.
 
 ## Notes
 

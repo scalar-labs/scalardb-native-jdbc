@@ -58,13 +58,6 @@ dependencies {
 // the tests run the drivers the zip bundles
 configurations["integrationTestRuntimeOnly"].extendsFrom(bundledDrivers)
 
-tasks.named<Test>("integrationTest") {
-    systemProperty(
-        "nativejdbc.engines",
-        providers.systemProperty("nativejdbc.engines").getOrElse("all"),
-    )
-}
-
 distributions.main {
     distributionBaseName = "scalardb-native-shell"
     contents {

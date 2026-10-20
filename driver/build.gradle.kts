@@ -85,15 +85,9 @@ afterEvaluate {
     }
 }
 
-// Which engines the integration tests run against: -Dnativejdbc.engines=postgresql,oracle or "all".
-tasks.named<Test>("integrationTest") {
-    systemProperty(
-        "nativejdbc.engines",
-        providers.systemProperty("nativejdbc.engines").getOrElse("all"),
-    )
-    // -Dnativejdbc.bench=true runs the read-overhead benchmark (bench package), off by default;
-    // -Dnativejdbc.bench.* options are passed on (see ReadOverheadBenchmark)
-    systemProperties(providers.systemPropertiesPrefixedBy("nativejdbc.bench").get())
+// -Dnativejdbc.bench=true runs the read-overhead benchmark (bench package), off by default; the
+// -Dnativejdbc.* options reach every integration test task (java-conventions)
+tasks.withType<Test>().matching { it.name.startsWith("integrationTest") }.configureEach {
     // measured as an application runs the driver, assertions off (in every jar, as in production)
     enableAssertions = providers.systemProperty("nativejdbc.bench").map { it != "true" }.getOrElse(true)
 }

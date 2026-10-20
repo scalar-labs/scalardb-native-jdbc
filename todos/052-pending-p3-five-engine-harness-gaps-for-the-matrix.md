@@ -77,14 +77,36 @@ To be filled during triage.
 
 ## Acceptance Criteria
 
-- [ ] With `all`, the five containers start concurrently; the first assertion runs within about 1.5 minutes locally.
-- [ ] `-Dnativejdbc.postgresql.url=...` (and username/password) runs the PostgreSQL leg against that database without a container.
-- [ ] The SQL Server fixture database has `READ_COMMITTED_SNAPSHOT` and `ALLOW_SNAPSHOT_ISOLATION` on.
-- [ ] `admin(isolation)` lets a test choose ScalarDB's isolation.
+- [x] With `all`, the five containers start concurrently; the first assertion runs within about 1.5 minutes locally.
+- [x] `-Dnativejdbc.postgresql.url=...` (and username/password) runs the PostgreSQL leg against that database without a container.
+- [x] The SQL Server fixture database has `READ_COMMITTED_SNAPSHOT` and `ALLOW_SNAPSHOT_ISOLATION` on.
+- [x] `admin(isolation)` lets a test choose ScalarDB's isolation (as `scalarDb(Properties)` with `scalar.db.jdbc.isolation_level`, which it already honoured).
 - [ ] An Oracle application user without DBA rights exists for the resolution and privilege cases.
-- [ ] CI runs one job per engine plus a `check -x integrationTest` job.
+- [x] CI runs one job per engine plus a `check -Dnativejdbc.engines=none` job.
 
 ## Work Log
+
+### 2026-10-20 - Done for milestone T0 of docs/plans/testing.md, but the Oracle application user
+
+**By:** Claude Code
+
+**Actions:**
+- java-conventions: one `integrationTest<Engine>` task per engine configuration, each in its own JVM and
+  container, `check` depending on those `-Dnativejdbc.engines` selects (`none` for none); a shared
+  build service caps them at three at a time (`-Pnativejdbc.parallelEngines`). `integrationTest` stays
+  the one-JVM task for `--tests` runs. Every integration task gets the `-Dnativejdbc.*` options.
+- `Engines`: the selected engines start together (`Startables.deepStart`); Oracle's startup timeout
+  raised to 10 minutes, after it timed out with six starting at once; `-Dnativejdbc.<engine>.url`,
+  `.username`, `.password` use an existing database instead of a container.
+- `ci.yml`: `check -Dnativejdbc.engines=none`, and a matrix job per engine.
+- Measured locally, the driver's suite, three tasks at a time: MySQL, MySQL lower case, MariaDB 5.2-5.6
+  min each; Oracle 5.3, PostgreSQL 4.1, SQL Server 7.0; about 13 minutes for the six, against about 45
+  in one task. Peak container memory with Oracle, PostgreSQL and SQL Server together 4.3 GB of
+  Docker's 7.75 GB (Oracle about 2 GB, MySQL about 0.6 GB), so three stays the default.
+- Left open: the Oracle application user, until a test needs one (todo 033, its first user, is done
+  without it). Gradle starts the per-engine tasks in name order, so the slow engines go last; starting
+  them first would save a few minutes and needs no more than ordering.
+
 
 ### 2026-10-09 - Initial Discovery
 

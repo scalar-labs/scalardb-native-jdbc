@@ -144,8 +144,49 @@ testing {
     }
 }
 
+// One integration test task per engine configuration (testing.Engines), each in a JVM with its own
+// container, so that `check` waits for the slowest engine rather than for the sum.
+// -Dnativejdbc.engines=postgresql,oracle narrows them, and `none` leaves them out. `integrationTest`
+// itself runs the selected engines in one JVM, for runs with --tests.
+val engines = listOf("postgresql", "oracle", "mysql", "mysql_lower_case", "mariadb", "sqlserver")
+val selectedEngines =
+    providers.systemProperty("nativejdbc.engines").getOrElse("all").trim().lowercase().let { p ->
+        when (p) {
+            "", "all" -> engines
+            "none" -> listOf()
+            else ->
+                p.split(",").map { it.trim() }.onEach {
+                    if (it !in engines) throw GradleException("nativejdbc.engines: no engine $it")
+                }
+        }
+    }
+// -Pnativejdbc.parallelEngines: how many containers at once across the build
+val engineSlots =
+    gradle.sharedServices.registerIfAbsent("engineSlots", EngineSlots::class) {
+        maxParallelUsages =
+            providers.gradleProperty("nativejdbc.parallelEngines").map { it.toInt() }.orElse(3)
+    }
+// every integration test task gets the -Dnativejdbc.* options: the engines, an external database
+// per engine (testing.Engines), the benchmarks' and the suites' switches
+val forwarded = providers.systemPropertiesPrefixedBy("nativejdbc.")
+tasks.named<Test>("integrationTest") { systemProperties(forwarded.get()) }
+val perEngine =
+    engines.map { engine ->
+        val words = engine.split("_").joinToString("") { it.replaceFirstChar(Char::uppercase) }
+        tasks.register<Test>("integrationTest$words") {
+            description = "Runs the integration tests on $engine."
+            group = "verification"
+            testClassesDirs = sourceSets["integrationTest"].output.classesDirs
+            classpath = sourceSets["integrationTest"].runtimeClasspath
+            useJUnitPlatform()
+            systemProperties(forwarded.get())
+            systemProperty("nativejdbc.engines", engine)
+            usesService(engineSlots)
+        }
+    }
+
 tasks.named("check") {
-    dependsOn(testing.suites.named("integrationTest"))
+    dependsOn(perEngine.filterIndexed { i, _ -> engines[i] in selectedEngines })
     // Javadoc is not part of `check` by default, so an unresolvable {@link} or a malformed tag fails
     // nothing until something builds the javadoc jar, which only happens when publishing. The javadoc
     // is a published artifact, so hold it to the same bar as the code and find out on the pull request.

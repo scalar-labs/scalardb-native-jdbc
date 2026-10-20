@@ -209,11 +209,17 @@ Requires JDK 25 to build; the driver artifact is compiled for Java 11 with `--re
 ./gradlew spotlessApply  # format to the Google Java Style Guide
 ```
 
-The integration tests run database containers through Testcontainers and need Docker. They run
-against all engine configurations by default; `./gradlew integrationTest -Dnativejdbc.engines=postgresql,mysql`
-selects a subset (`postgresql`, `mysql`, `mysql_lower_case` for MySQL with `lower_case_table_names=1`,
-`mariadb`, `sqlserver`, `oracle`). Oracle and SQL Server take a minute or more to start, and SQL Server
-runs under emulation on Apple Silicon.
+The integration tests run database containers through Testcontainers and need Docker. `check` runs
+them in one task per engine configuration (`integrationTestPostgresql`, `integrationTestOracle`,
+`integrationTestMysql`, `integrationTestMysqlLowerCase` for MySQL with `lower_case_table_names=1`,
+`integrationTestMariadb`, `integrationTestSqlserver`), three at a time, each with its own container;
+`-Pnativejdbc.parallelEngines=2` lowers that where Docker has less memory.
+`-Dnativejdbc.engines=postgresql,mysql` selects a subset (`none` for no integration tests at all),
+and `./gradlew :driver:integrationTest --tests '*ReadIntegrationTest*' -Dnativejdbc.engines=oracle`
+runs some tests on the selected engines in one task. `-Dnativejdbc.postgresql.url=...`, with
+`.username` and `.password`, runs an engine against an existing database instead of a container (the
+requirements are in `testing.Engines`). Oracle and SQL Server take a minute or more to start, and SQL
+Server runs under emulation on Apple Silicon.
 
 | Path | What |
 | --- | --- |

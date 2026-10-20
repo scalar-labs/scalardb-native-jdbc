@@ -486,8 +486,8 @@ the `scalardb-native-jdbc-<module>` pattern.
   `spotlessCheck` runs under `check`, `spotlessApply` formats.
 - SpotBugs at `Effort.MAX`, `Confidence.MEDIUM`, with FindSecBugs and the HTML report, excludes in
   `config/spotbugs/exclude.xml`.
-- Test suites through `testing.suites`: JUnit Jupiter `test`, and an `integrationTest` `JvmTestSuite`
-  wired into `check`; AssertJ and Mockito. The driver's integration tests are the interleaving matrix on
+- Test suites through `testing.suites`: JUnit Jupiter `test`, and an `integrationTest` `JvmTestSuite`,
+  run by `check` as one task per engine configuration, a few at a time; AssertJ and Mockito. The driver's integration tests are the interleaving matrix on
   Testcontainers images of the five engines, PostgreSQL first, MySQL through both Connector/J and MariaDB
   Connector/J, with a system property to point at an
   external database instead. The engine containers (`testing.Engines`) are the driver's test fixtures,
@@ -498,10 +498,10 @@ the `scalardb-native-jdbc-<module>` pattern.
   release assets, and the conventions are ready for Central when the preview becomes public. `RELEASING.md` follows ScalarDB's branching model: `main` for the
   next version, a version branch per line, `3.19`, releases cut from the branch, never from `main`.
 - Workflows, from Saga: `ci.yml` runs `check` on JDK 25 (Temurin) for `main`, version branches and pull
-  requests, then a compiler-warnings pass without the build cache, and uploads test reports on failure;
-  `auto-pr.yml`. To be added with the first release: `release-snapshot.yml`, a snapshot on every push to
-  `main` and version branches, and `release.yml`, from a tag. Two additions: an engine matrix job that runs the
-  interleaving matrix on the hosted runner's Docker, and a nightly that runs it against the newest 3.19
+  requests without the integration tests, then a compiler-warnings pass without the build cache, an
+  engine matrix job that runs the integration tests one engine per runner, and uploads test reports on
+  failure; `auto-pr.yml`. To be added with the first release: `release-snapshot.yml`, a snapshot on every push to
+  `main` and version branches, and `release.yml`, from a tag. One addition: a nightly that runs the integration tests against the newest 3.19
   patch and against the 4.0 line, which is not published, so the nightly clones ScalarDB `master` and
   runs `./gradlew :core:publishToMavenLocal` first, as the frontend's build does.
 

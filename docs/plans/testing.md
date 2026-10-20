@@ -40,6 +40,9 @@ first in every milestone, then Oracle, MySQL, MariaDB and SQL Server, in that or
 
 ### Milestone T0: the harness
 
+**Harness and CI done 2026-10-20** (todos 021, 052): per-engine tasks three at a time, about 13 minutes
+for the driver's suite locally against 45; the external database; the CI matrix. Todo 094 is next, and the seed comes with its first user, T2.
+
 - **Todo 052.** Start the containers in parallel (`Startables.deepStart`); honour
   `-Dnativejdbc.<engine>.url/username/password` and skip the container when set; set up SQL Server's
   database with the snapshot settings; give `admin()` an isolation parameter; an Oracle application

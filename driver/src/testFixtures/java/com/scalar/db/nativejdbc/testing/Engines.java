@@ -8,13 +8,16 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import org.testcontainers.containers.JdbcDatabaseContainer;
+import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.mariadb.MariaDBContainer;
 import org.testcontainers.mssqlserver.MSSQLServerContainer;
 import org.testcontainers.mysql.MySQLContainer;
@@ -22,10 +25,18 @@ import org.testcontainers.oracle.OracleContainer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * One database container per engine per JVM, started on first use and reaped by Testcontainers when
- * the JVM ends. Select engines with {@code -Dnativejdbc.engines=postgresql,oracle}; the default,
- * {@code all}, runs the five. The connection is always the administrative one, which the fixtures
- * and ScalarDB's admin both need.
+ * One database container per engine per JVM, the selected engines' started together on first use
+ * and reaped by Testcontainers when the JVM ends. Select engines with {@code
+ * -Dnativejdbc.engines=postgresql,oracle}; the default, {@code all}, runs the five. The connection
+ * is always the administrative one, which the fixtures and ScalarDB's admin both need.
+ *
+ * <p>{@code -Dnativejdbc.<engine>.url}, with {@code .username} and {@code .password}, points an
+ * engine at an existing database instead of a container, {@code <engine>} as in {@code
+ * nativejdbc.engines}. The user must be able to create schemas and, on Oracle, users (ScalarDB
+ * creates one per namespace). On SQL Server the URL names an application database with {@code
+ * READ_COMMITTED_SNAPSHOT} and {@code ALLOW_SNAPSHOT_ISOLATION} on; on Oracle, SYSDBA has set
+ * {@code "_disable_last_successful_login_time"} (see {@code ORACLE}), or SERIALIZABLE tests fail
+ * now and then.
  */
 public enum Engines {
   POSTGRESQL(Engine.POSTGRESQL) {
@@ -89,7 +100,9 @@ public enum Engines {
   ORACLE(Engine.ORACLE) {
     @Override
     JdbcDatabaseContainer<?> create() {
-      return new OracleContainer("gvenzl/oracle-free:23-slim-faststart");
+      // about a minute alone, several when the other engines start beside it
+      return new OracleContainer("gvenzl/oracle-free:23-slim-faststart")
+          .withStartupTimeout(Duration.ofMinutes(10));
     }
 
     @Override
@@ -174,14 +187,36 @@ public enum Engines {
 
   private Started started() throws SQLException {
     synchronized (STARTED) {
-      Started s = STARTED.get(this);
-      if (s == null) {
-        JdbcDatabaseContainer<?> c = create();
-        c.start();
-        s = new Started(url(c), username(c), c.getPassword());
-        STARTED.put(this, s);
+      if (STARTED.isEmpty()) {
+        start(selected());
       }
-      return s;
+      if (!STARTED.containsKey(this)) {
+        start(List.of(this)); // a test that names an engine outside the selection
+      }
+      return Objects.requireNonNull(STARTED.get(this));
+    }
+  }
+
+  private static void start(List<Engines> engines) throws SQLException {
+    Map<Engines, JdbcDatabaseContainer<?>> containers = new EnumMap<>(Engines.class);
+    for (Engines e : engines) {
+      String prefix = "nativejdbc." + e.name().toLowerCase(Locale.ROOT) + ".";
+      String url = System.getProperty(prefix + "url");
+      if (url != null) {
+        String username = System.getProperty(prefix + "username");
+        if (username == null) {
+          throw new IllegalStateException(prefix + "url is set without " + prefix + "username");
+        }
+        STARTED.put(e, new Started(url, username, System.getProperty(prefix + "password", "")));
+      } else {
+        containers.put(e, e.create());
+      }
+    }
+    Startables.deepStart(containers.values()).join();
+    for (Map.Entry<Engines, JdbcDatabaseContainer<?>> entry : containers.entrySet()) {
+      Engines e = entry.getKey();
+      JdbcDatabaseContainer<?> c = entry.getValue();
+      STARTED.put(e, new Started(e.url(c), e.username(c), c.getPassword()));
     }
   }
 
