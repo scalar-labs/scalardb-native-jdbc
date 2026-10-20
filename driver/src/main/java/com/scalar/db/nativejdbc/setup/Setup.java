@@ -552,9 +552,14 @@ public final class Setup {
                 engine.quote(index), on, keys, txState));
         return;
       case SQLSERVER:
+        // filtered on a metadata table; unfiltered on an inline one, the application's own table,
+        // where a filtered index would fail every write from a session without the SET options it
+        // needs, QUOTED_IDENTIFIER among them (error 1934, todo 289)
         execute(
             String.format(
-                "CREATE INDEX %s ON %s (%s) WHERE %s IN (1, 2)%s",
+                t.layout() == Layout.INLINE
+                    ? "CREATE INDEX %1$s ON %2$s (%4$s, %3$s)%5$s"
+                    : "CREATE INDEX %1$s ON %2$s (%3$s) WHERE %4$s IN (1, 2)%5$s",
                 engine.quote(index),
                 on,
                 keys,
@@ -619,7 +624,8 @@ public final class Setup {
    *
    * @return the number of rows stamped
    */
-  // ponytail: one statement per step over the whole table; batch by key range for very large tables
+  // ponytail: one statement per step over the whole table, which on an inline table write-locks the
+  // application's own rows until it ends (todo 290); batch by key range for very large tables
   private long backfill(TableInfo t) throws SQLException {
     String data = name(t.namespace(), t.dataTable());
     String meta = name(t.namespace(), metadataTable(t));

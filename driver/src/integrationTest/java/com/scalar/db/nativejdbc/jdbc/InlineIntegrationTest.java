@@ -4,8 +4,13 @@ import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.scalar.db.api.Delete;
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.api.TwoPhaseCommitTransaction;
+import com.scalar.db.api.TwoPhaseCommitTransactionManager;
+import com.scalar.db.api.Update;
 import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import java.sql.Connection;
@@ -70,6 +75,69 @@ class InlineIntegrationTest {
       assertThatThrownBy(() -> rows(d, "SELECT x FROM inl.imp"))
           .isInstanceOf(SQLFeatureNotSupportedException.class);
       d.rollback();
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
+  void aRowWithNullMetadata_putInFlightByScalarDb_readsAsItsBeforeImage(Engines e)
+      throws Exception {
+    ScalarDbNames.on(e);
+    String ns = e.storedSchema("inl2");
+    String table = e.storedTable("imp");
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          e.createSchema("inl2"),
+          "CREATE TABLE inl2.imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
+          "INSERT INTO inl2.imp VALUES (1, 'a')");
+    }
+    try (DistributedTransactionAdmin admin = e.admin()) {
+      admin.createCoordinatorTables(true);
+      admin.importTable(ns, table, Map.of(), Map.of());
+    }
+    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog, c, t -> t.namespace().equals(ns), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+      // rows another client writes after the setup, their metadata NULL; on SQL Server from a
+      // session without QUOTED_IDENTIFIER, which a filtered index would refuse (todo 289)
+      if (e.engine() == Engine.SQLSERVER) {
+        e.execute(c, "SET QUOTED_IDENTIFIER OFF");
+      }
+      e.execute(
+          c,
+          "INSERT INTO inl2.imp (id, x) VALUES (2, 'b')",
+          "INSERT INTO inl2.imp (id, x) VALUES (3, 'c')");
+    }
+    // ScalarDB updates one and deletes the other, prepared: their before images are found
+    // through before_tx_version = 0, which ScalarDB writes over a NULL tx_version (todo 291)
+    try (TwoPhaseCommitTransactionManager tpc =
+        e.scalarDb().getTwoPhaseCommitTransactionManager()) {
+      TwoPhaseCommitTransaction held = tpc.begin();
+      try {
+        held.update(
+            Update.newBuilder()
+                .namespace(ns)
+                .table(table)
+                .partitionKey(ScalarDbNames.key("id", 2))
+                .textValue(ScalarDbNames.N("x"), "B")
+                .build());
+        held.delete(
+            Delete.newBuilder()
+                .namespace(ns)
+                .table(table)
+                .partitionKey(ScalarDbNames.key("id", 3))
+                .build());
+        held.prepare();
+        try (Connection d = e.openDriver()) {
+          assertThat(rows(d, "SELECT x FROM inl2.imp ORDER BY id")).containsExactly("a", "b", "c");
+        }
+      } finally {
+        held.rollback();
+      }
     }
   }
 }

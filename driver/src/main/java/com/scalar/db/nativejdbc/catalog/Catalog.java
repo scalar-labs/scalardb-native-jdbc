@@ -113,6 +113,27 @@ public final class Catalog implements AutoCloseable {
           "before_tx_prepared_at",
           "before_tx_committed_at");
 
+  /**
+   * Whether a table's columns are those of the inline layout: the transaction columns, and for each
+   * {@code before_c} the data column {@code c}, or {@code before_c} is itself a data column with a
+   * before image. A decoupled table's metadata table holds {@code before_c} without {@code c}, so
+   * it is never taken for one, even when the virtual tables cannot be read (todo 287).
+   */
+  private static boolean inline(Set<String> names) {
+    if (!names.containsAll(TRANSACTION_COLUMNS)) {
+      return false;
+    }
+    for (String n : names) {
+      if (n.startsWith("before_")
+          && !TRANSACTION_COLUMNS.contains(n)
+          && !names.contains(n.substring("before_".length()))
+          && !names.contains("before_" + n)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   /** What a schema name given to this class may look like: a plain SQL identifier. */
   private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
@@ -693,7 +714,7 @@ public final class Catalog implements AutoCloseable {
       for (MetadataColumn c : e.getValue()) {
         names.add(c.name);
       }
-      if (!sources.contains(e.getKey()) && names.containsAll(TRANSACTION_COLUMNS)) {
+      if (!sources.contains(e.getKey()) && inline(names)) {
         out.add(e.getKey());
       }
     }
@@ -1001,7 +1022,7 @@ public final class Catalog implements AutoCloseable {
           }
         }
       }
-      out.transactional = names.containsAll(TRANSACTION_COLUMNS);
+      out.transactional = inline(names);
       for (String name : names) {
         if (TRANSACTION_COLUMNS.contains(name)) {
           continue;

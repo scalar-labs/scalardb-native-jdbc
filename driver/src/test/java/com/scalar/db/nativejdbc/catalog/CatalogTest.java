@@ -76,6 +76,31 @@ class CatalogTest {
   }
 
   @Test
+  void withoutTheVirtualTables_aMetadataTableIsNoInlineTable() throws SQLException {
+    // Oracle reports virtual_tables it may not read as missing (todo 287)
+    Map<String, List<MetadataColumn>> metadata = new HashMap<>();
+    List<MetadataColumn> meta = columns("Id:PARTITION", "before_Amount");
+    List<MetadataColumn> inline = columns("id:PARTITION", "x", "before_x", "before_y");
+    // before_y is a data column of its own, with its before image
+    inline.addAll(columns("before_before_y"));
+    for (String t : TX) {
+      meta.add(new MetadataColumn(t, null, false, null));
+      inline.add(new MetadataColumn(t, null, false, null));
+    }
+    metadata.put("ns.Orders_tx_metadata", meta);
+    metadata.put("ns.inline", inline);
+    Snapshot s =
+        new Snapshot(
+            true, false, List.of(), metadata, SetupObjects.none(Engine.POSTGRESQL), Instant.EPOCH);
+    assertThat(s.inlineTables()).containsExactly("ns.inline");
+    assertThat(s.classify(new QualifiedName("ns", "Orders_tx_metadata")).layout())
+        .isEqualTo(Layout.PLAIN);
+    TableInfo t = s.classify(new QualifiedName("ns", "inline"));
+    assertThat(t.layout()).isEqualTo(Layout.INLINE);
+    assertThat(t.dataColumns()).containsExactly("id", "x", "before_y");
+  }
+
+  @Test
   void createdDecoupledTable_isTheVirtualName_withTheDataTablesColumns() throws SQLException {
     TableInfo t = snapshot().classify(new QualifiedName("ns", "Orders"));
     assertThat(t.layout()).isEqualTo(Layout.DECOUPLED_CREATED);
