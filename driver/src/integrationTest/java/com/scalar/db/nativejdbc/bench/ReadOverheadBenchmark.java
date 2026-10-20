@@ -144,7 +144,13 @@ class ReadOverheadBenchmark {
      * BASE's statement through the driver, on the same tables imported into ScalarDB with their
      * metadata copied: what the driver's own rewrite costs, parsing included.
      */
-    DRIVER
+    DRIVER,
+    /**
+     * BASE with the rows in flight held by an open native transaction instead: updated, every
+     * non-key column changed, and not committed, so that the plain query reads past them as on the
+     * database alone. What rows in flight cost without the driver; not with a proxy.
+     */
+    BASE_OPEN
   }
 
   enum Param {
@@ -157,11 +163,22 @@ class ReadOverheadBenchmark {
     SPAN300,
     /** The composite key of the customer's row: customer / 10 and customer % 10. */
     PART,
-    CLUSTER
+    CLUSTER,
+    /** A row of the hot table h: customer mod 20,000. */
+    HOT_ID,
+    /** A group of h, 100 rows: region mod 200. */
+    HOT_GRP
   }
 
   private static final Map<String, String> TABLE =
-      Map.of("C", "c", "O", "o", "R", "r", "X", "w", "K", "k");
+      Map.of("C", "c", "O", "o", "R", "r", "X", "w", "K", "k", "H", "h");
+
+  /**
+   * The ScalarDB tables. h is small and hot: 20,000 rows, with the rows in flight a share of it
+   * that grows with {@code -Dnativejdbc.bench.inflight} (0.5% at 100, 50% at 10,000), where the
+   * others' stay a small share.
+   */
+  private static final List<String> TABLES = List.of("c", "o", "r", "w", "k", "h");
 
   /** The 49 non-key columns of the wide table w: c01 (id mod 1000, indexed), then id + n. */
   private static final List<String> WIDE = wide();
@@ -185,7 +202,9 @@ class ReadOverheadBenchmark {
           "w",
           WIDE,
           "k",
-          List.of("grp", "val"));
+          List.of("grp", "val"),
+          "h",
+          List.of("qty", "grp"));
 
   /** The key columns of a table: k has a partition and a clustering key, the others id. */
   private static List<String> key(String t) {
@@ -598,7 +617,38 @@ class ReadOverheadBenchmark {
               null,
               null,
               List.of("a", "b"),
-              Param.REGION));
+              Param.REGION),
+          new Query(
+              "hot: key lookup",
+              "SELECT a.id, {a.qty} FROM {H:a} WHERE {W:a} AND a.id = ?",
+              null,
+              null,
+              List.of("a"),
+              Param.HOT_ID),
+          new Query(
+              "hot: indexed filter (100 rows)",
+              "SELECT a.id FROM {H:a} WHERE {W:a} AND {a.grp} = ?",
+              null,
+              null,
+              List.of("a"),
+              Param.HOT_GRP),
+          new Query(
+              "hot: key JOIN from a customer",
+              "SELECT a.id, {b.qty} FROM {C:a} JOIN {H:b} ON b.id = {a.region}"
+                  + " WHERE {W:a} AND {W:b} AND a.id = ?",
+              null,
+              null,
+              List.of("a", "b"),
+              Param.CUSTOMER),
+          new Query(
+                  "hot: COUNT(*) of 20k rows",
+                  "SELECT COUNT(*) FROM {H:a} WHERE {W:a}",
+                  "SELECT a.id AS id FROM {H:a} WHERE {W:a}",
+                  "SELECT COUNT(*) FROM ({ARMS}) v",
+                  List.of("a"))
+              .partial(
+                  "SELECT COUNT(*) AS n FROM {H:a} WHERE {W:a}",
+                  "SELECT SUM(v.n) FROM ({ARMS}) v"));
 
   static List<Engines> engines() {
     return Engines.selected();
@@ -619,6 +669,9 @@ class ReadOverheadBenchmark {
               "jdbc:scalardb-native:" + e.url().substring("jdbc:".length()),
               e.username(),
               e.password());
+      if (REGATHER) {
+        regather(e);
+      }
     }
     // -Dnativejdbc.bench.rttMs=1: measure through a proxy adding this round-trip time
     double rtt = Double.parseDouble(System.getProperty("nativejdbc.bench.rttMs", "0"));
@@ -679,9 +732,11 @@ class ReadOverheadBenchmark {
               sql = on(m, c).nativeSQL(sql); // what the driver sends
             }
             noParallel(c, engine, q, m, true);
+            Connection open = holdInFlight(e, m);
             plans.append("==== ").append(q.name).append(" / ").append(m).append('\n');
             plans.append(sql).append('\n');
             plans.append(explain(c, engine, sql, q.params)).append('\n');
+            release(open);
             noParallel(c, engine, q, m, false);
           }
         }
@@ -702,7 +757,7 @@ class ReadOverheadBenchmark {
         Map<Mode, String> sqls = new LinkedHashMap<>();
         for (Mode m : modes) {
           String sql = render(q, m, engine);
-          if (sql != null) {
+          if (sql != null && (m != Mode.BASE_OPEN || proxy == null)) {
             sqls.put(m, sql);
           }
         }
@@ -756,7 +811,9 @@ class ReadOverheadBenchmark {
                   ? ""
                   : BEFORE_INDEX.equals("plain") ? "-beforeplain" : "-before")
               + (SS_INDEX.equals("filtered") ? "" : "-ss" + SS_INDEX)
-              + (INFLIGHT != 100 ? "-inflight" + INFLIGHT : "");
+              + (INFLIGHT != 100 ? "-inflight" + INFLIGHT : "")
+              + (GATHER_INFLIGHT != INFLIGHT ? "-gather" + GATHER_INFLIGHT : "")
+              + (REGATHER ? "-regather" : "");
       Path out = Path.of("build", "bench", "read-overhead-" + e + suffix + ".md");
       Files.createDirectories(Path.of("build", "bench"));
       Files.writeString(out, report.toString(), StandardCharsets.UTF_8);
@@ -775,12 +832,15 @@ class ReadOverheadBenchmark {
     Map<Mode, Result> results = new LinkedHashMap<>();
     for (Map.Entry<Mode, String> m : sqls.entrySet()) {
       noParallel(c, e.engine(), q, m.getKey(), true);
+      Connection open = null;
       try {
+        open = holdInFlight(e, m.getKey());
         results.put(m.getKey(), measure(on(m.getKey(), c), m.getValue(), q.params));
       } catch (SQLException ex) {
         System.out.printf(
             "BENCH %s | %s | %s | error %s%n", e, q.name, m.getKey(), ex.getMessage());
       } finally {
+        release(open);
         noParallel(c, e.engine(), q, m.getKey(), false);
       }
     }
@@ -943,6 +1003,63 @@ class ReadOverheadBenchmark {
   }
 
   /**
+   * For BASE_OPEN: a connection whose open transaction has updated the rows in flight of each
+   * ScalarDB table, the ones of its metadata table in state 1, every non-key column changed; null
+   * for the other modes. Readers pass them without waiting on every engine but SQL Server without
+   * READ_COMMITTED_SNAPSHOT.
+   */
+  private static @Nullable Connection holdInFlight(Engines e, Mode m) throws SQLException {
+    if (m != Mode.BASE_OPEN) {
+      return null;
+    }
+    Connection open = e.open();
+    try {
+      open.setAutoCommit(false);
+      for (String t : TABLES) {
+        StringBuilder set = new StringBuilder();
+        for (String col : Objects.requireNonNull(NON_KEY.get(t))) {
+          set.append(set.length() == 0 ? "" : ", ")
+              .append(col)
+              .append(" = ")
+              .append(
+                  col.equals("name") || col.equals("label")
+                      ? "CONCAT(" + col + ", 'x')"
+                      : col + " + 1");
+        }
+        StringBuilder same = new StringBuilder();
+        for (String k : t.equals("k") ? List.of("pid", "cid") : List.of("id")) {
+          same.append(" AND m.").append(k).append(" = bn.").append(t).append('.').append(k);
+        }
+        e.execute(
+            open,
+            "UPDATE bn."
+                + t
+                + " SET "
+                + set
+                + " WHERE EXISTS (SELECT 1 FROM bn."
+                + t
+                + "m m WHERE m.tx_state = 1"
+                + same
+                + ")");
+      }
+      return open;
+    } catch (SQLException ex) {
+      release(open);
+      throw ex;
+    }
+  }
+
+  private static void release(@Nullable Connection open) throws SQLException {
+    if (open != null) {
+      try {
+        open.rollback();
+      } finally {
+        open.close();
+      }
+    }
+  }
+
+  /**
    * For DRIVER: imports the benchmark's ScalarDB tables into ScalarDB, decoupled, with ScalarDB
    * indexes on the indexed columns (which also index their before images), copies each table's
    * metadata rows, its rows in flight included, into ScalarDB's metadata table, and runs the
@@ -951,7 +1068,8 @@ class ReadOverheadBenchmark {
   private static void importForDriver(Engines e) throws Exception {
     Engine engine = e.engine();
     String ns = e.storedSchema("bn");
-    Map<String, String> indexed = Map.of("c", "region", "o", "customer_id", "w", "c01", "k", "grp");
+    Map<String, String> indexed =
+        Map.of("c", "region", "o", "customer_id", "w", "c01", "k", "grp", "h", "grp");
     if (engine == Engine.ORACLE) {
       // Oracle takes one index per column list: ScalarDB's replaces the benchmark's own
       try (Connection c = e.open()) {
@@ -960,10 +1078,11 @@ class ReadOverheadBenchmark {
             "DROP INDEX bn.c_region",
             "DROP INDEX bn.o_customer",
             "DROP INDEX bn.w_c01",
-            "DROP INDEX bn.k_grp");
+            "DROP INDEX bn.k_grp",
+            "DROP INDEX bn.h_grp");
       }
     }
-    List<String> tables = List.of("c", "o", "r", "w", "k");
+    List<String> tables = TABLES;
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
@@ -1028,12 +1147,103 @@ class ReadOverheadBenchmark {
                 + "m");
       }
       e.execute(c, stats.toArray(new String[0]));
+      if (GATHER_INFLIGHT != INFLIGHT) {
+        inFlight(e, c, catalog, ns, tables, GATHER_INFLIGHT);
+      }
+      long started = System.nanoTime();
       List<Setup.Result> results =
           Setup.run(catalog, c, i -> i.namespace().equals(ns), Duration.ofMinutes(30), List.of());
+      System.out.printf(
+          Locale.ROOT,
+          "BENCH %s | setup with %d rows in flight | %.0f ms%n",
+          e,
+          GATHER_INFLIGHT,
+          (System.nanoTime() - started) / 1e6);
+      if (GATHER_INFLIGHT != INFLIGHT) {
+        inFlight(e, c, catalog, ns, tables, -1);
+      }
       for (Setup.Result r : results) {
         if (!r.succeeded()) {
           throw new IllegalStateException("setup failed: " + r);
         }
+      }
+    }
+  }
+
+  /**
+   * Sets {@code tx_state} in ScalarDB's metadata tables alone: {@code count} rows in flight per
+   * table by the rule of {@link #load}, or with {@code -1} the rows copied in flight (their {@code
+   * tx_id} is {@code w}) and no others. Only the statistics see the state between the two: the rows
+   * put in flight here have no before image.
+   */
+  private static void inFlight(
+      Engines e, Connection c, Catalog catalog, String ns, List<String> tables, int count)
+      throws SQLException {
+    Engine engine = e.engine();
+    for (String t : tables) {
+      TableInfo info = catalog.lookup(List.of(), ns, e.storedTable(t));
+      String id = engine.quote(e.storedColumn("id"));
+      String key =
+          t.equals("k")
+              ? "(10 * "
+                  + engine.quote(e.storedColumn("pid"))
+                  + " + "
+                  + engine.quote(e.storedColumn("cid"))
+                  + ")"
+              : id;
+      int per =
+          Math.max(
+              2,
+              (t.equals("o") ? 500_000 : t.equals("r") ? 1000 : t.equals("h") ? 20_000 : 100_000)
+                  / Math.max(1, count));
+      int at = (t.equals("o") ? 3 : 7) % per;
+      String inFlight =
+          count < 0
+              ? engine.quote("tx_id") + " = 'w'"
+              : count == 0
+                  ? "1 = 0"
+                  : key + " - " + per + " * FLOOR(" + key + " / " + per + ") = " + at;
+      e.execute(
+          c,
+          "UPDATE "
+              + engine.quote(info.namespace())
+              + "."
+              + engine.quote(Objects.requireNonNull(info.metadataTable()))
+              + " SET "
+              + engine.quote("tx_state")
+              + " = CASE WHEN "
+              + inFlight
+              + " THEN 1 ELSE 3 END");
+    }
+  }
+
+  /**
+   * Oracle's nightly statistics job, as it runs after the application: each query once through the
+   * driver, so that Oracle records the use of {@code tx_state}, then each ScalarDB metadata table's
+   * statistics gathered with the defaults (MySQL's ANALYZE leaves histograms as they are).
+   */
+  private static void regather(Engines e) throws Exception {
+    Engine engine = e.engine();
+    Connection d = Objects.requireNonNull(driver, "driver connection");
+    for (Query q : QUERIES) {
+      String sql = render(q, Mode.DRIVER, engine);
+      if (sql == null) {
+        continue;
+      }
+      try (PreparedStatement ps = d.prepareStatement(sql)) {
+        run(d, sql, ps, placeholders(ps), q.params, 4242, 7);
+      }
+    }
+    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    String ns = e.storedSchema("bn");
+    try (Connection c = e.open()) {
+      if (engine == Engine.ORACLE) {
+        e.execute(c, "BEGIN DBMS_STATS.FLUSH_DATABASE_MONITORING_INFO; END;");
+      }
+      for (String t : TABLES) {
+        TableInfo info = catalog.lookup(List.of(), ns, e.storedTable(t));
+        e.execute(
+            c, statistics(engine, info.namespace(), Objects.requireNonNull(info.metadataTable())));
       }
     }
   }
@@ -1127,12 +1337,12 @@ class ReadOverheadBenchmark {
 
   // ---- rendering
 
-  private static final Pattern FROM = Pattern.compile("\\{([CORXK]):(\\w+)(?:/([AB]))?\\}");
+  private static final Pattern FROM = Pattern.compile("\\{([CORXKH]):(\\w+)(?:/([AB]))?\\}");
   private static final Pattern WHERE = Pattern.compile("\\{W:(\\w+)(?:/([AB]))?\\}");
   private static final Pattern COLUMN = Pattern.compile("\\{(\\w+)\\.(\\w+)(?:/([AB]))?\\}");
 
   static @Nullable String render(Query q, Mode m, Engine engine) {
-    String sql = renderRaw(q, m == Mode.DRIVER ? Mode.BASE : m, engine);
+    String sql = renderRaw(q, m == Mode.DRIVER || m == Mode.BASE_OPEN ? Mode.BASE : m, engine);
     if (sql == null) {
       return null;
     }
@@ -1636,6 +1846,14 @@ class ReadOverheadBenchmark {
   // -Dnativejdbc.bench.inflight=10000: rows in flight per table, 100 by default
   private static final int INFLIGHT = Integer.getInteger("nativejdbc.bench.inflight", 100);
 
+  // -Dnativejdbc.bench.gatherInflight=0: rows in flight per table in ScalarDB's metadata tables
+  // while the driver's setup gathers their statistics (DRIVER only), INFLIGHT by default
+  private static final int GATHER_INFLIGHT =
+      Integer.getInteger("nativejdbc.bench.gatherInflight", INFLIGHT);
+
+  // -Dnativejdbc.bench.regather=true: Oracle's nightly statistics job before measuring (regather)
+  private static final boolean REGATHER = Boolean.getBoolean("nativejdbc.bench.regather");
+
   private static int customer(Random random) {
     return HOT ? 7 + 1000 * random.nextInt(100) : random.nextInt(100_000);
   }
@@ -1661,6 +1879,10 @@ class ReadOverheadBenchmark {
         return customer / 10;
       case CLUSTER:
         return customer % 10;
+      case HOT_ID:
+        return customer % 20_000;
+      case HOT_GRP:
+        return region % 200;
       default:
         return Integer.parseInt(p.name().substring(4));
     }
@@ -1835,6 +2057,7 @@ class ReadOverheadBenchmark {
         "CREATE TABLE bn.o (id " + in + " PRIMARY KEY, customer_id " + in + ", total " + in + ")");
     ddl.add("CREATE TABLE bn.r (id " + in + " PRIMARY KEY, label VARCHAR(20))");
     ddl.add("CREATE TABLE bn.p (id " + in + " PRIMARY KEY, cid " + in + ", region " + in + ")");
+    ddl.add("CREATE TABLE bn.h (id " + in + " PRIMARY KEY, qty " + in + ", grp " + in + ")");
     StringBuilder wide = new StringBuilder("CREATE TABLE bn.w (id " + in + " PRIMARY KEY");
     for (String col : WIDE) {
       wide.append(", ").append(col).append(' ').append(in);
@@ -1850,7 +2073,7 @@ class ReadOverheadBenchmark {
             + ", val "
             + in
             + ", PRIMARY KEY (pid, cid))");
-    for (String t : List.of("c", "o", "r", "w", "k")) {
+    for (String t : TABLES) {
       StringBuilder cols = new StringBuilder();
       for (String col : NON_KEY.get(t)) {
         cols.append(", before_")
@@ -1903,7 +2126,8 @@ class ReadOverheadBenchmark {
     ddl.add(
         "UPDATE bn.rm SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
             + " before_tx_version = 1, before_label = CONCAT('r', id)"
-            + " WHERE id - 100 * FLOOR(id / 100) = 7");
+            + " WHERE id - 100 * FLOOR(id / 100) = 7"
+            + (INFLIGHT == 0 ? " AND 1 = 0" : ""));
     ddl.add("INSERT INTO bn.p (id, cid, region) SELECT n, n * 7919, n * 37 FROM bn.d");
     ddl.add(
         "INSERT INTO bn.cm (id, tx_id, tx_state, tx_version) SELECT id, 'seed', 3, 1 FROM bn.c");
@@ -1940,10 +2164,21 @@ class ReadOverheadBenchmark {
     ddl.add(
         "INSERT INTO bn.km (pid, cid, tx_id, tx_state, tx_version) SELECT pid, cid, 'seed', 3, 1"
             + " FROM bn.k");
+    ddl.add(
+        "INSERT INTO bn.h (id, qty, grp) SELECT x.id, x.id, x.id - 200 * FLOOR(x.id / 200) FROM"
+            + " (SELECT "
+            + ids5
+            + " AS id FROM "
+            + digits5
+            + ") x WHERE x.id < 20000");
+    ddl.add(
+        "INSERT INTO bn.hm (id, tx_id, tx_state, tx_version) SELECT id, 'seed', 3, 1 FROM bn.h");
     // INFLIGHT rows in flight per table (at most half of c), their before image equal to the
     // current values; the rows in flight at 100 stay in flight at any larger count
-    int perC = Math.max(2, 100_000 / INFLIGHT);
-    int perO = Math.max(2, 500_000 / INFLIGHT);
+    // and at 0 none: the driver's rewrite alone
+    int perC = Math.max(2, 100_000 / Math.max(1, INFLIGHT));
+    int perO = Math.max(2, 500_000 / Math.max(1, INFLIGHT));
+    String none = INFLIGHT == 0 ? " AND 1 = 0" : "";
     ddl.add(
         "UPDATE bn.cm SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
             + " before_tx_version = 1, before_name = CONCAT('n', id), before_region = id - 1000 *"
@@ -1952,7 +2187,8 @@ class ReadOverheadBenchmark {
             + " * FLOOR(id / "
             + perC
             + ") = "
-            + 7 % perC);
+            + 7 % perC
+            + none);
     ddl.add(
         "UPDATE bn.om SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
             + " before_tx_version = 1, before_customer_id = id - 100000 * FLOOR(id / 100000),"
@@ -1961,7 +2197,8 @@ class ReadOverheadBenchmark {
             + " * FLOOR(id / "
             + perO
             + ") = "
-            + 3 % perO);
+            + 3 % perO
+            + none);
     // w and k: the rows of c's ids in flight, k's rows numbered 10 * pid + cid
     ddl.add(
         "UPDATE bn.wm SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
@@ -1972,7 +2209,8 @@ class ReadOverheadBenchmark {
             + " * FLOOR(id / "
             + perC
             + ") = "
-            + 7 % perC);
+            + 7 % perC
+            + none);
     String kid = "(10 * pid + cid)";
     ddl.add(
         "UPDATE bn.km SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
@@ -1991,13 +2229,26 @@ class ReadOverheadBenchmark {
             + " / "
             + perC
             + ") = "
-            + 7 % perC);
+            + 7 % perC
+            + none);
+    int perH = Math.max(2, 20_000 / Math.max(1, INFLIGHT));
+    ddl.add(
+        "UPDATE bn.hm SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
+            + " before_tx_version = 1, before_qty = id, before_grp = id - 200 * FLOOR(id / 200)"
+            + " WHERE id - "
+            + perH
+            + " * FLOOR(id / "
+            + perH
+            + ") = "
+            + 7 % perH
+            + none);
     String ix = engine == Engine.ORACLE ? "bn." : "";
     ddl.add("CREATE INDEX " + ix + "c_region ON bn.c (region)");
     ddl.add("CREATE INDEX " + ix + "o_customer ON bn.o (customer_id)");
     ddl.add("CREATE INDEX " + ix + "w_c01 ON bn.w (c01)");
     ddl.add("CREATE INDEX " + ix + "k_grp ON bn.k (grp)");
-    for (String t : List.of("c", "o", "r", "w", "k")) {
+    ddl.add("CREATE INDEX " + ix + "h_grp ON bn.h (grp)");
+    for (String t : TABLES) {
       String ss = SS_INDEX;
       boolean partial =
           engine == Engine.POSTGRESQL || (engine == Engine.SQLSERVER && !ss.equals("composite"));
@@ -2028,7 +2279,9 @@ class ReadOverheadBenchmark {
     if (!BEFORE_INDEX.isEmpty()) {
       // each secondary index of a data table mirrored on the before image: "plain" as ScalarDB
       // creates it, otherwise restricted to rows in flight
-      String[][] mirrored = {{"c", "region"}, {"o", "customer_id"}, {"w", "c01"}, {"k", "grp"}};
+      String[][] mirrored = {
+        {"c", "region"}, {"o", "customer_id"}, {"w", "c01"}, {"k", "grp"}, {"h", "grp"}
+      };
       for (String[] tc : mirrored) {
         boolean plain = BEFORE_INDEX.equals("plain");
         boolean filtered = engine == Engine.POSTGRESQL || engine == Engine.SQLSERVER;
@@ -2052,25 +2305,29 @@ class ReadOverheadBenchmark {
         break;
       case MYSQL:
         ddl.add(
-            "ANALYZE TABLE bn.c, bn.cm, bn.o, bn.om, bn.r, bn.rm, bn.p, bn.w, bn.wm, bn.k, bn.km");
+            "ANALYZE TABLE bn.c, bn.cm, bn.o, bn.om, bn.r, bn.rm, bn.p, bn.w, bn.wm, bn.k, bn.km,"
+                + " bn.h, bn.hm");
         // without a histogram MySQL takes tx_state IN (1, 2) for the whole table in a subquery
         ddl.add(
-            "ANALYZE TABLE bn.cm, bn.om, bn.rm, bn.wm, bn.km UPDATE HISTOGRAM ON tx_state WITH 16"
+            "ANALYZE TABLE bn.cm, bn.om, bn.rm, bn.wm, bn.km, bn.hm UPDATE HISTOGRAM ON tx_state"
+                + " WITH 16"
                 + " BUCKETS");
         break;
       case MARIADB:
         ddl.add(
-            "ANALYZE TABLE bn.c, bn.cm, bn.o, bn.om, bn.r, bn.rm, bn.p, bn.w, bn.wm, bn.k, bn.km");
+            "ANALYZE TABLE bn.c, bn.cm, bn.o, bn.om, bn.r, bn.rm, bn.p, bn.w, bn.wm, bn.k, bn.km,"
+                + " bn.h, bn.hm");
         break;
       case SQLSERVER:
-        for (String t : List.of("c", "cm", "o", "om", "r", "rm", "p", "w", "wm", "k", "km")) {
+        for (String t :
+            List.of("c", "cm", "o", "om", "r", "rm", "p", "w", "wm", "k", "km", "h", "hm")) {
           ddl.add(statistics(engine, "bn", t));
         }
         break;
       case ORACLE:
         ddl.add("BEGIN DBMS_STATS.GATHER_SCHEMA_STATS('BN'); END;");
         // without a histogram Oracle takes tx_state IN (1, 2) for half the table and scans it
-        for (String t : List.of("CM", "OM", "RM", "WM", "KM")) {
+        for (String t : List.of("CM", "OM", "RM", "WM", "KM", "HM")) {
           ddl.add(
               "BEGIN DBMS_STATS.GATHER_TABLE_STATS('BN', '"
                   + t
