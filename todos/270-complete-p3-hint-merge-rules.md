@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "270"
 tags: [code-review, sqlserver, serializable, isolation]
@@ -36,3 +36,4 @@ All fail closed.
 ## Work Log
 
 - 2026-10-19: found in the review of 5acbf90 (8c3), verified as stated above.
+- 2026-10-20: fixed. holdingEveryTable: HOLDLOCK not added where HOLDLOCK or SERIALIZABLE stands; REPEATABLEREAD replaced by HOLDLOCK, padded; NOLOCK, READUNCOMMITTED, READCOMMITTED(LOCK), READPAST, SNAPSHOT refused (0AN01); a list without WITH gets one (Msg 1018 measured otherwise); SELECT INTO targets skipped. The ScalarDB-table locking read drops REPEATABLEREAD when it adds HOLDLOCK. Unit tests and SnapshotIntegrationTest on SQL Server.

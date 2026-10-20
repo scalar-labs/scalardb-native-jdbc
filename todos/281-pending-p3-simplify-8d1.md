@@ -31,3 +31,4 @@ dependencies: []
 ## Work Log
 
 - 2026-10-19: found in the review of 2ce2755 (8d1), verified as stated above.
+- 2026-10-20: partly fixed. 2 (identity from columns()), 3 (otherKeys), 5 (OF rule), 6 (Engines.writes), 7 (Rows.oracle) done. Open: 1 (dialect pieces as Engine methods), 4 (optional).

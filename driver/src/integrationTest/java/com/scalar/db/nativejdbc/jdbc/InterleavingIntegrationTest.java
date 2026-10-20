@@ -10,7 +10,6 @@ import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.intType;
 import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionAdmin;
@@ -114,7 +113,6 @@ class InterleavingIntegrationTest {
   @MethodSource("engines")
   void interleavings(Engines e) throws Exception {
     ScalarDbNames.on(e);
-    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,

@@ -40,3 +40,4 @@ From the simplicity pass (no behaviour change except the fixture):
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-20: partly fixed. 1, 3-11 done. 2 kept: StatementShape.classify is public and its own unit test pins the refusal; the router's check covers the multi-table statements.

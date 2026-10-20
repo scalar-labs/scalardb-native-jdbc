@@ -29,3 +29,4 @@ dependencies: []
 ## Work Log
 
 - 2026-10-19: found in the review of 2ce2755 (8d1), verified as stated above.
+- 2026-10-20: partly fixed. 1: no change, each code is paired with its engine's SQLState, so MySQL's 1205 (HY000) is not accepted. 2: the Oracle catch requires ORA-08177. 3: Oracle FOR UPDATE OF in StatementShapeTest. Open from 3: qualifiedStar over joins, the IGNORE_ROW_ON_DUPKEY_INDEX skip path, keyViolated's Oracle branch.

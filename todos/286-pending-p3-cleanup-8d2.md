@@ -38,3 +38,4 @@ the Oracle refusal belongs in its own test method.
 ## Work Log
 
 - 2026-10-20: found in the review of d18b58c (8d2), verified as stated above.
+- 2026-10-20: partly fixed. Code 1-5, comments and docs done (Router.sessionLevel; vendor level set before the router's; ALTER only when autocommit changes). Tests: rollback-only after 08177, the level set in autocommit, the refusal in its own method done. Open: 08176 never produced; the Oracle passthrough re-set untested.

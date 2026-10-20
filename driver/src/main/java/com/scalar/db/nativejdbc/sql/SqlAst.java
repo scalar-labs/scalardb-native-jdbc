@@ -502,9 +502,12 @@ public final class SqlAst {
     Set<Object> values = valuesUnder(root);
     boolean setsSession = false;
     for (Object v : values) {
-      if (engine == Engine.SQLSERVER && v instanceof Function && isHintList((Function) v)) {
+      if (engine == Engine.SQLSERVER
+          && v instanceof TableFunction
+          && isHintList(((TableFunction) v).getFunction())) {
         // the hint pass blanks every hint list it finds; one the parser still reads as a call
-        // was lexed differently by the two, so which table it holds is unknown
+        // where a table stands was lexed differently by the two, so which table it holds is
+        // unknown; elsewhere a call names columns, as MAX(snapshot) (todo 258)
         return Outcome.refused("a table hint list that the driver cannot place");
       }
       if (v instanceof Function) {
@@ -671,11 +674,16 @@ public final class SqlAst {
     if (found == null) {
       return null;
     }
-    int between = TableHints.tokensBetween(source, foundEnd, c.start);
-    boolean as = TableHints.firstBetween(source, foundEnd, c.start).equals("AS");
-    return between == 0 || (found.hasAlias() && (between == 1 || (between == 2 && as)))
-        ? found
-        : null;
+    List<String> between = new ArrayList<>();
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      int[] s = span(t, t);
+      if (s != null && s[0] >= foundEnd && s[1] <= c.start) {
+        between.add(t.image);
+      }
+    }
+    int n = between.size();
+    boolean as = n > 0 && between.get(0).equalsIgnoreCase("AS");
+    return n == 0 || (found.hasAlias() && (n == 1 || (n == 2 && as))) ? found : null;
   }
 
   /**
@@ -1162,6 +1170,11 @@ public final class SqlAst {
         return null;
       }
     }
+    return inserted(text, inserts);
+  }
+
+  /** {@code text} with each piece inserted at its offset, from the end so the offsets hold. */
+  private static String inserted(String text, List<Map.Entry<Integer, String>> inserts) {
     inserts.sort(Map.Entry.<Integer, String>comparingByKey().reversed());
     StringBuilder out = new StringBuilder(text);
     for (Map.Entry<Integer, String> i : inserts) {
@@ -1216,11 +1229,19 @@ public final class SqlAst {
     if (callsUserFunction()) {
       return null; // its body's reads take no hint (todo 269)
     }
+    // SELECT ... INTO's new table, which takes no hint (Msg 319)
+    Set<Table> into = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (Select s : selects) {
+      if (s instanceof PlainSelect && ((PlainSelect) s).getIntoTables() != null) {
+        into.addAll(((PlainSelect) s).getIntoTables());
+      }
+    }
+    StringBuilder edited = new StringBuilder(text);
     List<Map.Entry<Integer, String>> inserts = new ArrayList<>();
     for (TableRef r : tableRefs) {
       String named = r.schema();
       String schema = named == null ? "" : unquoted(named).toLowerCase(Locale.ROOT);
-      if (schema.equals("information_schema") || schema.equals("sys")) {
+      if (schema.equals("information_schema") || schema.equals("sys") || into.contains(r.node)) {
         continue;
       }
       if (r.hasHintOrLink()) {
@@ -1228,7 +1249,28 @@ public final class SqlAst {
       }
       Integer listEnd = hintEnds.get(r);
       if (listEnd != null) {
-        inserts.add(Map.entry(listEnd - 1, ", HOLDLOCK"));
+        List<String> h = hints.getOrDefault(r, List.of());
+        if (!Collections.disjoint(h, NOT_HELD)) {
+          return null; // an isolation hint HOLDLOCK conflicts with (todo 270)
+        }
+        int open = openOf(text, listEnd - 1);
+        if (open < 0) {
+          return null;
+        }
+        // REPEATABLEREAD conflicts with HOLDLOCK, which holds what it does and more: replaced,
+        // padded so that every offset holds
+        Matcher m = REPEATABLEREAD.matcher(text).region(open, listEnd);
+        while (m.find()) {
+          edited.replace(m.start(), m.end(), "HOLDLOCK      ");
+        }
+        if (!h.contains("HOLDLOCK")
+            && !h.contains("SERIALIZABLE")
+            && !h.contains("REPEATABLEREAD")) {
+          inserts.add(Map.entry(listEnd - 1, ", HOLDLOCK"));
+        }
+        if (!WITH_BEFORE.matcher(text.substring(0, open)).find()) {
+          inserts.add(Map.entry(open, "WITH ")); // a list without WITH takes one hint only
+        }
         continue;
       }
       Token last = lastNameToken(r);
@@ -1246,12 +1288,34 @@ public final class SqlAst {
       }
       inserts.add(Map.entry(at[1], " WITH (HOLDLOCK)"));
     }
-    inserts.sort(Map.Entry.<Integer, String>comparingByKey().reversed());
-    StringBuilder out = new StringBuilder(text);
-    for (Map.Entry<Integer, String> i : inserts) {
-      out.insert(i.getKey(), i.getValue());
+    return inserted(edited.toString(), inserts);
+  }
+
+  /** The isolation hints that read without holding, which HOLDLOCK cannot be added to. */
+  private static final Set<String> NOT_HELD =
+      Set.of(
+          "NOLOCK",
+          "READUNCOMMITTED",
+          "READCOMMITTED",
+          "READCOMMITTEDLOCK",
+          "READPAST",
+          "SNAPSHOT");
+
+  private static final Pattern REPEATABLEREAD = Pattern.compile("(?i)\\bREPEATABLEREAD\\b");
+
+  private static final Pattern WITH_BEFORE = Pattern.compile("(?i)\\bWITH\\s*$");
+
+  /** Where the parenthesis that {@code close} closes opens in {@code text}; -1 when none. */
+  private static int openOf(String text, int close) {
+    int depth = 0;
+    for (int i = close; i >= 0; i--) {
+      char c = text.charAt(i);
+      depth += c == ')' ? 1 : c == '(' ? -1 : 0;
+      if (depth == 0) {
+        return i;
+      }
     }
-    return out.toString();
+    return -1;
   }
 
   /**
@@ -1541,7 +1605,7 @@ public final class SqlAst {
   }
 
   /** SQL Server's table hints that hold locks to the transaction's end. */
-  public static final Set<String> LOCKING_HINTS =
+  private static final Set<String> LOCKING_HINTS =
       Set.of("UPDLOCK", "XLOCK", "HOLDLOCK", "SERIALIZABLE", "REPEATABLEREAD", "TABLOCKX");
 
   /**
@@ -2854,6 +2918,15 @@ public final class SqlAst {
         return null; // PostgreSQL reads an unqualified table name as its whole row (todo 110)
       }
       out.add(name);
+    }
+    if (engine == Engine.ORACLE) {
+      // Oracle's FOR UPDATE OF names columns, which the copy must hold too (todo 278)
+      for (Table target : forUpdateTables) {
+        String q = target.getSchemaName();
+        if (q == null || lowerUnquoted(q).equals(self)) {
+          out.add(lowerUnquoted(target.getName()));
+        }
+      }
     }
     return out;
   }

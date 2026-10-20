@@ -28,7 +28,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
@@ -480,8 +479,9 @@ final class Router {
     if (!scalarDb.isEmpty() && ast.hintsOnOthers(scalarDb.keySet())) {
       // blanked out of the text the driver rewrites (4.7)
       throw Errors.unsupported(
-          "a SQL Server table hint other than NOLOCK or INDEX on a table ScalarDB does not manage"
-              + " is not supported in a statement that reads a ScalarDB table");
+          "a SQL Server table hint the parser cannot read (any but WITH (NOLOCK) or WITH (INDEX"
+              + " ...)) on a table ScalarDB does not manage is not supported in a statement that"
+              + " reads a ScalarDB table");
     }
     for (SqlAst.TableRef ref : scalarDb.keySet()) {
       if (!StatementShape.LOCK_HINTS.containsAll(ast.hints(ref))) {
@@ -744,11 +744,12 @@ final class Router {
     IdentityHashMap<SqlAst.TableRef, TableInfo> readDb = scalarDb;
     String inner = null;
     String relock = null;
+    if (ast.source().contains(LOCK_MARK)) {
+      // the driver's own mark, which the user's text must not bring
+      throw Errors.unsupported(
+          "the locking read cannot be rewritten onto the committed rows" + tables);
+    }
     if (engine == Engine.SQLSERVER) {
-      if (ast.source().contains(LOCK_MARK)) {
-        throw Errors.unsupported(
-            "the locking read cannot be rewritten onto the committed rows" + tables);
-      }
       if (ast.hints(ref).isEmpty() && !plain) {
         throw Errors.unsupported(
             "SQL Server locks with table hints, not FOR UPDATE or FOR SHARE: write WITH (UPDLOCK)"
@@ -760,14 +761,14 @@ final class Router {
       // with a range lock, which holds off a ScalarDB insert into the predicate's range
       List<String> hints = new ArrayList<>(ast.hints(ref));
       if (lockingSerializable() && !hints.contains("HOLDLOCK") && !hints.contains("SERIALIZABLE")) {
+        hints.remove("REPEATABLEREAD"); // which conflicts with HOLDLOCK, holding less (todo 270)
         hints.add("HOLDLOCK");
       }
       inner = "WITH (" + String.join(", ", hints) + ")";
       // a lock read through a covering index there locks that index's keys only, an update lock
       // too: the rows are locked again through the primary key as their versions are read
       relock =
-          (mode == ForMode.UPDATE ? "UPDLOCK" : "REPEATABLEREAD")
-              + ", ROWLOCK"
+          (mode == ForMode.UPDATE ? "UPDLOCK, ROWLOCK" : Writes.shareLock(engine))
               + (shape.noWait() || shape.skipLocked() ? ", NOWAIT" : "");
     } else if (engine == Engine.ORACLE) {
       // the clause stays at the end, as on PostgreSQL: Oracle takes it on the outer query only,
@@ -782,7 +783,7 @@ final class Router {
         throw Errors.unsupported(
             "only FOR UPDATE and FOR SHARE lock a ScalarDB table on this engine" + tables);
       }
-      String share = engine == Engine.MARIADB ? "LOCK IN SHARE MODE" : "FOR SHARE";
+      String share = Writes.shareLock(engine);
       String wait = (shape.noWait() ? " NOWAIT" : "") + (shape.skipLocked() ? " SKIP LOCKED" : "");
       inner = (update ? "FOR UPDATE" : share) + wait;
       // a shared lock read through a covering index locks the index entry only: the rows are
@@ -798,10 +799,7 @@ final class Router {
                   + (engine == Engine.MYSQL && !snapshot() ? " OF d" : "")
                   + (wait.isEmpty() ? "" : " NOWAIT");
       int clause = plain ? -1 : ast.afterLast("FOR") - "FOR".length();
-      SqlAst bare =
-          ast.source().contains(LOCK_MARK)
-              ? null
-              : plain ? ast : clause < 0 ? null : ast.without(clause, ast.end());
+      SqlAst bare = plain ? ast : clause < 0 ? null : ast.without(clause, ast.end());
       if (bare == null || bare.hasLockingOrIntoClause() || bare.tableRefs().size() != 1) {
         throw Errors.unsupported(
             "the locking read cannot be rewritten onto the committed rows" + tables);
@@ -1122,27 +1120,44 @@ final class Router {
 
   /** Per ScalarDB table of a read, the check for a row in flight anywhere in it (design 4.2). */
   private List<String> checks(IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+    return checks(scalarDb, false);
+  }
+
+  /**
+   * Each ScalarDB table's check once, in the order of their names, which locks follow; when {@code
+   * locked}, the in-flight index read under a shared lock, a gap or range lock that holds off every
+   * prepare of the table.
+   */
+  private List<String> checks(
+      IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb, boolean locked) {
     Set<String> out = new TreeSet<>();
     for (TableInfo t : scalarDb.values()) {
+      boolean hint = locked && engine == Engine.SQLSERVER;
       out.add(
           Writes.anyRow(
-              engine,
-              "SELECT 1 FROM "
-                  + SplitRead.meta(engine, t)
-                  + " WHERE "
-                  + engine.quote("tx_state")
-                  + " IN (1, 2)"));
+                  engine,
+                  "SELECT 1 FROM "
+                      + SplitRead.meta(engine, t)
+                      + (hint
+                          ? " WITH (HOLDLOCK, INDEX(" + engine.quote(t.inflightIndex(engine)) + "))"
+                          : "")
+                      + " WHERE "
+                      + engine.quote("tx_state")
+                      + " IN (1, 2)")
+              // a database's forced parameterization would make the literal a parameter, which
+              // the filtered index then does not match (Msg 8622); RECOMPILE keeps it (todo 271)
+              + (hint ? " OPTION (RECOMPILE)" : locked ? " LOCK IN SHARE MODE" : ""));
     }
     return List.copyOf(out);
   }
 
   /**
-   * A read at SERIALIZABLE on MySQL or MariaDB that is not one table row by row: each ScalarDB
-   * table's in-flight index read under a shared lock, whose gap lock holds off every ScalarDB
-   * prepare of the table until commit, then the statement on the data tables, which then hold the
-   * committed rows only, under {@code LOCK IN SHARE MODE} (design 4.2, the coarse path). A table
-   * the statement reaches in a subquery or a derived table would be read unlocked, from the
-   * snapshot: refused.
+   * A read at SERIALIZABLE on MySQL, MariaDB or SQL Server that is not one table row by row: each
+   * ScalarDB table's in-flight index read under a shared lock, whose gap or range lock holds off
+   * every ScalarDB prepare of the table until commit, then the statement on the data tables, which
+   * then hold the committed rows only, under {@code LOCK IN SHARE MODE}, or on SQL Server with
+   * {@code WITH (HOLDLOCK)} on every table (design 4.2, the coarse path). A table the statement
+   * reaches in a subquery or a derived table would be read unlocked, from the snapshot: refused.
    */
   private Route coarseRead(
       String sql, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb, String tables)
@@ -1200,36 +1215,7 @@ final class Router {
             0,
             List.of(),
             true);
-    List<String> checks = new ArrayList<>();
-    if (engine == Engine.SQLSERVER) {
-      // the in-flight index read under a range lock, which holds off every prepare of the table
-      for (TableInfo t : byName(scalarDb).values()) {
-        checks.add(
-            Writes.anyRow(
-                engine,
-                "SELECT 1 FROM "
-                    + SplitRead.meta(engine, t)
-                    + " WITH (HOLDLOCK, INDEX("
-                    + engine.quote(t.inflightIndex(engine))
-                    + ")) WHERE "
-                    + engine.quote("tx_state")
-                    + " IN (1, 2)"));
-      }
-    } else {
-      for (String check : checks(scalarDb)) {
-        checks.add(check + " LOCK IN SHARE MODE");
-      }
-    }
-    return r.checked(checks);
-  }
-
-  /** Each ScalarDB table of a read once, in the order of their names, which locks follow. */
-  private static Map<String, TableInfo> byName(IdentityHashMap<SqlAst.TableRef, TableInfo> refs) {
-    Map<String, TableInfo> out = new TreeMap<>();
-    for (TableInfo t : refs.values()) {
-      out.put(t.namespace() + "." + t.table(), t);
-    }
-    return out;
+    return r.checked(checks(scalarDb, true));
   }
 
   /**
@@ -1246,8 +1232,8 @@ final class Router {
   private static final String LOCKS_EVERY_SELECT =
       "at SERIALIZABLE on MySQL, MariaDB and SQL Server every read is under a lock, which a"
           + " statement with a # comment, a SELECT joining information_schema to other tables, a"
-          + " locking clause whose OF list leaves a table out, a table with SQL Server's NOLOCK"
-          + " or INDEX hint, or a call of a SQL Server function of your own, whose reads no lock"
+          + " locking clause whose OF list leaves a table out, a table with SQL Server's INDEX hint"
+          + " or an isolation hint that holds no lock (NOLOCK, READPAST, READCOMMITTED, SNAPSHOT), or a call of a SQL Server function of your own, whose reads no lock"
           + " hint reaches, cannot be given; use -- or /* */ comments, read information_schema on"
           + " its own, name every table in OF, and leave those hints and functions out";
 
@@ -1327,17 +1313,20 @@ final class Router {
   }
 
   /**
-   * The level an Oracle session runs at for the driver's: REPEATABLE READ is Oracle's SERIALIZABLE
-   * in a transaction, and READ COMMITTED in autocommit, where each statement is one: at
-   * SERIALIZABLE ojdbc commits after a write only, so a read in autocommit would open a transaction
-   * that later reads go on in, at its snapshot, and SET TRANSACTION fails in (ORA-01453); one
-   * statement's snapshot is READ COMMITTED's own.
+   * The level the vendor session runs at for the driver's {@code level}: {@link #vendorLevel}, but
+   * READ COMMITTED on Oracle in autocommit, where each statement is one: at SERIALIZABLE ojdbc
+   * commits after a write only, so a read in autocommit would open a transaction that later reads
+   * go on in, at its snapshot, and SET TRANSACTION fails in (ORA-01453); one statement's snapshot
+   * is READ COMMITTED's own.
    *
+   * @param level the driver's level
    * @param autocommit whether the connection is in autocommit
    * @return the JDBC level to set on the vendor connection
    */
-  int oracleSessionLevel(boolean autocommit) {
-    return autocommit ? Connection.TRANSACTION_READ_COMMITTED : vendorLevel(isolation());
+  int sessionLevel(int level, boolean autocommit) {
+    return engine == Engine.ORACLE && autocommit
+        ? Connection.TRANSACTION_READ_COMMITTED
+        : vendorLevel(level);
   }
 
   /** The engine this router routes for. */
@@ -1573,10 +1562,10 @@ final class Router {
   }
 
   /**
-   * The table's rows in flight, counted through the in-flight index up to {@link
-   * #PER_ROW_ABOVE_IN_RANGES} + 1, and when they were counted; read again once a count is older
-   * than {@link #COUNT_TTL_NANOS}. The count only chooses a plan, so one that is a second old costs
-   * time, never rows.
+   * The table's rows in flight on MySQL and MariaDB, counted through the in-flight index up to
+   * {@link #PER_ROW_ABOVE_IN_RANGES} + 1, and when they were counted; read again once a count is
+   * older than {@link #COUNT_TTL_NANOS}. The count only chooses a plan, so one that is a second old
+   * costs time, never rows.
    */
   @SuppressFBWarnings(
       value = "SQL_INJECTION_JDBC",
@@ -1600,14 +1589,12 @@ final class Router {
     try (Statement st = vendor.createStatement();
         ResultSet rs =
             st.executeQuery(
-                "SELECT COUNT(*) FROM (SELECT "
-                    + (engine == Engine.SQLSERVER ? "TOP " + (PER_ROW_ABOVE_IN_RANGES + 1) : "")
-                    + " 1 AS one FROM "
+                "SELECT COUNT(*) FROM (SELECT 1 AS one FROM "
                     + meta
                     + " WHERE "
                     + engine.quote("tx_state")
-                    + " IN (1, 2)"
-                    + (engine == Engine.SQLSERVER ? "" : " LIMIT " + (PER_ROW_ABOVE_IN_RANGES + 1))
+                    + " IN (1, 2) LIMIT "
+                    + (PER_ROW_ABOVE_IN_RANGES + 1)
                     + ") x")) {
       rs.next();
       count = rs.getLong(1);
@@ -1870,10 +1857,6 @@ final class Router {
       if (route.passthrough && SETS_LEVEL.matcher(text).find()) {
         // passthrough may set the level, or reset it, in SQL: follow the session (todos 184, 222)
         try {
-          int level =
-              engine == Engine.SQLSERVER
-                  ? sqlServerLevel(vendor)
-                  : driverLevel(vendor.getTransactionIsolation());
           if (engine == Engine.ORACLE) {
             // ojdbc reports the level it last set, and Oracle shows no session's own: the level
             // set in SQL is the connection's again, which the driver's reads are written for
@@ -1881,7 +1864,13 @@ final class Router {
               // passthrough runs in autocommit, whose level is READ COMMITTED
               s.execute("ALTER SESSION SET ISOLATION_LEVEL = READ COMMITTED");
             }
-          } else if (engine == Engine.SQLSERVER) {
+            return;
+          }
+          int level =
+              engine == Engine.SQLSERVER
+                  ? sqlServerLevel(vendor)
+                  : driverLevel(vendor.getTransactionIsolation());
+          if (engine == Engine.SQLSERVER) {
             // SNAPSHOT, what SERIALIZABLE runs at, is followed only where the statement names it;
             // SQL Server's own SERIALIZABLE is the driver's
             if (level != Connection.TRANSACTION_REPEATABLE_READ

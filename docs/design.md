@@ -426,7 +426,7 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   | SQLSTATE | Exception | Meaning | What the caller does |
   |---|---|---|---|
   | `40001` | `SQLTransactionRollbackException` | a driver-decided abort: a conflict with a ScalarDB or driver transaction (4.4, section 6) | roll back and retry the transaction |
-  | `0AN01` | `SQLFeatureNotSupportedException` | a statement or setting the driver does not handle, with the reason: a statement on a ScalarDB table it cannot rewrite, one the parser cannot interpret, a procedure call or a function that runs SQL text (4.1), the transaction mode set in SQL, a passthrough statement outside autocommit; `READ_UNCOMMITTED`, and `SERIALIZABLE` on Oracle once milestone 8 builds it (section 5) | rewrite the statement; never retry |
+  | `0AN01` | `SQLFeatureNotSupportedException` | a statement or setting the driver does not handle, with the reason: a statement on a ScalarDB table it cannot rewrite, one the parser cannot interpret, a procedure call or a function that runs SQL text (4.1), the transaction mode set in SQL, a passthrough statement outside autocommit; `READ_UNCOMMITTED`, `SERIALIZABLE` on Oracle (section 5), and `ALTER SESSION SET ISOLATION_LEVEL` there | rewrite the statement; never retry |
   | `55000` | `SQLNonTransientException` | a statement names a ScalarDB table the setup of section 3 has not been run for; not `08004`, since it is raised per statement and an `08` state makes a pool discard a working connection | run the setup |
   | `42000` | `SQLSyntaxErrorException` | a name a statement must not use: `T_data`, `T_tx_metadata`, `T_scalardb`, a synonym; the message names the table to use | rewrite the statement |
   | `42501` | `SQLSyntaxErrorException` | ScalarDB's catalog exists but this user cannot read it | grant SELECT on the catalog tables |
@@ -1053,8 +1053,9 @@ union as a derived table.
   MySQL, MariaDB and SQL Server the coarse check is instead a **locking read** of the in-flight index,
   `LOCK IN SHARE MODE` or `WITH (HOLDLOCK)`, whose gap or range lock blocks every later prepare on the
   table until commit, stalling every ScalarDB writer of the table as a table lock would. (As built on
-  MySQL and MariaDB, section 5, every SELECT of the statement is locked, so none reads the snapshot and
-  the first-statement rule and `rc_T` below are not needed there.) It must be the
+  MySQL, MariaDB and SQL Server, section 5, every SELECT of the statement is locked on the data
+  tables, so none reads the snapshot and the first-statement rule and `rc_T` below are not needed
+  there; SQL Server also holds every table a write or a read reaches, `WITH (HOLDLOCK)`.) It must be the
   transaction's **first statement**: a locking read does not establish the
   snapshot on these engines, so when it comes first the snapshot is taken afterwards, under the lock, and
   nothing can go in flight before commit; when a statement ran earlier, a ScalarDB transaction that
@@ -1427,7 +1428,10 @@ dropping those refusals, with the rules below in place.
   the separate base-table `FOR UPDATE` statement of 4.2, the column requalified to `T`. Until then
   `NOWAIT`, `WAIT` and `SKIP LOCKED` are refused on a ScalarDB table, and `FOR UPDATE OF` is accepted
   only when it names the table by its alias or name, PostgreSQL's form; Oracle's `OF col`, which names a
-  column, is refused. SQL Server
+  column, is refused. As built (milestone 8d1): on Oracle the clause stays in place, at the end of the
+  statement on the data table as on PostgreSQL; `NOWAIT`, `SKIP LOCKED` and `OF col` (bare or
+  qualified by the table's alias) are accepted, `WAIT n` and `OF` naming another table's column are
+  refused. SQL Server
   `WITH (UPDLOCK ...)` does not parse, so the driver strips SQL Server table hints from the statement
   text before parsing, in a token pass, and re-applies an `UPDLOCK` or `HOLDLOCK` intent as the separate
   locking re-read of 4.2; this is what `@Lock(PESSIMISTIC_WRITE)` needs on SQL Server (4.6).
@@ -1670,8 +1674,8 @@ lock wait where it waits on the driver.
 - **Between driver transactions** the strength at the SERIALIZABLE level is: true serializability on
   PostgreSQL through SSI; on MySQL, MariaDB and SQL Server strict two-phase locking by the driver's own
   locking re-reads, row locks plus range locks on every predicate read, and on the coarse path the
-  user's statement run as a locking read, on the data tables on MySQL and MariaDB, through `rc_T` on SQL
-  Server (4.2), since the engine's SERIALIZABLE level is not used there. Oracle refuses the level.
+  user's statement run as a locking read on the data tables (4.2), every table it reaches held on SQL
+  Server, since the engine's SERIALIZABLE level is not used there. Oracle refuses the level.
 - **Against ScalarDB transactions** on the engines with read locks, the argument of this section needs
   only that a prepare blocks behind the driver's read lock until commit. On MySQL,
   MariaDB and SQL Server the lock must reach the row or the `T_meta` row, not only a covering index
@@ -1692,7 +1696,9 @@ lock wait where it waits on the driver.
   reads for the same reason.
 - `Connection.setTransactionIsolation` keeps the JDBC constants: the driver translates
   `TRANSACTION_REPEATABLE_READ` to SNAPSHOT on SQL Server and to Oracle's SERIALIZABLE on
-  Oracle, so an application uses one constant across engines.
+  Oracle, in a transaction (READ COMMITTED in autocommit, where a statement's snapshot is its own),
+  so an application uses one constant across engines. ORA-08177 and ORA-08176 leave the transaction
+  rollback-only.
 
 ---
 
@@ -1760,7 +1766,7 @@ between `T` and plain tables are the database's own.
 | Level | Between driver transactions | Against ScalarDB transactions |
 |---|---|---|
 | READ COMMITTED | the database's READ COMMITTED | each statement sees committed values only, no snapshot across statements; a write to a key this transaction read is first-updater-wins through the anchor, so a lost update becomes a `40001` abort, against driver and ScalarDB writers alike; reads that take no anchor (subqueries, grouped and DISTINCT reads, the `rc_T` shapes of 4.2) protect nothing, and a locking clause is refused on them; lock the keys first with an attributable `SELECT ... FOR UPDATE` |
-| SNAPSHOT | the database's REPEATABLE READ / SNAPSHOT | consistent snapshot, ScalarDB transactions visible atomically, first-committer-wins; write skew possible, as snapshot isolation allows |
+| SNAPSHOT | the database's REPEATABLE READ / SNAPSHOT; Oracle's SERIALIZABLE | consistent snapshot, ScalarDB transactions visible atomically, first-committer-wins; write skew possible, as snapshot isolation allows |
 | SERIALIZABLE | PostgreSQL's SERIALIZABLE; on MySQL, MariaDB and SQL Server the driver's own locking reads (4.2, section 5); refused on Oracle (section 5) | serializable **if** the ScalarDB transaction runs at SERIALIZABLE, and on PostgreSQL ScalarDB's storage connections too, under the assumptions of section 5 (an argument, not a proof; with two-phase commit, every prepare before any validation) |
 
 **Limits**

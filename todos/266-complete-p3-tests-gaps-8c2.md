@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "266"
 tags: [code-review, sqlserver, tests]
@@ -31,3 +31,4 @@ dependencies: []
 ## Work Log
 
 - 2026-10-19: found in the review of 51e1c51 (8c2), verified as stated above.
+- 2026-10-20: fixed. the UPDATE conflict asserts 3960 (SQL Server) and 8177 (Oracle), and rollback-only after it; the 3951 case is tested by preparing a statement (driver lookups) before switching to REPEATABLE READ.

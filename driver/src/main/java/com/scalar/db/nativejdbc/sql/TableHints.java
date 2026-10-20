@@ -1,6 +1,8 @@
 package com.scalar.db.nativejdbc.sql;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -77,6 +79,30 @@ final class TableHints {
           "HAVING", "WHEN", "THEN", "ELSE", "RETURN", "OVER", "USING", "WITH", "INTO", "TOP",
           "OUTPUT");
 
+  /** Words that start a list of tables, or a write's target. */
+  private static final Set<String> TABLE_CLAUSES =
+      Set.of("FROM", "JOIN", "UPDATE", "DELETE", "APPLY");
+
+  /** Words that start anything else. */
+  private static final Set<String> OTHER_CLAUSES =
+      Set.of(
+          "SELECT",
+          "WHERE",
+          "ON",
+          "SET",
+          "GROUP",
+          "ORDER",
+          "HAVING",
+          "VALUES",
+          "OUTPUT",
+          "USING",
+          "WHEN",
+          "INTO",
+          "OPTION",
+          "UNION",
+          "EXCEPT",
+          "INTERSECT");
+
   private TableHints() {}
 
   /** Whether {@code word} is one of SQL Server's table hints, in any case. */
@@ -109,22 +135,36 @@ final class TableHints {
     List<Token> tokens = tokens(text);
     StringBuilder out = new StringBuilder(text);
     List<Clause> clauses = new ArrayList<>();
+    // whether the tokens stand in a FROM clause or an UPDATE's or DELETE's target, per depth: a
+    // list without WITH follows a table there only (todo 258)
+    Deque<Boolean> tables = new ArrayDeque<>();
+    boolean table = false;
     for (int i = 0; i < tokens.size(); i++) {
       Token t = tokens.get(i);
+      if (TABLE_CLAUSES.contains(t.upper)) {
+        table = true;
+      } else if (OTHER_CLAUSES.contains(t.upper)) {
+        table = false;
+      }
       boolean with = t.upper.equals("WITH") && next(tokens, i + 1, "(");
       boolean legacy =
           !with
+              && table
               && t.kind == '('
               && i > 0
               && (tokens.get(i - 1).kind == 'w' || tokens.get(i - 1).kind == 'q')
-              && !NOT_A_TABLE.contains(tokens.get(i - 1).upper);
+              && !NOT_A_TABLE.contains(tokens.get(i - 1).upper)
+              && !afterDerivedTable(tokens, i - 1);
       int open = with ? i + 1 : legacy ? i : -1;
-      if (open < 0) {
-        continue;
-      }
       List<String> hints = new ArrayList<>();
-      int close = hintList(tokens, open, hints);
+      int close = open < 0 ? -1 : hintList(tokens, open, hints);
       if (close < 0) {
+        if (t.kind == '(') {
+          tables.push(table);
+          table = false;
+        } else if (t.kind == ')' && !tables.isEmpty()) {
+          table = tables.pop();
+        }
         continue;
       }
       if (with && PARSED.containsAll(hints)) {
@@ -144,29 +184,13 @@ final class TableHints {
     return new Result(out.toString(), clauses);
   }
 
-  /**
-   * The tokens of {@code text} in {@code [from, to)}, comments and whitespace aside.
-   *
-   * @return how many there are
-   */
-  static int tokensBetween(String text, int from, int to) {
-    int count = 0;
-    for (Token t : tokens(text)) {
-      if (t.start >= from && t.end <= to) {
-        count++;
-      }
+  /** Whether the name at {@code name} is a derived table's alias: {@code (...) [AS] name}. */
+  private static boolean afterDerivedTable(List<Token> tokens, int name) {
+    int before = name - 1;
+    if (before >= 0 && tokens.get(before).upper.equals("AS")) {
+      before--;
     }
-    return count;
-  }
-
-  /** The first token of {@code text} in {@code [from, to)}, upper case, or "" when none. */
-  static String firstBetween(String text, int from, int to) {
-    for (Token t : tokens(text)) {
-      if (t.start >= from && t.end <= to) {
-        return t.upper;
-      }
-    }
-    return "";
+    return before >= 0 && tokens.get(before).kind == ')';
   }
 
   private static boolean next(List<Token> tokens, int i, String image) {

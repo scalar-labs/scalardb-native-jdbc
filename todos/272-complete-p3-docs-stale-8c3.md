@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "272"
 tags: [code-review, sqlserver, serializable, docs]
@@ -28,3 +28,4 @@ dependencies: []
 ## Work Log
 
 - 2026-10-19: found in the review of 5acbf90 (8c3), verified as stated above.
+- 2026-10-20: fixed. design 4.2 as-built note and section 5, coarseRead javadoc, the two test comments updated; README rewrapped.

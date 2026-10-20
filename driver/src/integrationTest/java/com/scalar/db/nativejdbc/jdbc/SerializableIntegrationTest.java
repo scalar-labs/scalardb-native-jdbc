@@ -2,6 +2,7 @@ package com.scalar.db.nativejdbc.jdbc;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionAdmin;
@@ -45,11 +46,11 @@ import org.junit.jupiter.params.provider.MethodSource;
  * SERIALIZABLE (design section 5): on PostgreSQL, with the driver and ScalarDB's storage
  * connections at SERIALIZABLE, SSI breaks every cycle between a driver transaction and ScalarDB
  * transactions, including those row locks cannot: a phantom from a ScalarDB insert, write skew, and
- * a read-only ScalarDB transaction that sees a state no serial order gives. On MySQL and MariaDB
- * the driver's locking re-reads break them: a ScalarDB prepare waits on them, here until ScalarDB's
- * short lock wait fails it. Each scenario also runs with the driver at REPEATABLE READ, its
- * SNAPSHOT, or on PostgreSQL ScalarDB's storage at REPEATABLE READ, where the timings that need SSI
- * must end in the anomaly: that shows the scenario reaches it.
+ * a read-only ScalarDB transaction that sees a state no serial order gives. On MySQL, MariaDB and
+ * SQL Server the driver's locking re-reads break them: a ScalarDB prepare waits on them, here until
+ * ScalarDB's short lock wait fails it. Each scenario also runs with the driver at REPEATABLE READ,
+ * its SNAPSHOT, or on PostgreSQL ScalarDB's storage at REPEATABLE READ, where the timings that need
+ * SSI must end in the anomaly: that shows the scenario reaches it.
  */
 @SuppressFBWarnings(
     value = "SQL_INJECTION_JDBC",
@@ -185,28 +186,31 @@ class SerializableIntegrationTest {
 
   @ParameterizedTest
   @MethodSource("engines")
+  void oracle_refusesSerializable(Engines e) throws Exception {
+    assumeTrue(e.engine() == Engine.ORACLE, "Oracle only");
+    // refused, Oracle's SERIALIZABLE being snapshot isolation: REPEATABLE READ is that (design 5)
+    Properties none = new Properties();
+    none.setProperty("scalardbnative.allowNoCatalog", "true");
+    try (Connection c = e.openDriver(none)) {
+      assertThatThrownBy(() -> c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE))
+          .isInstanceOf(SQLFeatureNotSupportedException.class)
+          .hasMessageContaining("TRANSACTION_REPEATABLE_READ");
+      assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
+      DatabaseMetaData md = c.getMetaData();
+      assertThat(md.supportsTransactionIsolationLevel(Connection.TRANSACTION_SERIALIZABLE))
+          .isFalse();
+      assertThat(md.supportsTransactionIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ))
+          .isTrue();
+      c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
   void ssiBreaksTheCycles(Engines e) throws Exception {
     boolean pg = e.engine() == Engine.POSTGRESQL;
-    if (e.engine() == Engine.ORACLE) {
-      // refused there, its SERIALIZABLE being snapshot isolation: REPEATABLE READ is that (design
-      // 5)
-      Properties none = new Properties();
-      none.setProperty("scalardbnative.allowNoCatalog", "true");
-      try (Connection c = e.openDriver(none)) {
-        assertThatThrownBy(() -> c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE))
-            .isInstanceOf(SQLFeatureNotSupportedException.class)
-            .hasMessageContaining("TRANSACTION_REPEATABLE_READ");
-        assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
-        DatabaseMetaData md = c.getMetaData();
-        assertThat(md.supportsTransactionIsolationLevel(Connection.TRANSACTION_SERIALIZABLE))
-            .isFalse();
-        assertThat(md.supportsTransactionIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ))
-            .isTrue();
-        c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
-        assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
-      }
-      return;
-    }
+    assumeTrue(e.engine() != Engine.ORACLE, "refused there: oracle_refusesSerializable");
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace("sz", true);
@@ -525,7 +529,10 @@ class SerializableIntegrationTest {
       return true;
     }
     for (Throwable c = ex; c != null; c = c.getCause()) {
-      if (c instanceof SQLException && ((SQLException) c).getErrorCode() == 1222) {
+      // 1222 is another error elsewhere, MySQL's among them (todo 273)
+      if (c instanceof SQLException
+          && ((SQLException) c).getErrorCode() == 1222
+          && c.getClass().getName().startsWith("com.microsoft.sqlserver.")) {
         return true;
       }
     }

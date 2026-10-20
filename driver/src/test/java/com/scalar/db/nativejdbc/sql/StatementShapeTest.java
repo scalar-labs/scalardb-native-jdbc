@@ -66,6 +66,20 @@ class StatementShapeTest {
   }
 
   @Test
+  void oracleForUpdateOf_namesAColumnOfTheTable() {
+    // Oracle's OF names a column, bare or by the table's alias or name (todo 280)
+    for (String of : List.of("x", "a.x", "t.x")) {
+      String sql = "SELECT x FROM t" + (of.startsWith("t.") ? "" : " a") + " FOR UPDATE OF " + of;
+      assertThat(StatementShape.of(sql, Engine.ORACLE)).as(sql).isPresent();
+    }
+    assertThat(StatementShape.of("SELECT x FROM t a FOR UPDATE OF b.x", Engine.ORACLE)).isEmpty();
+    // PostgreSQL's names the table
+    assertThat(StatementShape.of("SELECT x FROM t a FOR UPDATE OF a", Engine.POSTGRESQL))
+        .isPresent();
+    assertThat(StatementShape.of("SELECT x FROM t a FOR UPDATE OF b", Engine.POSTGRESQL)).isEmpty();
+  }
+
+  @Test
   void select_byKey() {
     StatementShape s =
         shape(

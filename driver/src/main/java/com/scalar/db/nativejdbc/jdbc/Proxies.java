@@ -262,7 +262,7 @@ public final class Proxies {
                   "SERIALIZABLE is not supported on Oracle, whose SERIALIZABLE is snapshot"
                       + " isolation: set TRANSACTION_REPEATABLE_READ for that (design 5)");
             }
-            int vendorLevel = router.vendorLevel(level);
+            int vendorLevel = router.sessionLevel(level, vendor.getAutoCommit());
             if (vendorLevel == Router.SQLSERVER_SNAPSHOT) {
               session.requireSnapshotIsolation(vendor);
             }
@@ -272,11 +272,8 @@ public final class Proxies {
               // refuses to go on at SNAPSHOT in (error 3951)
               vendor.rollback();
             }
+            vendor.setTransactionIsolation(vendorLevel);
             router.setIsolation(level);
-            vendor.setTransactionIsolation(
-                router.engine() == Engine.ORACLE
-                    ? router.oracleSessionLevel(vendor.getAutoCommit())
-                    : vendorLevel);
             return null;
           }
         case "getTransactionIsolation":
@@ -284,7 +281,7 @@ public final class Proxies {
             // the vendor connection's own level, unless the driver runs SERIALIZABLE at another
             int driver = router.isolation();
             if (router.engine() == Engine.ORACLE) {
-              return driver; // REPEATABLE READ runs at Oracle's SERIALIZABLE
+              return driver; // the vendor's is Oracle's SERIALIZABLE, or READ COMMITTED
             }
             if (driver == Connection.TRANSACTION_NONE) {
               // SQL Server's lock-based REPEATABLE READ, set in SQL, at which the driver does not
@@ -369,8 +366,8 @@ public final class Proxies {
                 anchors.transactionEnded();
                 ranInTransaction = false;
               }
-              if (router.engine() == Engine.ORACLE) {
-                vendor.setTransactionIsolation(router.oracleSessionLevel(on));
+              if (router.engine() == Engine.ORACLE && wasInTransaction == on) {
+                vendor.setTransactionIsolation(router.sessionLevel(router.isolation(), on));
               }
             }
           }
@@ -829,6 +826,7 @@ public final class Proxies {
         inTransaction = !owner.vendor.getAutoCommit();
       }
       boolean marks = inTransaction;
+      boolean ranBefore = owner.ranInTransaction;
       long at = epoch;
       // in autocommit the checks and the read share one snapshot in a transaction of their own,
       // its rows fetched whole, since its end closes a cursor
@@ -839,7 +837,8 @@ public final class Proxies {
         if (owner.router.engine() == Engine.ORACLE) {
           // the session runs at READ COMMITTED in autocommit: the checks and the read need one
           // snapshot, Oracle's SERIALIZABLE (todo 283)
-          owner.vendor.setTransactionIsolation(owner.router.oracleSessionLevel(false));
+          owner.vendor.setTransactionIsolation(
+              owner.router.sessionLevel(owner.router.isolation(), false));
         }
       }
       Object result;
@@ -876,8 +875,15 @@ public final class Proxies {
             && e instanceof SQLException
             && Writes.endsTransaction(owner.vendor, (SQLException) e)) {
           // a deadlock ended the transaction, and the session goes on in a new one: the checks
-          // passed and the anchors read hold no more (todo 230)
-          owner.rollbackOnly = true;
+          // passed and the anchors read hold no more (todo 230); with nothing run before, as a
+          // compile error first in a transaction on SQL Server, the new one is just a new one
+          // (todo 257)
+          if (ranBefore) {
+            owner.rollbackOnly = true;
+          } else {
+            owner.anchors.transactionEnded();
+            owner.ranInTransaction = false;
+          }
         }
         throw e instanceof SQLException ? Writes.asRetryable((SQLException) e) : e;
       }
@@ -931,7 +937,8 @@ public final class Proxies {
         owner.router.transactionEnded();
         owner.vendor.setAutoCommit(true);
         if (owner.router.engine() == Engine.ORACLE) {
-          owner.vendor.setTransactionIsolation(owner.router.oracleSessionLevel(true));
+          owner.vendor.setTransactionIsolation(
+              owner.router.sessionLevel(owner.router.isolation(), true));
         }
         vendor().setFetchSize(fetchSize);
       }

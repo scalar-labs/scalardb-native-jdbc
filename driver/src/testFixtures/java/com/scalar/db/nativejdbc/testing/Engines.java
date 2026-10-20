@@ -172,11 +172,6 @@ public enum Engines {
     return engine;
   }
 
-  /** Whether the driver writes ScalarDB tables on this engine: every one since milestone 8d1. */
-  public boolean writes() {
-    return true;
-  }
-
   private Started started() throws SQLException {
     synchronized (STARTED) {
       Started s = STARTED.get(this);

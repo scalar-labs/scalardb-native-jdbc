@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "271"
 tags: [code-review, sqlserver, serializable, robustness]
@@ -30,3 +30,4 @@ SERIALIZABLE then fails (closed).
 ## Work Log
 
 - 2026-10-19: found in the review of 5acbf90 (8c3), verified as stated above.
+- 2026-10-20: fixed. OPTION (RECOMPILE) on the coarse check (measured: Msg 8622 without it under forced parameterization, none with it); SnapshotIntegrationTest runs a coarse read under PARAMETERIZATION FORCED; fails without the fix.

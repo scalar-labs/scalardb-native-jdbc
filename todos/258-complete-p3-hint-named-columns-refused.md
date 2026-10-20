@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "258"
 tags: [code-review, sqlserver, usability]
@@ -32,3 +32,4 @@ a misleading message. SQL Server accepts such columns.
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-20: fixed. the hint pass takes a list without WITH only where a table stands (FROM, JOIN, APPLY, an UPDATE or DELETE target), not after a derived table's alias; INSERT INTO t (cols) is a column list (measured). The safety net for a list the parser reads as a call is limited to table functions. TableHintsTest.columnsNamedAsHints_areNoHintList.

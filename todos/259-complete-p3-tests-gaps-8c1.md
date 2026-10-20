@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "259"
 tags: [code-review, sqlserver, tests]
@@ -32,3 +32,4 @@ dependencies: []
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-20: fixed. the connect check is tested with XACT_ABORT on as the server's user options (MoreWrites); the SET XACT_ABORT assert dropped. The READPAST release is tested by rolling the skipped row's ScalarDB transaction back while both reads are open; without the savepoint rollback the test hangs (mutation checked).

@@ -112,23 +112,25 @@ alone and `SET GLOBAL` are not, and the driver clears the former.
 `TRANSACTION_REPEATABLE_READ` runs at SQL Server's SNAPSHOT level, which the database must allow
 (`ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON`, else `55000`); its update conflict, error
 3960, comes as `40001`, even when it arrives with a row rather than at the execute, and `READPAST`
-is not available there. A level set in SQL through passthrough is read back from the session;
-SQL Server's own REPEATABLE READ, which locks and keeps no snapshot, refuses statements on
-ScalarDB tables with `0AN01`. SERIALIZABLE on SQL Server runs at SNAPSHOT and takes `HOLDLOCK`
-on every table each read reaches, as SQL Server's own SERIALIZABLE would; otherwise as the MySQL
-paragraph above says: a read of one ScalarDB table row by row locks its rows, any other locks the
-in-flight index of each ScalarDB table it reads, and a ScalarDB table in a derived table or a set
-operation is refused. A write to tables ScalarDB does not manage is held too, its target and
-every table it reads, since SNAPSHOT would read them unlocked. A table with a `NOLOCK` or `INDEX`
-hint, and a call of a function of your own, whose reads no hint reaches, are refused at that
-level; `sys` and `information_schema` are not locked. ScalarDB's own connections wait on these locks up to
-their lock timeout (none by default): give them a short one, `lockTimeout` in the URL. On Oracle `TRANSACTION_REPEATABLE_READ` runs at
-Oracle's SERIALIZABLE, which is snapshot isolation, in a transaction, and at READ COMMITTED in
-autocommit, where a statement's snapshot is its own; ORA-08177 and ORA-08176 come as `40001` and
-leave the transaction rollback-only. `TRANSACTION_SERIALIZABLE` is refused there with `0AN01`, and
+is not available there. A level set in SQL through passthrough is read back from the session; SQL
+Server's own REPEATABLE READ, which locks and keeps no snapshot, refuses statements on ScalarDB
+tables with `0AN01`. SERIALIZABLE on SQL Server runs at SNAPSHOT and takes `HOLDLOCK` on every table
+each read reaches, as SQL Server's own SERIALIZABLE would; otherwise as the MySQL paragraph above
+says: a read of one ScalarDB table row by row locks its rows, any other locks the in-flight index of
+each ScalarDB table it reads, and a ScalarDB table in a derived table or a set operation is refused.
+A write to tables ScalarDB does not manage is held too, its target and every table it reads, since
+SNAPSHOT would read them unlocked. A table with a `NOLOCK` or `INDEX` hint, and a call of a function
+of your own, whose reads no hint reaches, are refused at that level; `sys` and `information_schema`
+are not locked. ScalarDB's own connections wait on these locks up to their lock timeout (none by
+default): give them a short one, `lockTimeout` in the URL.
+
+On Oracle `TRANSACTION_REPEATABLE_READ` runs at Oracle's SERIALIZABLE, which is snapshot isolation,
+in a transaction, and at READ COMMITTED in autocommit, where a statement's snapshot is its own;
+ORA-08177 and ORA-08176 come as `40001` and leave the transaction rollback-only.
+`TRANSACTION_SERIALIZABLE` is refused there with `0AN01`, and
 `DatabaseMetaData.supportsTransactionIsolationLevel` reports it unsupported, REPEATABLE READ
-supported. A level set in SQL through passthrough on Oracle is not followed: the connection's is
-set again.
+supported. A level set in SQL through passthrough on Oracle is not followed: the connection's is set
+again.
 
 ## Preview scope
 

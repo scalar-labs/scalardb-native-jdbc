@@ -32,3 +32,4 @@ dependencies: []
 ## Work Log
 
 - 2026-10-19: found in the review of 5acbf90 (8c3), verified as stated above.
+- 2026-10-20: partly fixed. 1 (range under ROWLOCK), 2 (passthrough naming isolation, SNAPSHOT at SERIALIZABLE), 4 (1222 gated on SQL Server), 5 (a write outside a coarse read waits), 6 (comment already says it) done. Open: 3.

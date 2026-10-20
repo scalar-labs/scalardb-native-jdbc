@@ -502,8 +502,9 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
     (2026-10-19).** As planned, first-committer-wins native (error 3960, reported as `40001`), with
     these found on the engine: a shared-lock hint reads the rows committed now, so the locking read
     is compared with the snapshot as on MySQL, the metadata row relocked under the same hint; SQL
-    Server refuses `READPAST` at SNAPSHOT; `OFFSET 0` is no skip; the driver's in-flight checks and
-    counts were written with `LIMIT`, which SQL Server does not have. `SnapshotIntegrationTest` runs
+    Server refuses `READPAST` at SNAPSHOT; `OFFSET 0` is no skip; the driver's in-flight checks were
+    written with `LIMIT`, which SQL Server does not have (its in-flight counts run on MySQL and
+    MariaDB only). `SnapshotIntegrationTest` runs
     SNAPSHOT on SQL Server.
   - **8c3: SERIALIZABLE**, SNAPSHOT plus the locking re-read of 4.2 under `WITH (HOLDLOCK)`.
     **Done (2026-10-19).** As 8b2 with `HOLDLOCK` for `LOCK IN SHARE MODE`, after measuring that a
@@ -534,7 +535,8 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
     Oracle takes `FOR UPDATE` on the outer query only; `getResultSet` failing on a statement not
     executed (ORA-17144). The tests give ScalarDB upper-case names and BIGINT integers on Oracle
     (`ScalarDbNames`), since its SQL folds names and ScalarDB imports a `NUMBER` as BIGINT only;
-    the query timeout's test is skipped there, the containerised server taking no cancel.
+    the query timeout's test is skipped there, the containerised server taking no cancel. The
+    tests' `FOR SHARE` is written per test, not through the fixture; `WAIT n` is refused.
   - **8d2: SNAPSHOT**, Oracle's SERIALIZABLE; `TRANSACTION_SERIALIZABLE` refused with `0AN01` in
     `setTransactionIsolation`, naming `TRANSACTION_REPEATABLE_READ`, and reported unsupported by
     `DatabaseMetaData.supportsTransactionIsolationLevel`. First-committer-wins is native,

@@ -3,6 +3,7 @@ package com.scalar.db.nativejdbc.sql;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.nativejdbc.engine.Engine;
+import java.util.List;
 import net.sf.jsqlparser.JSQLParserException;
 import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
@@ -105,7 +106,18 @@ class TableHintsTest {
     assertThat(hold("SELECT x FROM p WITH (UPDLOCK) WHERE id = 1"))
         .isEqualTo("SELECT x FROM p WITH (UPDLOCK, HOLDLOCK) WHERE id = 1");
     assertThat(hold("SELECT x FROM p a (UPDLOCK, ROWLOCK)"))
-        .isEqualTo("SELECT x FROM p a (UPDLOCK, ROWLOCK, HOLDLOCK)");
+        .isEqualTo("SELECT x FROM p a WITH (UPDLOCK, ROWLOCK, HOLDLOCK)");
+    // merged with the hints there (todo 270): HOLDLOCK once, REPEATABLEREAD as HOLDLOCK, padded;
+    // a hint that holds nothing cannot be held; SELECT INTO's new table takes none
+    assertThat(hold("SELECT x FROM p WITH (HOLDLOCK)"))
+        .isEqualTo("SELECT x FROM p WITH (HOLDLOCK)");
+    assertThat(hold("SELECT x FROM p WITH (REPEATABLEREAD, ROWLOCK)"))
+        .isEqualTo("SELECT x FROM p WITH (HOLDLOCK      , ROWLOCK)");
+    for (String h : List.of("READUNCOMMITTED", "READCOMMITTED", "READCOMMITTEDLOCK", "READPAST")) {
+      assertThat(hold("SELECT x FROM p WITH (" + h + ")")).as(h).isNull();
+    }
+    assertThat(hold("SELECT v INTO #t FROM p WHERE id = 1"))
+        .isEqualTo("SELECT v INTO #t FROM p WITH (HOLDLOCK) WHERE id = 1");
     // a write's target and every table it reads (todo 268)
     assertThat(hold("UPDATE p SET v = 0 WHERE id = 1 AND (SELECT SUM(v) FROM p) >= 2"))
         .isEqualTo(
@@ -130,6 +142,31 @@ class TableHintsTest {
         .isEqualTo("SELECT ISNULL(v, 0), sys.fn_varbintohexstr(0x1) FROM p WITH (HOLDLOCK)");
     assertThat(hold("SELECT value FROM STRING_SPLIT('a,b', ',')"))
         .isEqualTo("SELECT value FROM STRING_SPLIT('a,b', ',')");
+  }
+
+  @Test
+  void columnsNamedAsHints_areNoHintList() {
+    // a list after a function, a CTE or a derived table names columns (todo 258)
+    for (String sql :
+        List.of(
+            "SELECT MAX(snapshot) FROM p",
+            "WITH x (snapshot) AS (SELECT 1) SELECT snapshot FROM x",
+            "SELECT nowait FROM (SELECT 1) AS d (nowait)",
+            "SELECT nowait FROM (SELECT 1) d (nowait)",
+            "INSERT INTO p (snapshot) SELECT x FROM ns.t")) {
+      SqlAst a = ast(sql);
+      assertThat(a.tableRefs()).as(sql).allMatch(r -> a.hints(r).isEmpty());
+    }
+    // after a table, its alias, in a join or after a comma, it is one
+    for (String sql :
+        List.of(
+            "SELECT x FROM p (NOLOCK)",
+            "SELECT x FROM q JOIN p a (NOLOCK) ON a.id = q.id",
+            "SELECT x FROM q, p AS a (NOLOCK)",
+            "SELECT x FROM q WHERE id IN (SELECT id FROM p (NOLOCK))")) {
+      SqlAst a = ast(sql);
+      assertThat(a.tableRefs()).as(sql).anyMatch(r -> a.hints(r).contains("NOLOCK"));
+    }
   }
 
   private static @Nullable String hold(String sql) {

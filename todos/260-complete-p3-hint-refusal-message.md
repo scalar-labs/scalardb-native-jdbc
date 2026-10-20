@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "260"
 tags: [code-review, sqlserver, docs]
@@ -28,3 +28,4 @@ cannot read" correctly.
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-20: fixed. message names the hints the parser cannot read.

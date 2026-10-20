@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "279"
 tags: [code-review, oracle, docs]
@@ -29,3 +29,4 @@ dependencies: []
 ## Work Log
 
 - 2026-10-19: found in the review of 2ce2755 (8d1), verified as stated above.
+- 2026-10-20: fixed. design 4.7 as-built Oracle note, plan 8d1 note, Writes comments; the tag renamed " generated".

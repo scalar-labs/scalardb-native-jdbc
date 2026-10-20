@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "257"
 tags: [code-review, sqlserver, correctness]
@@ -31,3 +31,4 @@ at 1; 245 really ends it (handled right).
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-20: fixed. when an error ends the transaction and nothing ran before it in the transaction, the driver starts afresh (anchors cleared) instead of marking it rollback-only (Proxies).

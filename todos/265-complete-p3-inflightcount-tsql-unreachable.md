@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "265"
 tags: [code-review, sqlserver, docs]
@@ -29,3 +29,4 @@ message say the counts are T-SQL now. Only `checks()` (l.1123) is live.
 ## Work Log
 
 - 2026-10-19: found in the review of 51e1c51 (8c2), verified as stated above.
+- 2026-10-20: fixed. T-SQL dropped from inflightCount, javadoc says MySQL and MariaDB; plan wording fixed.

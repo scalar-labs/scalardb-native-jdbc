@@ -50,8 +50,8 @@ public final class Rows {
               + "|INNER\\b|ON\\b)\\w+)?");
 
   /**
-   * A test's query in Oracle's dialect: LIMIT, with its OFFSET, as {@code OFFSET ... FETCH}, before
-   * a trailing locking clause, which Oracle takes after it.
+   * A test's query in Oracle's dialect: a trailing LIMIT, with its OFFSET, as {@code OFFSET ...
+   * FETCH} (Oracle takes no row limit with FOR UPDATE).
    *
    * @param sql a query with PostgreSQL's and MySQL's clauses
    * @return the query as Oracle takes it
@@ -71,7 +71,7 @@ public final class Rows {
   }
 
   private static final Pattern ORACLE_LIMIT =
-      Pattern.compile("(?i)\\s+LIMIT\\s+(\\d+)(?:\\s+OFFSET\\s+(\\d+))?(?=\\s+FOR\\s|\\s*;?$)");
+      Pattern.compile("(?i)\\s+LIMIT\\s+(\\d+)(?:\\s+OFFSET\\s+(\\d+))?(?=\\s*;?$)");
 
   /**
    * A test's query in T-SQL: its trailing locking clause as table hints on the first table it
@@ -108,14 +108,15 @@ public final class Rows {
     }
     if (!hints.isEmpty()) {
       Matcher t = TABLE.matcher(s);
-      if (t.find()) {
-        s =
-            s.substring(0, t.end())
-                + " WITH ("
-                + String.join(", ", hints)
-                + ")"
-                + s.substring(t.end());
+      if (!t.find()) {
+        throw new IllegalArgumentException("no table to hint in " + sql);
       }
+      s =
+          s.substring(0, t.end())
+              + " WITH ("
+              + String.join(", ", hints)
+              + ")"
+              + s.substring(t.end());
     }
     return s;
   }

@@ -30,3 +30,4 @@ dependencies: []
 ## Work Log
 
 - 2026-10-19: found in the review of 5acbf90 (8c3), verified as stated above.
+- 2026-10-20: partly fixed. 1 (byName folded into checks), 2 (Writes.shareLock), 3 (shared insert tail) done. Open: 4 (Router.ran branches), 5 (test duplication).

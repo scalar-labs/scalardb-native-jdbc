@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "256"
 tags: [code-review, sqlserver, correctness]
@@ -29,3 +29,4 @@ rows of `INSERT INTO ns.idt (x) VALUES (?)` with RETURN_GENERATED_KEYS in autoco
 ## Work Log
 
 - 2026-10-19: found in the review of cc3a681 (8c1), verified as stated above.
+- 2026-10-20: fixed. refused before the commit when the keys to read back exceed the engine's parameter limit (2,100 on SQL Server, 65,535 elsewhere), so autocommit writes nothing (Writes.returned). Chunked reading into rows held in memory left for when a batch needs more.

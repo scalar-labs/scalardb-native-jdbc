@@ -6,6 +6,7 @@ import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.SqlAst;
 import com.scalar.db.nativejdbc.sql.StatementShape;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -176,10 +177,8 @@ final class Writes {
           tables, "RETURNING on an UPDATE or DELETE of a ScalarDB table is not supported");
     }
     Names n = new Names(engine, t);
-    if ((engine == Engine.MYSQL || engine == Engine.ORACLE)
-        && vendor != null
-        && shape.kind() == StatementShape.Kind.INSERT) {
-      String why = engine == Engine.ORACLE ? oracleTrigger(vendor, n) : storesOtherKeys(vendor, n);
+    if (vendor != null && shape.kind() == StatementShape.Kind.INSERT) {
+      String why = otherKeys(vendor, n);
       if (why != null) {
         throw refused(tables, why);
       }
@@ -187,6 +186,18 @@ final class Writes {
     return shape.kind() == StatementShape.Kind.INSERT
         ? insertPlan(shape, t, n, all, tables, snapshot, vendor == null ? null : columns(vendor, n))
         : keyedPlan(shape, t, n, all, tables, snapshot, locks);
+  }
+
+  /** Why the engine may store other key values than an INSERT gives; null when it cannot. */
+  private static @Nullable String otherKeys(Connection vendor, Names n) throws SQLException {
+    switch (n.engine) {
+      case MYSQL:
+        return storesOtherKeys(vendor, n);
+      case ORACLE:
+        return oracleTrigger(vendor, n);
+      default:
+        return null;
+    }
   }
 
   /**
@@ -240,8 +251,8 @@ final class Writes {
   }
 
   /**
-   * The data table's columns in their own order with their types (todos 203, 208), an
-   * AUTO_INCREMENT one's followed by {@code " auto_increment"} (todo 218).
+   * The data table's columns in their own order with their types (todos 203, 208), a generated
+   * one's (AUTO_INCREMENT, IDENTITY) followed by {@code " generated"} (todo 218).
    */
   private static Map<String, String> columns(Connection vendor, Names n) throws SQLException {
     Map<String, String> out = new LinkedHashMap<>();
@@ -270,8 +281,7 @@ final class Writes {
         while (rs.next()) {
           out.put(
               rs.getString(1),
-              rs.getString(2).toLowerCase(Locale.ROOT)
-                  + (rs.getBoolean(3) ? " auto_increment" : ""));
+              rs.getString(2).toLowerCase(Locale.ROOT) + (rs.getBoolean(3) ? " generated" : ""));
         }
       }
     }
@@ -470,7 +480,8 @@ final class Writes {
                         + (returning == null ? " RETURNING " : ", ")
                         + n.readColumns("")
                         + source.substring(end)
-                    : source);
+                    : source,
+            -1);
     if (insert == null) {
       throw refused(tables, "the statement's text cannot be rewritten");
     }
@@ -504,8 +515,7 @@ final class Writes {
           }
           String k = engine.quote(t.keyColumns().get(i));
           String value = source.substring(span[0], span[1]);
-          String full =
-              type(engine, tableColumns, t.keyColumns().get(i)).replace(" auto_increment", "");
+          String full = type(engine, tableColumns, t.keyColumns().get(i)).replace(" generated", "");
           if (engine == Engine.ORACLE && !full.isEmpty()) {
             // as the column holds it: a VARCHAR2 bind does not equal a blank-padded CHAR key, and
             // a number bound for a text key would convert every key to a number (todo 277)
@@ -514,7 +524,8 @@ final class Writes {
           terms.add(k + " = " + value);
           termsData.add("d." + k + " = " + value);
           if (!returns
-              && type(engine, tableColumns, t.keyColumns().get(i)).endsWith(" auto_increment")) {
+              && (engine == Engine.MYSQL || engine == Engine.MARIADB)
+              && type(engine, tableColumns, t.keyColumns().get(i)).endsWith(" generated")) {
             // MySQL generates a key given as 0, and the read-back by 0 would find an older row
             // with key 0 (todo 218): read back no row, which refuses the write
             readBackOnly.append(" AND d.").append(k).append(" <> 0");
@@ -597,7 +608,8 @@ final class Writes {
         committed,
         repeats,
         returning,
-        Router.exposed(ref));
+        Router.exposed(ref),
+        type(engine, tableColumns, t.keyColumns().get(0)).endsWith(" generated"));
   }
 
   /**
@@ -606,7 +618,7 @@ final class Writes {
    */
   private static boolean isFloat(
       Engine engine, @Nullable Map<String, String> columns, String column) {
-    String type = type(engine, columns, column).replace(" auto_increment", "");
+    String type = type(engine, columns, column).replace(" generated", "");
     return type.equals("real")
         || type.equals("binary_float")
         || (type.equals("float") && (engine == Engine.MYSQL || engine == Engine.MARIADB));
@@ -665,18 +677,10 @@ final class Writes {
   /**
    * The user's text with the table named by its data table, which a created table's name, a view,
    * is not: the name as written stays as the alias, where {@code alias}, so that qualifiers keep
-   * working. {@code text} is the source with edits only after the name.
+   * working. {@code text} is the source with edits only after the name; {@code where}, where an
+   * UPDATE's WHERE starts in the source, or -1, is where SQL Server's FROM clause goes.
    *
    * @return the text, or {@code null} when the name cannot be placed in it
-   */
-  private static @Nullable String onDataTable(
-      Engine engine, SqlAst ast, TableInfo t, boolean alias, String text) {
-    return onDataTable(engine, ast, t, alias, text, -1);
-  }
-
-  /**
-   * As {@link #onDataTable(Engine, SqlAst, TableInfo, boolean, String)}; {@code from}, where an
-   * UPDATE's WHERE starts in the source, is where SQL Server's FROM clause goes.
    */
   private static @Nullable String onDataTable(
       Engine engine, SqlAst ast, TableInfo t, boolean alias, String text, int where) {
@@ -727,11 +731,12 @@ final class Writes {
   }
 
   /**
-   * Whether a vendor error ended the transaction: one of class 40, except a MySQL or MariaDB lock
-   * wait timeout, which undoes the statement only unless innodb_rollback_on_timeout is on, and
-   * which MariaDB's driver reports as a plain error (todos 204, 211); and MariaDB's 1020, a locking
-   * read of a row changed since the snapshot under innodb_snapshot_isolation, which ends it too
-   * (todo 248). On SQL Server, whatever the error, whether a transaction is left.
+   * Whether a vendor error ended the transaction, or left it fit only for a rollback, as Oracle's
+   * serialization failures do: one of class 40, except a MySQL or MariaDB lock wait timeout, which
+   * undoes the statement only unless innodb_rollback_on_timeout is on, and which MariaDB's driver
+   * reports as a plain error (todos 204, 211); and MariaDB's 1020, a locking read of a row changed
+   * since the snapshot under innodb_snapshot_isolation, which ends it too (todo 248). On SQL
+   * Server, whatever the error, whether a transaction is left.
    */
   static boolean endsTransaction(Connection vendor, SQLException e) {
     try {
@@ -769,16 +774,22 @@ final class Writes {
   /**
    * SQL Server's update conflict at SNAPSHOT, error 3960, which its driver reports under a plain
    * SQLState, and Oracle's serialization failures, under 72000, as the retryable conflicts they
-   * are: first-committer-wins (design 5).
+   * are: first-committer-wins (design 5). A batch's keeps its update counts (todo 285).
    */
   static SQLException asRetryable(SQLException e) {
-    if (e.getErrorCode() == 3960 && String.valueOf(e.getSQLState()).startsWith("S0")) {
-      return new SQLTransactionRollbackException(e.getMessage(), "40001", 3960, e);
+    if (!(e.getErrorCode() == 3960 && String.valueOf(e.getSQLState()).startsWith("S0"))
+        && !oracleSerialization(e)) {
+      return e;
     }
-    if (oracleSerialization(e)) {
-      return new SQLTransactionRollbackException(e.getMessage(), "40001", e.getErrorCode(), e);
+    if (e instanceof BatchUpdateException) {
+      return new BatchUpdateException(
+          e.getMessage(),
+          "40001",
+          e.getErrorCode(),
+          ((BatchUpdateException) e).getLargeUpdateCounts(),
+          e);
     }
-    return e;
+    return new SQLTransactionRollbackException(e.getMessage(), "40001", e.getErrorCode(), e);
   }
 
   /**
@@ -793,6 +804,21 @@ final class Writes {
   /** An Oracle constraint as its messages name it, {@code (OWNER.NAME)}. */
   private static final Pattern ORA_CONSTRAINT =
       Pattern.compile("\\(([A-Za-z0-9_$#]+)\\.([A-Za-z0-9_$#]+)\\)");
+
+  /**
+   * The engine's shared row lock: the clause after a query, or SQL Server's table hints (design
+   * 4.2).
+   */
+  static String shareLock(Engine engine) {
+    switch (engine) {
+      case MARIADB:
+        return "LOCK IN SHARE MODE";
+      case SQLSERVER:
+        return "REPEATABLEREAD, ROWLOCK";
+      default:
+        return "FOR SHARE";
+    }
+  }
 
   /** A query with a row when {@code select} has one, and with none when it has none. */
   static String anyRow(Engine engine, String select) {
@@ -1323,14 +1349,7 @@ final class Writes {
           keys.read(rs, 1, n.keyColumns.size());
         }
       }
-      Map<List<Object>, Anchors.Version> out =
-          versions(
-              run,
-              n,
-              keys,
-              n.engine == Engine.MARIADB
-                  ? "LOCK IN SHARE MODE"
-                  : n.engine == Engine.SQLSERVER ? "REPEATABLEREAD, ROWLOCK" : "FOR SHARE");
+      Map<List<Object>, Anchors.Version> out = versions(run, n, keys, shareLock(n.engine));
       if (out == null) {
         throw new Aborted(
             "a row the statement's predicate matches is being written by a ScalarDB transaction");
@@ -1428,7 +1447,8 @@ final class Writes {
                       + ", ?, 3, 1, ?, ? FROM "
                       + n.dataOf("d", keys.types, chunk.size())
                       + " WHERE "
-                      + n.keysOf(keys.types, chunk.size())))) {
+                      + n.keysOf(keys.types, chunk.size())
+                      + n.unstamped()))) {
         bindAll(ps, run.stamp(ps, 1), chunk);
         stamped += ps.executeUpdate();
       }
@@ -1443,11 +1463,11 @@ final class Writes {
    */
   private static final class InsertPlan extends Plan {
     final Step insert;
-    // on MySQL, which has no RETURNING, each row's key read back by its values; none for an
-    // AUTO_INCREMENT key the statement leaves out, which the vendor driver reports
+    // where there is no RETURNING, each row's key read back by its values; none for a generated
+    // key (AUTO_INCREMENT, IDENTITY) the statement leaves out, which the vendor driver reports
     final List<Step> readBack;
-    // whether that key is AUTO_INCREMENT, asked once
-    private volatile @Nullable Boolean autoIncrement;
+    // whether that key is generated
+    private final boolean generatedKey;
     final @Nullable Step inFlight;
     // at SNAPSHOT and SERIALIZABLE, the keys committed in the snapshot
     final @Nullable Step committed;
@@ -1464,8 +1484,10 @@ final class Writes {
         @Nullable Step committed,
         @Nullable Step repeats,
         @Nullable String returning,
-        String exposed) {
+        String exposed,
+        boolean generatedKey) {
       super(n);
+      this.generatedKey = generatedKey;
       this.insert = insert;
       this.readBack = List.copyOf(readBack);
       this.inFlight = inFlight;
@@ -1506,7 +1528,7 @@ final class Writes {
       Savepoint sp = run.v.setSavepoint();
       try {
         if (generated()) {
-          if (!autoIncrement(run)) {
+          if (!generatedKey) {
             throw Errors.unsupported(
                 "an INSERT of a ScalarDB table that leaves out its key needs an AUTO_INCREMENT"
                     + " or IDENTITY key on this engine");
@@ -1518,8 +1540,21 @@ final class Writes {
                   insert,
                   null,
                   false,
-                  n.engine == Engine.ORACLE ? n.keyColumns.toArray(new String[0]) : new String[0]);
-          long count = ps.executeLargeUpdate();
+                  // quoted, as ojdbc otherwise folds a lower-case name (todo 278)
+                  n.engine == Engine.ORACLE
+                      ? n.keyColumns.stream().map(n.engine::quote).toArray(String[]::new)
+                      : new String[0]);
+          long count;
+          try {
+            count = ps.executeLargeUpdate();
+          } catch (SQLException e) {
+            if (e.getErrorCode() == 63809) {
+              throw Errors.unsupported(
+                  "an INSERT of several rows that leaves out the IDENTITY key of a ScalarDB table"
+                      + " on Oracle, which returns no keys for it: insert the rows one by one");
+            }
+            throw e;
+          }
           try (ResultSet k = ps.getGeneratedKeys()) {
             while (k.next()) {
               keys.read(k, 1, width);
@@ -1625,31 +1660,10 @@ final class Writes {
       return (n.engine == Engine.MYSQL || n.engine == Engine.ORACLE) && readBack.isEmpty();
     }
 
-    private boolean autoIncrement(Run run) throws SQLException {
-      Boolean known = autoIncrement;
-      if (known == null) {
-        try (PreparedStatement ps =
-            run.v.prepareStatement(
-                n.engine == Engine.ORACLE
-                    ? "SELECT 1 FROM all_tab_identity_cols WHERE owner = ? AND table_name = ? AND"
-                        + " column_name = ?"
-                    : "SELECT 1 FROM information_schema.columns WHERE table_schema = ? AND"
-                        + " table_name = ? AND column_name = ? AND extra LIKE '%auto_increment%'")) {
-          ps.setString(1, n.namespace);
-          ps.setString(2, n.dataTable);
-          ps.setString(3, n.keyColumns.get(0));
-          try (ResultSet rs = ps.executeQuery()) {
-            known = rs.next();
-          }
-        }
-        autoIncrement = known;
-      }
-      return known;
-    }
-
     /**
      * Whether the duplicate is of the data table's primary key: the constraint pgjdbc reports, read
-     * without depending on pgjdbc, or the key MySQL's message names; true when it cannot be told.
+     * without depending on pgjdbc, the key MySQL's message names, SQL Server's error code and
+     * message, or Oracle's constraint looked up by name; true when it cannot be told.
      */
     private boolean keyViolated(Run run, SQLException e) throws SQLException {
       if (n.engine == Engine.SQLSERVER) {
@@ -1744,28 +1758,31 @@ final class Writes {
       for (int from = 0; from < keys.rows.size(); from += size) {
         List<Object[]> chunk = keys.rows.subList(from, Math.min(keys.rows.size(), from + size));
         // on MySQL and MariaDB the keys drive the update, as dataOf (todo 220), and are bound first
-        boolean pg = !n.lookups();
+        boolean keysFirst = n.lookups();
         try (PreparedStatement ps =
             run.prepare(
                 n.stamp(
-                        pg
-                            ? n.meta
-                            : n.keyValues(keys.types, chunk.size())
+                        keysFirst
+                            ? n.keyValues(keys.types, chunk.size())
                                 + " STRAIGHT_JOIN "
                                 + n.meta
                                 + " ON "
-                                + n.keyJoinValues(n.meta),
+                                + n.keyJoinValues(n.meta)
+                            : n.meta,
                         "COALESCE(" + n.txVersion + ", 0) + 1")
                     + "EXISTS (SELECT 1 FROM "
                     + n.data
                     + " d WHERE "
                     + n.keyJoin(n.meta, "d")
-                    + (pg ? " AND " + n.keyIn("d", keys.types, chunk.size()) : "")
+                    + (keysFirst ? "" : " AND " + n.keyIn("d", keys.types, chunk.size()))
                     + ") AND "
                     + n.distinctFrom(n.txId)
                     + " AND "
                     + n.committed())) {
-          int i = pg ? bindAll(ps, run.stamp(ps, 1), chunk) : run.stamp(ps, bindAll(ps, 1, chunk));
+          int i =
+              keysFirst
+                  ? run.stamp(ps, bindAll(ps, 1, chunk))
+                  : bindAll(ps, run.stamp(ps, 1), chunk);
           ps.setString(i, run.txId);
           taken += ps.executeUpdate();
         }
@@ -1819,10 +1836,21 @@ final class Writes {
    * @return the rows, its statement closed with it
    * @throws SQLException a database error
    */
-  // ponytail: one placeholder per key column and row; a batch of more than 65,535 rows fails
+  // ponytail: one placeholder per key column and row, refused past the engine's limit; read in
+  // chunks into rows held in memory if a batch needs more
   static ResultSet returned(Connection vendor, Plan plan, String items, Keys keys)
       throws SQLException {
     Names n = plan.n;
+    int limit = n.engine == Engine.SQLSERVER ? 2100 : 65535;
+    if (keys.rows.size() * n.keyColumns.size() > limit) {
+      // refused before the commit, so that autocommit writes nothing (todo 256)
+      throw Errors.unsupported(
+          "generated keys for "
+              + keys.rows.size()
+              + " rows of one statement or batch; at most "
+              + limit / n.keyColumns.size()
+              + " on this database");
+    }
     String q = ((InsertPlan) plan).exposed;
     String sql =
         keys.rows.isEmpty()
@@ -1939,9 +1967,8 @@ final class Writes {
                 new Anchors.Version(rs.getString(from + width), rs.getObject(from + width + 1)));
           }
           // SQL Server keeps the lock of a row the statement read and rejected, a row in flight
-          // that
-          // READPAST did not skip, which holds off its ScalarDB commit: every lock goes with the
-          // savepoint, and the rows returned are locked again by key, at the versions returned
+          // that READPAST did not skip, which holds off its ScalarDB commit: every lock goes with
+          // the savepoint, and the rows returned are locked again by key, at the versions returned
           boolean relocks = inFlight == null && n.engine == Engine.SQLSERVER;
           if (relocks) {
             run.v.rollback(sp);
@@ -2111,7 +2138,8 @@ final class Writes {
       // the relock goes through the primary key, which a covering index would otherwise stand
       // in for
       boolean hint = lock != null && n.engine == Engine.SQLSERVER;
-      // and the metadata row under the lock too, which SNAPSHOT would read in its snapshot
+      // and the metadata row under the lock too, at every level on SQL Server (NOWAIT under
+      // READPAST too): SNAPSHOT would read it in its snapshot
       String read =
           n.withMeta(
                   n.dataOf(
@@ -2360,15 +2388,13 @@ final class Writes {
      * its metadata.
      */
     String withMeta(String keyQualifier, String where) {
-      return withMeta(data + " d", keyQualifier, where);
+      return withMeta(data + " d", "", keyQualifier, where);
     }
 
-    /** As {@link #withMeta(String, String)}, the data table as d in {@code source}. */
-    String withMeta(String source, String keyQualifier, String where) {
-      return withMeta(source, "", keyQualifier, where);
-    }
-
-    /** As {@link #withMeta(String, String, String)}, the metadata table under {@code hint}. */
+    /**
+     * As {@link #withMeta(String, String)}, the data table as d in {@code source}, the metadata
+     * table under {@code hint}.
+     */
     String withMeta(String source, String hint, String keyQualifier, String where) {
       return "SELECT "
           + readColumns(keyQualifier)
@@ -2449,12 +2475,12 @@ final class Writes {
      * has one already is skipped.
      */
     String insertStamp(String rows) {
-      // IGNORE also turns data errors into warnings, which rows the driver builds do not have
       boolean pg = engine == Engine.POSTGRESQL;
-      boolean mssql = engine == Engine.SQLSERVER;
       boolean oracle = engine == Engine.ORACLE;
-      // Oracle's hint skips a key that has a row, waiting on one being inserted, as IGNORE does
-      return (pg || mssql
+      // MySQL's IGNORE also turns data errors into warnings, which rows the driver builds do not
+      // have; Oracle's hint skips a key that has a row, waiting on one being inserted, as IGNORE
+      // does; SQL Server's rows leave such keys out (unstamped)
+      return (pg || engine == Engine.SQLSERVER
               ? "INSERT INTO "
               : oracle
                   ? "INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (" + columns("") + ")) */ INTO "
@@ -2475,16 +2501,23 @@ final class Writes {
           + committedAt
           + ") "
           + rows
-          + (pg ? " ON CONFLICT DO NOTHING" : "")
-          // rows from d, with their WHERE: a key with a metadata row, or one being inserted, is
-          // left out, its range held until the end (SQL Server has no insert that skips one)
-          + (mssql
-              ? " AND NOT EXISTS (SELECT 1 FROM "
-                  + meta
-                  + " x WITH (UPDLOCK, HOLDLOCK) WHERE "
-                  + keyJoin("x", "d")
-                  + ")"
-              : "");
+          + (pg ? " ON CONFLICT DO NOTHING" : "");
+    }
+
+    /**
+     * On SQL Server, which has no insert that skips a key, the condition on data rows {@code d}
+     * that leaves out a key with a metadata row, or one being inserted, its range held until the
+     * end; elsewhere none.
+     */
+    String unstamped() {
+      if (engine != Engine.SQLSERVER) {
+        return "";
+      }
+      return " AND NOT EXISTS (SELECT 1 FROM "
+          + meta
+          + " x WITH (UPDLOCK, HOLDLOCK) WHERE "
+          + keyJoin("x", "d")
+          + ")";
     }
   }
 }

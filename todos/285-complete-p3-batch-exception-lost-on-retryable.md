@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "285"
 tags: [code-review, oracle, correctness]
@@ -28,3 +28,4 @@ update counts, where a ScalarDB-table batch gives BatchUpdateException 40001.
 ## Work Log
 
 - 2026-10-20: found in the review of d18b58c (8d2), verified as stated above.
+- 2026-10-20: fixed. asRetryable keeps a BatchUpdateException with its counts, SQLState 40001.

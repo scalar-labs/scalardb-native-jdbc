@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "278"
 tags: [code-review, oracle, usability]
@@ -33,3 +33,4 @@ dependencies: []
 ## Work Log
 
 - 2026-10-19: found in the review of 2ce2755 (8d1), verified as stated above.
+- 2026-10-20: fixed. 1: the key-0 guard is MySQL/MariaDB only. 2: key names quoted for ojdbc (measured). 3: ORA-63809 refused with 0AN01 and a message. 4: Oracle OF columns join the columns the copy reads. Tested in MoreWrites on Oracle.

@@ -65,7 +65,6 @@ class SnapshotIntegrationTest {
   void snapshotLevels(Engines e) throws Exception {
     ScalarDbNames.on(e);
     boolean pg = e.engine() == Engine.POSTGRESQL;
-    boolean mysqlLike = e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB;
     boolean oracle = e.engine() == Engine.ORACLE;
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
@@ -121,6 +120,19 @@ class SnapshotIntegrationTest {
         }
       }
     }
+    if (e.engine() == Engine.SQLSERVER) {
+      // the driver's own lookups as a statement is prepared, at READ COMMITTED, open a
+      // transaction that SQL Server would not go on in at SNAPSHOT (error 3951, todo 266)
+      try (Connection d = e.openDriver()) {
+        d.setAutoCommit(false);
+        try (PreparedStatement ps = d.prepareStatement("SELECT x FROM sn.t WHERE id = ?")) {
+          d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+          ps.setInt(1, 1);
+          assertThat(rows(ps)).containsExactly("a");
+        }
+        d.rollback();
+      }
+    }
     // Oracle refuses SERIALIZABLE (design 5)
     for (int level :
         oracle
@@ -146,8 +158,8 @@ class SnapshotIntegrationTest {
     boolean pg = e.engine() == Engine.POSTGRESQL;
     boolean mysqlLike = e.engine() == Engine.MYSQL || e.engine() == Engine.MARIADB;
     boolean oracle = e.engine() == Engine.ORACLE;
-    // SERIALIZABLE on MySQL and MariaDB: every read locks, anything but one table row by row on the
-    // coarse path
+    // SERIALIZABLE on MySQL, MariaDB and SQL Server: every read locks, anything but one table row
+    // by row on the coarse path
     boolean coarse = !pg && level == Connection.TRANSACTION_SERIALIZABLE;
     String duplicate = pg ? "23505" : "23000";
     Properties waits = new Properties();
@@ -302,6 +314,7 @@ class SnapshotIntegrationTest {
       // in autocommit each statement reads the rows committed when it runs: Oracle's SERIALIZABLE
       // would keep a read's snapshot for the reads after it, ojdbc committing after writes only
       d.setAutoCommit(true);
+      d.setTransactionIsolation(level); // the level set in autocommit too (todo 286)
       assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 13"))
           .as("%s: an autocommit read", at)
           .containsExactly("a");
@@ -529,6 +542,13 @@ class SnapshotIntegrationTest {
             .as("%s: a ScalarDB write of a row read", at)
             .isInstanceOf(TransactionException.class);
         d.rollback();
+        // the coarse check alone: its lock of the in-flight index holds off a ScalarDB write
+        // outside what the read reaches (todo 273)
+        rows(d, "SELECT COUNT(*) FROM sn.t WHERE id < 3");
+        assertThatThrownBy(() -> scalarDbSet(tm, 18, "o"))
+            .as("%s: a ScalarDB write outside a coarse read", at)
+            .isInstanceOf(TransactionException.class);
+        d.rollback();
         // a write locks its predicate and compares it with the snapshot: a row a ScalarDB
         // transaction moved into it since aborts the write (todo 234)
         assertThat(rows(d, "SELECT x FROM sn.t WHERE id = 4")).containsExactly("a");
@@ -555,8 +575,23 @@ class SnapshotIntegrationTest {
           assertThatThrownBy(() -> st.executeUpdate("UPDATE sn.t SET v = 1 WHERE id = 4"))
               .as("%s: first-committer-wins against ScalarDB", at)
               .isInstanceOf(SQLException.class)
-              .extracting(ex -> ((SQLException) ex).getSQLState())
-              .isEqualTo("40001");
+              .satisfies(
+                  ex -> {
+                    SQLException s = (SQLException) ex;
+                    assertThat(s.getSQLState()).isEqualTo("40001");
+                    // the engine's own conflict, mapped, not the driver's abort (todo 266)
+                    if (e.engine() == Engine.SQLSERVER) {
+                      assertThat(s.getErrorCode()).isEqualTo(3960);
+                    } else if (oracle) {
+                      assertThat(s.getErrorCode()).isEqualTo(8177);
+                    }
+                  });
+          if (oracle || e.engine() == Engine.SQLSERVER) {
+            // and the transaction is rollback-only after it (todo 286)
+            assertThatThrownBy(() -> st.executeUpdate("UPDATE sn.t SET v = 1 WHERE id = 5"))
+                .as("%s: rollback-only after the conflict", at)
+                .isInstanceOf(SQLTransactionRollbackException.class);
+          }
         }
         d.rollback();
         // a locking read of a row changed after the snapshot, which MySQL, MariaDB and SQL Server
@@ -626,7 +661,7 @@ class SnapshotIntegrationTest {
                               + " LOCKED"
                           : "SELECT id FROM sn.t WHERE id >= 7 ORDER BY id LIMIT 1 FOR UPDATE"
                               + " SKIP LOCKED"))
-              .as("%s: SKIP LOCKED with LIMIT", at)
+              .as("%s: SKIP LOCKED%s", at, oracle ? "" : " with LIMIT")
               .containsExactly("8");
           d.rollback();
           other.rollback();
@@ -856,6 +891,21 @@ class SnapshotIntegrationTest {
           .as("%s: SERIALIZABLE set in SQL", at)
           .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
       assertThat(rows(d, session)).as("%s: run at SNAPSHOT", at).containsExactly("5");
+      // a statement that names the level and sets none keeps SERIALIZABLE; SNAPSHOT named is
+      // followed, as REPEATABLE READ (todo 273)
+      d.setClientInfo("scalardbnative.passthrough", "true");
+      try (Statement st = d.createStatement()) {
+        st.execute("SELECT 'isolation' AS word");
+        assertThat(d.getTransactionIsolation())
+            .as("%s: after a statement naming isolation", at)
+            .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
+        st.execute("SET TRANSACTION ISOLATION LEVEL SNAPSHOT");
+        assertThat(d.getTransactionIsolation())
+            .as("%s: SNAPSHOT set in SQL at SERIALIZABLE", at)
+            .isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
+      }
+      d.setClientInfo("scalardbnative.passthrough", "false");
+      d.setTransactionIsolation(level);
     }
 
     // the conflict comes with the row the read reaches, after rows streamed: the transaction is
@@ -913,6 +963,15 @@ class SnapshotIntegrationTest {
           "CREATE TABLE sn_plain.p (id INT PRIMARY KEY, v INT)",
           "INSERT INTO sn_plain.p VALUES (1, 1), (2, 1), (3, 1), (4, 1)",
           "SET LOCK_TIMEOUT 1000");
+      // the coarse check keeps its literal, which its filtered index needs, under a database's
+      // forced parameterization (todo 271)
+      st.execute("ALTER DATABASE CURRENT SET PARAMETERIZATION FORCED");
+      try {
+        assertThat(rows(d, "SELECT COUNT(*) FROM sn.t")).as("%s: forced", at).hasSize(1);
+        d.rollback();
+      } finally {
+        st.execute("ALTER DATABASE CURRENT SET PARAMETERIZATION SIMPLE");
+      }
       // locked as they are read, as the engine's SERIALIZABLE would lock them (todo 229)
       for (String read :
           List.of(
@@ -921,28 +980,43 @@ class SnapshotIntegrationTest {
                   + " WHERE q.id = 1)",
               "SELECT x FROM sn.t WHERE id IN (SELECT id FROM sn_plain.p WHERE v = 1)",
               "SELECT v FROM sn_plain.p WITH (UPDLOCK) WHERE id = 1",
-              "WITH c AS (SELECT id FROM sn_plain.p WHERE id = 1) SELECT id FROM c")) {
+              "WITH c AS (SELECT id FROM sn_plain.p WHERE id = 1) SELECT id FROM c",
+              // a hint the table has is merged with HOLDLOCK (todo 270)
+              "SELECT v FROM sn_plain.p WITH (HOLDLOCK) WHERE id = 1",
+              "SELECT v FROM sn_plain.p WITH (REPEATABLEREAD) WHERE id = 1",
+              "SELECT v FROM sn_plain.p (UPDLOCK) WHERE id = 1")) {
         rows(d, read);
         assertThatThrownBy(() -> st.execute("UPDATE sn_plain.p SET v = 0 WHERE id = 1"))
             .as("%s: a write of a row %s read", at, read)
             .isInstanceOf(SQLException.class);
         d.rollback();
       }
-      // and the range: an insert into a predicate read waits too
-      rows(d, "SELECT COUNT(*) FROM sn_plain.p WHERE id BETWEEN 5 AND 9");
-      assertThatThrownBy(() -> st.execute("INSERT INTO sn_plain.p VALUES (6, 1)"))
-          .as("%s: an insert into a range read", at)
+      // SELECT INTO's new table takes no hint, the table it reads does (todo 270)
+      ds.execute("SELECT v INTO #sn_tt FROM sn_plain.p WHERE id = 1");
+      assertThatThrownBy(() -> st.execute("UPDATE sn_plain.p SET v = 0 WHERE id = 1"))
+          .as("%s: a write of a row SELECT INTO read", at)
           .isInstanceOf(SQLException.class);
       d.rollback();
+      // and the range: an insert into a predicate read waits too, under a hint that holds
+      // nothing by itself as well (todo 273)
+      for (String range : List.of("", " WITH (ROWLOCK)")) {
+        rows(d, "SELECT COUNT(*) FROM sn_plain.p" + range + " WHERE id BETWEEN 5 AND 9");
+        assertThatThrownBy(() -> st.execute("INSERT INTO sn_plain.p VALUES (6, 1)"))
+            .as("%s: an insert into a range read%s", at, range)
+            .isInstanceOf(SQLException.class);
+        d.rollback();
+      }
       // the catalog takes no lock; a hint the parser keeps cannot take one
       assertThat(rows(d, "SELECT COUNT(*) FROM sys.tables WHERE name = 'p'"))
           .as("%s: sys", at)
           .containsExactly("1");
       d.rollback();
-      assertThatThrownBy(() -> rows(d, "SELECT v FROM sn_plain.p WITH (NOLOCK)"))
-          .as("%s: NOLOCK", at)
-          .isInstanceOf(SQLFeatureNotSupportedException.class);
-      d.rollback();
+      for (String hint : List.of("NOLOCK", "READUNCOMMITTED", "READCOMMITTEDLOCK", "READPAST")) {
+        assertThatThrownBy(() -> rows(d, "SELECT v FROM sn_plain.p WITH (" + hint + ")"))
+            .as("%s: %s", at, hint)
+            .isInstanceOf(SQLFeatureNotSupportedException.class);
+        d.rollback();
+      }
       // a function of the application's own reads where no hint reaches (todo 269)
       e.execute(
           o,

@@ -33,3 +33,4 @@ The BatchUpdateException concern was checked: mssql-jdbc throws a plain SQLServe
 ## Work Log
 
 - 2026-10-19: found in the review of 51e1c51 (8c2), verified as stated above.
+- 2026-10-20: partly fixed. 1 (withMeta), 4 (comment) done; 3 and 5 were done in 8c3. Open: 2, the vendor-to-driver level mapping in one Router method.

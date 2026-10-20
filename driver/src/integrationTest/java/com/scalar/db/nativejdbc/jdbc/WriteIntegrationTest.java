@@ -8,7 +8,6 @@ import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.intType;
 import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionAdmin;
@@ -78,7 +77,6 @@ class WriteIntegrationTest {
   @MethodSource("engines")
   void writes_onBothLayouts(Engines e) throws Exception {
     ScalarDbNames.on(e);
-    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
@@ -370,7 +368,6 @@ class WriteIntegrationTest {
   @MethodSource("engines")
   void reviewFindings(Engines e) throws Exception {
     ScalarDbNames.on(e);
-    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
@@ -539,11 +536,7 @@ class WriteIntegrationTest {
       try (Connection lock = e.open();
           Connection d = e.openDriver()) {
         lock.setAutoCommit(false);
-        rows(
-            lock,
-            e.engine() == Engine.SQLSERVER
-                ? "SELECT x FROM rf.imp WITH (UPDLOCK) WHERE id = 70"
-                : "SELECT x FROM rf.imp WHERE id = 70 FOR UPDATE");
+        rows(lock, "SELECT x FROM rf.imp WHERE id = 70 FOR UPDATE");
         Statement st = d.createStatement();
         st.setQueryTimeout(1);
         long t0 = System.nanoTime();
@@ -638,7 +631,6 @@ class WriteIntegrationTest {
   @MethodSource("engines")
   void anchorsFromReads(Engines e) throws Exception {
     ScalarDbNames.on(e);
-    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
@@ -827,7 +819,6 @@ class WriteIntegrationTest {
   @MethodSource("engines")
   void anchorsFromJoins(Engines e) throws Exception {
     ScalarDbNames.on(e);
-    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
@@ -1022,7 +1013,6 @@ class WriteIntegrationTest {
   @MethodSource("engines")
   void anchorReviewFindings(Engines e) throws Exception {
     ScalarDbNames.on(e);
-    assumeTrue(e.writes(), "writes are not built on this engine yet (milestone 8)");
     try (Connection c = e.open()) {
       e.execute(
           c,
