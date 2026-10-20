@@ -1,0 +1,199 @@
+# Plan: the benchmark environment
+
+## Why
+
+The read benchmark (`ReadOverheadBenchmark`) and T6 of `testing.md` run today against
+Testcontainers on a laptop. That is fine for exploring plans, not for numbers we publish or decide
+on:
+
+1. **Docker Desktop on macOS.** The containers share one Linux VM with a fixed share of CPU and
+   memory and virtualised disk I/O, beside whatever else the laptop runs. On 2026-10-20 the
+   measurements ran beside another project's containers, a JVM at 200% CPU, and a Docker hang.
+2. **Default settings.** PostgreSQL runs with `shared_buffers` 128 MB and `work_mem` 4 MB, MySQL and
+   MariaDB with a 128 MB buffer pool, against 500k-row tables plus their metadata tables. Sorts spill
+   (PostgreSQL's VIEW_CASE page sorted 500k rows on disk), and the engines choose the plans of a
+   small server. Which form of the read wins depends on that.
+3. **Oracle Free** is capped at 2 CPUs and 2 GB, a limit of the product, not of the container.
+
+A container on a dedicated Linux host, with tuned settings and a local disk, runs on the host's
+kernel and measures like a native install. The problem is the laptop and the defaults.
+
+Laptop containers stay for smoke runs, the integration tests, and questions about the SQL itself:
+whether a planner can estimate a filter does not depend on the machine (the filter without
+`COALESCE`, `paging-route.md`, was found locally).
+
+## Scope
+
+**AWS, $500 at most.** Engines in priority order: **PostgreSQL and Oracle**, then MySQL and
+MariaDB. SQL Server is left out (its licence on RDS is the most expensive, and it is not a priority);
+it can be added to tier A later with the Developer edition.
+
+## Two tiers
+
+| tier | what | for |
+|---|---|---|
+| **A: self-managed** | one EC2 instance per engine running the engine's official image (the tests' images; Oracle's Enterprise Edition image from Oracle's registry) with host networking and the data on the instance's NVMe, settings below; a separate client instance in the same availability zone | plan questions, the form matrix, comparisons between driver versions |
+| **B: managed** | RDS for PostgreSQL, Oracle (19c, Standard Edition 2, licence included), MySQL and MariaDB, default parameter groups plus the memory settings below; the same client | the numbers a customer would see: real defaults, networked storage, Oracle's nightly statistics job (todo 094) |
+
+Tier A is controllable and repeatable; tier B is realistic and less precise. Both run the same
+benchmarks with the same parameters, and a result names its tier.
+
+**Oracle versions.** Tier A runs 23ai (the version the tests use, as Oracle Free 23). RDS for Oracle
+offers 19c and 21c, not 23ai, as far as known; to be checked before provisioning. If so, tier B runs
+19c, the most deployed version, which is the point of tier B. Oracle has renamed the 23ai line:
+the tests' image reports "Oracle AI Database 26ai, Release 23.26" (2026-10-20). Tier A takes the
+Enterprise Edition image of that line.
+
+## Machines
+
+| role | type | notes |
+|---|---|---|
+| tier A database | `m6id.2xlarge`: 8 vCPU, 32 GB, 474 GB local NVMe | the data on the NVMe; fixed performance, not a burstable `t` type |
+| tier B database | `db.m5.2xlarge`: 8 vCPU, 32 GB, 100 GB gp3 (RDS offers Oracle SE2 licence included on no m6i class) | single-AZ, no read replicas, no backups beyond the minimum |
+| client | `m6i.2xlarge`: 8 vCPU, 32 GB | Gradle and the benchmark JVM, one JVM per engine; one per tier if its CPU goes above 50% |
+
+All x86, one availability zone. No CI runners: shared and too noisy for timing.
+
+## Settings
+
+Sized for 32 GB, so that the benchmark's data (about 1 GB per engine with indexes and metadata
+tables) stays in memory. Everything else is the engine's default. The settings live in
+`bench-env/`, and each report records the effective ones (harness change 2).
+
+| engine | tier A version | settings |
+|---|---|---|
+| PostgreSQL | 16 | `shared_buffers` 8GB, `effective_cache_size` 24GB, `work_mem` 64MB, `maintenance_work_mem` 1GB, `random_page_cost` 1.1 |
+| Oracle | 23ai, Enterprise Edition | SGA 16 GB, PGA 4 GB; the automatic statistics job left on |
+| MySQL | 8.4 | `innodb_buffer_pool_size` 20G, `innodb_redo_log_capacity` 4G; `lower_case_table_names` as in the tests |
+| MariaDB | 11.4 | `innodb_buffer_pool_size` 20G, `innodb_log_file_size` 4G |
+
+On tier B, everything stays at RDS's defaults, which size the buffers from the instance's memory:
+the default parameter groups are the customer's starting point that tier B measures.
+
+## Harness changes
+
+The harness targets an external database through `-Dnativejdbc.<engine>.url`, `.username` and
+`.password` (`Engines.start`). Added for this plan, in `ReadOverheadBenchmark`:
+
+1. **A clean start (done).** `-Dnativejdbc.bench.dropExisting=true` drops the schemas a run creates
+   (`bn`, ScalarDB's `scalardb` and `coordinator`, which ScalarDB names in quoted lower case) before
+   loading; Oracle's without `DROP USER IF EXISTS`, which 19c lacks. Off by default, so that a
+   mistyped URL does not empty another database. Checked on 2026-10-20 against standalone
+   PostgreSQL and Oracle containers: a second run on the first one's leftovers loads and measures.
+2. **The environment in the report (done).** Each report starts with the tier
+   (`-Dnativejdbc.bench.tier=A`), the server version, and the settings that change plans.
+3. **A statement timeout (done):** `-Dnativejdbc.bench.timeoutSeconds`, 120 by default; 30 for the
+   form matrix, where some forms never finish.
+4. **Privileges on RDS.** The benchmark and Setup create users and schemas and, on Oracle, call
+   `DBMS_STATS`. RDS's master user has neither SYSDBA nor superuser: check each call on the first
+   run and use RDS's equivalent (`rdsadmin` procedures) where one is refused.
+5. **Reuse of a loaded data set**, only if loading over the network turns out to dominate a run.
+
+## Tooling (`bench-env/`)
+
+- `terraform/`: the VPC, subnets and security groups (SSH to the client from the user's address
+  only; the databases reachable only from the client), the client, and the instances of both tiers,
+  chosen per run by the variables `tier_a` and `tier_b`. Tier A's Oracle needs `oracle_image` and a
+  login to Oracle's registry, both from the user; without them tier A runs no Oracle.
+- `rank.py`: ranks the forms per engine, in-flight count and query from a directory of reports
+  (rows checked against BASE, forms that failed left out), and flags where a form beats DRIVER by
+  more than 1.5x.
+- `run.sh plan` writes `terraform/bench.tfplan` and shows it for approval; `run.sh run` applies it,
+  copies the repository at HEAD to the client once per tier (`git archive` over SSH; nothing is
+  pushed), runs `matrix.sh` per tier in parallel, copies the reports to `bench-env/results/`, and
+  destroys everything (see "Credentials").
+- `test-run.sh`: checks `run.sh`'s teardown with stand-ins for `aws`, `terraform`, `ssh` and `scp`.
+- `iam-policy.json`: the benchmark user's permissions; `terraform/bench.tfvars.example`: the
+  settings file the user fills in (`bench.tfvars`, ignored by git).
+- `matrix.sh`: runs on the client; the read benchmark against one tier's databases, every engine in
+  parallel, per in-flight count (`INFLIGHT`) and run (`REPS`), with the clean start on.
+
+## Safety and cost control
+
+- **An AWS Budget of $500** on the account, e-mail alerts at 50% and 80%, and at 100% a budget
+  action that attaches a deny policy to the benchmark user (no new instances). A budget action can
+  stop only instances chosen when the action is created, not ones Terraform creates later, and
+  billing data lags by hours: the budget is a backstop, and the destroy trap and the dead man's
+  switch are what stop running instances.
+- **Every run ends in `terraform destroy`**, from a trap that also runs after a failure. RDS
+  instances are deleted, not stopped (RDS restarts a stopped instance after 7 days).
+- **A dead man's switch on EC2:** each instance shuts itself down 10 hours after boot, with
+  `instance_initiated_shutdown_behavior = "terminate"`.
+- **The agent's credentials** come from `aws login --profile scalardb-bench` (AWS CLI 2.32 or
+  later), signed in through the browser as the benchmark user of `iam-policy.json` (EC2 and RDS in
+  one region, read access to costs and prices), in an account used only for this. Never as root or
+  an administrator, and never the user's own `default` profile. No access key is created.
+
+## Credentials
+
+`aws login` gives short-lived credentials, refreshed by the CLI until the login session ends. The
+risk is the cleanup: a run that outlives the session cannot destroy what it created, and RDS, unlike
+EC2, does not terminate itself (four RDS instances cost about $100 a day). So `run.sh`:
+
+1. exports fresh credentials before every Terraform call (`aws configure export-credentials`);
+2. refreshes them every 5 minutes, and on the first refresh that fails (the session ended) destroys
+   everything at once, with the last credentials, which are still valid for some minutes;
+3. destroys everything after `MAX_RUN_MINUTES` (480 by default, below a 12-hour session with room for
+   the destroy), at the end, and after a failure or an interrupt;
+4. if a destroy fails anyway, prints the commands to sign in again and destroy by hand.
+
+Log in right before a run. A run longer than a session (T5's and T6's long runs) is split into
+pieces that each fit in one; to check once the account exists is the session length `aws login`
+allows there, and that the Terraform AWS provider takes the exported credentials (it reads the
+standard environment variables, so it should).
+- **Each `terraform apply` is shown first** (`terraform plan`, the instance list and the estimated
+  hourly cost) and confirmed by the user before it runs.
+
+## Running
+
+1. `aws login --profile scalardb-bench`; `run.sh plan`, shown to the user with the instance list and
+   the estimated hourly cost; on approval, `run.sh run`, which applies it.
+2. Copy the repository at a commit, build, and run the same scripts as locally with the external
+   URLs, `-Dnativejdbc.bench.dropExisting=true` and the tier.
+3. Each point is three runs. Caches are warm (the benchmark warms each statement); cold caches are
+   not measured.
+4. Copy the reports to `docs/benchmarks/`, marked by tier, and destroy.
+
+**First job: the form matrix.** All 33 forms of the read benchmark on all 41 queries, at 100 and
+10,000 rows in flight, on tier A, PostgreSQL and Oracle first: one screening run with a 30 s timeout,
+`rank.py`, then three runs of the two or three best forms of each flagged query. The result is a
+table of query shape to form per engine and the gaps against what the driver emits, which become
+the router's rules (as `paging-route.md` does for paging). Then the same on tier B, then MySQL and
+MariaDB, then T5 and T6.
+
+## Cost
+
+Rough, from memory of AWS on-demand prices in `us-east-1`, to be checked with the Pricing API before
+the first apply:
+
+| item | assumption | estimate |
+|---|---|---|
+| Tier A, all running | four `m6id.2xlarge` at about $0.47/h, one client at about $0.38/h | about $2.3/h |
+| Tier B, all running | RDS PostgreSQL, MySQL, MariaDB at about $0.70-0.75/h each; Oracle SE2 licence included about $1.5-2.5/h; storage a few dollars a month each | about $3.7-4.7/h |
+| Form matrix, tier A | screening about 2.5 h, confirmation about 1.5 h, all engines in parallel | about $10-15 |
+| Read benchmark, tier B | three matrices of about 3 h | about $40 |
+| Setup, debugging, failed runs | | about $30 |
+| T5 and T6, tier A, four engines | about 64 hours per engine (`testing.md`) | about $200 |
+| T6, tier B, PostgreSQL and Oracle | about 40 hours | about $110 |
+| **Total** | | **about $400**, about $100 of margin |
+
+The risk is an environment left running: everything of both tiers costs about $150 a day. The
+budget action, the destroy trap and the dead man's switch exist for that.
+
+## Publishing
+
+The licences of Oracle restrict publishing benchmark results without the vendor's permission, and
+the development licence of Oracle 23ai on tier A has its own terms for benchmarking. The Oracle
+numbers stay internal until both are checked.
+
+## Decisions (2026-10-20)
+
+1. **AWS**, in an account used only for the benchmarks.
+2. **$500 at most**, watched by a budget with alerts and a deny action.
+3. **Oracle 23ai** on tier A; 19c on RDS if RDS has no 23ai.
+4. **An agent provisions**, with the benchmark user's short-lived `aws login` credentials, each
+   apply confirmed first.
+5. **Engines: PostgreSQL and Oracle first, then MySQL and MariaDB**; SQL Server left out.
+
+Open: the region (`us-east-1` unless the user prefers one nearer); the Oracle download for tier A,
+which needs an Oracle account, so the user fetches the installer or a link to it.

@@ -546,6 +546,22 @@ class ReadOverheadBenchmark {
                   "SELECT a.id AS aid, b.id AS bid FROM {C:a} JOIN {O:b} ON {b.customer_id} = a.id"
                       + " WHERE {W:a} AND {W:b} ORDER BY b.id DESC{PAGE:0:20}"),
           new Query(
+              "page: keyset, key < ?, ORDER BY key DESC, 20 rows",
+              "SELECT b.id, {b.total} FROM {O:b} WHERE {W:b} AND b.id < ?"
+                  + " ORDER BY b.id DESC{PAGE:0:20}",
+              null,
+              null,
+              List.of("b"),
+              Param.CUSTOMER),
+          new Query(
+              "page: 3 tables JOIN FK, ORDER BY key DESC, 20 rows",
+              "SELECT g.id, a.id, b.id FROM {R:g} JOIN {C:a} ON {a.region} = g.id"
+                  + " JOIN {O:b} ON {b.customer_id} = a.id WHERE {W:g} AND {W:a} AND {W:b}"
+                  + " ORDER BY b.id DESC{PAGE:0:20}",
+              null,
+              null,
+              List.of("g", "a", "b")),
+          new Query(
                   "page: indexed range of 30k rows, ORDER BY key, 20 rows",
                   "SELECT a.id, {a.name} FROM {C:a} WHERE {W:a} AND {a.region} < ?"
                       + " ORDER BY a.id{PAGE:0:20}",
@@ -659,6 +675,9 @@ class ReadOverheadBenchmark {
   void readOverhead(Engines e) throws Exception {
     Engine engine = e.engine();
     try (Connection admin = e.open()) {
+      if (DROP_EXISTING) {
+        dropExisting(e, admin);
+      }
       load(e, admin);
     }
     if (modes().contains(Mode.DRIVER)) {
@@ -703,8 +722,10 @@ class ReadOverheadBenchmark {
       report
           .append("## ")
           .append(e)
+          .append("\n\n")
+          .append(environment(e, c))
           .append(
-              "\n\nMedian ms over up to 200 runs (ratio to BASE); p95 in brackets. `!` marks rows"
+              "\nMedian ms over up to 200 runs (ratio to BASE); p95 in brackets. `!` marks rows"
                   + " that differ from BASE.\n\n| query |");
       List<Mode> modes = modes();
       for (Mode m : modes) {
@@ -1242,8 +1263,16 @@ class ReadOverheadBenchmark {
       }
       for (String t : TABLES) {
         TableInfo info = catalog.lookup(List.of(), ns, e.storedTable(t));
-        e.execute(
-            c, statistics(engine, info.namespace(), Objects.requireNonNull(info.metadataTable())));
+        try {
+          e.execute(
+              c,
+              statistics(engine, info.namespace(), Objects.requireNonNull(info.metadataTable())));
+        } catch (SQLException ex) {
+          // ORA-20005: statistics the setup locked, which the nightly job skips
+          if (ex.getErrorCode() != 20005) {
+            throw ex;
+          }
+        }
       }
     }
   }
@@ -1809,6 +1838,7 @@ class ReadOverheadBenchmark {
 
   private static Result measure(Connection c, String sql, Param[] params) throws SQLException {
     try (PreparedStatement ps = c.prepareStatement(sql)) {
+      ps.setQueryTimeout(TIMEOUT_SECONDS); // a plan that never ends is an error, not a wait
       int placeholders = ps.getParameterMetaData().getParameterCount();
       Random random = new Random(42);
       List<String> first =
@@ -1842,6 +1872,94 @@ class ReadOverheadBenchmark {
 
   // -Dnativejdbc.bench.hot=true: only customers and the region with rows in flight
   private static final boolean HOT = Boolean.getBoolean("nativejdbc.bench.hot");
+
+  // -Dnativejdbc.bench.dropExisting=true: drop what an earlier run left on an external database
+  private static final boolean DROP_EXISTING = Boolean.getBoolean("nativejdbc.bench.dropExisting");
+
+  // -Dnativejdbc.bench.timeoutSeconds=30: the statement timeout of a measured statement
+  private static final int TIMEOUT_SECONDS =
+      Integer.getInteger("nativejdbc.bench.timeoutSeconds", 120);
+
+  // -Dnativejdbc.bench.tier=A: the environment named in the report, "local" by default
+  private static final String TIER = System.getProperty("nativejdbc.bench.tier", "local");
+
+  /**
+   * Drops the schemas a run creates, which a container never has but an external database keeps
+   * from the run before: the benchmark's, and ScalarDB's metadata and coordinator, which ScalarDB
+   * names in lower case quoted. Oracle 19c has no DROP USER IF EXISTS: ORA-01918 is ignored.
+   */
+  private static void dropExisting(Engines e, Connection c) throws SQLException {
+    for (String stored : List.of(e.storedSchema("bn"), "scalardb", "coordinator")) {
+      String schema = e.engine().quote(stored);
+      switch (e.engine()) {
+        case POSTGRESQL:
+          e.execute(c, "DROP SCHEMA IF EXISTS " + schema + " CASCADE");
+          break;
+        case MYSQL:
+        case MARIADB:
+          e.execute(c, "DROP DATABASE IF EXISTS " + schema);
+          break;
+        case ORACLE:
+          e.execute(
+              c,
+              "BEGIN EXECUTE IMMEDIATE 'DROP USER "
+                  + schema
+                  + " CASCADE';"
+                  + " EXCEPTION WHEN OTHERS THEN IF SQLCODE != -1918 THEN RAISE; END IF; END;");
+          break;
+        default:
+          throw new UnsupportedOperationException("dropExisting on " + e.engine());
+      }
+    }
+  }
+
+  /** The settings that change plans, per engine, recorded in each report. */
+  private static String settingsQuery(Engine engine) {
+    switch (engine) {
+      case POSTGRESQL:
+        return "SELECT name || '=' || setting || COALESCE(unit, '') FROM pg_settings WHERE name IN"
+            + " ('shared_buffers', 'effective_cache_size', 'work_mem', 'random_page_cost',"
+            + " 'max_parallel_workers_per_gather', 'jit') ORDER BY name";
+      case MYSQL:
+      case MARIADB:
+        return "SELECT CONCAT(variable_name, '=', variable_value)"
+            + " FROM performance_schema.global_variables WHERE variable_name IN"
+            + " ('innodb_buffer_pool_size', 'innodb_redo_log_capacity', 'innodb_log_file_size',"
+            + " 'optimizer_switch', 'join_buffer_size', 'sort_buffer_size') ORDER BY 1";
+      case ORACLE:
+        return "SELECT name || '=' || value FROM v$parameter WHERE name IN ('sga_target',"
+            + " 'pga_aggregate_target', 'memory_target', 'optimizer_features_enable', 'cpu_count')"
+            + " ORDER BY name";
+      default:
+        return "SELECT name + '=' + CAST(value_in_use AS VARCHAR(40)) FROM sys.configurations"
+            + " WHERE name IN ('max server memory (MB)', 'max degree of parallelism',"
+            + " 'cost threshold for parallelism') ORDER BY name";
+    }
+  }
+
+  /** The tier, engine version and plan-changing settings, as the report's first lines. */
+  private static String environment(Engines e, Connection c) throws SQLException {
+    StringBuilder out = new StringBuilder();
+    out.append("Environment: ")
+        .append(TIER)
+        .append(", ")
+        .append(c.getMetaData().getDatabaseProductVersion().replace('\n', ' '))
+        .append(". Settings:");
+    try (java.sql.Statement st = c.createStatement();
+        ResultSet rs = st.executeQuery(settingsQuery(e.engine()))) {
+      while (rs.next()) {
+        out.append(" `").append(rs.getString(1)).append('`');
+      }
+    } catch (SQLException ex) {
+      out.append(" not readable (").append(ex.getMessage().trim()).append(')');
+    }
+    return out.append(".\n").toString();
+  }
+
+  // -Dnativejdbc.bench.plainCaseFilter=true: VIEW_CASE's filter without COALESCE, which
+  // PostgreSQL can estimate from the statistics of tx_state
+  private static final boolean PLAIN_CASE_FILTER =
+      Boolean.getBoolean("nativejdbc.bench.plainCaseFilter");
 
   // -Dnativejdbc.bench.inflight=10000: rows in flight per table, 100 by default
   private static final int INFLIGHT = Integer.getInteger("nativejdbc.bench.inflight", 100);
@@ -2466,7 +2584,10 @@ class ReadOverheadBenchmark {
             + t
             + "m xm ON "
             + keyEq(t, "xm", "x")
-            + " WHERE COALESCE(xm.tx_state, 3) = 3 OR (xm.tx_state IN (1,"
+            + (PLAIN_CASE_FILTER
+                ? " WHERE xm.tx_state IS NULL OR xm.tx_state = 3"
+                : " WHERE COALESCE(xm.tx_state, 3) = 3")
+            + " OR (xm.tx_state IN (1,"
             + " 2) AND (xm.before_tx_id IS NOT NULL OR xm.before_tx_version IS NOT NULL))");
   }
 }

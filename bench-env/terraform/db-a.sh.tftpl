@@ -1,0 +1,30 @@
+#!/bin/bash
+# Tier A database: the engine's official image, host networking, the data on the instance's NVMe,
+# the settings of docs/plans/benchmark-environment.md. Terminates itself after ${lifetime} minutes.
+set -euxo pipefail
+shutdown -h +${lifetime}
+dev=/dev/$(lsblk -dno NAME,MODEL | awk '/Instance Storage/ {print $1; exit}')
+mkfs.ext4 -F "$dev"
+mkdir -p /data && mount "$dev" /data
+apt-get update && apt-get install -y docker.io
+case "${engine}" in
+  postgresql)
+    docker run -d --name db --network host -v /data/pg:/var/lib/postgresql/data \
+      -e POSTGRES_PASSWORD='${password}' --shm-size=9g postgres:16 \
+      -c shared_buffers=8GB -c effective_cache_size=24GB -c work_mem=64MB \
+      -c maintenance_work_mem=1GB -c random_page_cost=1.1 ;;
+  mysql)
+    docker run -d --name db --network host -v /data/mysql:/var/lib/mysql \
+      -e MYSQL_ROOT_PASSWORD='${password}' mysql:8.4 \
+      --innodb-buffer-pool-size=20G --innodb-redo-log-capacity=4294967296 ;;
+  mariadb)
+    docker run -d --name db --network host -v /data/mariadb:/var/lib/mysql \
+      -e MARIADB_ROOT_PASSWORD='${password}' mariadb:11.4 \
+      --innodb-buffer-pool-size=20G --innodb-log-file-size=4294967296 ;;
+  oracle)
+    echo '${registry_token}' | docker login container-registry.oracle.com -u '${registry_user}' --password-stdin
+    mkdir -p /data/oracle && chown 54321:54321 /data/oracle
+    docker run -d --name db --network host -v /data/oracle:/opt/oracle/oradata \
+      -e ORACLE_PWD='${password}' -e INIT_SGA_SIZE=16384 -e INIT_PGA_SIZE=4096 \
+      --shm-size=17g '${oracle_image}' ;;
+esac

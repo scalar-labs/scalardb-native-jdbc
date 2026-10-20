@@ -1,0 +1,11 @@
+# Copy to bench.tfvars (ignored by git) and fill in. Secrets stay in this file, never in the chat.
+admin_cidr     = "203.0.113.7/32"                 # your public address, /32
+ssh_public_key = "ssh-ed25519 AAAA... you@host"   # the public key, not the private one
+tier_a         = ["postgresql", "oracle"]
+tier_b         = []                               # e.g. ["postgresql", "oracle"] for RDS
+# Oracle Enterprise Edition on tier A: an image from container-registry.oracle.com after accepting
+# its licence there, and the registry login (an auth token, not the account password)
+oracle_image          = ""
+oracle_registry_user  = ""
+oracle_registry_token = ""
+# db_password comes from the environment: export BENCH_DB_PASSWORD=..., which run.sh passes on
