@@ -559,18 +559,10 @@ The `tools` module with the setup command and the stuck-row check, the `samples/
 4.6 as the acceptance suite, and the engine matrix in CI. The sweeper first planned here was dropped on
 2026-10-12: settling rows needs the coordinator, which the driver does not depend on, so recovery is
 ScalarDB's (todo 084) and the driver keeps only the stuck-row check (todo 085). Split in four, each ending
-with the full check green and a commit:
+with the full check green and a commit; 9a moved to `testing.md`:
 
-  - **9a: test harness and CI matrix** (todos 021, 052). One integration test task per engine, run side by
-    side, so a full check costs about the slowest engine, not the sum (today about 45 minutes in one
-    task); `-Dnativejdbc.engines` still narrows it. An external database by
-    `-Dnativejdbc.<engine>.url`, `.username`, `.password` in place of the container, for a nightly
-    against a real server. CI: the unit tests and static checks in one job, the integration tests in a
-    matrix job per engine. To measure first: whether Gradle runs the per-engine tasks of one project in
-    parallel (it does with the configuration cache on, which `gradle.properties` turns on), and the
-    memory of all five containers at once against Docker's 7.75 GB (SQL Server and Oracle together have
-    run out of it before; a cap of two or three engines at a time if so). Done when a full local check
-    and the CI run take about the slowest engine's time.
+  - **9a: test harness and CI matrix.** Moved to milestone T0 of `docs/plans/testing.md`, run by its
+    own agent (todos 021, 052).
   - **9b: the `tools` module** (todos 026, 085). A command line over the driver's `setup.Setup`, which
     stays in the driver: `setup`, `check` and `teardown`, over every ScalarDB table of the catalog or
     those named with `--table`; `--dry-run` prints the DDL; never prompts; exit 0 when all is well, 1
@@ -588,7 +580,10 @@ with the full check green and a commit:
     (Hibernate) and `crud-mybatis`: one entity with a generated key and a version column, its CRUD, an
     optimistic-lock conflict, a `@Transactional` rollback, and a ScalarDB transaction writing the same
     table between two of the application's, through the published driver artifact on a pool. Each runs
-    as a test on every engine, so the acceptance suite is the samples themselves. To measure first: the
+    as a test on every engine, so the acceptance suite is the samples themselves. They test how each
+    ORM uses JDBC (dialect detection through the metadata, generated keys, batches, transactions,
+    exception translation), not SQL coverage: an ORM emits a narrow set of statements, and the coverage
+    corpus of `testing.md` comes from the engines' own suites. To measure first: the
     statements each ORM emits on each engine (Hibernate's sequences and `RETURNING`, Spring Data JDBC's
     generated keys, MyBatis's `useGeneratedKeys`), each against the refusal list, so a refusal found is
     fixed in the driver or documented, not worked around in the sample.
@@ -620,7 +615,7 @@ New packages under `com.scalar.db.nativejdbc`, each depending only on what is li
 | 012 rewrite fragments | milestone 3 |
 | 008 statement cache | milestone 6 |
 | 026 operator tooling, 085 stuck-row check | milestone 9b |
-| 021, 052 harness and CI | milestones 5 and 9a |
+| 021, 052 harness and CI | milestone 5, then T0 of `testing.md` |
 
 The cleanup todos (019, 020, 022 to 025, 028 to 031, 050, 051) are taken when a milestone touches the
 code they name, not separately.
