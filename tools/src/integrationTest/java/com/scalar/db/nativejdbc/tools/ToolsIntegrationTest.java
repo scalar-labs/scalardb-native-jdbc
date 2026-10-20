@@ -25,11 +25,8 @@ import org.junit.jupiter.params.provider.MethodSource;
  */
 class ToolsIntegrationTest {
 
-  /** Every engine but MySQL with lower-case table names, which changes nothing here. */
   static List<Engines> engines() {
-    List<Engines> engines = new ArrayList<>(Engines.selected());
-    engines.remove(Engines.MYSQL_LOWER_CASE);
-    return engines;
+    return Engines.selected();
   }
 
   @ParameterizedTest

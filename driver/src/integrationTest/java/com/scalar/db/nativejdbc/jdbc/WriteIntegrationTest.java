@@ -82,33 +82,41 @@ class WriteIntegrationTest {
           c,
           e.createSchema("wr"),
           "CREATE TABLE wr.imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
-          "INSERT INTO wr.imp VALUES (1, 'a'), (2, 'b'), (3, 'c')");
+          "INSERT INTO wr.imp VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+          // and in the inline layout, the metadata in the row (milestone 10b)
+          "CREATE TABLE wr.impi (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
+          "INSERT INTO wr.impi VALUES (1, 'a'), (2, 'b'), (3, 'c')");
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("wr"), true);
       admin.importTable(N("wr"), N("imp"), DECOUPLED, Map.of());
-      admin.createTable(
-          N("wr"),
-          N("made"),
-          TableMetadata.newBuilder()
-              .addColumn(N("id"), intType())
-              .addColumn(N("x"), DataType.TEXT)
-              .addPartitionKey(N("id"))
-              .build(),
-          DECOUPLED);
+      admin.importTable(N("wr"), N("impi"), Map.of(), Map.of());
+      for (String made : List.of("made", "madei")) {
+        admin.createTable(
+            N("wr"),
+            N(made),
+            TableMetadata.newBuilder()
+                .addColumn(N("id"), intType())
+                .addColumn(N("x"), DataType.TEXT)
+                .addPartitionKey(N("id"))
+                .build(),
+            made.equals("made") ? DECOUPLED : Map.of());
+      }
     }
     try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
       DistributedTransaction tx = tm.begin();
-      for (int i = 1; i <= 3; i++) {
-        tx.insert(
-            Insert.newBuilder()
-                .namespace(N("wr"))
-                .table(N("made"))
-                .partitionKey(id(i))
-                .textValue(N("x"), String.valueOf((char) ('a' + i - 1)))
-                .build());
+      for (String made : List.of("made", "madei")) {
+        for (int i = 1; i <= 3; i++) {
+          tx.insert(
+              Insert.newBuilder()
+                  .namespace(N("wr"))
+                  .table(N(made))
+                  .partitionKey(id(i))
+                  .textValue(N("x"), String.valueOf((char) ('a' + i - 1)))
+                  .build());
+        }
       }
       tx.commit();
     }
@@ -121,13 +129,17 @@ class WriteIntegrationTest {
     }
     TableInfo imp = catalog.lookup(List.of(), N("wr"), N("imp"));
     TableInfo made = catalog.lookup(List.of(), N("wr"), N("made"));
+    TableInfo madei = catalog.lookup(List.of(), N("wr"), N("madei"));
     List<Table> tables =
         List.of(
             new Table(
                 "wr.imp",
                 "wr." + Q(imp.metadataTable()),
                 Objects.requireNonNull(imp.virtualTable())),
-            new Table("wr.made", "wr." + Q(made.metadataTable()), N("made")));
+            new Table("wr.made", "wr." + Q(made.metadataTable()), N("made")),
+            // inline: the table is its own metadata table, and ScalarDB's name for itself
+            new Table("wr.impi", "wr.impi", N("impi")),
+            new Table("wr.madei", "wr." + Q(madei.metadataTable()), N("madei")));
     try (DistributedTransactionManager tm = scalarDb.getTransactionManager();
         TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager()) {
       for (Table t : tables) {

@@ -5,7 +5,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.api.Delete;
+import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.api.DistributedTransactionManager;
+import com.scalar.db.api.Get;
+import com.scalar.db.api.Result;
 import com.scalar.db.api.TwoPhaseCommitTransaction;
 import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.api.Update;
@@ -15,9 +19,11 @@ import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import java.sql.Connection;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -63,13 +69,29 @@ class InlineIntegrationTest {
       assertThat(results.get(0).rowsStamped()).isEqualTo(2);
       assertThat(rows(c, nullTxId)).containsExactly("0");
     }
-    try (Connection d = e.openDriver()) {
+    try (Connection d = e.openDriver();
+        Statement st = d.createStatement()) {
       assertThat(rows(d, "SELECT * FROM inl.imp ORDER BY id"))
           .as("the data columns only")
           .containsExactly("1/a", "2/b");
-      // writes, and the stronger levels, come with milestones 10b and 10c
-      assertThatThrownBy(() -> d.createStatement().executeUpdate("UPDATE inl.imp SET x = 'z'"))
+      // writes (10b): an INSERT names its columns, and none names a metadata column
+      assertThatThrownBy(() -> st.executeUpdate("INSERT INTO inl.imp VALUES (3, 'c')"))
           .isInstanceOf(SQLFeatureNotSupportedException.class);
+      assertThatThrownBy(() -> st.executeUpdate("UPDATE inl.imp SET tx_state = 3"))
+          .isInstanceOf(SQLFeatureNotSupportedException.class);
+      assertThat(st.executeUpdate("UPDATE inl.imp SET x = 'z' WHERE id = 1")).isEqualTo(1);
+      assertThat(st.executeUpdate("DELETE FROM inl.imp WHERE id = 2")).isEqualTo(1);
+      try (Connection v = e.open()) {
+        assertThat(
+                rows(
+                    v,
+                    "SELECT id, x, "
+                        + e.engine().quote("tx_version")
+                        + " FROM inl.imp ORDER BY id"))
+            .as("the update stamped at the next version, the delete took the row")
+            .containsExactly("1/z/2");
+      }
+      // the stronger levels come with milestone 10c
       d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       d.setAutoCommit(false);
       assertThatThrownBy(() -> rows(d, "SELECT x FROM inl.imp"))
@@ -132,12 +154,51 @@ class InlineIntegrationTest {
                 .partitionKey(ScalarDbNames.key("id", 3))
                 .build());
         held.prepare();
-        try (Connection d = e.openDriver()) {
+        try (Connection d = e.openDriver();
+            Statement st = d.createStatement()) {
           assertThat(rows(d, "SELECT x FROM inl2.imp ORDER BY id")).containsExactly("a", "b", "c");
         }
       } finally {
         held.rollback();
       }
+    }
+    // the driver's writes of such rows (10b): an UPDATE stamps version 1, a DELETE takes the row,
+    // and ScalarDB reads what they left
+    try (Connection d = e.openDriver();
+        Statement st = d.createStatement()) {
+      assertThat(st.executeUpdate("UPDATE inl2.imp SET x = 'u' WHERE id = 2")).isEqualTo(1);
+      assertThat(st.executeUpdate("DELETE FROM inl2.imp WHERE id = 3")).isEqualTo(1);
+    }
+    try (Connection v = e.open()) {
+      assertThat(
+              rows(
+                  v,
+                  "SELECT id, "
+                      + e.engine().quote("tx_state")
+                      + ", "
+                      + e.engine().quote("tx_version")
+                      + " FROM inl2.imp WHERE id > 1 ORDER BY id"))
+          .containsExactly("2/3/1");
+    }
+    try (DistributedTransactionManager tm = e.scalarDb().getTransactionManager()) {
+      DistributedTransaction tx = tm.begin();
+      Optional<Result> two =
+          tx.get(
+              Get.newBuilder()
+                  .namespace(ns)
+                  .table(table)
+                  .partitionKey(ScalarDbNames.key("id", 2))
+                  .build());
+      Optional<Result> three =
+          tx.get(
+              Get.newBuilder()
+                  .namespace(ns)
+                  .table(table)
+                  .partitionKey(ScalarDbNames.key("id", 3))
+                  .build());
+      tx.commit();
+      assertThat(two.map(r -> r.getText(ScalarDbNames.N("x")))).contains("u");
+      assertThat(three).isEmpty();
     }
   }
 }

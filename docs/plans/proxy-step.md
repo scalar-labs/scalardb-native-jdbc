@@ -636,6 +636,14 @@ the comparison suites of `testing.md` (T1 to T3) run over both once they exist.
     is the conditional delete of the row itself, no tombstone; a statement naming a `tx_*` or
     `before_*` column is refused. Batches, generated keys, `RETURNING`/`OUTPUT`, upserts' refusals, as
     on the decoupled layouts. `WriteIntegrationTest` and `MoreWritesIntegrationTest` by layout.
+    **Done (2026-10-20).** As planned, but: an INSERT without a column list is refused rather than
+    expanded (ORMs name the columns); UPDATE runs unchanged, its CAS on the same row; an INSERT's stamp
+    is an UPDATE of the rows it inserted by key where `tx_id IS NULL`, with no subquery on the table,
+    which MySQL refuses in an UPDATE of it. Found on the way: `RETURNING *` and `getGeneratedKeys`
+    after `RETURN_GENERATED_KEYS` returned the metadata columns; they return the data columns, and a
+    `RETURNING` with any other `*` is refused. `WriteIntegrationTest`'s main scenario and four of
+    `MoreWritesIntegrationTest`'s (batches, `RETURNING`, the in-flight wait, read-only) run on an
+    imported and a created inline table; the locking ones wait for 10c.
   - **10c: locking reads and the other levels.** `FOR UPDATE`/`FOR SHARE` and SQL Server's hints,
     SNAPSHOT and SERIALIZABLE on all five engines; `SnapshotIntegrationTest`,
     `SerializableIntegrationTest` and the interleaving suite by layout.

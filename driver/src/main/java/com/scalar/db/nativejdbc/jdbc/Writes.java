@@ -177,6 +177,9 @@ final class Writes {
           tables, "RETURNING on an UPDATE or DELETE of a ScalarDB table is not supported");
     }
     Names n = new Names(engine, t);
+    if (t.layout() == Layout.INLINE) {
+      inlineRefusals(engine, shape, t, tables);
+    }
     if (vendor != null && shape.kind() == StatementShape.Kind.INSERT) {
       String why = otherKeys(vendor, n);
       if (why != null) {
@@ -186,6 +189,36 @@ final class Writes {
     return shape.kind() == StatementShape.Kind.INSERT
         ? insertPlan(shape, t, n, all, tables, snapshot, vendor == null ? null : columns(vendor, n))
         : keyedPlan(shape, t, n, all, tables, snapshot, locks);
+  }
+
+  /**
+   * The writes an inline table refuses (milestone 10b): one naming a metadata column, which only
+   * ScalarDB and the driver write, and an INSERT without a column list, whose values would fall to
+   * the table's columns, the metadata ones among them.
+   */
+  private static void inlineRefusals(
+      Engine engine, StatementShape shape, TableInfo t, String tables) throws SQLException {
+    if (shape.kind() == StatementShape.Kind.INSERT && shape.insertColumns().isEmpty()) {
+      throw refused(
+          tables,
+          "an INSERT into a table in ScalarDB's inline layout names its columns, as the table"
+              + " holds ScalarDB's metadata columns too");
+    }
+    Set<String> data = new HashSet<>();
+    for (String c : t.dataColumns()) {
+      data.add(engine.columnKey(c));
+    }
+    List<String> named = new ArrayList<>(shape.insertColumns());
+    named.addAll(shape.setColumns());
+    named.addAll(shape.whereColumns());
+    for (String c : named) {
+      String lower = c.toLowerCase(Locale.ROOT);
+      if (!data.contains(engine.columnKey(c))
+          && (lower.startsWith("tx_") || lower.startsWith("before_"))) {
+        throw refused(
+            tables, "a write naming ScalarDB's metadata column " + c + " is not supported");
+      }
+    }
   }
 
   /** Why the engine may store other key values than an INSERT gives; null when it cannot. */
@@ -405,6 +438,7 @@ final class Writes {
         n,
         shape.kind() == StatementShape.Kind.DELETE,
         t.layout() == Layout.DECOUPLED_IMPORTED,
+        t.layout() == Layout.INLINE,
         afterImages,
         locked,
         new Step(keys, inWhere),
@@ -432,6 +466,15 @@ final class Writes {
       throw refused(tables, "the statement's text cannot be rewritten");
     }
     String returning = shape.returning() ? source.substring(items, end).trim() : null;
+    if (t.layout() == Layout.INLINE
+        && returning != null
+        && !returning.equals("*")
+        && returning.contains("*")) {
+      throw refused(
+          tables,
+          "RETURNING with a * other than all of it on a table in ScalarDB's inline layout, whose"
+              + " metadata columns it would return; name the columns");
+    }
     // MySQL has no RETURNING: the keys are read back by the literals and placeholders the
     // statement gives them in its column list, one row each, or are the AUTO_INCREMENT values of
     // the one key column it leaves out, which the vendor driver reports (todos 186, 187)
@@ -476,7 +519,10 @@ final class Writes {
                     + " "
                     + source.substring(output)
                 : returns
-                    ? source.substring(0, end)
+                    ? (n.inline && "*".equals(returning)
+                            // the data columns, not the metadata ones beside them (milestone 10b)
+                            ? source.substring(0, items) + " " + n.star("")
+                            : source.substring(0, end))
                         + (returning == null ? " RETURNING " : ", ")
                         + n.readColumns("")
                         + source.substring(end)
@@ -1199,6 +1245,8 @@ final class Writes {
   private static final class KeyedPlan extends Plan {
     final boolean delete;
     final boolean imported;
+    // the metadata in the row: a DELETE is the conditional delete of the row itself (milestone 10b)
+    final boolean inline;
     final @Nullable Step afterImages;
     final @Nullable Step locked;
     final Step keys;
@@ -1209,6 +1257,7 @@ final class Writes {
         Names n,
         boolean delete,
         boolean imported,
+        boolean inline,
         @Nullable Step afterImages,
         @Nullable Step locked,
         Step keys,
@@ -1217,6 +1266,7 @@ final class Writes {
       super(n);
       this.delete = delete;
       this.imported = imported;
+      this.inline = inline;
       this.afterImages = afterImages;
       this.locked = locked;
       this.keys = keys;
@@ -1280,9 +1330,15 @@ final class Writes {
           }
           anchors.wrote(run.txId); // the stamp stays if the DELETE then matches nothing
         }
+        // an inline row is deleted with its metadata, by the anchored delete alone
+        boolean rowDelete = inline && delete;
         int written;
-        try (PreparedStatement ps = run.prepare(dml, row.key)) {
-          written = ps.executeUpdate();
+        if (rowDelete) {
+          written = cas(run, row, types);
+        } else {
+          try (PreparedStatement ps = run.prepare(dml, row.key)) {
+            written = ps.executeUpdate();
+          }
         }
         if (written == 0) {
           skipOrAbort(run, row);
@@ -1291,7 +1347,7 @@ final class Writes {
         if (written != 1) {
           throw new Aborted("a key matched " + written + " rows");
         }
-        if (!(delete && row.metaKey == null) && cas(run, row, types) != 1) {
+        if (!rowDelete && !(delete && row.metaKey == null) && cas(run, row, types) != 1) {
           throw new Aborted("a row the statement writes changed after it was read");
         }
         anchors.wrote(run.txId);
@@ -1393,6 +1449,14 @@ final class Writes {
       }
       String keyed = n.keyEquals("") + " AND " + n.committed();
       if (row.txId == null) {
+        if (inline && delete) {
+          try (PreparedStatement ps =
+              run.prepare(
+                  "DELETE FROM " + n.meta + " WHERE " + keyed + " AND " + n.txId + " IS NULL")) {
+            bind(ps, 1, metaKey);
+            return ps.executeUpdate();
+          }
+        }
         try (PreparedStatement ps =
             run.prepare(n.stamp("1") + keyed + " AND " + n.txId + " IS NULL")) {
           bind(ps, run.stamp(ps, 1), metaKey);
@@ -1748,7 +1812,8 @@ final class Writes {
     }
 
     private void stamp(Run run, Keys keys) throws SQLException {
-      int stamped = stampFromData(run, n, keys);
+      // an inline row is its own metadata row: stamped where it stands, below
+      int stamped = n.inline ? 0 : stampFromData(run, n, keys);
       if (stamped == keys.rows.size()) {
         return;
       }
@@ -1770,20 +1835,28 @@ final class Writes {
                                 + n.keyJoinValues(n.meta)
                             : n.meta,
                         "COALESCE(" + n.txVersion + ", 0) + 1")
-                    + "EXISTS (SELECT 1 FROM "
-                    + n.data
-                    + " d WHERE "
-                    + n.keyJoin(n.meta, "d")
-                    + (keysFirst ? "" : " AND " + n.keyIn("d", keys.types, chunk.size()))
-                    + ") AND "
-                    + n.distinctFrom(n.txId)
-                    + " AND "
-                    + n.committed())) {
+                    + (n.inline
+                        // the rows the statement just inserted, their metadata NULL; no
+                        // subquery on the table itself, which MySQL refuses in an UPDATE of it
+                        ? (keysFirst ? "" : n.keyIn(n.meta, keys.types, chunk.size()) + " AND ")
+                            + n.txId
+                            + " IS NULL"
+                        : "EXISTS (SELECT 1 FROM "
+                            + n.data
+                            + " d WHERE "
+                            + n.keyJoin(n.meta, "d")
+                            + (keysFirst ? "" : " AND " + n.keyIn("d", keys.types, chunk.size()))
+                            + ") AND "
+                            + n.distinctFrom(n.txId)
+                            + " AND "
+                            + n.committed()))) {
           int i =
               keysFirst
                   ? run.stamp(ps, bindAll(ps, 1, chunk))
                   : bindAll(ps, run.stamp(ps, 1), chunk);
-          ps.setString(i, run.txId);
+          if (!n.inline) {
+            ps.setString(i, run.txId);
+          }
           taken += ps.executeUpdate();
         }
       }
@@ -1855,14 +1928,14 @@ final class Writes {
     String sql =
         keys.rows.isEmpty()
             ? "SELECT "
-                + (items.equals("*") ? q + ".*" : items)
+                + (items.equals("*") ? n.star(q) : items)
                 + " FROM "
                 + n.data
                 + " "
                 + q
                 + " WHERE 1 = 0"
             : "SELECT "
-                + (items.equals("*") ? q + ".*" : items)
+                + (items.equals("*") ? n.star(q) : items)
                 + " FROM "
                 + n.data
                 + " " // a table alias without AS, which Oracle has not
@@ -2188,6 +2261,9 @@ final class Writes {
     final String txVersion;
     final String preparedAt;
     final String committedAt;
+    // the metadata in the row: the table is its own metadata table (milestone 10)
+    final boolean inline;
+    private final List<String> dataColumns;
 
     Names(Engine engine, TableInfo t) {
       this.engine = engine;
@@ -2205,6 +2281,8 @@ final class Writes {
       this.txVersion = engine.quote("tx_version");
       this.preparedAt = engine.quote("tx_prepared_at");
       this.committedAt = engine.quote("tx_committed_at");
+      this.inline = t.layout() == Layout.INLINE;
+      this.dataColumns = t.dataColumns();
     }
 
     // SQL Server: the data table's primary key index, quoted, read once
@@ -2241,6 +2319,21 @@ final class Writes {
     }
 
     /** The key columns as a select list the driver reads keys from, as {@link #key} reads them. */
+    /**
+     * Every data column, as {@code SELECT q.*} would give them but for an inline table's metadata
+     * columns, which only ScalarDB and the driver see.
+     */
+    String star(String q) {
+      if (!inline) {
+        return (q.isEmpty() ? "" : q + ".") + "*";
+      }
+      List<String> out = new ArrayList<>();
+      for (String c : dataColumns) {
+        out.add((q.isEmpty() ? "" : q + ".") + engine.quote(c));
+      }
+      return String.join(", ", out);
+    }
+
     String readColumns(String q) {
       List<String> out = new ArrayList<>();
       for (String k : keyColumns) {

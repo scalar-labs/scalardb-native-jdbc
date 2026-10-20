@@ -92,6 +92,9 @@ class MoreWritesIntegrationTest {
           e.createSchema("wb"),
           "CREATE TABLE wb.imp (id " + e.intType() + " PRIMARY KEY, x " + e.textType() + ")",
           "INSERT INTO wb.imp VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+          // and in the inline layout (milestone 10b)
+          "CREATE TABLE wb.impi (id " + e.intType() + " PRIMARY KEY, x " + e.textType() + ")",
+          "INSERT INTO wb.impi VALUES (1, 'a'), (2, 'b'), (3, 'c')",
           "CREATE TABLE wb.plain (id " + e.intType() + " PRIMARY KEY, x " + e.textType() + ")",
           "CREATE TABLE wb.cov (id "
               + e.intType()
@@ -232,17 +235,28 @@ class MoreWritesIntegrationTest {
               .addPartitionKey(N("id"))
               .build(),
           DECOUPLED);
+      admin.importTable(N("wb"), N("impi"), Map.of(), Map.of());
+      admin.createTable(
+          N("wb"),
+          N("madei"),
+          TableMetadata.newBuilder()
+              .addColumn(N("id"), intType())
+              .addColumn(N("x"), DataType.TEXT)
+              .addPartitionKey(N("id"))
+              .build());
     }
     try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
       DistributedTransaction tx = tm.begin();
-      for (int i = 1; i <= 3; i++) {
-        tx.insert(
-            Insert.newBuilder()
-                .namespace(N("wb"))
-                .table(N("made"))
-                .partitionKey(id(i))
-                .textValue(N("x"), String.valueOf((char) ('a' + i - 1)))
-                .build());
+      for (String made : List.of("made", "madei")) {
+        for (int i = 1; i <= 3; i++) {
+          tx.insert(
+              Insert.newBuilder()
+                  .namespace(N("wb"))
+                  .table(N(made))
+                  .partitionKey(id(i))
+                  .textValue(N("x"), String.valueOf((char) ('a' + i - 1)))
+                  .build());
+        }
       }
       tx.commit();
     }
@@ -279,6 +293,20 @@ class MoreWritesIntegrationTest {
         lockingReads(e, tm, tpc, t);
         reviewFindings(e, tpc, t);
         timeoutMidWrite(e, tpc, t);
+        readOnlyWrite(e, t);
+      }
+      // the inline layout, the table its own metadata table: the writes without a locking read
+      // (milestone 10b; locking reads and the stronger levels come with 10c)
+      for (Table t :
+          List.of(
+              new Table("wb.impi", "wb.impi", N("impi")),
+              new Table(
+                  "wb.madei",
+                  "wb." + Q(catalog.lookup(List.of(), N("wb"), N("madei")).metadataTable()),
+                  N("madei")))) {
+        batches(e, tm, tpc, t);
+        returning(e, t);
+        inFlightWait(e, tpc, t);
         readOnlyWrite(e, t);
       }
       if (e.engine() == Engine.POSTGRESQL) {

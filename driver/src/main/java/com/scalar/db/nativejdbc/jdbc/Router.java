@@ -566,10 +566,6 @@ final class Router {
               + tables);
     }
     TableInfo t = Objects.requireNonNull(scalarDb.get(shape.get().table()));
-    if (t.layout() == Layout.INLINE) {
-      throw Errors.unsupported(
-          "writes to tables in ScalarDB's inline layout are not supported yet" + tables);
-    }
     Writes.Plan plan =
         Writes.plan(engine, shape.get(), t, tables, snapshot(), lockingSerializable(), vendor);
     return new Route(
