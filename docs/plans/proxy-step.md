@@ -555,10 +555,45 @@ Split, as milestone 4 was (2026-10-17), each part reviewed before the next:
 
 ### Milestone 9: tools and acceptance
 
-The `tools` module with the setup command (`setup`, `check`, `teardown`, `--dry-run`, exit codes, todo
-026), a command line over the driver's `setup.Setup`, which stays in the driver, the sweeper calling `recoverRecord`, and the `samples/` applications of design 4.6 (plain JDBC,
-Spring Data JDBC, JPA, MyBatis) as the acceptance suite. The CI engine matrix and the nightly (todos 021
-and 052).
+The `tools` module with the setup command and the stuck-row check, the `samples/` applications of design
+4.6 as the acceptance suite, and the engine matrix in CI. The sweeper first planned here was dropped on
+2026-10-12: settling rows needs the coordinator, which the driver does not depend on, so recovery is
+ScalarDB's (todo 084) and the driver keeps only the stuck-row check (todo 085). Split in four, each ending
+with the full check green and a commit:
+
+  - **9a: test harness and CI matrix** (todos 021, 052). One integration test task per engine, run side by
+    side, so a full check costs about the slowest engine, not the sum (today about 45 minutes in one
+    task); `-Dnativejdbc.engines` still narrows it. An external database by
+    `-Dnativejdbc.<engine>.url`, `.username`, `.password` in place of the container, for a nightly
+    against a real server. CI: the unit tests and static checks in one job, the integration tests in a
+    matrix job per engine. To measure first: whether Gradle runs the per-engine tasks of one project in
+    parallel (it does with the configuration cache on, which `gradle.properties` turns on), and the
+    memory of all five containers at once against Docker's 7.75 GB (SQL Server and Oracle together have
+    run out of it before; a cap of two or three engines at a time if so). Done when a full local check
+    and the CI run take about the slowest engine's time.
+  - **9b: the `tools` module** (todos 026, 085). A command line over the driver's `setup.Setup`, which
+    stays in the driver: `setup`, `check` and `teardown`, over every ScalarDB table of the catalog or
+    those named with `--table`; `--dry-run` prints the DDL; never prompts; exit 0 when all is well, 1
+    when something is missing or rows are stuck, 2 on an error; a line per table, or JSON with `--json`.
+    `check` runs the verification the driver runs at connect (the setup of each table, SQL Server's
+    snapshot settings) and the stuck-row check of design 4.4: per table, the count and oldest age of rows
+    prepared past the transaction lifetime, read-only, through the in-flight index, never reading the
+    coordinator. picocli, as the shell uses; no ScalarDB dependency. Tests on all five engines: a table
+    set up and checked, one missing, rows left prepared and reported, a committed table reporting none.
+    From 026 also: the logger category `com.scalar.db.nativejdbc` and its events (refusals, catalog
+    refreshes, in-flight waits) with their levels, in the design. To decide first: whether a catalog
+    refresh through the JDBC surface (a client-info key beside passthrough) is still wanted, or the
+    TTL is enough.
+  - **9c: the samples** (design 4.6). `samples/crud-jdbc`, `crud-spring-data-jdbc`, `crud-jpa`
+    (Hibernate) and `crud-mybatis`: one entity with a generated key and a version column, its CRUD, an
+    optimistic-lock conflict, a `@Transactional` rollback, and a ScalarDB transaction writing the same
+    table between two of the application's, through the published driver artifact on a pool. Each runs
+    as a test on every engine, so the acceptance suite is the samples themselves. To measure first: the
+    statements each ORM emits on each engine (Hibernate's sequences and `RETURNING`, Spring Data JDBC's
+    generated keys, MyBatis's `useGeneratedKeys`), each against the refusal list, so a refusal found is
+    fixed in the driver or documented, not worked around in the sample.
+  - **9d: the release.** README's quick start through the tools and a sample; RELEASING.md for the new
+    modules; design 1, 3 and 4.6 as built; the next preview, 3.19.0-alpha.2, prepared as alpha.1 was.
 
 ## Package layout
 
@@ -584,8 +619,8 @@ New packages under `com.scalar.db.nativejdbc`, each depending only on what is li
 | 039 session state | milestone 1 |
 | 012 rewrite fragments | milestone 3 |
 | 008 statement cache | milestone 6 |
-| 026 operator tooling | milestone 9 |
-| 021, 052 harness and CI | milestones 5 and 9 |
+| 026 operator tooling, 085 stuck-row check | milestone 9b |
+| 021, 052 harness and CI | milestones 5 and 9a |
 
 The cleanup todos (019, 020, 022 to 025, 028 to 031, 050, 051) are taken when a milestone touches the
 code they name, not separately.
