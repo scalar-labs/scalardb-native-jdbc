@@ -35,6 +35,28 @@ plain-table plan is itself poor (MariaDB's paged join: BASE 204 ms, VIEW_CASE 0.
 
 One repetition only: single-digit factors are indicative; the large ones are not noise.
 
+## Recommendation
+
+Which form to read each kind of query with, per engine. Keep means the split read the driver emits
+today (SPLIT_DRV, `SplitRead.java`): the committed copy excludes rows in flight by `NOT EXISTS` on
+PostgreSQL and Oracle, and by a left join to the DISTINCT in-flight keys on MySQL and MariaDB.
+Brackets give the gain over DRIVER measured here.
+
+| Query type | PostgreSQL | Oracle | MySQL | MariaDB |
+|---|---|---|---|---|
+| Key lookups, filters, FK filters, IN / NOT EXISTS subqueries, LEFT JOIN, 2-4 table joins | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, DISTINCT set) | Keep (SPLIT_DRV, DISTINCT set) |
+| Paging: ORDER BY key + LIMIT, keyset, indexed range + LIMIT | VIEW_CASE (1.7x-14x) | VIEW_CASE (10x-37x) | VIEW_CASE (2x-111x) | VIEW_CASE (1.5x-11x) |
+| Paged join, 2-3 tables | SPLIT_DRVP (3.6x-7.4x); VIEW_CASE with the plain filter to confirm | VIEW_CASE (4x-163x) | VIEW_CASE (8x-2,800x) | VIEW_CASE (530x-1,200x) |
+| Deep OFFSET page | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, NOT EXISTS) | VIEW_CASE (3.5x-13x) | VIEW_CASE (3.7x-4.5x) |
+| Full-scan aggregates | SPLIT_DRVN (1.6x-8x) | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, DISTINCT set) | Keep (SPLIT_DRV, DISTINCT set) |
+| DISTINCT | SPLIT_NI or SPLIT_DHDP (1.5x-2.3x) | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, DISTINCT set); no form helps | Keep (SPLIT_DRV, DISTINCT set); no form helps |
+| Wide tables, 4-table key lookup | VIEW_CASE (3.2x-3.5x) | Keep (SPLIT_DRV, NOT EXISTS) | VIEW_CASE (1.7x-2.7x) | VIEW_LJ (2.3x-3.1x) |
+
+This run's VIEW_CASE used the `COALESCE` filter, not the plain one the driver emits; on PostgreSQL's
+paged joins that form is the planner's misestimate, so those cells need a rerun with
+`-Dnativejdbc.bench.plainCaseFilter=true`. Forms that beat DRIVER by up to 1.5x on joins at 100 rows
+in flight lose to it at 10,000, and the driver cannot know the count when it plans, so those stay Keep.
+
 ## Rankings
 
 ### Tier A (EC2)
