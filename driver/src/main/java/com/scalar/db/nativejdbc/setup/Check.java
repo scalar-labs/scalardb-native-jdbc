@@ -201,7 +201,7 @@ public final class Check {
     Engine engine = catalog.engine();
     catalog.invalidate();
     List<Result> out = new ArrayList<>();
-    for (TableInfo t : catalog.decoupledTables()) {
+    for (TableInfo t : catalog.scalarDbTables()) {
       if (!which.test(t)) {
         continue;
       }

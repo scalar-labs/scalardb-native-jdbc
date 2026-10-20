@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
@@ -49,51 +50,67 @@ class ReadIntegrationTest {
     return Engines.selected();
   }
 
+  /** Every engine with each layout: decoupled, and inline (milestone 10). */
+  static List<Arguments> layouts() {
+    List<Arguments> out = new ArrayList<>();
+    for (Engines e : Engines.selected()) {
+      out.add(Arguments.of(e, false));
+      out.add(Arguments.of(e, true));
+    }
+    return out;
+  }
+
   @ParameterizedTest
-  @MethodSource("engines")
+  @MethodSource("layouts")
   @SuppressFBWarnings(
       value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
       justification = "fixture DDL and queries written in the test sources")
-  void reads_seeTheCommittedImage_whileScalarDbHoldsRowsPrepared(Engines e) throws Exception {
+  void reads_seeTheCommittedImage_whileScalarDbHoldsRowsPrepared(Engines e, boolean inline)
+      throws Exception {
     Engine engine = e.engine();
-    String rd = e.storedSchema("rd");
+    // each layout in a schema of its own: the decoupled one, or the inline one (milestone 10)
+    String ns = inline ? "ri" : "rd";
+    String rd = e.storedSchema(ns);
+    Map<String, String> layout = inline ? Map.of() : DECOUPLED;
     String id = e.storedColumn("id");
     String x = e.storedColumn("x");
     String imp = e.storedTable("imp");
     try (Connection c = e.open()) {
       e.execute(
           c,
-          e.createSchema("rd"),
-          "CREATE TABLE rd.imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
-          "INSERT INTO rd.imp VALUES (1, 'a')",
-          "INSERT INTO rd.imp VALUES (2, 'b')",
-          "INSERT INTO rd.imp VALUES (3, 'c')");
+          e.createSchema(ns),
+          "CREATE TABLE " + ns + ".imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
+          "INSERT INTO " + ns + ".imp VALUES (1, 'a')",
+          "INSERT INTO " + ns + ".imp VALUES (2, 'b')",
+          "INSERT INTO " + ns + ".imp VALUES (3, 'c')");
     }
     // the created table's names are lower case, which Oracle reads only quoted
     String madeTable = engine == Engine.ORACLE ? "\"made\"" : "made";
-    String made = "rd." + madeTable;
+    String made = ns + "." + madeTable;
     String mid = engine == Engine.ORACLE ? "\"id\"" : "id";
     String mx = engine == Engine.ORACLE ? "\"x\"" : "x";
     try (Connection c = e.open()) {
       // a plain table holding made's committed image while rows are in flight, to compare with
       e.execute(
           c,
-          "CREATE TABLE rd.pl ("
+          "CREATE TABLE "
+              + ns
+              + ".pl ("
               + mid
               + " "
               + e.intType()
               + " PRIMARY KEY, "
               + mx
               + " VARCHAR(10))",
-          "INSERT INTO rd.pl VALUES (1, 'a')",
-          "INSERT INTO rd.pl VALUES (2, 'b')",
-          "INSERT INTO rd.pl VALUES (3, 'c')");
+          "INSERT INTO " + ns + ".pl VALUES (1, 'a')",
+          "INSERT INTO " + ns + ".pl VALUES (2, 'b')",
+          "INSERT INTO " + ns + ".pl VALUES (3, 'c')");
     }
     TransactionFactory scalarDb = e.scalarDb();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true); // the commit state of every transaction
       admin.createNamespace(rd, true);
-      admin.importTable(rd, imp, DECOUPLED, Map.of());
+      admin.importTable(rd, imp, layout, Map.of());
       admin.createTable(
           rd,
           "made",
@@ -102,7 +119,7 @@ class ReadIntegrationTest {
               .addColumn("x", DataType.TEXT)
               .addPartitionKey("id")
               .build(),
-          DECOUPLED);
+          layout);
     }
     try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
       DistributedTransaction tx = tm.begin();
@@ -119,7 +136,8 @@ class ReadIntegrationTest {
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     // ScalarDB addresses an imported table by its virtual table, imp_scalardb
-    String impScalarDb = Objects.requireNonNull(catalog.lookup(List.of(), rd, imp).virtualTable());
+    String impScalarDb =
+        Objects.requireNonNullElse(catalog.lookup(List.of(), rd, imp).virtualTable(), imp);
     try (Connection c = e.open()) {
       List<Setup.Result> results =
           Setup.run(catalog, c, t -> t.namespace().equals(rd), Duration.ofMinutes(1), List.of());
@@ -134,7 +152,8 @@ class ReadIntegrationTest {
     try (Connection c = e.openDriver()) {
       assertThat(rows(c, "SELECT " + mx + " FROM " + made + " ORDER BY " + mid))
           .containsExactly("a", "b", "c");
-      assertThat(rows(c, "SELECT x FROM rd.imp ORDER BY id")).containsExactly("a", "b", "c");
+      assertThat(rows(c, "SELECT x FROM " + ns + ".imp ORDER BY id"))
+          .containsExactly("a", "b", "c");
     }
 
     try (TwoPhaseCommitTransactionManager tm = scalarDb.getTwoPhaseCommitTransactionManager()) {
@@ -159,7 +178,8 @@ class ReadIntegrationTest {
         // prepared: the before images, and no in-flight insert
         assertThat(rows(c, "SELECT " + mx + " FROM " + made + " ORDER BY " + mid))
             .containsExactly("a", "b", "c");
-        assertThat(rows(c, "SELECT x FROM rd.imp ORDER BY id")).containsExactly("a", "b", "c");
+        assertThat(rows(c, "SELECT x FROM " + ns + ".imp ORDER BY id"))
+            .containsExactly("a", "b", "c");
         try (PreparedStatement ps =
             c.prepareStatement("SELECT " + mx + " FROM " + made + " WHERE " + mid + " = ?")) {
           ps.setInt(1, 2);
@@ -211,7 +231,9 @@ class ReadIntegrationTest {
                         + mx
                         + ", i.x FROM "
                         + made
-                        + " m JOIN rd.imp i ON m."
+                        + " m JOIN "
+                        + ns
+                        + ".imp i ON m."
                         + mid
                         + " = i.id ORDER BY i.id"))
             .containsExactly("a/a", "b/b", "c/c");
@@ -255,7 +277,7 @@ class ReadIntegrationTest {
         // the reads above ran split, not through the read views
         Router router = new Router(engine, catalog, new Session(engine));
         String join =
-            "SELECT m." + mx + " FROM " + made + " m JOIN rd.imp i ON m." + mid + " = i.id";
+            "SELECT m." + mx + " FROM " + made + " m JOIN " + ns + ".imp i ON m." + mid + " = i.id";
         assertThat(router.route(vendor, join).sql)
             .contains("UNION ALL")
             .doesNotContainIgnoringCase("rc_");
@@ -327,7 +349,9 @@ class ReadIntegrationTest {
         assertThat(
                 router.route(
                         vendor,
-                        "SELECT x FROM rd.imp WHERE id IN (SELECT MAX("
+                        "SELECT x FROM "
+                            + ns
+                            + ".imp WHERE id IN (SELECT MAX("
                             + mid
                             + ") FROM "
                             + made
@@ -343,7 +367,8 @@ class ReadIntegrationTest {
     try (Connection c = e.openDriver()) {
       assertThat(rows(c, "SELECT " + mx + " FROM " + made + " ORDER BY " + mid))
           .containsExactly("a", "b2", "d");
-      assertThat(rows(c, "SELECT x FROM rd.imp ORDER BY id")).containsExactly("A", "b", "c");
+      assertThat(rows(c, "SELECT x FROM " + ns + ".imp ORDER BY id"))
+          .containsExactly("A", "b", "c");
     }
 
     // many rows in flight: on MySQL and MariaDB a statement prepared before them is prepared again
@@ -453,7 +478,8 @@ class ReadIntegrationTest {
       justification = "test queries written in the test sources")
   private static void splitReads(Connection c, String made, String mid, String mx)
       throws SQLException {
-    String join = " FROM " + made + " m JOIN rd.imp i ON m." + mid + " = i.id";
+    String ns = made.substring(0, made.indexOf('.')); // the layout's schema
+    String join = " FROM " + made + " m JOIN " + ns + ".imp i ON m." + mid + " = i.id";
     assertThat(rows(c, "SELECT m." + mid + ", m." + mx + ", i.x" + join))
         .containsExactlyInAnyOrder("1/a/a", "2/b/b", "3/c/c");
     // three references, eight copies
@@ -466,7 +492,9 @@ class ReadIntegrationTest {
                     + mx
                     + " FROM "
                     + made
-                    + " a JOIN rd.imp b ON a."
+                    + " a JOIN "
+                    + ns
+                    + ".imp b ON a."
                     + mid
                     + " = b.id JOIN "
                     + made
@@ -475,7 +503,10 @@ class ReadIntegrationTest {
                     + " = b.id WHERE b.id < 3"))
         .containsExactlyInAnyOrder("a/a/a", "b/b/b");
     // the subquery's table is split; the outer row comes out once
-    assertThat(rows(c, "SELECT x FROM rd.imp WHERE id IN (SELECT " + mid + " FROM " + made + ")"))
+    assertThat(
+            rows(
+                c,
+                "SELECT x FROM " + ns + ".imp WHERE id IN (SELECT " + mid + " FROM " + made + ")"))
         .containsExactlyInAnyOrder("a", "b", "c");
     // the nullable side of a LEFT JOIN is split
     assertThat(
@@ -483,7 +514,9 @@ class ReadIntegrationTest {
                 c,
                 "SELECT i.x, m."
                     + mx
-                    + " FROM rd.imp i LEFT JOIN "
+                    + " FROM "
+                    + ns
+                    + ".imp i LEFT JOIN "
                     + made
                     + " m ON m."
                     + mid
@@ -511,6 +544,7 @@ class ReadIntegrationTest {
    */
   private static void groupedReads(
       Connection c, Connection vendor, String made, String mid, String mx) throws SQLException {
+    String ns = made.substring(0, made.indexOf('.')); // the layout's schema
     String[][] statements = {
       {"SELECT COUNT(*) FROM {T}"},
       {"SELECT count( * ) + 1, Max(m.{ID}) * 2 FROM {T} m"},
@@ -528,7 +562,7 @@ class ReadIntegrationTest {
         "0"
       },
     };
-    sameAsPlain(c, vendor, made, mid, mx, statements);
+    sameAsPlain(c, vendor, ns + ".pl", made, mid, mx, statements);
   }
 
   /**
@@ -539,6 +573,7 @@ class ReadIntegrationTest {
   private static void outerJoinAndSubqueryReads(
       Connection c, Connection vendor, Router router, String made, String mid, String mx)
       throws SQLException {
+    String ns = made.substring(0, made.indexOf('.')); // the layout's schema
     String[][] statements = {
       // a match in each piece, and none
       {"SELECT a.{X}, b.{X} FROM {T} a LEFT JOIN {T} b ON b.{ID} = a.{ID} + 1 ORDER BY a.{ID}"},
@@ -559,28 +594,46 @@ class ReadIntegrationTest {
       },
       // the key: each value in one piece
       {
-        "SELECT p.{X} FROM rd.pl p WHERE p.{ID} IN (SELECT m.{ID} FROM {T} m WHERE m.{ID} <> ?) ORDER BY 1",
+        "SELECT p.{X} FROM "
+            + ns
+            + ".pl p WHERE p.{ID} IN (SELECT m.{ID} FROM {T} m WHERE m.{ID} <> ?) ORDER BY 1",
         "0"
       },
       // a value both pieces hold, and an UNKNOWN comparison
-      {"SELECT p.{X} FROM rd.pl p WHERE p.{ID} IN (SELECT m.{ID} * 0 + 1 FROM {T} m) ORDER BY 1"},
       {
-        "SELECT p.{X} FROM rd.pl p WHERE p.{ID} IN"
+        "SELECT p.{X} FROM "
+            + ns
+            + ".pl p WHERE p.{ID} IN (SELECT m.{ID} * 0 + 1 FROM {T} m) ORDER BY 1"
+      },
+      {
+        "SELECT p.{X} FROM "
+            + ns
+            + ".pl p WHERE p.{ID} IN"
             + " (SELECT CASE WHEN m.{ID} = 2 THEN NULL ELSE m.{ID} * 0 + 2 END FROM {T} m) ORDER BY 1"
       },
       {
-        "SELECT p.{X} FROM rd.pl p WHERE EXISTS (SELECT 1 FROM {T} m WHERE m.{ID} >= p.{ID}) ORDER BY 1"
+        "SELECT p.{X} FROM "
+            + ns
+            + ".pl p WHERE EXISTS (SELECT 1 FROM {T} m WHERE m.{ID} >= p.{ID}) ORDER BY 1"
       },
       // both sides split
       {"SELECT a.{X} FROM {T} a WHERE a.{ID} IN (SELECT b.{ID} + 1 FROM {T} b) ORDER BY 1"},
       // in an expression: NOT IN with and without a NULL, NOT EXISTS, IN under OR
-      {"SELECT p.{X} FROM rd.pl p WHERE p.{ID} NOT IN (SELECT m.{ID} + 1 FROM {T} m) ORDER BY 1"},
       {
-        "SELECT p.{X} FROM rd.pl p WHERE p.{ID} NOT IN"
+        "SELECT p.{X} FROM "
+            + ns
+            + ".pl p WHERE p.{ID} NOT IN (SELECT m.{ID} + 1 FROM {T} m) ORDER BY 1"
+      },
+      {
+        "SELECT p.{X} FROM "
+            + ns
+            + ".pl p WHERE p.{ID} NOT IN"
             + " (SELECT CASE WHEN m.{ID} = 3 THEN NULL ELSE m.{ID} END FROM {T} m)"
       },
       {
-        "SELECT p.{X} FROM rd.pl p WHERE NOT EXISTS"
+        "SELECT p.{X} FROM "
+            + ns
+            + ".pl p WHERE NOT EXISTS"
             + " (SELECT 1 FROM {T} m WHERE m.{ID} = p.{ID} + 2) ORDER BY 1"
       },
       {
@@ -593,7 +646,7 @@ class ReadIntegrationTest {
       String sql = st[0].replace("{X}", mx).replace("{ID}", mid).replace("{T}", made);
       assertThat(router.route(vendor, sql).sql).as(sql).doesNotContainIgnoringCase("rc_");
     }
-    sameAsPlain(c, vendor, made, mid, mx, statements);
+    sameAsPlain(c, vendor, ns + ".pl", made, mid, mx, statements);
   }
 
   /**
@@ -604,7 +657,13 @@ class ReadIntegrationTest {
       value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
       justification = "test queries written in the test sources")
   private static void sameAsPlain(
-      Connection c, Connection vendor, String made, String mid, String mx, String[][] statements)
+      Connection c,
+      Connection vendor,
+      String plain,
+      String made,
+      String mid,
+      String mx,
+      String[][] statements)
       throws SQLException {
     for (String[] st : statements) {
       String sql = st[0].replace("{X}", mx).replace("{ID}", mid);
@@ -614,7 +673,7 @@ class ReadIntegrationTest {
         Connection conn = side == 0 ? vendor : c;
         List<String> out = side == 0 ? expected : actual;
         try (PreparedStatement ps =
-            conn.prepareStatement(sql.replace("{T}", side == 0 ? "rd.pl" : made))) {
+            conn.prepareStatement(sql.replace("{T}", side == 0 ? plain : made))) {
           for (int i = 1; i < st.length; i++) {
             ps.setInt(i, Integer.parseInt(st[i]));
           }

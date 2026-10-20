@@ -50,12 +50,22 @@ class ToolsIntegrationTest {
             true,
             Map.of("transaction-metadata-decoupling", "true"));
       }
+      // and one in the inline layout, its metadata in the row
+      admin.createTable(
+          "tl",
+          "i",
+          TableMetadata.newBuilder()
+              .addColumn("id", DataType.INT)
+              .addColumn("v", DataType.INT)
+              .addPartitionKey("id")
+              .build(),
+          true);
     }
-    String[] both = {"--table", "tl.t", "--table", "tl.u"};
+    String[] both = {"--table", "tl.t", "--table", "tl.u", "--table", "tl.i"};
 
     Run check = tool(e, "check", both);
     assertThat(check.exit).as(check.all()).isEqualTo(Main.EXIT_FOUND);
-    assertThat(check.out).contains("tl.t: not set up", "tl.u: not set up");
+    assertThat(check.out).contains("tl.t: not set up", "tl.u: not set up", "tl.i: not set up");
 
     // a dry run prints the statements and changes nothing
     Run plan = tool(e, "setup", "--dry-run", "--table", "tl.t");
@@ -68,7 +78,7 @@ class ToolsIntegrationTest {
     assertThat(setup.out).contains("tl.t: ", "read view");
     check = tool(e, "check", both);
     assertThat(check.exit).as(check.all()).isZero();
-    assertThat(check.out).contains("tl.t: set up, no rows stuck");
+    assertThat(check.out).contains("tl.t: set up, no rows stuck", "tl.i: set up, no rows stuck");
 
     // a row ScalarDB left prepared counts as stuck once it is older than the lifetime
     try (TwoPhaseCommitTransactionManager tpc =
@@ -104,7 +114,8 @@ class ToolsIntegrationTest {
     Run down = tool(e, "teardown", both);
     assertThat(down.exit).as(down.all()).isZero();
     assertThat(down.out).contains("dropped read view");
-    assertThat(tool(e, "check", both).out).contains("tl.t: not set up", "tl.u: not set up");
+    assertThat(tool(e, "check", both).out)
+        .contains("tl.t: not set up", "tl.u: not set up", "tl.i: not set up");
   }
 
   private static Run tool(Engines e, String action, String... args) throws SQLException {

@@ -17,7 +17,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -397,15 +399,18 @@ public final class Catalog implements AutoCloseable {
   }
 
   /**
-   * Lists the decoupled ScalarDB tables of the catalog, for the setup: every table the driver will
-   * need a read view and an in-flight index for.
+   * Returns every ScalarDB table the driver serves, decoupled and inline, as the setup and its
+   * check go over them.
    *
-   * @return the tables, in ScalarDB's spelling of their names
-   * @throws SQLException if the catalog cannot be read
+   * @return the tables, inline ones first, by name
+   * @throws SQLException if the catalog cannot be loaded
    */
-  public List<TableInfo> decoupledTables() throws SQLException {
+  public List<TableInfo> scalarDbTables() throws SQLException {
     Snapshot s = snapshot();
     List<TableInfo> out = new ArrayList<>();
+    for (String name : s.inlineTables()) {
+      out.add(s.classify(split(name)));
+    }
     for (VirtualTable v : s.virtualTables()) {
       out.add(s.classify(split(v.inner ? v.name : v.left)));
     }
@@ -664,23 +669,55 @@ public final class Catalog implements AutoCloseable {
       absent(c, e);
     }
     boolean caseInsensitive = present && engine.tableNamesCaseInsensitive(c);
-    SetupObjects setupObjects = setupObjects(c, virtualTables, caseInsensitive);
+    List<String> inline = inlineTables(virtualTables, metadata);
+    SetupObjects setupObjects = setupObjects(c, virtualTables, inline, caseInsensitive);
     return new Snapshot(
         present, caseInsensitive, virtualTables, metadata, setupObjects, now.plus(ttl));
   }
 
   /**
-   * The setup's objects for every decoupled table, listed by name. A failure other than a lost
-   * connection keeps the previous load's answer, so a passing error does not refuse every table for
-   * a whole TTL; a lost connection is thrown, for the caller's reconnect.
+   * The tables of ScalarDB's inline layout, by full name: those whose metadata holds the
+   * transaction columns and that are no source of a virtual table, the metadata table of a
+   * decoupled one holding them too.
+   */
+  private static List<String> inlineTables(
+      List<VirtualTable> virtualTables, Map<String, List<MetadataColumn>> metadata) {
+    Set<String> sources = new HashSet<>();
+    for (VirtualTable v : virtualTables) {
+      sources.add(v.left);
+      sources.add(v.right);
+    }
+    List<String> out = new ArrayList<>();
+    for (Map.Entry<String, List<MetadataColumn>> e : metadata.entrySet()) {
+      Set<String> names = new HashSet<>();
+      for (MetadataColumn c : e.getValue()) {
+        names.add(c.name);
+      }
+      if (!sources.contains(e.getKey()) && names.containsAll(TRANSACTION_COLUMNS)) {
+        out.add(e.getKey());
+      }
+    }
+    Collections.sort(out);
+    return out;
+  }
+
+  /**
+   * The setup's objects for every decoupled and inline table, listed by name. A failure other than
+   * a lost connection keeps the previous load's answer, so a passing error does not refuse every
+   * table for a whole TTL; a lost connection is thrown, for the caller's reconnect.
    */
   private SetupObjects setupObjects(
-      Connection c, List<VirtualTable> virtualTables, boolean caseInsensitive) throws SQLException {
+      Connection c, List<VirtualTable> virtualTables, List<String> inline, boolean caseInsensitive)
+      throws SQLException {
     Set<String> schemas = new LinkedHashSet<>();
     Set<String> views = new LinkedHashSet<>();
     Set<String> indexes = new LinkedHashSet<>();
+    List<String> users = new ArrayList<>(inline);
     for (VirtualTable v : virtualTables) {
-      QualifiedName user = split(v.inner ? v.name : v.left);
+      users.add(v.inner ? v.name : v.left);
+    }
+    for (String name : users) {
+      QualifiedName user = split(name);
       schemas.add(user.schema());
       views.add(engine.readViewName(user.table()));
       indexes.add(engine.inflightIndexName(user.table()));
@@ -775,6 +812,7 @@ public final class Catalog implements AutoCloseable {
     private final Map<String, VirtualTable> byLeft = new HashMap<>();
     private final Map<String, VirtualTable> byRight = new HashMap<>();
     private final Map<String, List<MetadataColumn>> metadata = new HashMap<>();
+    private final List<String> inline;
 
     /**
      * @param caseInsensitive whether the database compares table names without regard to case, in
@@ -788,6 +826,7 @@ public final class Catalog implements AutoCloseable {
         SetupObjects setupObjects,
         Instant expiresAt) {
       this.setupObjects = setupObjects;
+      this.inline = Catalog.inlineTables(virtualTables, metadata);
       this.present = present;
       this.caseInsensitive = caseInsensitive;
       this.expiresAt = expiresAt;
@@ -807,6 +846,10 @@ public final class Catalog implements AutoCloseable {
 
     Collection<VirtualTable> virtualTables() {
       return byName.values();
+    }
+
+    List<String> inlineTables() {
+      return inline;
     }
 
     TableInfo classify(QualifiedName q) throws SQLException {
@@ -893,14 +936,14 @@ public final class Catalog implements AutoCloseable {
             q.table(),
             Layout.INLINE,
             q.table(),
-            null,
+            q.table(), // the metadata is in the row: the table is its own metadata table
             null,
             columns.partitionKey,
             columns.clusteringKey,
             columns.dataColumns,
             columns.indexed,
             columns.floats,
-            true);
+            setupObjects.isSetUp(q.schema(), q.table(), q.table(), columns.dataColumns));
       }
       return plain(q);
     }

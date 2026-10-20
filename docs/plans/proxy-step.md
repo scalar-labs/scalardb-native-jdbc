@@ -622,7 +622,15 @@ the comparison suites of `testing.md` (T1 to T3) run over both once they exist.
     split, anchored, per-row checks, `rc_T` fallback. `SELECT *` and `ResultSetMetaData` show the data
     columns only. On PostgreSQL first, then the other four. To measure first: what ScalarDB's import
     without decoupling leaves in the added columns, and which `before_*` indexes ScalarDB creates on
-    the table, a covering index the locking re-read must not stop at (4.2).
+    the table, a covering index the locking re-read must not stop at (4.2). **Done (2026-10-20).**
+    As planned. Measured: an inline table holds exactly the columns of the decoupled data and
+    metadata tables together; an import leaves them NULL in every row; a created table gets an index
+    on `before_<col>` for each secondary index, an imported one none (for 10c). The setup backfills an
+    inline table as an imported decoupled one, its insert step finding nothing. Inline tables are
+    refused at REPEATABLE READ and SERIALIZABLE, and for locking reads and writes, until 10b and 10c.
+    `ReadIntegrationTest`'s main scenario runs by layout; `InlineIntegrationTest` covers the
+    backfill; `ToolsIntegrationTest` an inline table. The interleaving test now counts PostgreSQL's
+    serialization failure in a ScalarDB recovery as an abort, as it counts Oracle's.
   - **10b: writes.** INSERT stamps by an UPDATE of the rows it inserted, by key; an INSERT without a
     column list is expanded to the data columns; UPDATE as decoupled, its CAS on the same row; DELETE
     is the conditional delete of the row itself, no tombstone; a statement naming a `tx_*` or

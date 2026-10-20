@@ -269,7 +269,7 @@ class CatalogIntegrationTest {
 
     TableInfo imported = catalog.lookup(NO_SESSION, "app", "imported_inline");
     assertThat(imported.layout()).isEqualTo(Layout.INLINE);
-    assertThat(imported.metadataTable()).isNull();
+    assertThat(imported.metadataTable()).isEqualTo(imported.table());
     assertThat(imported.keyColumns()).containsExactly(e.storedColumn("id"));
   }
 

@@ -104,7 +104,7 @@ class CatalogTest {
   void inlineTable_carriesTheTransactionColumns_whichAreNotDataColumns() throws SQLException {
     TableInfo t = snapshot().classify(new QualifiedName("ns", "inline"));
     assertThat(t.layout()).isEqualTo(Layout.INLINE);
-    assertThat(t.metadataTable()).isNull();
+    assertThat(t.metadataTable()).isEqualTo("inline"); // the metadata is in the row
     assertThat(t.dataColumns()).containsExactly("id", "x");
   }
 

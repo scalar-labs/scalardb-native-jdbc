@@ -275,7 +275,7 @@ public final class Setup {
     }
     catalog.invalidate(); // tables ScalarDB registered since the last load included
     List<TableInfo> out = new ArrayList<>();
-    for (TableInfo t : catalog.decoupledTables()) {
+    for (TableInfo t : catalog.scalarDbTables()) {
       if (which.test(t)) {
         out.add(t);
       }
@@ -329,7 +329,9 @@ public final class Setup {
         createIndex(t, index);
         done(actions, "created in-flight index " + index);
       }
-      if (t.layout() == Layout.DECOUPLED_IMPORTED) {
+      // an inline table imported into ScalarDB holds its rows with NULL metadata, as an imported
+      // decoupled one does without metadata rows; one ScalarDB created has none, and costs a count
+      if (t.layout() == Layout.DECOUPLED_IMPORTED || t.layout() == Layout.INLINE) {
         stamped = backfill(t);
         done(actions, "backfilled " + stamped + " rows");
       }

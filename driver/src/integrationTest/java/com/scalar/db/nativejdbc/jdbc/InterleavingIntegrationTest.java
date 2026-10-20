@@ -767,10 +767,12 @@ class InterleavingIntegrationTest {
       for (Throwable c = t; c != null; c = c.getCause()) {
         // SQL Server's deadlock, MySQL's 1205 being a lock wait timeout, HY000; Oracle's deadlock
         // and its serialization failure at the SERIALIZABLE ScalarDB needs there, a recovery's
-        // included
+        // included; PostgreSQL's serialization failure in a recovery, which ScalarDB reports as a
+        // plain PreparationException (code 0)
         int code = c instanceof SQLException ? ((SQLException) c).getErrorCode() : 0;
         String state = c instanceof SQLException ? ((SQLException) c).getSQLState() : null;
         if ((code == 1205 && "40001".equals(state))
+            || (code == 0 && "40001".equals(state))
             || (code == 60 && "61000".equals(state))
             || (code == 8177 && "72000".equals(state))) {
           return true;
