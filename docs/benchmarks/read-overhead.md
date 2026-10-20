@@ -1022,3 +1022,79 @@ What is left:
   100 rows in flight, 5.0x and 5.4x against 3.5x and 2.8x; SQL Server's LEFT JOIN 2.1-2.2x against
   1.1x. Both still stay within a few times the plain query.
 - **PostgreSQL's key IN at 10,000 rows in flight**, 5.1x against 3.1x through the view.
+
+## Statistics, open transactions and paging (2026-10-20)
+
+Through the driver on Oracle and MySQL, median of three runs, each a fresh container: ratios to BASE.
+New in the benchmark: `-Dnativejdbc.bench.gatherInflight=N` (the setup gathers its statistics with
+N rows in flight, then the run puts back the measured number), `-Dnativejdbc.bench.regather=true`
+(Oracle's nightly job: each query once, then the metadata tables' statistics gathered with the
+defaults), `-Dnativejdbc.bench.inflight=0`, the BASE_OPEN mode (the plain query while an open native
+transaction holds the same rows updated, every non-key column changed), and a hot table `h` of
+20,000 rows whose rows in flight are 0.5% of it at 100 and 50% at 10,000. Differences within about
+30% are noise: some runs shared the machine.
+
+**When the statistics are gathered (todo 094).** Gathered with 100 in flight and measured at 100;
+gathered and measured at 10,000; gathered with none and measured at 10,000:
+
+| query | Oracle 100/100 | Oracle 10k/10k | Oracle 0/10k | MySQL 100/100 | MySQL 10k/10k | MySQL 0/10k |
+|---|---|---|---|---|---|---|
+| 4 tables: one region | 0.9 | 0.7 | 1654 | 2.4 | 17.8 | 19.1 |
+| NOT EXISTS, ScalarDB on both sides | 5.0 | 2.9 | 60.5 | 12.1 | 1.6 | 1.9 |
+| LEFT JOIN, ScalarDB on both sides | 1.7 | 1.3 | 17.3 | 2.3 | 1.8 | 2.0 |
+| plain table JOIN on key | 1.4 | 1.1 | 11.5 | 1.7 | 1.3 | 1.3 |
+| 3 tables: key lookup | 0.8 | 1.4 | 13.2 | 2.5 | 2.4 | 2.6 |
+| page: JOIN FK, 20 rows | 2.3 | 47.8 | 54.8 | 4.8 | 59.5 | 219 |
+| hot: COUNT(*) of 20k rows | 2.7 | 11.5 | 9.1 | 1.4 | 10.0 | 10.7 |
+
+- **Oracle depends on the moment**: a histogram gathered while nothing is in flight estimates `IN
+  (1, 2)` at one row, and a burst of 10,000 then takes nested loops over it, up to 1654x. One
+  gathered at 10,000 and measured at 100 changed little (a first round: unindexed filter 1.2 to
+  2.7x, page JOIN FK 2.7 to 4.8x, COUNT(*) 2.4 to 3.7x). The nightly job's regather, after the
+  queries had run, took "IN subquery selecting a non-key" from 3.0x to 17.5x.
+- **MySQL does not**: the same plans whichever the moment; what grows at 10,000 is the in-flight
+  pieces' own work.
+- So the setup now sets fixed statistics on Oracle, assuming 10,000 rows in flight (at most half the
+  table), and locks them; MySQL keeps the gathered histogram.
+- Setup time with the histogram: Oracle 3-19 s, MySQL 38-83 s for the benchmark's six tables.
+
+**What rows in flight cost without the driver.** DRIVER with none in flight is the rewrite alone;
+BASE_OPEN is the database alone with 10,000 held by open transactions:
+
+| query | Oracle DRIVER 0 | Oracle BASE_OPEN 10k | Oracle DRIVER / BASE_OPEN 10k | MySQL DRIVER 0 | MySQL BASE_OPEN 10k | MySQL DRIVER / BASE_OPEN 10k |
+|---|---|---|---|---|---|---|
+| key lookup | 1.1 | 1.0 | 1.1 | 1.0 | 0.8 | 1.2 |
+| full scan: COUNT(*) of 100k rows | 2.7 | 1.0 | 5.0 | 1.4 | 10.0 | 0.7 |
+| full scan: GROUP BY of 100k rows | 1.2 | 1.5 | 1.2 | 2.6 | 7.7 | 0.7 |
+| hot: COUNT(*) of 20k rows | 2.0 | 7.7 | 1.2 | 1.3 | 8.3 | 0.9 |
+| IN subquery on non-key | 1.1 | 1.5 | 0.3 | 1.6 | 3.2 | 5.1 |
+| 3 tables: one region | 1.1 | 1.8 | 0.5 | 1.7 | 2.4 | 5.2 |
+| page: ORDER BY key DESC, 20 rows of 500k | 1.3 | 1.2 | 0.9 | 1.3 | 0.8 | 25.1 |
+| page: 20 rows after 10k | 13.8 | 0.5 | 16.0 | 64.4 | 1.0 | 12.7 |
+| page: JOIN FK, 20 rows | 1.1 | 0.7 | 21.9 | 1.5 | 1.0 | 104.5 |
+| DISTINCT over an indexed column | 1.8 | 1.6 | 1.3 | 14.1 | 1.3 | 22.2 |
+
+- With nothing in flight the rewrite costs 1.0-1.6x on most shapes; the exceptions (OFFSET paging,
+  MySQL's DISTINCT and four-table key lookups, Oracle's NOT EXISTS) are the rewrite's own.
+- Open transactions cost the database itself little, except full scans and aggregates (7.7-10x on
+  MySQL, rebuilding old versions from the undo log); there the driver costs the same.
+- What remains the driver's: paging, 13-105x over the database alone, and on MySQL joins and IN
+  subqueries driven by the in-flight pieces, 4-5x.
+
+**Paging.** "page: JOIN FK, ORDER BY key DESC, 20 rows" has no filter: the plain query reads the
+orders' key backwards and stops after 20 rows. Each in-flight copy of the split starts from the
+in-flight index instead, so it reads every row in flight, joins and sorts them to keep 20. Three runs
+each:
+
+| form | Oracle 100 | Oracle 10k | MySQL 100 | MySQL 10k |
+|---|---|---|---|---|
+| DRIVER | 1.2-2.9 | 27-29 | 4.5-4.9 | 105-119 |
+| SPLIT_MX | 18-89 | 96-110 | 248-300 | 331-377 |
+| SPLIT_LT | not generated for the shape | | | |
+| VIEW_CASE | 0.4-1.2 | 0.9-1.1 | 0.9-1.0 | 0.9 |
+
+The CASE view keeps the plain plan: the key read backwards, a key lookup of each row's metadata and
+of the customer's, stopped after 20 rows (MySQL `Limit: 20 ... rows=20`, Oracle `WINDOW NOSORT
+STOPKEY`). It loses on any filter, join or aggregate over a non-key column (11-830x above), which the
+CASE hides from the index, so it suits only a row limit over a key order with the other tables
+reached by key (todo 296).
