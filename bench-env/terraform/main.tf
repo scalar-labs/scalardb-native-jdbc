@@ -177,7 +177,10 @@ resource "aws_instance" "client" {
   vpc_security_group_ids               = [aws_security_group.client.id]
   key_name                             = aws_key_pair.bench.key_name
   instance_initiated_shutdown_behavior = "terminate"
-  user_data                            = templatefile("${path.module}/client.sh.tftpl", { lifetime = var.lifetime_minutes })
+  metadata_options {
+    http_tokens = "required" # IMDSv2 only
+  }
+  user_data = templatefile("${path.module}/client.sh.tftpl", { lifetime = var.lifetime_minutes })
   root_block_device {
     volume_size = 50
     volume_type = "gp3"
@@ -193,6 +196,9 @@ resource "aws_instance" "db" {
   vpc_security_group_ids               = [aws_security_group.db.id]
   key_name                             = aws_key_pair.bench.key_name
   instance_initiated_shutdown_behavior = "terminate"
+  metadata_options {
+    http_tokens = "required" # IMDSv2 only
+  }
   user_data = templatefile("${path.module}/db-a.sh.tftpl", {
     engine         = each.key
     password       = var.db_password

@@ -124,6 +124,19 @@ The harness targets an external database through `-Dnativejdbc.<engine>.url`, `.
   one region, read access to costs and prices), in an account used only for this. Never as root or
   an administrator, and never the user's own `default` profile. No access key is created.
 
+## Secrets on the instances
+
+The database password reaches tier A's instances through `user_data`, which anyone in the account
+with `ec2:DescribeInstanceAttribute` can read: acceptable for a password generated per environment,
+used only by these databases, which only the client reaches. The boot scripts run without `set -x`,
+so it is not logged, and the instances take IMDSv2 tokens only. **Before tier A runs Oracle
+Enterprise Edition, the registry token (the user's own credential) moves to Secrets Manager**, read
+by the instance through its role, not `user_data`.
+
+The role may tag RDS resources only with the benchmark's tag and only on the names Terraform
+generates (`bench-b-*`, `bench-*` subnet groups): someone else's resource so named in the shared
+account could still be tagged and then changed. Accepted as unlikely; the names include a timestamp.
+
 ## Credentials
 
 `aws login` gives short-lived credentials, refreshed by the CLI until the login session ends. The

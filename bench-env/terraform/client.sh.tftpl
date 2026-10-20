@@ -1,7 +1,7 @@
 #!/bin/bash
 # The client: JDK 25 (Temurin, as CI) for Gradle and the benchmark. Terminates itself after
 # ${lifetime} minutes.
-set -euxo pipefail
+set -euo pipefail
 shutdown -h +${lifetime}
 apt-get update && apt-get install -y wget gpg
 wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor > /usr/share/keyrings/adoptium.gpg

@@ -44,10 +44,14 @@
       }
     },
     {
-      "Sid": "RdsTagsOnlyOnBenchNames",
+      "Sid": "RdsOnlyTheBenchTagOnBenchNames",
       "Effect": "Allow",
       "Action": "rds:AddTagsToResource",
-      "Resource": ["arn:aws:rds:us-east-1:*:db:bench-*", "arn:aws:rds:us-east-1:*:subgrp:bench-*"]
+      "Resource": ["arn:aws:rds:us-east-1:*:db:bench-b-*", "arn:aws:rds:us-east-1:*:subgrp:bench-*"],
+      "Condition": {
+        "StringEquals": { "aws:RequestTag/project": "scalardb-native-jdbc-bench" },
+        "ForAllValues:StringEquals": { "aws:TagKeys": ["project"] }
+      }
     },
     {
       "Sid": "ChangeAndDeleteOnlyTagged",
