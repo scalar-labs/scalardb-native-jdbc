@@ -733,6 +733,7 @@ public final class Catalog implements AutoCloseable {
     Set<String> schemas = new LinkedHashSet<>();
     Set<String> views = new LinkedHashSet<>();
     Set<String> indexes = new LinkedHashSet<>();
+    Set<String> dataTables = new LinkedHashSet<>();
     List<String> users = new ArrayList<>(inline);
     for (VirtualTable v : virtualTables) {
       users.add(v.inner ? v.name : v.left);
@@ -743,8 +744,18 @@ public final class Catalog implements AutoCloseable {
       views.add(engine.readViewName(user.table()));
       indexes.add(engine.inflightIndexName(user.table()));
     }
+    for (String name : inline) {
+      dataTables.add(split(name).table());
+    }
+    for (VirtualTable v : virtualTables) {
+      QualifiedName left = split(v.left);
+      schemas.add(left.schema());
+      dataTables.add(left.table());
+    }
     try {
-      return engine.setupObjects(c, schemas, views, indexes, caseInsensitive);
+      SetupObjects out = engine.setupObjects(c, schemas, views, indexes, caseInsensitive);
+      engine.addBeforeTypes(c, out, schemas, dataTables, caseInsensitive);
+      return out;
     } catch (SQLException e) {
       if (isConnectionFailure(e)) {
         throw e;
@@ -911,6 +922,7 @@ public final class Catalog implements AutoCloseable {
             columns.dataColumns,
             columns.indexed,
             columns.floats,
+            setupObjects.beforeTypes(q.schema(), unqualified(v.left)),
             setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
       v = byLeft.get(k);
@@ -936,6 +948,7 @@ public final class Catalog implements AutoCloseable {
             columns.dataColumns,
             columns.indexed,
             columns.floats,
+            setupObjects.beforeTypes(q.schema(), unqualified(v.left)),
             setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
       v = byRight.get(k);
@@ -964,6 +977,7 @@ public final class Catalog implements AutoCloseable {
             columns.dataColumns,
             columns.indexed,
             columns.floats,
+            setupObjects.beforeTypes(q.schema(), q.table()),
             setupObjects.isSetUp(q.schema(), q.table(), q.table(), columns.dataColumns));
       }
       return plain(q);

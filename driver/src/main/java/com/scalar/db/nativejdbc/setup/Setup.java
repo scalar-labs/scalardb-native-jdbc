@@ -480,7 +480,7 @@ public final class Setup {
     for (String c : t.dataColumns()) {
       String q = engine.quote(c);
       committed.add("t." + q);
-      before.add(keys.contains(c) ? "t." + q : "m." + engine.quote("before_" + c) + " AS " + q);
+      before.add(keys.contains(c) ? "t." + q : t.beforeImage(engine, "m", c) + " AS " + q);
     }
     String data = name(t.namespace(), t.dataTable());
     String meta = name(t.namespace(), metadataTable(t));

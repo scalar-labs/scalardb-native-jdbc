@@ -3,6 +3,8 @@ package com.scalar.db.nativejdbc.coverage;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.api.TwoPhaseCommitTransaction;
+import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Random;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -33,15 +36,23 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * Milestone T1 of the testing plan: with nothing in flight, the committed image of a ScalarDB table
- * is its data, so every statement of the corpus must return through the driver, on the tables
- * imported into ScalarDB in each layout, what it returns through the vendor driver on the same
- * tables left plain. Writes {@code build/coverage/<engine>.md}: each statement's route and outcome.
+ * Milestones T1 and T2 of the testing plan. With nothing in flight, the committed image of a
+ * ScalarDB table is its data, so every statement of the corpus must return through the driver, on
+ * the tables imported into ScalarDB in each layout, what it returns through the vendor driver on
+ * the same tables left plain (T1). Prepared rows do not change the committed image, so the plain
+ * tables stay the expected answer while ScalarDB transactions hold a share of the keys prepared
+ * (T2). Writes {@code build/coverage/<engine>.md}: each statement's route and outcome in both
+ * phases.
  */
 @EnabledIfSystemProperty(named = "nativejdbc.coverage", matches = "true")
 @SuppressFBWarnings(
-    value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
-    justification = "the corpus's statements and the test's own DDL")
+    value = {
+      "SQL_INJECTION_JDBC",
+      "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE",
+      "PREDICTABLE_RANDOM"
+    },
+    justification =
+        "the corpus's statements and the test's own DDL; a seeded generator, so a run reproduces")
 class CorpusIntegrationTest {
 
   /** The corpus's ScalarDB tables; {@code r} stays plain in every schema. */
@@ -109,50 +120,60 @@ class CorpusIntegrationTest {
         new StringBuilder("# Read corpus on ")
             .append(engine)
             .append(large ? ", large data set" : ", small data set")
-            .append("\n\n| file | statement | layout | route | outcome |\n|---|---|---|---|---|\n");
-    List<String> failures = new ArrayList<>();
-    int passed = 0;
-    int refused = 0;
-    Map<String, Integer> routes = new java.util.TreeMap<>();
+            .append("\n\n| phase | file | statement | layout | route | outcome |\n")
+            .append("|---|---|---|---|---|---|\n");
+    Tally tally = new Tally();
+    long seed = Long.getLong("nativejdbc.seed", System.nanoTime());
+    System.out.printf(
+        Locale.ROOT, "CorpusIntegrationTest %s: -Dnativejdbc.seed=%d%n", engine, seed);
     try (Connection vendor = e.open();
         Connection driver = e.openDriver()) {
-      for (Corpus.Entry st : Corpus.load(engine)) {
-        String sql = types(engine, st.sql());
-        Side expected = Side.run(vendor, tables(sql, set + "p"));
-        for (String layout : List.of(set + "d", set + "i")) {
-          String through = tables(sql, layout);
-          String route = route(driver, through);
-          routes.merge(route.startsWith("refused") ? "refused" : route, 1, Integer::sum);
-          Side actual = Side.run(driver, through);
-          String outcome = compare(expected, actual, st.ordered());
-          if (outcome.startsWith("refused")) {
-            refused++;
-          } else if (outcome.equals("pass") || outcome.startsWith("pass,")) {
-            passed++;
-          } else {
-            failures.add(st.file() + ": " + through + " (" + layout + "): " + outcome);
+      runCorpus(engine, vendor, driver, set, "settled", report, tally);
+      // T2: every key in flight on the small set; on the large one a share above the per-row
+      // check's threshold on MySQL and MariaDB (Router.PER_ROW_ABOVE)
+      List<TwoPhaseCommitTransaction> held = new ArrayList<>();
+      try (TwoPhaseCommitTransactionManager tpc =
+          e.scalarDb().getTwoPhaseCommitTransactionManager()) {
+        try {
+          InFlight.prepare(e, catalog, tpc, set, large ? 0.1 : 1.0, new Random(seed), held);
+          // not vacuous: the inline tables hold their rows' states, prepared (1) and deleted (2)
+          for (String t : IMPORTED) {
+            try (Statement st = vendor.createStatement();
+                ResultSet rs =
+                    st.executeQuery(
+                        "SELECT COUNT(*) FROM "
+                            + set
+                            + "i."
+                            + t
+                            + " WHERE "
+                            + engine.quote("tx_state")
+                            + " IN (1, 2)")) {
+              rs.next();
+              int n = rs.getInt(1);
+              assertThat(n).as("rows in flight in " + t).isPositive();
+              report.insert(
+                  report.indexOf("\n\n") + 2,
+                  String.format(Locale.ROOT, "In flight in %si.%s: %d rows.%n%n", set, t, n));
+            }
           }
-          report
-              .append("| ")
-              .append(st.file())
-              .append(" | `")
-              .append(through.replace("|", "\\|"))
-              .append("` | ")
-              .append(layout)
-              .append(" | ")
-              .append(route)
-              .append(" | ")
-              .append(outcome.replace("|", "\\|").replace('\n', ' '))
-              .append(" |\n");
+          runCorpus(engine, vendor, driver, set, "in flight", report, tally);
+        } finally {
+          for (TwoPhaseCommitTransaction tx : held) {
+            tx.rollback();
+          }
         }
       }
     }
+    int passed = tally.passed;
+    int refused = tally.refused;
+    List<String> failures = tally.failures;
+    Map<String, Integer> routes = tally.routes;
     report.insert(
         report.indexOf("\n\n") + 2,
         String.format(
             Locale.ROOT,
-            "%d passed, %d refused, %d failed (each statement in both layouts). Routes: %s; an"
-                + " rc_T fallback costs 24-1800x on joins.%n%n",
+            "%d passed, %d refused, %d failed (each statement in both layouts and both phases)."
+                + " Routes: %s; an rc_T fallback costs 24-1800x on joins.%n%n",
             passed,
             refused,
             failures.size(),
@@ -165,6 +186,63 @@ class CorpusIntegrationTest {
     Files.createDirectories(Objects.requireNonNull(out.getParent()));
     Files.writeString(out, report.toString(), StandardCharsets.UTF_8);
     assertThat(failures).as("statements whose rows differ; see " + out).isEmpty();
+  }
+
+  /** The outcomes so far. */
+  static final class Tally {
+    int passed;
+    int refused;
+    final List<String> failures = new ArrayList<>();
+    final Map<String, Integer> routes = new java.util.TreeMap<>();
+  }
+
+  /**
+   * Every statement of the corpus, against the plain schema and through the driver on both layouts.
+   */
+  private static void runCorpus(
+      Engine engine,
+      Connection vendor,
+      Connection driver,
+      String set,
+      String phase,
+      StringBuilder report,
+      Tally tally)
+      throws Exception {
+    for (Corpus.Entry st : Corpus.load(engine)) {
+      String sql = types(engine, st.sql());
+      Side expected = Side.run(vendor, tables(sql, set + "p"));
+      for (String layout : List.of(set + "d", set + "i")) {
+        String through = tables(sql, layout);
+        String route = route(driver, through);
+        if (phase.equals("settled")) {
+          tally.routes.merge(route.startsWith("refused") ? "refused" : route, 1, Integer::sum);
+        }
+        Side actual = Side.run(driver, through);
+        String outcome = compare(expected, actual, st.ordered());
+        if (outcome.startsWith("refused")) {
+          tally.refused++;
+        } else if (outcome.equals("pass") || outcome.startsWith("pass,")) {
+          tally.passed++;
+        } else {
+          tally.failures.add(
+              phase + ", " + st.file() + ": " + through + " (" + layout + "): " + outcome);
+        }
+        report
+            .append("| ")
+            .append(phase)
+            .append(" | ")
+            .append(st.file())
+            .append(" | `")
+            .append(through.replace("|", "\\|"))
+            .append("` | ")
+            .append(layout)
+            .append(" | ")
+            .append(route)
+            .append(" | ")
+            .append(outcome.replace("|", "\\|").replace('\n', ' '))
+            .append(" |\n");
+      }
+    }
   }
 
   /**
@@ -339,9 +417,21 @@ class CorpusIntegrationTest {
     }
 
     static Side run(Connection c, String sql) {
-      Side s = new Side();
       try (Statement st = c.createStatement();
           ResultSet rs = st.executeQuery(sql)) {
+        return of(rs);
+      } catch (SQLException ex) {
+        Side s = new Side();
+        s.error = ex.getSQLState() + " " + ex.getMessage();
+        s.state = Objects.requireNonNullElse(ex.getSQLState(), "");
+        return s;
+      }
+    }
+
+    /** The columns and rows of a result. */
+    static Side of(ResultSet rs) throws SQLException {
+      Side s = new Side();
+      {
         ResultSetMetaData md = rs.getMetaData();
         int n = md.getColumnCount();
         for (int i = 1; i <= n; i++) {
@@ -362,9 +452,6 @@ class CorpusIntegrationTest {
           }
           s.rows.add(row);
         }
-      } catch (SQLException ex) {
-        s.error = ex.getSQLState() + " " + ex.getMessage();
-        s.state = Objects.requireNonNullElse(ex.getSQLState(), "");
       }
       return s;
     }

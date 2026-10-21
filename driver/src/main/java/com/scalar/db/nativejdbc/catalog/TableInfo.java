@@ -3,6 +3,7 @@ package com.scalar.db.nativejdbc.catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.jspecify.annotations.Nullable;
 
 /** What the driver knows about one user table name. */
@@ -19,6 +20,7 @@ public final class TableInfo {
   private final List<String> dataColumns;
   private final List<String> indexedColumns;
   private final List<String> floatColumns;
+  private final Map<String, String> beforeTypes;
   private final boolean setUp;
 
   TableInfo(
@@ -45,6 +47,7 @@ public final class TableInfo {
         dataColumns,
         indexedColumns,
         List.of(),
+        Map.of(),
         setUp);
   }
 
@@ -60,6 +63,7 @@ public final class TableInfo {
       List<String> dataColumns,
       List<String> indexedColumns,
       List<String> floatColumns,
+      Map<String, String> beforeTypes,
       boolean setUp) {
     this.namespace = namespace;
     this.table = table;
@@ -72,6 +76,7 @@ public final class TableInfo {
     this.dataColumns = List.copyOf(dataColumns);
     this.indexedColumns = List.copyOf(indexedColumns);
     this.floatColumns = List.copyOf(floatColumns);
+    this.beforeTypes = Map.copyOf(beforeTypes);
     this.setUp = setUp;
   }
 
@@ -85,6 +90,21 @@ public final class TableInfo {
    */
   public boolean isSetUp() {
     return setUp;
+  }
+
+  /**
+   * Returns the before image of a column of a row in flight, as a select-list expression with the
+   * column's own type: cast where ScalarDB keeps it in a wider type (todo 303).
+   *
+   * @param engine the engine
+   * @param alias the metadata table's alias
+   * @param column the data column
+   * @return the expression
+   */
+  public String beforeImage(Engine engine, String alias, String column) {
+    String b = alias + "." + engine.quote("before_" + column);
+    String type = beforeTypes.get(column);
+    return type == null ? b : "CAST(" + b + " AS " + type;
   }
 
   /**

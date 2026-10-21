@@ -1,6 +1,6 @@
 # Plan: SQL coverage, isolation and performance testing
 
-Status: accepted 2026-10-20, with the decisions under "Decisions". Nothing here is implemented yet.
+Status: accepted 2026-10-20, with the decisions under "Decisions". T0 done, T1 first pass done (see each milestone).
 
 ## Goal
 
@@ -67,8 +67,10 @@ not committed; the review's findings wait for a decision (the todo's work log).
 schema in both layouts, the small and the large data set, 90 statements of the shared corpus plus 4-6 of each
 engine's row limits, the comparator (rows, labels and types, SQLState of a failure, refusals apart,
 nullability reported apart), and `build/coverage/<engine>[-large].md` with each statement's route.
-All five engines pass but MySQL and MariaDB, where a `VARCHAR` column comes back as `LONGVARCHAR`
-(todo 303); nullability differs on PostgreSQL and Oracle (todo 302). About a quarter of the
+`VARCHAR` came back as `LONGVARCHAR` on MySQL and MariaDB (todo 303, fixed: the before image is cast
+to the column's type, and a `DATETIME`'s to its precision); nullability differs on PostgreSQL and
+Oracle (todo 302). `columns.sql` (2026-10-21) reads every column by name and by `*`: on MySQL and
+MariaDB a `BOOLEAN` comes back as `TINYINT` (todo 304), the only failures left. About a quarter of the
 statements fall back to `rc_T`: right and full joins, CTEs, window functions, GROUP BY an expression,
 a derived table with DISTINCT. Open: decimals and CHAR, the locking clauses, JSON functions, more
 statements per area.
@@ -103,6 +105,15 @@ be the same.
 
 ### Milestone T2: differential reads, rows in flight
 
+**Done 2026-10-21**, as a second phase of `CorpusIntegrationTest` (`coverage/InFlight`): the plain
+schema is the copy, since the ScalarDB tables are imported from identical ones and nothing is
+committed to them. Three two-phase-commit transactions per layout update, delete and insert over
+every key of the small set and a tenth of the large one (about 1,900 rows, above `PER_ROW_ABOVE`),
+from `-Dnativejdbc.seed`, prepared and left so while the corpus runs, then rolled back; the test
+asserts rows are in flight. Every engine passes as in T1. On Oracle a prepare can fail with ORA-08177
+(SERIALIZABLE storage); that transaction is rolled back and the rest stay in flight. The
+coordinator-decided states stay with `ReadIntegrationTest`.
+
 Prepared rows do not change the committed image. So the plain copies of the ScalarDB tables taken while
 nothing is in flight stay the expected answer however many ScalarDB transactions are then prepared:
 
@@ -122,6 +133,18 @@ nothing is in flight stay the expected answer however many ScalarDB transactions
   so one run puts more rows than that in flight.
 
 ### Milestone T3: differential writes
+
+**Nothing in flight done 2026-10-21** (`coverage/WriteCorpusIntegrationTest`, `resources/writes/`): 36
+shared statements and each engine's own (upserts, `MERGE`, joins in `UPDATE` and `DELETE`, `RETURNING`
+and `OUTPUT`), in order, through the driver on each layout and directly on a plain twin; update
+counts or returned rows and then the three tables compared after each statement; a statement the
+driver refuses rolled back on the twin. At the end ScalarDB reads every row and must see the twin's,
+and a ScalarDB transaction writes every row and commits. Every engine passes; `build/coverage/
+<engine>-writes.md` lists 13 to 19 refusals per layout, the documented write scope: `INSERT ...
+SELECT`, a subquery or join reading another table or the target, the upserts (`ON CONFLICT`, `ON
+DUPLICATE KEY UPDATE`, `INSERT IGNORE`, `REPLACE`, `MERGE`), `UPDATE` and `DELETE` with `LIMIT`,
+`RETURNING` on `UPDATE` and `DELETE`, a key's update.
+Open: rows in flight.
 
 - **Nothing in flight.** Each DML statement runs through the driver on the ScalarDB tables and directly
   on their plain copies. Compare the update counts, the generated keys and the final data. Then read
@@ -247,9 +270,11 @@ Open: which cloud and account.
 
 ## Ownership
 
-This plan is run by its own agent, beside the work on milestone 9 of `proxy-step.md`. It owns this plan,
-the test fixtures (`Engines`, `Rows`), the integration test wiring in `driver/build.gradle.kts` and
-`build-logic`, `ci.yml`, and the suites and tools it adds. A failure the driver causes is filed as a todo,
+This plan was run by its own agent, beside the work on milestone 9 of `proxy-step.md`. Since 2026-10-21
+the SQL coverage and isolation milestones, T1 to T5, are run by the driver's agent, and the testing
+agent keeps T6 and the benchmarks (`benchmark-environment.md`, `paging-route.md`, todo 094). The
+fixtures (`Engines`, `Rows`), the integration test wiring in `driver/build.gradle.kts` and
+`build-logic`, and `ci.yml` stay with the testing agent; a change to them is agreed first. A failure the driver causes is filed as a todo,
 with the statement and its route, and fixed in `driver/src/main` by the milestone 9 work, which owns it.
 
 ## Risks

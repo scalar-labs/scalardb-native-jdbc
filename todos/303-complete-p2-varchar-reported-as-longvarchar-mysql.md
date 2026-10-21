@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "303"
 tags: [read, metadata, mysql, mariadb]
@@ -34,6 +34,10 @@ As in todo 302. **Effort:** Medium.
 
 ## Recommended Action
 
+Option 1, with the column's character set and collation: `CAST(m.before_c AS CHAR(n) CHARACTER SET cs) COLLATE coll`,
+in the in-flight copy and in `rc_T`. A `CHAR(n)` column still reads as `VARCHAR`: MySQL has no cast to a
+fixed-length CHAR.
+
 ## Acceptance Criteria
 
 - [ ] The corpus passes on MySQL and MariaDB with column types equal to the plain table's.
@@ -48,3 +52,11 @@ As in todo 302. **Effort:** Medium.
 ## Resources
 
 - docs/plans/testing.md, milestone T1; todo 302.
+
+### 2026-10-21 - Fixed
+
+**By:** Claude Code
+- The catalog lists each `CHAR`/`VARCHAR` column's length, character set and collation on MySQL and
+  MariaDB (`Engine.addBeforeTypes`); `TableInfo.beforeImage` casts the before image to it.
+- The read corpus passes on MySQL and MariaDB, both layouts, nothing in flight and rows in flight.
+  Existing `rc_T` views keep the old type until the setup is run again.

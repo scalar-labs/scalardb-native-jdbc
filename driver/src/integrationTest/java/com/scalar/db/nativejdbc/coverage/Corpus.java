@@ -28,10 +28,14 @@ final class Corpus {
   private Corpus() {}
 
   static List<Entry> load(Engine engine) throws IOException, URISyntaxException {
+    return load("corpus", engine);
+  }
+
+  /** The statements of the resource directory {@code dir}, the shared files first. */
+  static List<Entry> load(String dir, Engine engine) throws IOException, URISyntaxException {
     Path root =
         Path.of(
-            Objects.requireNonNull(Corpus.class.getClassLoader().getResource("corpus"), "corpus")
-                .toURI());
+            Objects.requireNonNull(Corpus.class.getClassLoader().getResource(dir), dir).toURI());
     List<Path> files = new ArrayList<>(sqlFiles(root));
     Path own = root.resolve(engine.name().toLowerCase(Locale.ROOT));
     if (Files.isDirectory(own)) {

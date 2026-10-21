@@ -19,6 +19,7 @@ public final class SetupObjects {
   private final boolean caseInsensitive;
   private final Map<String, List<String>> viewColumns = new HashMap<>();
   private final Set<String> indexes = new HashSet<>();
+  private final Map<String, Map<String, String>> beforeTypes = new HashMap<>();
 
   SetupObjects(Engine engine, boolean caseInsensitive) {
     this.engine = engine;
@@ -41,6 +42,24 @@ public final class SetupObjects {
 
   void addIndex(String schema, String table, String index) {
     indexes.add(key(schema, table, index));
+  }
+
+  void addBeforeType(String schema, String table, String column, String type) {
+    beforeTypes.computeIfAbsent(key(schema, table), k -> new HashMap<>()).put(column, type);
+  }
+
+  /**
+   * Returns the type to cast each column's before image to, where ScalarDB keeps it in a wider type
+   * than the column's own, which a {@code UNION} of the two would report: on MySQL and MariaDB a
+   * {@code CHAR} or {@code VARCHAR} column, whose before image is a {@code LONGTEXT}, and a {@code
+   * DATETIME} or {@code TIMESTAMP} column, whose before image has three fractional digits.
+   *
+   * @param schema the schema
+   * @param dataTable the data table
+   * @return the cast's {@code AS} part and collation, by column; empty for the other engines
+   */
+  public Map<String, String> beforeTypes(String schema, String dataTable) {
+    return beforeTypes.getOrDefault(key(schema, dataTable), Map.of());
   }
 
   /**

@@ -332,7 +332,7 @@ final class SplitRead {
     List<String> keys = t.keyColumns();
     for (String c : read) {
       String q = engine.quote(c);
-      cols.add(keys.contains(c) ? "t." + q : "m." + engine.quote("before_" + c) + " AS " + q);
+      cols.add(keys.contains(c) ? "t." + q : t.beforeImage(engine, "m", c) + " AS " + q);
     }
     return "(SELECT "
         + String.join(", ", cols)

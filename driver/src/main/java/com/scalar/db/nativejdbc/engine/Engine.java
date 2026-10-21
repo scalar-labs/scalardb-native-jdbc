@@ -280,6 +280,78 @@ public enum Engine {
     return out;
   }
 
+  /**
+   * Adds to {@code out} the type each column's before image is cast to on MySQL and MariaDB, where
+   * ScalarDB keeps the before image in a wider type than the column's, which a union of the two
+   * reports: a {@code CHAR} or {@code VARCHAR} column's as a {@code LONGTEXT}, cast to the column's
+   * length, character set and collation (todo 303); a {@code DATETIME} or {@code TIMESTAMP}
+   * column's with three fractional digits, cast to the column's. Nothing on the other engines,
+   * whose before images have the column's type.
+   *
+   * @param connection a connection to the database
+   * @param out the listing to add to
+   * @param schemas the schemas, in their stored spelling
+   * @param tables the data tables
+   * @param caseInsensitive whether the database compares table names without regard to case
+   * @throws SQLException if the engine's catalog cannot be read
+   */
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "the query text is constant apart from the number of placeholders")
+  public void addBeforeTypes(
+      Connection connection,
+      SetupObjects out,
+      Collection<String> schemas,
+      Collection<String> tables,
+      boolean caseInsensitive)
+      throws SQLException {
+    if ((this != MYSQL && this != MARIADB) || schemas.isEmpty() || tables.isEmpty()) {
+      return;
+    }
+    List<String> s = spellings(schemas, caseInsensitive);
+    List<String> t = spellings(tables, caseInsensitive);
+    try (PreparedStatement ps =
+        connection.prepareStatement(
+            "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH,"
+                + " CHARACTER_SET_NAME, COLLATION_NAME, DATA_TYPE, DATETIME_PRECISION"
+                + " FROM information_schema.COLUMNS"
+                + " WHERE DATA_TYPE IN ('char', 'varchar', 'datetime', 'timestamp')"
+                + " AND TABLE_SCHEMA IN ("
+                + marks(s.size())
+                + ") AND TABLE_NAME IN ("
+                + marks(t.size())
+                + ")")) {
+      bind(ps, s, t);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String dataType = rs.getString(7);
+          if ("datetime".equalsIgnoreCase(dataType) || "timestamp".equalsIgnoreCase(dataType)) {
+            out.addBeforeType(
+                rs.getString(1),
+                rs.getString(2),
+                rs.getString(3),
+                "DATETIME(" + rs.getInt(8) + "))");
+            continue;
+          }
+          String charset = rs.getString(5);
+          String collation = rs.getString(6);
+          // names the server chose, checked anyway before they go into statement text
+          if (charset == null
+              || collation == null
+              || !charset.matches("\\w+")
+              || !collation.matches("\\w+")) {
+            continue;
+          }
+          out.addBeforeType(
+              rs.getString(1),
+              rs.getString(2),
+              rs.getString(3),
+              "CHAR(" + rs.getLong(4) + ") CHARACTER SET " + charset + ") COLLATE " + collation);
+        }
+      }
+    }
+  }
+
   /** The names to ask for: as given, and lower-cased where the database ignores case. */
   private static List<String> spellings(Collection<String> names, boolean caseInsensitive) {
     Set<String> out = new LinkedHashSet<>(names);
