@@ -69,98 +69,130 @@ final class InFlight {
       List<TwoPhaseCommitTransaction> held,
       Map<String, Set<List<String>>> keys)
       throws Exception {
+    for (String layout : List.of("d", "i")) {
+      prepare(
+          e,
+          catalog,
+          tpc,
+          set + layout,
+          layout.equals("d"),
+          List.of("c", "o", "k"),
+          t -> true,
+          share,
+          random,
+          held,
+          keys);
+    }
+  }
+
+  /**
+   * Prepares the transactions over the tables of one ScalarDB schema and adds them to {@code held},
+   * which the caller rolls back.
+   *
+   * @param schema the schema, as the keys name it
+   * @param decoupled whether its tables are of the decoupled layout
+   * @param tables its tables, each without a clustering key
+   * @param newKeys the tables that get new keys too, whose first key column has room past its keys
+   */
+  static void prepare(
+      Engines e,
+      Catalog catalog,
+      TwoPhaseCommitTransactionManager tpc,
+      String schema,
+      boolean decoupled,
+      List<String> tables,
+      java.util.function.Predicate<String> newKeys,
+      double share,
+      Random random,
+      List<TwoPhaseCommitTransaction> held,
+      Map<String, Set<List<String>>> keys)
+      throws Exception {
     try (DistributedTransactionAdmin admin = e.admin()) {
-      for (String layout : List.of("d", "i")) {
-        String ns = e.storedSchema(set + layout);
-        List<TwoPhaseCommitTransaction> txs = new ArrayList<>();
-        Map<TwoPhaseCommitTransaction, Map<String, Set<List<String>>>> byTx = new HashMap<>();
-        for (int i = 0; i < TRANSACTIONS; i++) {
-          TwoPhaseCommitTransaction tx = tpc.begin();
-          held.add(tx);
-          txs.add(tx);
+      String ns = e.storedSchema(schema);
+      List<TwoPhaseCommitTransaction> txs = new ArrayList<>();
+      Map<TwoPhaseCommitTransaction, Map<String, Set<List<String>>>> byTx = new HashMap<>();
+      for (int i = 0; i < TRANSACTIONS; i++) {
+        TwoPhaseCommitTransaction tx = tpc.begin();
+        held.add(tx);
+        txs.add(tx);
+      }
+      for (String t : tables) {
+        String table = e.storedTable(t);
+        String scalarDb =
+            decoupled
+                ? Objects.requireNonNull(catalog.lookup(List.of(), ns, table).virtualTable())
+                : table;
+        TableMetadata md = Objects.requireNonNull(admin.getTableMetadata(ns, scalarDb));
+        if (!md.getClusteringKeyNames().isEmpty()) {
+          throw new IllegalStateException(table + ": the tables have no clustering key");
         }
-        for (String t : List.of("c", "o", "k")) {
-          String table = e.storedTable(t);
-          String scalarDb =
-              layout.equals("d")
-                  ? Objects.requireNonNull(catalog.lookup(List.of(), ns, table).virtualTable())
-                  : table;
-          TableMetadata md = Objects.requireNonNull(admin.getTableMetadata(ns, scalarDb));
-          if (!md.getClusteringKeyNames().isEmpty()) {
-            throw new IllegalStateException(table + ": the corpus's tables have no clustering key");
-          }
-          List<String> keyNames = new ArrayList<>(md.getPartitionKeyNames());
-          List<String> values = new ArrayList<>();
-          for (String c : md.getColumnNames()) {
-            // ScalarDB's metadata lists the transaction columns too; the corpus's names none so
-            if (!keyNames.contains(c) && !c.startsWith("tx_") && !c.startsWith("before_")) {
-              values.add(c);
-            }
-          }
-          int fresh = 0;
-          List<Result> rows = committed(e, ns, scalarDb);
-          boolean any = false;
-          for (int r = 0; r < rows.size(); r++) {
-            Result row = rows.get(r);
-            // at least the last row, so every table holds some
-            if (random.nextDouble() >= share && (any || r < rows.size() - 1)) {
-              continue;
-            }
-            any = true;
-            TwoPhaseCommitTransaction tx = txs.get(random.nextInt(txs.size()));
-            Set<List<String>> mine =
-                byTx.computeIfAbsent(tx, x -> new HashMap<>())
-                    .computeIfAbsent(set + layout + "." + t, x -> new HashSet<>());
-            mine.add(spelled(row, keyNames));
-            Key partition = key(row, md.getPartitionKeyNames());
-            if (random.nextInt(10) < 6) {
-              var u = Upsert.newBuilder().namespace(ns).table(scalarDb).partitionKey(partition);
-              for (String c : values) {
-                if (random.nextBoolean()) {
-                  u.value(value(c, md.getColumnDataType(c), random));
-                }
-              }
-              tx.upsert(u.build());
-            } else {
-              tx.delete(
-                  Delete.newBuilder()
-                      .namespace(ns)
-                      .table(scalarDb)
-                      .partitionKey(partition)
-                      .build());
-            }
-            if (random.nextInt(5) == 0) {
-              // a new key: the row's own with the first key column moved out of every key's way
-              fresh++;
-              Key.Builder p = Key.newBuilder();
-              for (String k : md.getPartitionKeyNames()) {
-                p.add(keyNames.get(0).equals(k) ? moved(col(row, k), fresh) : col(row, k));
-              }
-              Key inserted = p.build();
-              List<String> spelled = new ArrayList<>();
-              for (Column<?> c : inserted.getColumns()) {
-                spelled.add(WriteCorpusIntegrationTest.normal(c.getValueAsObject()));
-              }
-              mine.add(spelled);
-              var ins = Insert.newBuilder().namespace(ns).table(scalarDb).partitionKey(inserted);
-              for (String c : values) {
-                ins.value(value(c, md.getColumnDataType(c), random));
-              }
-              tx.insert(ins.build());
-            }
+        List<String> keyNames = new ArrayList<>(md.getPartitionKeyNames());
+        List<String> values = new ArrayList<>();
+        for (String c : md.getColumnNames()) {
+          // ScalarDB's metadata lists the transaction columns too; the corpus's names none so
+          if (!keyNames.contains(c) && !c.startsWith("tx_") && !c.startsWith("before_")) {
+            values.add(c);
           }
         }
-        for (TwoPhaseCommitTransaction tx : txs) {
-          try {
-            tx.prepare();
-            byTx.getOrDefault(tx, Map.of())
-                .forEach((k, v) -> keys.computeIfAbsent(k, x -> new HashSet<>()).addAll(v));
-          } catch (PreparationConflictException ex) {
-            // Oracle's SERIALIZABLE refuses a prepare for a block another changed (ORA-08177):
-            // fewer rows in flight, which the caller's count still sees
-            tx.rollback();
-            held.remove(tx);
+        int fresh = 0;
+        List<Result> rows = committed(e, ns, scalarDb);
+        boolean any = false;
+        for (int r = 0; r < rows.size(); r++) {
+          Result row = rows.get(r);
+          // at least the last row, so every table holds some
+          if (random.nextDouble() >= share && (any || r < rows.size() - 1)) {
+            continue;
           }
+          any = true;
+          TwoPhaseCommitTransaction tx = txs.get(random.nextInt(txs.size()));
+          Set<List<String>> mine =
+              byTx.computeIfAbsent(tx, x -> new HashMap<>())
+                  .computeIfAbsent(schema + "." + t, x -> new HashSet<>());
+          mine.add(spelled(row, keyNames));
+          Key partition = key(row, md.getPartitionKeyNames());
+          if (random.nextInt(10) < 6) {
+            var u = Upsert.newBuilder().namespace(ns).table(scalarDb).partitionKey(partition);
+            for (String c : values) {
+              if (random.nextBoolean()) {
+                u.value(value(c, md.getColumnDataType(c), random));
+              }
+            }
+            tx.upsert(u.build());
+          } else {
+            tx.delete(
+                Delete.newBuilder().namespace(ns).table(scalarDb).partitionKey(partition).build());
+          }
+          if (newKeys.test(t) && random.nextInt(5) == 0) {
+            // a new key: the row's own with the first key column moved out of every key's way
+            fresh++;
+            Key.Builder p = Key.newBuilder();
+            for (String k : md.getPartitionKeyNames()) {
+              p.add(keyNames.get(0).equals(k) ? moved(col(row, k), fresh) : col(row, k));
+            }
+            Key inserted = p.build();
+            List<String> spelled = new ArrayList<>();
+            for (Column<?> c : inserted.getColumns()) {
+              spelled.add(WriteCorpusIntegrationTest.normal(c.getValueAsObject()));
+            }
+            mine.add(spelled);
+            var ins = Insert.newBuilder().namespace(ns).table(scalarDb).partitionKey(inserted);
+            for (String c : values) {
+              ins.value(value(c, md.getColumnDataType(c), random));
+            }
+            tx.insert(ins.build());
+          }
+        }
+      }
+      for (TwoPhaseCommitTransaction tx : txs) {
+        try {
+          tx.prepare();
+          byTx.getOrDefault(tx, Map.of())
+              .forEach((k, v) -> keys.computeIfAbsent(k, x -> new HashSet<>()).addAll(v));
+        } catch (PreparationConflictException ex) {
+          // Oracle's SERIALIZABLE refuses a prepare for a block another changed (ORA-08177):
+          // fewer rows in flight, which the caller's count still sees
+          tx.rollback();
+          held.remove(tx);
         }
       }
     }
@@ -197,11 +229,13 @@ final class InFlight {
     return Objects.requireNonNull(row.getColumns().get(name), name);
   }
 
-  /** An integer key moved past every existing one. */
+  /** A key moved past every existing one. */
   private static Column<?> moved(Column<?> c, int n) {
     return c instanceof BigIntColumn
         ? BigIntColumn.of(c.getName(), 1_000_000L + n)
-        : IntColumn.of(c.getName(), 1_000_000 + n);
+        : c instanceof TextColumn
+            ? TextColumn.of(c.getName(), "~" + n)
+            : IntColumn.of(c.getName(), 1_000_000 + n);
   }
 
   /**

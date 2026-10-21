@@ -198,7 +198,14 @@ a row per copy of the split read (todo 312, P1, fixed: such a statement is read 
 The failure left: a whole-row reference reports `record` (todo 313). Refusals: `EXPLAIN` of ScalarDB tables (199), statements the parser cannot read
 even without a ScalarDB table (about 300: cursors, `RELEASE SAVEPOINT`, `ORDER BY ... USING`,
 `JOIN ... USING ... AS`, nested grouping sets; todo 314), PL/pgSQL bodies, views and `ANALYZE` over
-ScalarDB tables (todo 315). Next: the same with rows in flight (T2), and sqllogictest.
+ScalarDB tables (todo 315). In flight, a second run per layout holds a tenth of the imported
+tables' keys (at least one row each, about 1,200 in `tenk1`) in prepared ScalarDB transactions, and
+the driver set to abort at once on a row in flight: a write or locking read of an imported table that
+aborts so is counted as such and not run on the plain side, nor is the rest of its transaction; a
+statement with a window function is compared by its number of rows, since the committed image is
+read by another plan and a window that does not order its rows sees them in another order. Result:
+the same as settled, over several seeds (`-Dnativejdbc.seed`), a write aborted in some. Next:
+sqllogictest.
 
 - **sqllogictest**, for the other four engines, which have no public suite PostgreSQL's size (MySQL's
   and MariaDB's `mysql-test` may follow). Its SELECT corpus is loaded into ScalarDB tables and run in
