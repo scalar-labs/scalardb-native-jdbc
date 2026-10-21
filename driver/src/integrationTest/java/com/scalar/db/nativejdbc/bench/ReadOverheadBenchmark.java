@@ -21,6 +21,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -141,6 +142,27 @@ class ReadOverheadBenchmark {
     /** SPLIT_DRV with each derived table projecting only the columns the statement references. */
     SPLIT_DRVN,
     /**
+     * Approach A, the plain aggregate corrected: the aggregate over the data table as it is, minus
+     * what the after images of the rows in flight add to it, plus what their before images add;
+     * DISTINCT keeps the plain DISTINCT and drops a value only rows in flight carry, adding the
+     * before images' values. The correction reads only the rows in flight.
+     */
+    CORR,
+    /**
+     * Approach B, the page over-fetched: the plain query's ORDER BY and limit raised by a margin on
+     * the data tables as they are, each row that holds a row in flight dropped, then the copies of
+     * the split read that hold one, each with the clauses applied inside it, and the page taken
+     * from both. Exact while the rows kept are at least the page; the driver reads again with a
+     * larger margin otherwise (not measured: the margin here always holds).
+     */
+    OVER,
+    /**
+     * Approach C, the subquery split on its own: an IN or NOT EXISTS over a ScalarDB table as one
+     * predicate on its committed rows and one on its before images, each on the table itself, so
+     * that the engine keeps its semijoin or antijoin.
+     */
+    SEMI,
+    /**
      * BASE's statement through the driver, on the same tables imported into ScalarDB with their
      * metadata copied: what the driver's own rewrite costs, parsing included.
      */
@@ -240,11 +262,25 @@ class ReadOverheadBenchmark {
     @Nullable String partialInner;
     @Nullable String partialOuter;
     @Nullable String pushed;
+    @Nullable String copy;
     @Nullable Graph graph;
+    final Map<Mode, String> forms = new EnumMap<>(Mode.class);
 
     /** The text of each copy for SPLIT_DRVP, with the clauses applied inside it. */
     Query pushed(String copy) {
       pushed = copy;
+      return this;
+    }
+
+    /** The text of a mode written out, its forced arms and plain tables rendered as given. */
+    Query form(Mode m, String template) {
+      forms.put(m, template);
+      return this;
+    }
+
+    /** For OVER: the copies' text where it is not {@code pushed}. */
+    Query copy(String template) {
+      copy = template;
       return this;
     }
 
@@ -295,8 +331,60 @@ class ReadOverheadBenchmark {
     }
   }
 
+  /** Template {@code t}, written for alias x, for alias {@code alias} in arm {@code arm}. */
+  private static String as(String t, String alias, @Nullable String arm) {
+    String forced = arm == null ? "" : "/" + arm;
+    return t.replaceAll("\\{(\\w):x\\}", "{$1:" + alias + forced + "}")
+        .replaceAll("\\{x\\.(\\w+)\\}", "{" + alias + ".$1" + forced + "}");
+  }
+
+  /**
+   * CORR for an aggregate of sums: {@code inner}, written for alias x with its aggregate {@code AS
+   * n}, on the plain table, negated on the after images in flight, and on their before images,
+   * combined by {@code outer} over {ARMS}.
+   */
+  private static String corr(String inner, String outer) {
+    // ponytail: a SUM whose rows are all inserted in flight gives 0, not NULL; a count of the
+    // summed values beside it decides, where the driver emits this
+    String negated =
+        inner
+            .replace("COUNT(*) AS n", "-COUNT(*) AS n")
+            .replaceAll("SUM\\((.*)\\) AS n", "-SUM($1) AS n");
+    return outer.replace(
+        "{ARMS}",
+        as(inner, "b", null)
+            + " UNION ALL "
+            + as(negated, "f", "F")
+            + " UNION ALL "
+            + as(inner, "e", "B"));
+  }
+
+  /**
+   * OVER: {@code window}, the plain query over-fetched, without its rows that hold a row in flight
+   * ({@code keys}: "table:column" of the window per ScalarDB table, its key), then the copies with
+   * a table in flight ({COPIES}), combined by {@code outer} over {ARMS}.
+   */
+  private static String over(String window, String keys, String outer) {
+    StringBuilder kept = new StringBuilder("SELECT w.* FROM (" + window + ") w WHERE 1 = 1");
+    for (String key : keys.split(",")) {
+      String[] tc = key.split(":");
+      kept.append(
+          String.format(
+              " AND NOT EXISTS (SELECT 1 FROM bn.%sm w%s WHERE w%s.id = w.%s AND w%s.tx_state IN"
+                  + " (1, 2))",
+              tc[0], tc[1], tc[1], tc[1], tc[1]));
+    }
+    return outer.replace("{ARMS}", kept + " UNION ALL {COPIES}");
+  }
+
+  /** SEMI: {@code t}, written with arm X for the outer table, once per arm of it. */
+  private static String semi(String t) {
+    return t.replace("/X}", "/A}") + " UNION ALL " + t.replace("/X}", "/B}");
+  }
+
   // {C:x} / {O:x}: the table with alias x; {x.col}: a non-key column of x; {W:x}: x's state
-  // condition; a suffix /A or /B forces an arm. {LIMIT}: three rows. {ARMS}: the split arms.
+  // condition; a suffix /A or /B forces an arm, /F the after image of a row in flight. {LIMIT}:
+  // three rows. {ARMS}: the split arms.
   static final List<Query> QUERIES =
       List.of(
           new Query(
@@ -322,12 +410,17 @@ class ReadOverheadBenchmark {
               List.of("b"),
               Param.CUSTOMER),
           new Query(
-              "COUNT by FK",
-              "SELECT COUNT(*) FROM {O:b} WHERE {W:b} AND {b.customer_id} = ?",
-              "SELECT b.id AS id FROM {O:b} WHERE {W:b} AND {b.customer_id} = ?",
-              "SELECT COUNT(*) FROM ({ARMS}) v",
-              List.of("b"),
-              Param.CUSTOMER),
+                  "COUNT by FK",
+                  "SELECT COUNT(*) FROM {O:b} WHERE {W:b} AND {b.customer_id} = ?",
+                  "SELECT b.id AS id FROM {O:b} WHERE {W:b} AND {b.customer_id} = ?",
+                  "SELECT COUNT(*) FROM ({ARMS}) v",
+                  List.of("b"),
+                  Param.CUSTOMER)
+              .form(
+                  Mode.CORR,
+                  corr(
+                      "SELECT COUNT(*) AS n FROM {O:x} WHERE {W:x} AND {x.customer_id} = ?",
+                      "SELECT SUM(v.n) FROM ({ARMS}) v")),
           new Query(
               "plain table JOIN on key (10 rows)",
               "SELECT p.id, {a.name} FROM bn.p p JOIN {C:a} ON a.id = p.cid WHERE {W:a}",
@@ -359,21 +452,35 @@ class ReadOverheadBenchmark {
               List.of("b", "a"),
               Param.REGION),
           new Query(
-              "IN subquery selecting a non-key",
-              "SELECT a.id FROM {C:a} WHERE {W:a} AND {a.region} = ? AND a.id IN"
-                  + " (SELECT {b.customer_id} FROM {O:b} WHERE {W:b})",
-              null,
-              null,
-              List.of("a"),
-              Param.REGION),
+                  "IN subquery selecting a non-key",
+                  "SELECT a.id FROM {C:a} WHERE {W:a} AND {a.region} = ? AND a.id IN"
+                      + " (SELECT {b.customer_id} FROM {O:b} WHERE {W:b})",
+                  null,
+                  null,
+                  List.of("a"),
+                  Param.REGION)
+              .form(
+                  Mode.SEMI,
+                  semi(
+                      "SELECT a.id FROM {C:a/X} WHERE {W:a/X} AND {a.region/X} = ? AND a.id IN"
+                          + " (SELECT {b.customer_id/A} FROM {O:b/A} WHERE {W:b/A})"
+                          + " UNION ALL SELECT a.id FROM {C:a/X} WHERE {W:a/X} AND {a.region/X} = ? AND a.id IN"
+                          + " (SELECT {f.customer_id/B} FROM {O:f/B} WHERE {W:f/B}) AND NOT EXISTS"
+                          + " (SELECT 1 FROM {O:g/A} WHERE {W:g/A} AND {g.customer_id/A} = a.id)")),
           new Query(
-              "NOT EXISTS, ScalarDB on both sides",
-              "SELECT a.id FROM {C:a} WHERE {W:a} AND {a.region} = ? AND NOT EXISTS"
-                  + " (SELECT 1 FROM {O:b} WHERE {W:b} AND {b.customer_id} = a.id)",
-              null,
-              null,
-              List.of("a"),
-              Param.REGION),
+                  "NOT EXISTS, ScalarDB on both sides",
+                  "SELECT a.id FROM {C:a} WHERE {W:a} AND {a.region} = ? AND NOT EXISTS"
+                      + " (SELECT 1 FROM {O:b} WHERE {W:b} AND {b.customer_id} = a.id)",
+                  null,
+                  null,
+                  List.of("a"),
+                  Param.REGION)
+              .form(
+                  Mode.SEMI,
+                  semi(
+                      "SELECT a.id FROM {C:a/X} WHERE {W:a/X} AND {a.region/X} = ? AND NOT EXISTS"
+                          + " (SELECT 1 FROM {O:b/A} WHERE {W:b/A} AND {b.customer_id/A} = a.id) AND NOT EXISTS"
+                          + " (SELECT 1 FROM {O:f/B} WHERE {W:f/B} AND {f.customer_id/B} = a.id)")),
           new Query(
               "LEFT JOIN, ScalarDB on both sides",
               "SELECT a.id, b.id FROM {C:a} LEFT JOIN {O:b} ON {b.customer_id} = a.id AND {W:b}"
@@ -396,7 +503,12 @@ class ReadOverheadBenchmark {
                   "SELECT COUNT(*) FROM ({ARMS}) v",
                   List.of("a"))
               .partial(
-                  "SELECT COUNT(*) AS n FROM {C:a} WHERE {W:a}", "SELECT SUM(v.n) FROM ({ARMS}) v"),
+                  "SELECT COUNT(*) AS n FROM {C:a} WHERE {W:a}", "SELECT SUM(v.n) FROM ({ARMS}) v")
+              .form(
+                  Mode.CORR,
+                  corr(
+                      "SELECT COUNT(*) AS n FROM {C:x} WHERE {W:x}",
+                      "SELECT SUM(v.n) FROM ({ARMS}) v")),
           new Query(
               "non-key filter JOIN FK, both ScalarDB",
               "SELECT a.id, b.id FROM {C:a} JOIN {O:b} ON {b.customer_id} = a.id"
@@ -413,7 +525,12 @@ class ReadOverheadBenchmark {
                   List.of("b"))
               .partial(
                   "SELECT SUM({b.total}) AS s FROM {O:b} WHERE {W:b}",
-                  "SELECT SUM(v.s) FROM ({ARMS}) v"),
+                  "SELECT SUM(v.s) FROM ({ARMS}) v")
+              .form(
+                  Mode.CORR,
+                  corr(
+                      "SELECT SUM({x.total}) AS n FROM {O:x} WHERE {W:x}",
+                      "SELECT SUM(v.n) FROM ({ARMS}) v")),
           new Query(
                   "full scan: GROUP BY of 100k rows",
                   "SELECT {a.region}, COUNT(*) FROM {C:a} WHERE {W:a} GROUP BY {a.region}",
@@ -423,7 +540,12 @@ class ReadOverheadBenchmark {
               .partial(
                   "SELECT {a.region} AS region, COUNT(*) AS n FROM {C:a} WHERE {W:a} GROUP BY"
                       + " {a.region}",
-                  "SELECT v.region, SUM(v.n) FROM ({ARMS}) v GROUP BY v.region"),
+                  "SELECT v.region, SUM(v.n) FROM ({ARMS}) v GROUP BY v.region")
+              .form(
+                  Mode.CORR,
+                  corr(
+                      "SELECT {x.region} AS g, COUNT(*) AS n FROM {C:x} WHERE {W:x} GROUP BY {x.region}",
+                      "SELECT v.g, SUM(v.n) FROM ({ARMS}) v GROUP BY v.g HAVING SUM(v.n) <> 0")),
           new Query(
               "full scan: unindexed filter",
               "SELECT a.id FROM {C:a} WHERE {W:a} AND {a.name} = ?",
@@ -524,7 +646,13 @@ class ReadOverheadBenchmark {
                   List.of("b"))
               .pushed(
                   "SELECT b.id AS id, {b.total} AS total FROM {O:b} WHERE {W:b}"
-                      + " ORDER BY b.id DESC{PAGE:0:20}"),
+                      + " ORDER BY b.id DESC{PAGE:0:20}")
+              .form(
+                  Mode.OVER,
+                  over(
+                      "SELECT b.id AS id, {b.total} AS total FROM {O:b} ORDER BY b.id DESC{PAGE:0:120}",
+                      "o:id",
+                      "SELECT v.id, v.total FROM ({ARMS}) v ORDER BY v.id DESC{PAGE:0:20}")),
           new Query(
                   "page: ORDER BY key DESC, 20 rows after 10k",
                   "SELECT b.id, {b.total} FROM {O:b} WHERE {W:b} ORDER BY b.id DESC{PAGE:10000:20}",
@@ -533,7 +661,13 @@ class ReadOverheadBenchmark {
                   List.of("b"))
               .pushed(
                   "SELECT b.id AS id, {b.total} AS total FROM {O:b} WHERE {W:b}"
-                      + " ORDER BY b.id DESC{PAGE:0:10020}"),
+                      + " ORDER BY b.id DESC{PAGE:0:10020}")
+              .form(
+                  Mode.OVER,
+                  over(
+                      "SELECT b.id AS id, {b.total} AS total FROM {O:b} ORDER BY b.id DESC{PAGE:0:11020}",
+                      "o:id",
+                      "SELECT v.id, v.total FROM ({ARMS}) v ORDER BY v.id DESC{PAGE:10000:20}")),
           new Query(
                   "page: JOIN FK, ORDER BY key DESC, 20 rows",
                   "SELECT a.id, b.id FROM {C:a} JOIN {O:b} ON {b.customer_id} = a.id"
@@ -544,23 +678,51 @@ class ReadOverheadBenchmark {
                   List.of("a", "b"))
               .pushed(
                   "SELECT a.id AS aid, b.id AS bid FROM {C:a} JOIN {O:b} ON {b.customer_id} = a.id"
-                      + " WHERE {W:a} AND {W:b} ORDER BY b.id DESC{PAGE:0:20}"),
+                      + " WHERE {W:a} AND {W:b} ORDER BY b.id DESC{PAGE:0:20}")
+              .form(
+                  Mode.OVER,
+                  over(
+                      "SELECT a.id AS aid, b.id AS bid FROM {C:a} JOIN {O:b} ON {b.customer_id} = a.id"
+                          + " ORDER BY b.id DESC{PAGE:0:120}",
+                      "c:aid,o:bid",
+                      "SELECT v.aid, v.bid FROM ({ARMS}) v ORDER BY v.bid DESC{PAGE:0:20}")),
           new Query(
-              "page: keyset, key < ?, ORDER BY key DESC, 20 rows",
-              "SELECT b.id, {b.total} FROM {O:b} WHERE {W:b} AND b.id < ?"
-                  + " ORDER BY b.id DESC{PAGE:0:20}",
-              null,
-              null,
-              List.of("b"),
-              Param.CUSTOMER),
+                  "page: keyset, key < ?, ORDER BY key DESC, 20 rows",
+                  "SELECT b.id, {b.total} FROM {O:b} WHERE {W:b} AND b.id < ?"
+                      + " ORDER BY b.id DESC{PAGE:0:20}",
+                  null,
+                  null,
+                  List.of("b"),
+                  Param.CUSTOMER)
+              .form(
+                  Mode.OVER,
+                  over(
+                      "SELECT b.id AS id, {b.total} AS total FROM {O:b} WHERE b.id < ?"
+                          + " ORDER BY b.id DESC{PAGE:0:120}",
+                      "o:id",
+                      "SELECT v.id, v.total FROM ({ARMS}) v ORDER BY v.id DESC{PAGE:0:20}"))
+              .copy(
+                  "SELECT b.id AS id, {b.total} AS total FROM {O:b} WHERE {W:b} AND b.id < ?"
+                      + " ORDER BY b.id DESC{PAGE:0:20}"),
           new Query(
-              "page: 3 tables JOIN FK, ORDER BY key DESC, 20 rows",
-              "SELECT g.id, a.id, b.id FROM {R:g} JOIN {C:a} ON {a.region} = g.id"
-                  + " JOIN {O:b} ON {b.customer_id} = a.id WHERE {W:g} AND {W:a} AND {W:b}"
-                  + " ORDER BY b.id DESC{PAGE:0:20}",
-              null,
-              null,
-              List.of("g", "a", "b")),
+                  "page: 3 tables JOIN FK, ORDER BY key DESC, 20 rows",
+                  "SELECT g.id, a.id, b.id FROM {R:g} JOIN {C:a} ON {a.region} = g.id"
+                      + " JOIN {O:b} ON {b.customer_id} = a.id WHERE {W:g} AND {W:a} AND {W:b}"
+                      + " ORDER BY b.id DESC{PAGE:0:20}",
+                  null,
+                  null,
+                  List.of("g", "a", "b"))
+              .form(
+                  Mode.OVER,
+                  over(
+                      "SELECT g.id AS gid, a.id AS aid, b.id AS bid FROM {R:g} JOIN {C:a} ON {a.region} = g.id"
+                          + " JOIN {O:b} ON {b.customer_id} = a.id ORDER BY b.id DESC{PAGE:0:120}",
+                      "r:gid,c:aid,o:bid",
+                      "SELECT v.gid, v.aid, v.bid FROM ({ARMS}) v ORDER BY v.bid DESC{PAGE:0:20}"))
+              .copy(
+                  "SELECT g.id AS gid, a.id AS aid, b.id AS bid FROM {R:g} JOIN {C:a} ON {a.region} = g.id"
+                      + " JOIN {O:b} ON {b.customer_id} = a.id WHERE {W:g} AND {W:a} AND {W:b}"
+                      + " ORDER BY b.id DESC{PAGE:0:20}"),
           new Query(
                   "page: indexed range of 30k rows, ORDER BY key, 20 rows",
                   "SELECT a.id, {a.name} FROM {C:a} WHERE {W:a} AND {a.region} < ?"
@@ -571,14 +733,27 @@ class ReadOverheadBenchmark {
                   Param.SPAN300)
               .pushed(
                   "SELECT a.id AS id, {a.name} AS name FROM {C:a} WHERE {W:a} AND {a.region} < ?"
-                      + " ORDER BY a.id{PAGE:0:20}"),
+                      + " ORDER BY a.id{PAGE:0:20}")
+              .form(
+                  Mode.OVER,
+                  over(
+                      "SELECT a.id AS id, {a.name} AS name FROM {C:a} WHERE {a.region} < ?"
+                          + " ORDER BY a.id{PAGE:0:120}",
+                      "c:id",
+                      "SELECT v.id, v.name FROM ({ARMS}) v ORDER BY v.id{PAGE:0:20}")),
           new Query(
                   "DISTINCT over an indexed column (1000 of 100k)",
                   "SELECT DISTINCT {a.region} FROM {C:a} WHERE {W:a}",
                   "SELECT {a.region} AS region FROM {C:a} WHERE {W:a}",
                   "SELECT DISTINCT v.region FROM ({ARMS}) v",
                   List.of("a"))
-              .pushed("SELECT DISTINCT {a.region} AS region FROM {C:a} WHERE {W:a}"),
+              .pushed("SELECT DISTINCT {a.region} AS region FROM {C:a} WHERE {W:a}")
+              .form(
+                  Mode.CORR,
+                  "SELECT d.region FROM (SELECT DISTINCT {a.region} AS region FROM {C:a}) d"
+                      + " WHERE NOT EXISTS (SELECT 1 FROM {C:f/F} WHERE {W:f/F} AND {f.region/F} = d.region"
+                      + " AND NOT EXISTS (SELECT 1 FROM {C:g/A} WHERE {W:g/A} AND {g.region/A} = d.region))"
+                      + " UNION SELECT {e.region/B} FROM {C:e/B} WHERE {W:e/B}"),
           // {X:x}: the 50-column table w; {K:x}: the table k keyed on (pid, cid)
           new Query(
               "wide: key lookup, 2 of 50 columns",
@@ -663,8 +838,12 @@ class ReadOverheadBenchmark {
                   "SELECT COUNT(*) FROM ({ARMS}) v",
                   List.of("a"))
               .partial(
-                  "SELECT COUNT(*) AS n FROM {H:a} WHERE {W:a}",
-                  "SELECT SUM(v.n) FROM ({ARMS}) v"));
+                  "SELECT COUNT(*) AS n FROM {H:a} WHERE {W:a}", "SELECT SUM(v.n) FROM ({ARMS}) v")
+              .form(
+                  Mode.CORR,
+                  corr(
+                      "SELECT COUNT(*) AS n FROM {H:x} WHERE {W:x}",
+                      "SELECT SUM(v.n) FROM ({ARMS}) v")));
 
   static List<Engines> engines() {
     return Engines.selected();
@@ -725,8 +904,10 @@ class ReadOverheadBenchmark {
           .append("\n\n")
           .append(environment(e, c))
           .append(
-              "\nMedian ms over up to 300 runs (ratio to BASE); p95 in brackets. `!` marks rows"
-                  + " that differ from BASE.\n\n| query |");
+              "\nMedian ms over up to 200 runs, 300 rounds through a proxy (ratio to BASE); p95 in brackets. `!` marks rows"
+                  + " that differ from "
+                  + (CHANGED ? "VIEW_LJ (images changed)" : "BASE")
+                  + ".\n\n| query |");
       List<Mode> modes = modes();
       for (Mode m : modes) {
         report.append(' ').append(m).append(" |");
@@ -790,6 +971,10 @@ class ReadOverheadBenchmark {
         lengths.append('\n');
         Map<Mode, Result> results =
             proxy == null ? sequential(c, e, q, sqls) : interleaved(c, e, q, sqls);
+        Result reference = results.get(CHANGED ? Mode.VIEW_LJ : Mode.BASE);
+        if (reference != null) {
+          expected = reference.rows;
+        }
         for (Mode m : modes) {
           Result r = results.get(m);
           if (r == null) {
@@ -797,7 +982,6 @@ class ReadOverheadBenchmark {
             continue;
           }
           if (m == Mode.BASE) {
-            expected = r.rows;
             base = r.median;
           }
           report
@@ -834,7 +1018,8 @@ class ReadOverheadBenchmark {
               + (SS_INDEX.equals("filtered") ? "" : "-ss" + SS_INDEX)
               + (INFLIGHT != 100 ? "-inflight" + INFLIGHT : "")
               + (GATHER_INFLIGHT != INFLIGHT ? "-gather" + GATHER_INFLIGHT : "")
-              + (REGATHER ? "-regather" : "");
+              + (REGATHER ? "-regather" : "")
+              + (CHANGED ? "-changed" : "");
       Path out = Path.of("build", "bench", "read-overhead-" + e + suffix + ".md");
       Files.createDirectories(Path.of("build", "bench"));
       Files.writeString(out, report.toString(), StandardCharsets.UTF_8);
@@ -1037,37 +1222,40 @@ class ReadOverheadBenchmark {
     try {
       open.setAutoCommit(false);
       for (String t : TABLES) {
-        StringBuilder set = new StringBuilder();
-        for (String col : Objects.requireNonNull(NON_KEY.get(t))) {
-          set.append(set.length() == 0 ? "" : ", ")
-              .append(col)
-              .append(" = ")
-              .append(
-                  col.equals("name") || col.equals("label")
-                      ? "CONCAT(" + col + ", 'x')"
-                      : col + " + 1");
-        }
-        StringBuilder same = new StringBuilder();
-        for (String k : t.equals("k") ? List.of("pid", "cid") : List.of("id")) {
-          same.append(" AND m.").append(k).append(" = bn.").append(t).append('.').append(k);
-        }
-        e.execute(
-            open,
-            "UPDATE bn."
-                + t
-                + " SET "
-                + set
-                + " WHERE EXISTS (SELECT 1 FROM bn."
-                + t
-                + "m m WHERE m.tx_state = 1"
-                + same
-                + ")");
+        e.execute(open, changeInFlight(t));
       }
       return open;
     } catch (SQLException ex) {
       release(open);
       throw ex;
     }
+  }
+
+  /** The update changing every non-key column of t's rows in flight in state 1. */
+  private static String changeInFlight(String t) {
+    StringBuilder set = new StringBuilder();
+    for (String col : Objects.requireNonNull(NON_KEY.get(t))) {
+      set.append(set.length() == 0 ? "" : ", ")
+          .append(col)
+          .append(" = ")
+          .append(
+              col.equals("name") || col.equals("label")
+                  ? "CONCAT(" + col + ", 'x')"
+                  : col + " + 1");
+    }
+    StringBuilder same = new StringBuilder();
+    for (String k : key(t)) {
+      same.append(" AND m.").append(k).append(" = bn.").append(t).append('.').append(k);
+    }
+    return "UPDATE bn."
+        + t
+        + " SET "
+        + set
+        + " WHERE EXISTS (SELECT 1 FROM bn."
+        + t
+        + "m m WHERE m.tx_state = 1"
+        + same
+        + ")";
   }
 
   private static void release(@Nullable Connection open) throws SQLException {
@@ -1366,9 +1554,9 @@ class ReadOverheadBenchmark {
 
   // ---- rendering
 
-  private static final Pattern FROM = Pattern.compile("\\{([CORXKH]):(\\w+)(?:/([AB]))?\\}");
-  private static final Pattern WHERE = Pattern.compile("\\{W:(\\w+)(?:/([AB]))?\\}");
-  private static final Pattern COLUMN = Pattern.compile("\\{(\\w+)\\.(\\w+)(?:/([AB]))?\\}");
+  private static final Pattern FROM = Pattern.compile("\\{([CORXKH]):(\\w+)(?:/([ABF]))?\\}");
+  private static final Pattern WHERE = Pattern.compile("\\{W:(\\w+)(?:/([ABF]))?\\}");
+  private static final Pattern COLUMN = Pattern.compile("\\{(\\w+)\\.(\\w+)(?:/([ABF]))?\\}");
 
   static @Nullable String render(Query q, Mode m, Engine engine) {
     String sql = renderRaw(q, m == Mode.DRIVER || m == Mode.BASE_OPEN ? Mode.BASE : m, engine);
@@ -1412,6 +1600,27 @@ class ReadOverheadBenchmark {
   }
 
   private static @Nullable String renderRaw(Query q, Mode m, Engine engine) {
+    if (written(m)) {
+      String form = q.forms.get(m);
+      if (form == null) {
+        return null;
+      }
+      String sql = render(form, m, Map.of());
+      if (sql.contains("{COPIES}")) {
+        String copy = Objects.requireNonNull(q.copy != null ? q.copy : q.pushed, q.name);
+        List<String> copies = new ArrayList<>();
+        int n = q.splitAliases.size();
+        for (int bits = 1; bits < (1 << n); bits++) {
+          Map<String, Character> arm = new LinkedHashMap<>();
+          for (int i = 0; i < n; i++) {
+            arm.put(q.splitAliases.get(i), (bits & (1 << i)) == 0 ? 'A' : 'B');
+          }
+          copies.add("SELECT * FROM (" + render(copy, Mode.SPLIT_AJ, arm) + ") p" + bits);
+        }
+        sql = sql.replace("{COPIES}", String.join(" UNION ALL ", copies));
+      }
+      return sql;
+    }
     boolean rownum = m == Mode.SPLIT_DRVR;
     boolean noSemijoin = m == Mode.SPLIT_DAJN || m == Mode.SPLIT_DAJH;
     boolean narrow = m == Mode.SPLIT_DRVN;
@@ -1743,14 +1952,19 @@ class ReadOverheadBenchmark {
     return m.name().startsWith("SPLIT_");
   }
 
+  /** The modes written out per query, CORR, OVER and SEMI: a table without an arm is plain. */
+  private static boolean written(Mode m) {
+    return m == Mode.CORR || m == Mode.OVER || m == Mode.SEMI;
+  }
+
   private static String from(String t, String x, Mode m, @Nullable Character arm) {
-    if (split(m) && arm != null) {
+    if ((split(m) || written(m)) && arm != null) {
       String meta = String.format("bn.%sm %sm ON %s", t, x, keyEq(t, x + "m", x));
       String set =
           String.format(
               "SELECT %s FROM bn.%sm %sq WHERE %sq.tx_state IN (1, 2)",
               keyList(t, x + "q"), t, x, x);
-      if (arm == 'B') {
+      if (arm == 'B' || arm == 'F') {
         return String.format("(bn.%s %s JOIN %s)", t, x, meta);
       }
       switch (m) {
@@ -1770,6 +1984,9 @@ class ReadOverheadBenchmark {
     }
     switch (m) {
       case BASE:
+      case CORR:
+      case OVER:
+      case SEMI:
         return "bn." + t + " " + x;
       case VIEW_LJ:
       case SPLIT_LJ:
@@ -1782,8 +1999,11 @@ class ReadOverheadBenchmark {
   }
 
   private static String where(String t, String x, Mode m, @Nullable Character arm) {
-    if (!split(m) || arm == null) {
+    if (!split(m) && !written(m) || arm == null) {
       return "1 = 1";
+    }
+    if (arm == 'F') {
+      return x + "m.tx_state IN (1, 2)";
     }
     if (arm == 'B') {
       return String.format(
@@ -1810,7 +2030,9 @@ class ReadOverheadBenchmark {
   }
 
   private static String column(String x, String col, Mode m, @Nullable Character arm) {
-    return split(m) && arm != null && arm == 'B' ? x + "m.before_" + col : x + "." + col;
+    return (split(m) || written(m)) && arm != null && arm == 'B'
+        ? x + "m.before_" + col
+        : x + "." + col;
   }
 
   // ---- measuring
@@ -1960,6 +2182,10 @@ class ReadOverheadBenchmark {
 
   // -Dnativejdbc.bench.plainCaseFilter=true: VIEW_CASE's filter without COALESCE, which
   // PostgreSQL can estimate from the statistics of tx_state
+  // -Dnativejdbc.bench.changed=true: rows in flight whose images differ, for checking a form's
+  // rows; BASE then reads the after images, so the rows are checked against VIEW_LJ's
+  private static final boolean CHANGED = Boolean.getBoolean("nativejdbc.bench.changed");
+
   private static final boolean PLAIN_CASE_FILTER =
       Boolean.getBoolean("nativejdbc.bench.plainCaseFilter");
 
@@ -2082,7 +2308,11 @@ class ReadOverheadBenchmark {
         try (java.sql.Statement st = c.createStatement()) {
           st.execute("SET plan_cache_mode = force_custom_plan");
         }
-        prefix = "EXPLAIN (ANALYZE, COSTS ON, TIMING OFF, SUMMARY ON) ";
+        // -Dnativejdbc.bench.timing=true: each node timed
+        prefix =
+            "EXPLAIN (ANALYZE, COSTS ON, TIMING "
+                + (Boolean.getBoolean("nativejdbc.bench.timing") ? "ON" : "OFF")
+                + ", SUMMARY ON) ";
         break;
       case MYSQL:
         prefix = "EXPLAIN ANALYZE ";
@@ -2362,6 +2592,28 @@ class ReadOverheadBenchmark {
             + ") = "
             + 7 % perH
             + none);
+    if (CHANGED) {
+      // after images apart from the before images, half of c's and o's rows in flight deleted,
+      // and ten rows of c, o and h inserted in flight: at the first run's customer and region
+      for (String t : TABLES) {
+        ddl.add(changeInFlight(t));
+      }
+      ddl.add("UPDATE bn.cm SET tx_state = 2 WHERE tx_state = 1 AND id - 2 * FLOOR(id / 2) = 0");
+      ddl.add("UPDATE bn.om SET tx_state = 2 WHERE tx_state = 1 AND id - 2 * FLOOR(id / 2) = 0");
+      ddl.add(
+          "INSERT INTO bn.c (id, name, region) SELECT 100000 + n, CONCAT('i', 100000 + n), 7"
+              + " FROM bn.d");
+      ddl.add("INSERT INTO bn.o (id, customer_id, total) SELECT 500000 + n, 4242, 1 FROM bn.d");
+      ddl.add("INSERT INTO bn.h (id, qty, grp) SELECT 20000 + n, n, 7 FROM bn.d");
+      for (String[] tn : new String[][] {{"c", "100000"}, {"o", "500000"}, {"h", "20000"}}) {
+        ddl.add(
+            "INSERT INTO bn."
+                + tn[0]
+                + "m (id, tx_id, tx_state, tx_version) SELECT "
+                + tn[1]
+                + " + n, 'w', 1, 1 FROM bn.d");
+      }
+    }
     String ix = engine == Engine.ORACLE ? "bn." : "";
     ddl.add("CREATE INDEX " + ix + "c_region ON bn.c (region)");
     ddl.add("CREATE INDEX " + ix + "o_customer ON bn.o (customer_id)");

@@ -86,9 +86,10 @@ statistics with the rows in flight (`-Dnativejdbc.bench.gatherInflight` defaults
 - Per engine, one vendor connection and one driver connection, one query at a time: latency, not
   throughput. The seven engines ran
   side by side, each in its own test JVM on the client.
-- Per query, every form runs once per round in a rotating order with the same random parameters:
-  10 rounds of warm-up (fewer past 5 s), then up to 300 rounds or 20 s, at least three. The report
-  gives the median and p95 in ms and the ratio of the median to BASE's.
+- Per query, each form in turn, through one prepared statement: a first run at a customer and
+  region with rows in flight (the rows compared), up to 20 warm-up runs or 2 s, then up to 200 timed
+  runs or 3 s with random customers and regions from a fixed seed. The report gives the median and
+  p95 in ms and the ratio of the median to BASE's.
 - A 30-second query timeout; a form that times out or fails is left out of the ranking.
 - One repetition at each in-flight count: a gain under 2x may be noise.
 
@@ -134,6 +135,160 @@ This run's VIEW_CASE used the `COALESCE` filter, not the plain one the driver em
 paged joins that form is the planner's misestimate, so those cells need a rerun with
 `-Dnativejdbc.bench.plainCaseFilter=true`. Forms that beat DRIVER by up to 1.5x on joins at 100 rows
 in flight lose to it at 10,000, and the driver cannot know the count when it plans, so those stay Keep.
+
+## The approaches
+
+Every form reads the same thing: each ScalarDB table as of its last commit. A row is either
+committed (`tx_state` 3, or no metadata row), whose data row holds its committed values, or in
+flight (`tx_state` 1 prepared or 2 deleted), whose data row holds the after image and whose
+metadata row holds the before image, null for a row inserted in flight. The forms differ in where
+the choice between the two is made, and that decides which plans the engine can still find.
+
+### The forms measured here
+
+| Form | What it is |
+|---|---|
+| BASE | The query on the data tables, ignoring the metadata: the target, and wrong whenever a row is in flight. |
+| VIEW_LJ, VIEW_AJ | Through a view per table: a UNION ALL of the committed rows (a left join on the metadata, or an anti-join on the rows in flight) and the before images of the rows in flight. |
+| VIEW_CASE | Through a view per table without a UNION: one left join on the metadata, each column `CASE WHEN in flight THEN before ELSE data END`. Keeps the data table's index order, hence its strength on pages. |
+| SPLIT_LJ, _AJ, _NI, _HJ, _HD | The split read: the query repeated once per combination of its tables' copies (committed or before image), joined by UNION ALL; 2^n copies for n tables. The suffix is how the committed copy drops rows in flight: left join on the metadata (LJ), `NOT EXISTS` (AJ), `NOT IN` (NI), a left join to the set of keys in flight (HJ), or to that set made DISTINCT (HD). |
+| SPLIT_PA, _PH | The split read with the aggregate computed in each copy and the copies' results combined on top. |
+| SPLIT_LT, _LH | One copy per table in flight, the others joined through LATERAL (CROSS APPLY), either image. |
+| SPLIT_MX, _MH | The all-committed copy by anti-join (or DISTINCT set), the other copies by left join on the metadata. |
+| SPLIT_D* | The same forms with each table replaced by a derived table of its copy's rows, so the rest of the statement is left as written; SPLIT_DRV is the driver's choice per engine. |
+| SPLIT_DRVP, _DAJP, _DHDP, _DLJP, _DRVR | The derived forms with the ORDER BY and limit (or DISTINCT) also applied inside each copy; DRVR uses `ROWNUM` on Oracle. |
+| SPLIT_DRVN | SPLIT_DRV with each derived table selecting only the columns the query uses. |
+| SPLIT_DAJN, _DAJH | MySQL: the anti-join kept a per-row probe (`NO_SEMIJOIN`). |
+| DRIVER | The statement through this driver, as it rewrites it today. |
+| BASE_OPEN | BASE with the rows in flight held by an open native transaction: what the database alone pays. |
+
+### New approaches for the queries no form fixes
+
+The forms above all rewrite the whole query, so the engine plans an anti-join or a derived table
+where the plain query had an index-order scan with an early stop, a loose index scan or a semijoin.
+The three approaches below keep the plain query's plan for the committed rows and pay for the rows
+in flight separately, in work that grows with how many are in flight rather than with the table.
+They are modes CORR, OVER and SEMI of `ReadOverheadBenchmark`, written out per query.
+
+**A. Correct the plain aggregate (CORR).** For a COUNT or SUM, the committed answer is the plain
+answer over the data table, minus what the rows in flight contribute through their after images,
+plus what they contribute through their before images. All three in one statement, so one snapshot:
+
+```sql
+SELECT SUM(v.n) FROM (
+  SELECT COUNT(*) AS n FROM o b WHERE b.customer_id = ?          -- plain
+  UNION ALL SELECT -COUNT(*) FROM o f JOIN om fm ON fm.id = f.id   -- after images in flight
+    WHERE fm.tx_state IN (1, 2) AND f.customer_id = ?
+  UNION ALL SELECT COUNT(*) FROM o e JOIN om em ON em.id = e.id    -- their before images
+    WHERE em.tx_state IN (1, 2) AND em.before_tx_id IS NOT NULL AND em.before_customer_id = ?) v
+```
+
+GROUP BY sums the three per group and drops groups that reach zero. DISTINCT keeps the plain
+DISTINCT (a loose index scan), drops a value only rows in flight carry and no committed row has,
+and adds the before images' values. Exact for COUNT, SUM and DISTINCT; MIN, MAX and AVG over
+averages are not sums and stay on the split read. A SUM whose rows are all inserted in flight gives
+0 where NULL is due, so the driver adds the count of the summed values to tell.
+
+**B. Over-fetch the page (OVER).** For `ORDER BY ... LIMIT n` over one table or a join, run the plain
+query with the limit raised by a margin, drop each result row that holds a row in flight, and add
+the split read's copies that hold one, each with the ORDER BY and limit inside it; take the page
+from both:
+
+```sql
+SELECT v.aid, v.bid FROM (
+  SELECT w.* FROM (SELECT a.id AS aid, b.id AS bid FROM c a JOIN o b ON b.customer_id = a.id
+                   ORDER BY b.id DESC LIMIT 120) w                 -- plain, margin 100
+    WHERE NOT EXISTS (SELECT 1 FROM cm WHERE cm.id = w.aid AND cm.tx_state IN (1, 2))
+      AND NOT EXISTS (SELECT 1 FROM om WHERE om.id = w.bid AND om.tx_state IN (1, 2))
+  UNION ALL SELECT * FROM (<copy with a in flight> ORDER BY b.id DESC LIMIT 20) p1
+  UNION ALL SELECT * FROM (<copy with b in flight> ...) p2
+  UNION ALL SELECT * FROM (<copy with both in flight> ...) p3) v
+ORDER BY v.bid DESC LIMIT 20
+```
+
+It is exact when the window keeps at least n rows (offset + n with an OFFSET) or holds the whole
+result: the kept rows are the committed ones in order, so a committed row outside the window ranks
+below all of them. Otherwise the driver reads again with a larger margin; this benchmark's margin
+(100 rows, 1,000 past an offset of 10,000) always holds. The window needs each table's key in its
+select list, which the driver adds as it does for versions. One table is the same with one copy,
+which is why the single-table pages are under B, not A.
+
+**C. Split only the subquery (SEMI).** An `IN` or `NOT EXISTS` over a ScalarDB table becomes one
+predicate on the table's committed rows and one on its before images, each on the table itself
+rather than on a view or derived table, so the engine keeps its semijoin or antijoin:
+
+```sql
+-- a.id IN (SELECT customer_id FROM o), committed
+SELECT a.id FROM c a WHERE <a committed> AND a.region = ?
+  AND a.id IN (SELECT b.customer_id FROM o b WHERE <b committed>)
+UNION ALL SELECT a.id FROM c a WHERE <a committed> AND a.region = ?
+  AND a.id IN (SELECT fm.before_customer_id FROM o f JOIN om fm ON ... WHERE <f in flight>)
+  AND NOT EXISTS (SELECT 1 FROM o g WHERE <g committed> AND g.customer_id = a.id)
+-- and the same two for a's before images
+```
+
+`NOT EXISTS` is the AND of two `NOT EXISTS`, one per image. The second IN arm excludes what the
+first returned, so no row comes twice without a DISTINCT.
+
+**Checking them.** With `-Dnativejdbc.bench.changed=true` the rows in flight get after images apart
+from their before images, half of them become deletes in flight, and ten rows per table are inserted
+in flight, at the first run's customer and region. BASE then reads wrong rows by design, so every
+form's rows are compared with VIEW_LJ's instead. A form that confuses the two images, or keeps an
+insert in flight, shows `!`.
+
+### Local results of A, B and C
+
+Measured on local containers (PostgreSQL 16, MySQL 8.4, MariaDB 11.4, Oracle 26ai Free) on one
+laptop, the AWS data at 100 and 10,000 rows in flight, the modes BASE, VIEW_LJ, VIEW_CASE,
+SPLIT_DRVP, SPLIT_DRVN, CORR, OVER, SEMI and DRIVER, `plainCaseFilter=true`, one run each. Absolute
+times are not comparable with AWS; the ratios between forms are. The 10,000 set ran after baabc26
+changed the views' before-image columns, which the VIEW_* forms read and the new forms do not.
+
+**Correct everywhere.** With changed images, CORR, OVER and SEMI return VIEW_LJ's rows for every
+query on all four engines at both counts. The only `error` cells are SPLIT_DRVN on the keyset and
+3-table pages (as on AWS) and VIEW_CASE on NOT EXISTS on MariaDB and Oracle, which runs 0.5 to 2.6 s
+elsewhere and most likely hit the 60 s timeout once the images changed.
+
+Median ms, the new form against DRIVER and the best existing form (other than BASE):
+
+| Query | PostgreSQL 100 | MySQL 100 | MariaDB 100 | Oracle 100 | PostgreSQL 10k | MySQL 10k | MariaDB 10k | Oracle 10k |
+|---|---|---|---|---|---|---|---|---|
+| A: COUNT of 100k | **3.2** / 7.7 / 5.9 | **7.7** / 10.3 | **8.4** / 18.1 | **1.9** / 4.6 | 13.4 / 19.0 / 13.2 | **27.8** / 54.0 | **26.4** / 33.4 | **8.3** / 11.4 |
+| A: SUM of 500k | **12.4** / 37.2 / 17.1 | **44.6** / 63.2 | **42.4** / 92.9 | **12.0** / 16.7 | 35.4 / 58.8 / **27.9** | **77.2** / 196.3 | **67.5** / 120.2 | 36.9 / **34.2** |
+| A: GROUP BY of 100k | **9.5** / 12.8 / 12.6 | **12.0** / 24.7 | **9.4** / 18.8 | 10.4 / **9.4** | **14.1** / 24.5 / 19.3 | **34.3** / 61.0 | **28.5** / 35.7 | **17.8** / 18.2 |
+| A: hot COUNT of 20k | **1.1** / 2.0 / 2.0 | **2.0** / 2.5 | **2.2** / 4.0 | **1.0** / 2.3 / 2.1 | 6.3 / 6.1 / **4.8** | 16.9 / 22.9 / **15.3** | 15.2 / 14.7 / **14.6** | 6.6 / 7.8 / **3.4** |
+| A: COUNT by FK | 0.52 / **0.47** | 0.71 / **0.65** | 0.66 / **0.63** | 0.91 / **0.63** | 1.35 / **0.60** | 11.3 / **1.8** | 10.0 / **0.73** | 3.6 / **0.62** |
+| A: DISTINCT | 18.1 / 12.1 / **11.6** | 334 / 21.4 / **19.3** | **3.1** / 33.0 / 26.4 | 147 / 14.1 / **10.3** | 36.7 / 23.0 / **18.5** | 334 / 64.4 / **61.3** | **24.2** / 49.6 / 40.4 | 159 / 20.9 / **17.1** |
+| B: page of 500k | **0.47** / 0.54 / 0.51 | 0.87 / 0.76 / **0.53** | 0.81 / 0.73 / **0.52** | 2.1 / 1.9 / **1.5** | 0.60 / 0.48 / **0.44** | 21.2 / 21.4 / **0.59** | 1.0 / 3.1 / **0.60** | 18.6 / 1.6 / **1.5** |
+| B: page after 10k | 3.8 / 2.8 / **2.8** | 59.0 / 112.8 / **8.3** | 8.3 / 7.2 / **6.1** | **6.8** / 64.3 | 19.1 / 17.0 / **14.1** | 32.6 / 34.5 / **9.5** | 28.8 / 39.2 / **8.6** | **31.6** / 82.6 |
+| B: JOIN FK page | 1.2 / 1.1 / **0.53** | 54.7 / 2.8 / **0.62** | 125 / 198 / **0.56** | 4.1 / 3.5 / **1.5** | 15.7 / 99.0 / **0.50** | 146 / 126 / **0.71** | 262 / 334 / **0.65** | 77.1 / 68.8 / **1.5** |
+| B: keyset page | 0.52 / 0.53 / **0.51** | 1.5 / 1.7 / **1.2** | 0.82 / 0.85 / **0.65** | 1.7 / 11.3 / **1.4** | 3.4 / 3.4 / **0.66** | 3.9 / 20.0 / **1.4** | 2.0 / 1.1 / **0.64** | 3.4 / 11.9 / **1.6** |
+| B: 3-table page | 4.3 / 4.0 / **0.56** | 71.1 / 781 / **0.66** | 137 / 207 / **0.66** | 84.4 / 16.9 / **1.6** | 1126 / 201 / **0.65** | 225 / 172 / **0.71** | 342 / 413 / **0.76** | 180 / 96.4 / **1.5** |
+| B: indexed range | 0.51 / 0.72 / **0.47** | 0.95 / 0.82 / **0.57** | 0.81 / 1.0 / **0.56** | 5.3 / 1.9 / **1.4** | 0.89 / 0.79 / **0.48** | 10.4 / 5.7 / **3.0** | 0.89 / 0.80 / **0.61** | 9.1 / 5.3 / **1.4** |
+| C: IN selecting a non-key | 4.3 / **0.85** | 2.0 / **1.7** | 2.0 / **1.5** | 10.3 / **5.3** | 24.6 / **15.8** | 42.5 / **24.5** | 275 / **6.4** | 136 / **5.7** |
+| C: NOT EXISTS | 0.65 / **0.64** | **1.1** / 9.0 | 1.3 / **1.0** | 4.8 / **1.7** | 5.0 / **1.4** | 8.9 / **1.8** | 7.9 / **1.8** | 4.8 / **2.3** |
+
+Each cell is new form / DRIVER / best existing form, the last left out where DRIVER is the best;
+the fastest is in bold.
+
+- **A wins the full-table aggregates.** At 100 in flight CORR runs within 1.2x of BASE on every
+  engine (1.35x for Oracle's GROUP BY, 1.9x for its hot COUNT), 1.3 to 3x faster than DRIVER except
+  on Oracle's GROUP BY. At 10,000 it is still the fastest full scan on MySQL and MariaDB and on most
+  of PostgreSQL and Oracle's. Where it isn't, it is within 30% of SPLIT_DRVN or DRIVER. The hot COUNT
+  at 10,000 goes to VIEW_CASE, by 4 to 30%, and by 2x on Oracle. It loses where the plain query is already an index lookup (COUNT by
+  FK), and its DISTINCT works only on MariaDB. On MySQL and Oracle its committed probe per value costs
+  more than the split read (147 to 334 ms against 10 to 60).
+- **B is not worth it except for deep offsets on Oracle.** VIEW_CASE matches or beats it on every other
+  page, and at 10,000 in flight its anti-join on the window and the 2^n − 1 copies cost more than they save
+  (up to 1.1 s for the 3-table page on PostgreSQL). On Oracle, the page after 10k rows is the
+  one where no existing form is fast: OVER takes 6.8 ms against DRIVER's 64 (31.6 against 82.6
+  at 10,000).
+- **C does not pay.** SEMI loses to DRIVER everywhere except MySQL's NOT EXISTS at 100 in flight
+  (1.1 against 9.0 ms), and loses by 2 to 40x at 10,000.
+
+So the recommendation gains three cells: CORR for COUNT, SUM and GROUP BY over a whole table on
+all four engines, and CORR's DISTINCT on MariaDB. OVER is for an ORDER BY past a deep OFFSET on Oracle. SEMI adds
+none. All three are to confirm on AWS before the driver takes them.
 
 ## Rankings
 
