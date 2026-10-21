@@ -58,6 +58,10 @@ nothing, whichever image is true; a dropped conjunct only widens what is checked
    limit) and as the cheaper choice where ScalarDB does not write concurrently. Under SERIALIZABLE
    on MySQL, MariaDB and SQL Server the table-wide check stays: its locking read is what holds off
    every later prepare, and a predicate would lock the same range.
+6. **On dedicated machines (AWS, last section)** the predicate check holds on PostgreSQL, MySQL
+   and MariaDB, ScalarDB's own commits unchanged. On Oracle 19c (RDS) it took about 300 ms a read
+   with rows in flight and lowered both reads and ScalarDB's commits; the setting does nothing on
+   Oracle until that plan is understood.
 
 ## Aborts with live ScalarDB writers
 
@@ -177,5 +181,40 @@ Server), 844 / 1,033 (Oracle), and with writers the same picture as below.
 - **ScalarDB's throughput**: unchanged within noise on PostgreSQL, MySQL, MariaDB and SQL Server;
   on Oracle at sixteen writers 629 against 407 commits/s with the setting on (first run), and on
   PostgreSQL and Oracle lower in the loaded second run. The readers take no lock at SNAPSHOT, so
-  this is the laptop's CPU shared with readers that now complete; to be confirmed on separate
-  machines.
+  this looked like the laptop's CPU shared with readers that now complete; on separate machines
+  (below) the others held and Oracle 19c did not.
+
+## Reads beside ScalarDB writers on AWS (2026-10-22)
+
+The same mode on dedicated machines, run `20261022-0044` (`docs/plans/benchmark-environment.md`):
+tier A (self-managed PostgreSQL and MariaDB on EC2, the databases capped at 1 GB of memory), tier B
+(RDS: PostgreSQL, MySQL, MariaDB, Oracle 19c SE2), one engine at a time, two runs each; the range
+is the two runs. Committed reads per second off → on, and ScalarDB's commits per second at
+sixteen writers:
+
+| engine | 1 writer | 4 writers | 16 writers | ScalarDB commits/s at 16, off → on |
+|---|---|---|---|---|
+| PostgreSQL A | 1,422-1,468 → 2,301-2,377 | 379-392 → 1,953-2,074 | 0-1 → 1,437-1,570 | 4,920-5,245 → 5,001-5,276 |
+| PostgreSQL B | 1,412-1,426 → 2,376-2,504 | 61-90 → 2,098 | 0 → 1,681-1,692 | 2,073-2,085 → 2,085-2,103 |
+| MariaDB A | 1,905-1,960 → 1,718-1,780 | 238-268 → 773-774 | 0 → 51 | 2,763-2,821 → 2,717-2,763 |
+| MariaDB B | 1,066-1,111 → 1,307-1,339 | 116-120 → 803-808 | 0 → 399-401 | 1,300-1,306 → 1,463-1,473 |
+| MySQL B | 1,138-1,140 → 1,516-1,530 | 130-191 → 1,127-1,144 | 0 → 796-808 | 1,802-1,815 → 1,548-1,593 |
+| Oracle B (19c) | 209-211 → 30-40 | 0-2 → 12-13 | 0 → 10 | 1,617-1,690 → 1,193-1,194 |
+
+- **PostgreSQL, MySQL and MariaDB: the laptop's picture holds.** With the setting on, retries stay
+  at or below 0.02 per commit at every count; at four and sixteen writers committed reads are 3-35x,
+  or hundreds per second against none. ScalarDB's own commits move within about 13%, both ways: the
+  readers take no lock at SNAPSHOT.
+- **Where it costs.** MariaDB A at one writer, 9% fewer reads: the check costs more there than the
+  one retry per commit it saves. MariaDB A at sixteen writers only 51 per second against about 400 on
+  tier B, p50 77 ms: the 1 GB cap is the suspect, not checked.
+- **Oracle 19c on RDS: slower with the setting.** With rows in flight a read takes about 300 ms (p50
+  at four writers 308 ms), so reads fall at one writer already, and ScalarDB's commits at sixteen
+  writers by 28%, as on the laptop (629 → 407): readers using the database's CPU on slow checks.
+  Oracle 23 on the laptop, with the same setup, gains as the others do (4 writers: 23 → 505, p50
+  7 ms), so this is the instance: version, edition, storage or the data table's statistics, which
+  RDS's nightly job gathers. Its plan of the predicate's check is the next thing to look at; until
+  then the setting does nothing on Oracle.
+- **Not measured.** Tier A's MySQL failed from the writers runs on (the cap is the suspect); SQL
+  Server is not in the AWS plan. MySQL B's first configuration ran cold (158 against 1,997 with no
+  writer, the same statements).

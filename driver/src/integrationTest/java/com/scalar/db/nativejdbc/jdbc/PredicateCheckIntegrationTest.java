@@ -42,7 +42,8 @@ import org.junit.jupiter.params.provider.MethodSource;
  * where its predicate matches the row's before image or its after image (design 4.2): a prepared
  * update, one that moves a row out of the predicate, an insert, a delete, a NULL; a placeholder's
  * value; a predicate it cannot evaluate alike in two statements, which aborts as before; and the
- * table's check not recorded as passed. Rows 1 to 10 hold x = 'a', 11 to 20 x = 'b', v = id.
+ * table's check not recorded as passed. On Oracle the setting does nothing. Rows 1 to 10 hold
+ * x = 'a', 11 to 20 x = 'b', v = id.
  */
 @SuppressFBWarnings(
     value = {"SQL_INJECTION_JDBC", "OBL_UNSATISFIED_OBLIGATION"},
@@ -93,10 +94,22 @@ class PredicateCheckIntegrationTest {
     }
     boolean pg = e.engine() == Engine.POSTGRESQL;
     try (TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      if (e.engine() == Engine.ORACLE) {
+        // the setting does nothing on Oracle: the table's check aborts as without it
+        TwoPhaseCommitTransaction held = prepared(tpc, update(15, "b"));
+        try (Connection d = driver(e, true)) {
+          d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+          d.setAutoCommit(false);
+          assertAborts(d, grouped("a"), "Oracle: a row in flight elsewhere");
+          d.rollback();
+        }
+        held.rollback();
+        return;
+      }
       scenarios(e, tpc, Connection.TRANSACTION_REPEATABLE_READ, "SNAPSHOT");
       if (pg) {
         scenarios(e, tpc, Connection.TRANSACTION_SERIALIZABLE, "SERIALIZABLE");
-      } else if (e.engine() != Engine.ORACLE) {
+      } else {
         // the coarse path's locking check holds off every prepare: no predicate there
         TwoPhaseCommitTransaction held = prepared(tpc, update(15, "b"));
         try (Connection d = driver(e, true)) {

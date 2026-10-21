@@ -153,7 +153,7 @@ final class DriverProperties {
           current.predicateChecks,
           "Under SNAPSHOT, and SERIALIZABLE on PostgreSQL, a read of one table that would abort"
               + " on a row in flight in that table first checks whether its predicate matches one;"
-              + " experimental"),
+              + " experimental; not on Oracle"),
     };
   }
 

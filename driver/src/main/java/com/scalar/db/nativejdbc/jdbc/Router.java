@@ -375,7 +375,9 @@ final class Router {
   }
 
   Router(Engine engine, Catalog catalog, Session session, boolean predicateChecks) {
-    this.predicateChecks = predicateChecks;
+    // not on Oracle: on 19c (RDS) the check took about 300 ms a read, its plan not yet known
+    // (docs/benchmarks/inflight-check.md)
+    this.predicateChecks = predicateChecks && engine != Engine.ORACLE;
     this.engine = engine;
     this.catalog = catalog;
     this.session = session;
