@@ -62,6 +62,12 @@ variable "oracle_registry_token" {
   sensitive = true
 }
 
+variable "client_profile" {
+  description = "The client's instance profile (setup-account.sh), for runs without the laptop; empty for none"
+  type        = string
+  default     = ""
+}
+
 variable "lifetime_minutes" {
   description = "Each EC2 instance terminates itself this long after boot"
   type        = number
@@ -176,6 +182,7 @@ resource "aws_instance" "client" {
   subnet_id                            = local.subnet
   vpc_security_group_ids               = [aws_security_group.client.id]
   key_name                             = aws_key_pair.bench.key_name
+  iam_instance_profile                 = var.client_profile == "" ? null : var.client_profile
   instance_initiated_shutdown_behavior = "terminate"
   metadata_options {
     http_tokens = "required" # IMDSv2 only

@@ -102,7 +102,19 @@ The harness targets an external database through `-Dnativejdbc.<engine>.url`, `.
   copies the repository at HEAD to the client once per tier (`git archive` over SSH; nothing is
   pushed), runs `matrix.sh` per tier in parallel, copies the reports to `bench-env/results/`, and
   destroys everything (see "Credentials").
-- `test-run.sh`: checks `run.sh`'s teardown with stand-ins for `aws`, `terraform`, `ssh` and `scp`.
+- **Runs without the laptop:** with `BENCH_BUCKET=scalardb-bench-<account>` and `bench.tfvars`'
+  `client_profile = "scalardb-bench-client"`, `run.sh run` applies, copies the tree, starts
+  `detached.sh` on the client and returns. The client runs the tiers within `MAX_RUN_MINUTES`, then,
+  also after a failure, uploads the reports and logs to the bucket, deletes the tagged RDS instances
+  and terminates the tagged EC2 instances, itself last, with its instance role (`client-policy.json`:
+  describe, terminate and delete only what carries the tag, upload to the bucket). `run.sh fetch RUN`
+  later copies the reports to `bench-env/results/RUN/` and destroys what is left (VPC, subnets,
+  security groups, key pair, subnet group: no cost). The bucket and role come from
+  `setup-account.sh`, run once more with the user's own login. If the client dies before its
+  teardown, its EC2 instances still end at the dead man's switch, but the RDS instances run until
+  `run.sh fetch`; the budget alerts are the backstop.
+- `test-run.sh`: checks `run.sh`'s teardown with stand-ins for `aws`, `terraform`, `ssh` and `scp`,
+  a detached run, and `detached.sh`'s teardown after a failed tier.
 - `iam-policy.json`: the benchmark user's permissions; `terraform/bench.tfvars.example`: the
   settings file the user fills in (`bench.tfvars`, ignored by git).
 - `matrix.sh`: runs on the client; the read benchmark against one tier's databases, every engine in

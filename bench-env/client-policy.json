@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "FindTheBenchmarksInstances",
+      "Effect": "Allow",
+      "Action": ["ec2:DescribeInstances", "rds:DescribeDBInstances"],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "us-east-1" } }
+    },
+    {
+      "Sid": "EndOnlyTheTaggedOnes",
+      "Effect": "Allow",
+      "Action": ["ec2:TerminateInstances", "rds:DeleteDBInstance"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:ResourceTag/project": "scalardb-native-jdbc-bench", "aws:RequestedRegion": "us-east-1" }
+      }
+    },
+    {
+      "Sid": "UploadTheReports",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::BUCKET/*"
+    }
+  ]
+}

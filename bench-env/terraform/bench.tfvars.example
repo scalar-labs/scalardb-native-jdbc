@@ -9,3 +9,5 @@ oracle_image          = ""
 oracle_registry_user  = ""
 oracle_registry_token = ""
 # db_password comes from the environment: export BENCH_DB_PASSWORD=..., which run.sh passes on
+# for runs without the laptop: the instance profile of setup-account.sh, with BENCH_BUCKET=scalardb-bench-<account>
+client_profile = ""

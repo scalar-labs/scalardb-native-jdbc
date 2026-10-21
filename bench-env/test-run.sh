@@ -41,4 +41,25 @@ if AWS_OK_CALLS=3 MATRIX_SECONDS=60 perl -e 'alarm 30; exec @ARGV' bash "$here/r
 fi
 grep -q 'credentials expired' "$t/out" && [ "$(grep -c '^destroy key=fake3' "$t/terraform")" = 1 ] \
   || { cat "$t/out" "$t/terraform"; echo "FAIL: expired login"; exit 1; }
+# a detached run: applied, started on the client, nothing destroyed from here
+rm "$t/terraform" "$t/aws"
+AWS_OK_CALLS=1000 MATRIX_SECONDS=0 BENCH_BUCKET=bucket bash "$here/run.sh" run > "$t/out" 2>&1 || { cat "$t/out"; echo "FAIL: detached run exited non-zero"; exit 1; }
+grep -q 'detached as' "$t/out" && [ "$(grep -c '^apply' "$t/terraform")" = 1 ] && ! grep -q '^destroy' "$t/terraform" \
+  || { cat "$t/out" "$t/terraform"; echo "FAIL: detached run"; exit 1; }
+
+# detached.sh on the client: a tier that fails still ends in the upload and the end of every instance
+mkdir -p "$t/home/a" "$t/home/b"
+command -v timeout > /dev/null || printf '#!/bin/bash\nshift; exec "$@"\n' > "$t/bin/timeout" # macOS has none
+chmod +x "$t/bin"/*
+printf '%s\n' 'cd a && mkdir results && touch results/r.md' 'cd b && false' > "$t/home/tiers.sh"
+cat > "$t/bin/aws" <<'S'
+#!/bin/bash
+echo "$*" >> "$T/calls"
+case "$*" in *describe-db-instances*) echo bench-b-pg-1 ;; *describe-instances*) echo i-1 i-2 ;; esac
+S
+HOME="$t/home" BUCKET=bucket RUN=r bash "$here/detached.sh" > "$t/home/detached.log" 2>&1
+grep -q 's3 cp --recursive --quiet a/results s3://bucket/r/a/' "$t/calls" &&
+  grep -q 'delete-db-instance --db-instance-identifier bench-b-pg-1' "$t/calls" &&
+  grep -q 'terminate-instances --instance-ids i-1 i-2' "$t/calls" && grep -q 'tier b failed' "$t/home/detached.log" \
+  || { cat "$t/home/detached.log" "$t/calls"; echo "FAIL: detached.sh teardown"; exit 1; }
 echo "run.sh teardown ok"

@@ -8,10 +8,15 @@
 #                 and destroys everything: at the end, after a failure or an interrupt, after
 #                 MAX_RUN_MINUTES, and as soon as the credentials can no longer be refreshed (the
 #                 login session ended), while the last ones still work.
+#                 With BENCH_BUCKET (and bench.tfvars' client_profile) it instead starts detached.sh on
+#                 the client, which runs the tiers, uploads the reports and ends the instances by
+#                 itself, and returns: the laptop can close.
+#   run.sh fetch RUN   after a detached run: its reports from the bucket to bench-env/results/RUN/,
+#                 then destroys what is left (the VPC and the rest, which cost nothing).
 #
 # Before either: aws login --profile hiroyuki_yamada (the user signs in). run.sh then works only as
 # the role scalardb-bench (setup-account.sh), assumed anew on every refresh.
-# Environment: BENCH_DB_PASSWORD, SSH_KEY (the private key of bench.tfvars' public one),
+# Environment: BENCH_DB_PASSWORD, SSH_KEY (the private key of bench.tfvars' public one), BENCH_BUCKET,
 # MAX_RUN_MINUTES (default 480, below a login session of 12 hours, with room for the destroy).
 # Arguments after `run` go to matrix.sh (and from there to Gradle).
 set -euo pipefail
@@ -47,8 +52,16 @@ case "${1:-}" in
     # the plan file holds the variables, the password included: no placeholder (*.tfplan is ignored)
     TF_VAR_db_password=${BENCH_DB_PASSWORD:?} tf plan -input=false -var-file=${TFVARS:-bench.tfvars} -out=bench.tfplan
     exit ;;
+  fetch)
+    out="${RESULTS_DIR:-$here/results}/${2:?usage: run.sh fetch RUN}"
+    mkdir -p "$out"
+    (. "$creds" && aws s3 cp --recursive --quiet "s3://${BENCH_BUCKET:?}/$2/" "$out/")
+    tail -3 "$out/detached.log" 2>/dev/null || echo "no detached.log: the run may still be going" >&2
+    TF_VAR_db_password=x tf destroy -auto-approve -input=false -var-file=${TFVARS:-bench.tfvars} >/dev/null && echo destroyed || recover
+    echo "=== reports in $out"
+    exit ;;
   run) shift ;;
-  *) echo "usage: run.sh plan | run [matrix.sh arguments]" >&2; exit 2 ;;
+  *) echo "usage: run.sh plan | run [matrix.sh arguments] | fetch RUN" >&2; exit 2 ;;
 esac
 : "${BENCH_DB_PASSWORD:?}" "${SSH_KEY:?}"
 export TF_VAR_db_password=$BENCH_DB_PASSWORD
@@ -77,12 +90,12 @@ echo "=== apply $(date +%T)"
 tf apply -input=false bench.tfplan
 client=$(tf output -raw client)
 ssh_() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 "ubuntu@$client" "$@"; }
-until ssh_ 'test -x /usr/lib/jvm/temurin-25-jdk-amd64/bin/java' 2>/dev/null; do sleep 15; done
+until ssh_ 'test -x /usr/lib/jvm/temurin-25-jdk-amd64/bin/java && test -x /snap/bin/aws' 2>/dev/null; do sleep 15; done
 
 urls=$(tf output -json urls)
 out="${RESULTS_DIR:-$here/results}/$(date +%Y%m%d-%H%M)"
 mkdir -p "$out"
-pids=()
+pids=(); cmds=()
 for tier in a b; do
   args=$(python3 -c '
 import json, sys
@@ -99,13 +112,24 @@ for key, url in urls.items():
   # the working tree, tracked and untracked, without what git ignores (secrets, state, results)
   (cd "$repo" && git ls-files -co --exclude-standard -z | tar -c -f - --null -T -) |
     ssh_ "rm -rf $tier && mkdir $tier && tar -x -C $tier"
+  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
+  if [ -n "${BENCH_BUCKET:-}" ]; then cmds+=("$cmd"); continue; fi
   (
-    ssh_ "cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' bash bench-env/matrix.sh $tier $(echo $args) -- $*" \
-      > "$out/$tier.log" 2>&1 || echo "tier $tier failed, see $out/$tier.log"
+    ssh_ "$cmd" > "$out/$tier.log" 2>&1 || echo "tier $tier failed, see $out/$tier.log"
     mkdir -p "$out/$tier"
     scp -q -i "$SSH_KEY" "ubuntu@$client:$tier/results/*" "$out/$tier/" || true
   ) &
   pids+=($!)
 done
+if [ -n "${BENCH_BUCKET:-}" ]; then
+  run=$(basename "$out")
+  printf '%s\n' "${cmds[@]}" | ssh_ "umask 077 && cat > tiers.sh && cp a/bench-env/detached.sh . &&
+    BUCKET='$BENCH_BUCKET' RUN='$run' MAX_RUN_MINUTES='${MAX_RUN_MINUTES:-480}' setsid nohup bash detached.sh < /dev/null > detached.log 2>&1 &"
+  trap - EXIT INT TERM
+  kill "$heartbeat" "$deadline" 2>/dev/null || true
+  rm -rf "$(dirname "$creds")"
+  echo "=== detached as $run: the client ends the instances itself; later: run.sh fetch $run"
+  exit
+fi
 for p in "${pids[@]}"; do wait "$p"; done
 echo "=== reports in $out"

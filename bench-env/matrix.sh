@@ -3,7 +3,8 @@
 # all engines in parallel, for each in-flight count and run; the reports go to results/.
 #
 # Usage: matrix.sh TIER engine=url=user... -- [-Dproperty=value...]
-# Environment: BENCH_DB_PASSWORD; INFLIGHT (default "100 10000"); REPS (default 3).
+# Environment: BENCH_DB_PASSWORD; INFLIGHT (default "100 10000"); REPS (default 3); CHANGED=1 adds
+# a run per in-flight count with changed images, its rows checked against VIEW_LJ.
 set -uo pipefail
 tier=$1; shift
 tasks=(); props=()
@@ -19,11 +20,12 @@ done
 shift || true
 mkdir -p results
 for n in ${INFLIGHT:-100 10000}; do
-  for rep in $(seq 1 "${REPS:-3}"); do
+  for rep in $(seq 1 "${REPS:-3}") ${CHANGED:+changed}; do
+    changed=(); [ "$rep" = changed ] && changed=(-Dnativejdbc.bench.changed=true)
     echo "=== $tier i$n-$rep $(date +%T)"
     ./gradlew "${tasks[@]}" "${props[@]}" -Dnativejdbc.bench=true -Dnativejdbc.bench.dropExisting=true \
       "-Dnativejdbc.bench.tier=$tier" "-Dnativejdbc.bench.inflight=$n" "-Dnativejdbc.bench.rep=$rep" \
-      --continue "-Pnativejdbc.parallelEngines=$((${#props[@]} / 3))" "$@" 2>&1 | grep -E 'BUILD|FAILED'
+      --continue "-Pnativejdbc.parallelEngines=$((${#props[@]} / 3))" "${changed[@]}" "$@" 2>&1 | grep -E 'BUILD|FAILED'
     for f in driver/build/bench/read-overhead-*.md driver/build/bench/explain-*.txt; do
       if [ -e "$f" ]; then mv "$f" "results/i$n-$rep-$(basename "$f")"; fi
     done

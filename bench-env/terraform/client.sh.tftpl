@@ -1,5 +1,6 @@
 #!/bin/bash
-# The client: JDK 25 (Temurin, as CI) for Gradle and the benchmark. Terminates itself after
+# The client: JDK 25 (Temurin, as CI) for Gradle and the benchmark, the AWS CLI for detached.sh.
+# Terminates itself after
 # ${lifetime} minutes.
 set -euo pipefail
 shutdown -h +${lifetime}
@@ -7,3 +8,4 @@ apt-get update && apt-get install -y wget gpg
 wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor > /usr/share/keyrings/adoptium.gpg
 echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb noble main" > /etc/apt/sources.list.d/adoptium.list
 apt-get update && apt-get install -y temurin-25-jdk python3
+snap install aws-cli --classic
