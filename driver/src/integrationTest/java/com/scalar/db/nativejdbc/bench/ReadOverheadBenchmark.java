@@ -916,7 +916,7 @@ class ReadOverheadBenchmark {
               "\nMedian ms over up to 200 runs, 300 rounds through a proxy (ratio to BASE); p95 in brackets. `!` marks rows"
                   + " that differ from "
                   + (CHANGED ? "VIEW_LJ (images changed)" : "BASE")
-                  + ".\n\n| query |");
+                  + ", `?` that the reference failed, so nothing was compared.\n\n| query |");
       List<Mode> modes = modes();
       for (Mode m : modes) {
         report.append(' ').append(m).append(" |");
@@ -997,7 +997,7 @@ class ReadOverheadBenchmark {
               .append(
                   String.format(
                       Locale.ROOT, " %.2f (%.1fx) [%.2f]", r.median, r.median / base, r.p95))
-              .append(r.rows.equals(expected) ? "" : " !")
+              .append(expected == null ? " ?" : r.rows.equals(expected) ? "" : " !")
               .append(" |");
           System.out.printf(
               Locale.ROOT,
