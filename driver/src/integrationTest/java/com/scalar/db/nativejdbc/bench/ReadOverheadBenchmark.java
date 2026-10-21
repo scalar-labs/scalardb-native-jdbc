@@ -41,11 +41,12 @@ import org.junit.jupiter.params.provider.MethodSource;
  * written to {@code build/bench/read-overhead-<engine>.md}.
  *
  * <p>Two ScalarDB-style tables, {@code c} (customers, 100k rows) and {@code o} (orders, 500k rows,
- * five per customer), each with a metadata table holding 100 rows in flight whose before image
- * equals the current values, so every rewrite must return the rows of the plain query. Two more for
- * the shapes of real tables: {@code w} (100k rows, 49 non-key columns) and {@code k} (100k rows
- * keyed on {@code (pid, cid)}), their rows in flight at {@code c}'s ids. The rewrites, through the
- * vendor driver directly so only the SQL is measured:
+ * five per customer; both {@code -Dnativejdbc.bench.scale} times larger), each with a metadata
+ * table holding 100 rows in flight whose before image equals the current values, so every rewrite
+ * must return the rows of the plain query. Two more for the shapes of real tables: {@code w} (100k
+ * rows, 49 non-key columns) and {@code k} (100k rows keyed on {@code (pid, cid)}), their rows in
+ * flight at {@code c}'s ids. The rewrites, through the vendor driver directly so only the SQL is
+ * measured:
  *
  * <ul>
  *   <li>BASE: the query on the data tables, ignoring the metadata; the target.
@@ -904,6 +905,14 @@ class ReadOverheadBenchmark {
           .append("\n\n")
           .append(environment(e, c))
           .append(
+              String.format(
+                  Locale.ROOT,
+                  "Data: c %,d rows, o %,d rows; %d rows in flight per table, %s.%n",
+                  rows("c"),
+                  rows("o"),
+                  INFLIGHT,
+                  NEWEST ? "at the highest ids" : "spread over the key"))
+          .append(
               "\nMedian ms over up to 200 runs, 300 rounds through a proxy (ratio to BASE); p95 in brackets. `!` marks rows"
                   + " that differ from "
                   + (CHANGED ? "VIEW_LJ (images changed)" : "BASE")
@@ -1017,6 +1026,8 @@ class ReadOverheadBenchmark {
                   : BEFORE_INDEX.equals("plain") ? "-beforeplain" : "-before")
               + (SS_INDEX.equals("filtered") ? "" : "-ss" + SS_INDEX)
               + (INFLIGHT != 100 ? "-inflight" + INFLIGHT : "")
+              + (SCALE != 1 ? "-scale" + SCALE : "")
+              + (NEWEST ? "-newest" : "")
               + (GATHER_INFLIGHT != INFLIGHT ? "-gather" + GATHER_INFLIGHT : "")
               + (REGATHER ? "-regather" : "")
               + (CHANGED ? "-changed" : "");
@@ -1400,18 +1411,7 @@ class ReadOverheadBenchmark {
                   + engine.quote(e.storedColumn("cid"))
                   + ")"
               : id;
-      int per =
-          Math.max(
-              2,
-              (t.equals("o") ? 500_000 : t.equals("r") ? 1000 : t.equals("h") ? 20_000 : 100_000)
-                  / Math.max(1, count));
-      int at = (t.equals("o") ? 3 : 7) % per;
-      String inFlight =
-          count < 0
-              ? engine.quote("tx_id") + " = 'w'"
-              : count == 0
-                  ? "1 = 0"
-                  : key + " - " + per + " * FLOOR(" + key + " / " + per + ") = " + at;
+      String inFlight = count < 0 ? engine.quote("tx_id") + " = 'w'" : inFlightAt(t, key, count);
       e.execute(
           c,
           "UPDATE "
@@ -2192,6 +2192,49 @@ class ReadOverheadBenchmark {
   // -Dnativejdbc.bench.inflight=10000: rows in flight per table, 100 by default
   private static final int INFLIGHT = Integer.getInteger("nativejdbc.bench.inflight", 100);
 
+  // -Dnativejdbc.bench.scale=10: c and o that many times larger, 1 to 20; h, r, w and k unchanged
+  private static final int SCALE = Integer.getInteger("nativejdbc.bench.scale", 1);
+
+  // -Dnativejdbc.bench.inflightAt=newest: each table's rows in flight at its highest ids, where
+  // pages of ORDER BY key DESC read and where new rows are written, instead of spread over the key
+  private static final boolean NEWEST =
+      System.getProperty("nativejdbc.bench.inflightAt", "spread").equals("newest");
+
+  private static int rows(String t) {
+    switch (t) {
+      case "c":
+        return 100_000 * SCALE;
+      case "o":
+        return 500_000 * SCALE;
+      case "h":
+        return 20_000;
+      case "r":
+        return 1000;
+      default:
+        return 100_000;
+    }
+  }
+
+  /** Which rows of t, by key, are in flight when count are: spread over the key, or the newest. */
+  private static String inFlightAt(String t, String key, int count) {
+    if (count == 0) {
+      return "1 = 0";
+    }
+    int per = Math.max(2, rows(t) / count); // at most half the table
+    if (NEWEST) {
+      return key + " >= " + (rows(t) - rows(t) / per);
+    }
+    return key
+        + " - "
+        + per
+        + " * FLOOR("
+        + key
+        + " / "
+        + per
+        + ") = "
+        + (t.equals("o") ? 3 : 7) % per;
+  }
+
   // -Dnativejdbc.bench.gatherInflight=0: rows in flight per table in ScalarDB's metadata tables
   // while the driver's setup gathers their statistics (DRIVER only), INFLIGHT by default
   private static final int GATHER_INFLIGHT =
@@ -2201,7 +2244,7 @@ class ReadOverheadBenchmark {
   private static final boolean REGATHER = Boolean.getBoolean("nativejdbc.bench.regather");
 
   private static int customer(Random random) {
-    return HOT ? 7 + 1000 * random.nextInt(100) : random.nextInt(100_000);
+    return HOT ? 7 + 1000 * random.nextInt(100) : random.nextInt(rows("c"));
   }
 
   private static int region(Random random) {
@@ -2402,6 +2445,14 @@ class ReadOverheadBenchmark {
     for (int i = 0; i < 10; i++) {
       ddl.add("INSERT INTO bn.d VALUES (" + i + ")");
     }
+    if (SCALE < 1 || SCALE > 20) {
+      throw new IllegalArgumentException("nativejdbc.bench.scale must be 1 to 20: " + SCALE);
+    }
+    // bn.s: 0 to 5 * SCALE - 1, the blocks of 100k ids of c and o
+    ddl.add("CREATE TABLE bn.s (n " + in + ")");
+    for (int i = 0; i < 5 * SCALE; i++) {
+      ddl.add("INSERT INTO bn.s VALUES (" + i + ")");
+    }
     ddl.add("CREATE TABLE bn.c (id " + in + " PRIMARY KEY, name VARCHAR(20), region " + in + ")");
     ddl.add(
         "CREATE TABLE bn.o (id " + in + " PRIMARY KEY, customer_id " + in + ", total " + in + ")");
@@ -2458,16 +2509,21 @@ class ReadOverheadBenchmark {
         "INSERT INTO bn.c (id, name, region) SELECT x.id, CONCAT('n', x.id), x.id - 1000 *"
             + " FLOOR(x.id / 1000) FROM (SELECT "
             + ids5
-            + " AS id FROM "
+            + " + 100000 * s.n AS id FROM "
             + digits5
+            + ", bn.s s WHERE s.n < "
+            + SCALE
             + ") x");
     ddl.add(
-        "INSERT INTO bn.o (id, customer_id, total) SELECT x.id, x.id - 100000 * FLOOR(x.id /"
-            + " 100000), x.id - 1000 * FLOOR(x.id / 1000) FROM (SELECT "
+        "INSERT INTO bn.o (id, customer_id, total) SELECT x.id, x.id - "
+            + rows("c")
+            + " * FLOOR(x.id / "
+            + rows("c")
+            + "), x.id - 1000 * FLOOR(x.id / 1000) FROM (SELECT "
             + ids5
-            + " + 100000 * d6.n AS id FROM "
+            + " + 100000 * s.n AS id FROM "
             + digits5
-            + ", bn.d d6 WHERE d6.n < 5) x");
+            + ", bn.s s) x");
     ddl.add(
         "INSERT INTO bn.r (id, label) SELECT x.id, CONCAT('r', x.id) FROM (SELECT d1.n + 10 *"
             + " d2.n + 100 * d3.n AS id FROM bn.d d1, bn.d d2, bn.d d3) x");
@@ -2526,41 +2582,26 @@ class ReadOverheadBenchmark {
     // INFLIGHT rows in flight per table (at most half of c), their before image equal to the
     // current values; the rows in flight at 100 stay in flight at any larger count
     // and at 0 none: the driver's rewrite alone
-    int perC = Math.max(2, 100_000 / Math.max(1, INFLIGHT));
-    int perO = Math.max(2, 500_000 / Math.max(1, INFLIGHT));
-    String none = INFLIGHT == 0 ? " AND 1 = 0" : "";
     ddl.add(
         "UPDATE bn.cm SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
             + " before_tx_version = 1, before_name = CONCAT('n', id), before_region = id - 1000 *"
-            + " FLOOR(id / 1000) WHERE id - "
-            + perC
-            + " * FLOOR(id / "
-            + perC
-            + ") = "
-            + 7 % perC
-            + none);
+            + " FLOOR(id / 1000) WHERE "
+            + inFlightAt("c", "id", INFLIGHT));
     ddl.add(
         "UPDATE bn.om SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
-            + " before_tx_version = 1, before_customer_id = id - 100000 * FLOOR(id / 100000),"
-            + " before_total = id - 1000 * FLOOR(id / 1000) WHERE id - "
-            + perO
+            + " before_tx_version = 1, before_customer_id = id - "
+            + rows("c")
             + " * FLOOR(id / "
-            + perO
-            + ") = "
-            + 3 % perO
-            + none);
+            + rows("c")
+            + "), before_total = id - 1000 * FLOOR(id / 1000) WHERE "
+            + inFlightAt("o", "id", INFLIGHT));
     // w and k: the rows of c's ids in flight, k's rows numbered 10 * pid + cid
     ddl.add(
         "UPDATE bn.wm SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
             + " before_tx_version = 1"
             + wideBefore
-            + " WHERE id - "
-            + perC
-            + " * FLOOR(id / "
-            + perC
-            + ") = "
-            + 7 % perC
-            + none);
+            + " WHERE "
+            + inFlightAt("w", "id", INFLIGHT));
     String kid = "(10 * pid + cid)";
     ddl.add(
         "UPDATE bn.km SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
@@ -2571,27 +2612,12 @@ class ReadOverheadBenchmark {
             + " / 1000), before_val = "
             + kid
             + " + 1 WHERE "
-            + kid
-            + " - "
-            + perC
-            + " * FLOOR("
-            + kid
-            + " / "
-            + perC
-            + ") = "
-            + 7 % perC
-            + none);
-    int perH = Math.max(2, 20_000 / Math.max(1, INFLIGHT));
+            + inFlightAt("k", kid, INFLIGHT));
     ddl.add(
         "UPDATE bn.hm SET tx_id = 'w', tx_state = 1, tx_version = 2, before_tx_id = 'seed',"
             + " before_tx_version = 1, before_qty = id, before_grp = id - 200 * FLOOR(id / 200)"
-            + " WHERE id - "
-            + perH
-            + " * FLOOR(id / "
-            + perH
-            + ") = "
-            + 7 % perH
-            + none);
+            + " WHERE "
+            + inFlightAt("h", "id", INFLIGHT));
     if (CHANGED) {
       // after images apart from the before images, half of c's and o's rows in flight deleted,
       // and ten rows of c, o and h inserted in flight: at the first run's customer and region
@@ -2601,16 +2627,22 @@ class ReadOverheadBenchmark {
       ddl.add("UPDATE bn.cm SET tx_state = 2 WHERE tx_state = 1 AND id - 2 * FLOOR(id / 2) = 0");
       ddl.add("UPDATE bn.om SET tx_state = 2 WHERE tx_state = 1 AND id - 2 * FLOOR(id / 2) = 0");
       ddl.add(
-          "INSERT INTO bn.c (id, name, region) SELECT 100000 + n, CONCAT('i', 100000 + n), 7"
-              + " FROM bn.d");
-      ddl.add("INSERT INTO bn.o (id, customer_id, total) SELECT 500000 + n, 4242, 1 FROM bn.d");
-      ddl.add("INSERT INTO bn.h (id, qty, grp) SELECT 20000 + n, n, 7 FROM bn.d");
-      for (String[] tn : new String[][] {{"c", "100000"}, {"o", "500000"}, {"h", "20000"}}) {
+          "INSERT INTO bn.c (id, name, region) SELECT "
+              + rows("c")
+              + " + n, CONCAT('i', "
+              + rows("c")
+              + " + n), 7 FROM bn.d");
+      ddl.add(
+          "INSERT INTO bn.o (id, customer_id, total) SELECT "
+              + rows("o")
+              + " + n, 4242, 1 FROM bn.d");
+      ddl.add("INSERT INTO bn.h (id, qty, grp) SELECT " + rows("h") + " + n, n, 7 FROM bn.d");
+      for (String t : List.of("c", "o", "h")) {
         ddl.add(
             "INSERT INTO bn."
-                + tn[0]
+                + t
                 + "m (id, tx_id, tx_state, tx_version) SELECT "
-                + tn[1]
+                + rows(t)
                 + " + n, 'w', 1, 1 FROM bn.d");
       }
     }
