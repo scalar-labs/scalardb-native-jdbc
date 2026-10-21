@@ -68,6 +68,12 @@ variable "client_profile" {
   default     = ""
 }
 
+variable "db_memory_mb" {
+  description = "Tier A: memory per database container, file cache included, with the buffer pool to fit; 0 for none"
+  type        = number
+  default     = 0
+}
+
 variable "lifetime_minutes" {
   description = "Each EC2 instance terminates itself this long after boot"
   type        = number
@@ -210,6 +216,7 @@ resource "aws_instance" "db" {
     engine         = each.key
     password       = var.db_password
     lifetime       = var.lifetime_minutes
+    db_memory_mb   = var.db_memory_mb
     oracle_image   = var.oracle_image
     registry_user  = var.oracle_registry_user
     registry_token = var.oracle_registry_token
