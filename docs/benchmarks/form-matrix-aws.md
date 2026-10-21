@@ -116,6 +116,51 @@ One repetition only: single-digit factors are indicative; the large ones are not
 
 ## Recommendation
 
+### Strategy
+
+Two layers, applied to every read. Neither depends on the engine, and the driver can choose
+each from the statement alone.
+
+**1. Whether a read aborts on rows in flight: predicate checks.** With
+`scalardbnative.predicateChecks` on, a read aborts only when its WHERE clause matches the in-flight
+before or after images, not whenever its table has a row in flight. This is the larger effect under
+write load. With 4 ScalarDB writers on RDS PostgreSQL, grouped reads went from 90 commits/s at 72
+retries per commit (off) to 2,098/s with none (on). The writers reports are in
+`bench-env/results/20261022-0044/*/writers-*.md`, and the method is in
+[the in-flight check benchmark](inflight-check.md) on the `predicate-checks` branch.
+
+Turn it on by default once these are settled:
+
+- **Oracle:** with one writer the reads are slower with the checks on, 30 commits/s against 211.
+- **MySQL:** the baseline with the checks off and no writers is 158/s, against about 2,000 on the
+  other engines. Until that is explained, the gain on MySQL is unproven. The writers mode also
+  failed on tier A's MySQL.
+- **Joins:** stage 1 covers reads of one table only. Joins still abort table-wide, including the
+  paged joins below, where VIEW_CASE gains the most.
+
+**2. How a read that goes ahead is read: three rules by query shape.**
+
+| Query shape | Form | Gain over DRIVER, 1x and 10x data |
+|---|---|---|
+| Everything else: key lookups, filters, joins, subqueries, pages with an OFFSET, COUNT by FK, DISTINCT | Keep (the split read, SPLIT_DRV) | - |
+| ORDER BY + LIMIT with no OFFSET, joined or not, keyset or range | VIEW_CASE, plain filter | 1.0x-33,000x |
+| COUNT, SUM, GROUP BY over a whole table | CORR | 1.3x-11x; Oracle at 10,000 in flight 0.8x-1.0x |
+
+The rules work together with the predicate checks. With the checks on, reads that meet rows in flight
+go ahead instead of retrying, so what a form costs with rows in flight is what users pay. And a
+grouped read under SNAPSHOT reads the same in-flight images twice, once for the check and once for
+CORR's correction. The CORR rewriter should take both from one read.
+
+What the short rules give up, against the per-engine table below:
+
+- CORR's DISTINCT on MariaDB (14x-77x) and PostgreSQL at 10x data (1.7x-9.1x).
+- OVER for Oracle's deep OFFSET (3.2x-13x at 1x data).
+- Up to 20% on Oracle's whole-table aggregates at 10,000 in flight.
+
+If MariaDB matters, a DISTINCT rule for it is the one engine-specific exception worth adding.
+
+### Per engine
+
 Which form to read each kind of query with, per engine. Keep means the split read the driver emits
 today (SPLIT_DRV, `SplitRead.java`): the committed copy excludes rows in flight by `NOT EXISTS` on
 PostgreSQL and Oracle, and by a left join to the DISTINCT in-flight keys on MySQL and MariaDB.
