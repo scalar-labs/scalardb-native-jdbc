@@ -53,11 +53,17 @@ public final class Proxies {
    * @param engine its engine
    * @param catalog the catalog for its database and identity
    * @param inflightWait how long a write waits for a row in flight to settle, zero to abort at once
+   * @param predicateChecks whether a read of one table checks its predicate's rows in flight before
+   *     it aborts on its table's (design 4.2)
    * @return the connection the application uses
    * @throws SQLException if the session cannot be read or the isolation level set
    */
   public static Connection connection(
-      Connection vendor, Engine engine, Catalog catalog, Duration inflightWait)
+      Connection vendor,
+      Engine engine,
+      Catalog catalog,
+      Duration inflightWait,
+      boolean predicateChecks)
       throws SQLException {
     // vendor defaults differ (Connector/J and MariaDB start at REPEATABLE READ), so every engine
     // starts at READ COMMITTED, the driver's default level (design section 1)
@@ -67,13 +73,13 @@ public final class Proxies {
       session.requireReadCommittedSnapshot(vendor);
     }
     session.schemas(vendor); // read now, outside any transaction
+    Router router = new Router(engine, catalog, session, predicateChecks);
     // ScalarDbTables, reached with unwrap, is the driver's own interface (design section 1)
     return (Connection)
         Proxy.newProxyInstance(
             Proxies.class.getClassLoader(),
             new Class<?>[] {Connection.class, ScalarDbTables.class},
-            new ConnectionHandler(
-                vendor, new Router(engine, catalog, session), session, inflightWait));
+            new ConnectionHandler(vendor, router, session, inflightWait));
   }
 
   private static Object proxy(Class<?> type, InvocationHandler h) {
@@ -848,7 +854,15 @@ public final class Proxies {
         }
         if (checked != null) {
           try {
-            owner.router.check(owner.vendor, checked, vendor().getQueryTimeout());
+            owner.router.check(
+                owner.vendor,
+                checked,
+                vendor().getQueryTimeout(),
+                // a value read once is read by the statement itself
+                boundOnce()
+                    ? null
+                    : (ps, position, placeholder) ->
+                        bind(ps, position, placeholder, parameters.get(placeholder)));
           } catch (Writes.Aborted e) {
             if (!own) {
               owner.rollbackOnly = true;
@@ -1054,23 +1068,12 @@ public final class Proxies {
         public void bind(PreparedStatement ps, int position, int placeholder, boolean asStored)
             throws SQLException {
           Call c = parameters == null ? null : parameters.get(placeholder);
-          if (c == null) {
-            throw new SQLException("no value is bound to parameter " + placeholder, "07001");
-          }
-          if (asStored && c.args.length > 1 && c.args[1] instanceof Float) {
+          if (asStored && c != null && c.args.length > 1 && c.args[1] instanceof Float) {
             // Connector/J sends a float as its shortest decimal text, which no stored float equals
             ps.setDouble(position, ((Float) c.args[1]).doubleValue());
             return;
           }
-          Object[] at = c.args.clone();
-          at[0] = position;
-          try {
-            forward(ps, c.method, at);
-          } catch (SQLException | RuntimeException e) {
-            throw e;
-          } catch (Throwable t) {
-            throw new SQLException(t);
-          }
+          StatementHandler.bind(ps, position, placeholder, c);
         }
 
         @Override
@@ -1242,6 +1245,45 @@ public final class Proxies {
      */
     private static boolean plain(Router.Route r) {
       return r.checks.isEmpty() && r.anchored == null && r.write == null;
+    }
+
+    /** Binds an application's value, as it was set, at {@code position} of a driver statement. */
+    private static void bind(PreparedStatement ps, int position, int placeholder, @Nullable Call c)
+        throws SQLException {
+      if (c == null) {
+        throw new SQLException("no value is bound to parameter " + placeholder, "07001");
+      }
+      Object[] at = c.args.clone();
+      at[0] = position;
+      try {
+        forward(ps, c.method, at);
+      } catch (SQLException | RuntimeException e) {
+        throw e;
+      } catch (Throwable t) {
+        throw new SQLException(t);
+      }
+    }
+
+    /**
+     * Whether a bound value can be read once only: a stream, or a LOB, SQLXML, array, struct or
+     * ref, which may be backed by one.
+     */
+    private boolean boundOnce() {
+      for (Call c : parameters.values()) {
+        for (Object a : c.args) {
+          if (a instanceof InputStream
+              || a instanceof Reader
+              || a instanceof java.sql.Blob
+              || a instanceof java.sql.Clob
+              || a instanceof java.sql.SQLXML
+              || a instanceof java.sql.Array
+              || a instanceof java.sql.Struct
+              || a instanceof java.sql.Ref) {
+            return true;
+          }
+        }
+      }
+      return false;
     }
 
     /** Whether a bound value is a stream, which the vendor statement consumed and cannot replay. */

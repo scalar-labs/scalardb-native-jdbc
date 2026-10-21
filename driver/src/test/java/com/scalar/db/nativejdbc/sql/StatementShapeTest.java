@@ -16,6 +16,44 @@ class StatementShapeTest {
     return StatementShape.of(sql, Engine.POSTGRESQL).orElseThrow();
   }
 
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "SELECT region, SUM(amount) FROM o WHERE region = ? GROUP BY region",
+        "SELECT COUNT(*) FROM o WHERE region BETWEEN 1 AND 9 AND NOT (amount IS NULL)",
+        "SELECT DISTINCT region FROM o WHERE o.region IN (1, 2, ?) OR amount * 2 > -5",
+        "SELECT id FROM o WHERE name LIKE 'a%' AND CAST(amount AS CHAR(9)) = '7'",
+        "SELECT id FROM o WHERE CASE WHEN amount > 0 THEN 1 ELSE 0 END = 1",
+        "SELECT id FROM o WHERE created < TIMESTAMP '2026-01-01 00:00:00' ORDER BY id"
+      })
+  void wherePure_columnsPlaceholdersLiteralsOperators(String sql) {
+    assertThat(shape(sql).wherePure()).isTrue();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "SELECT COUNT(*) FROM o WHERE created < NOW()",
+        "SELECT COUNT(*) FROM o WHERE created < CURRENT_TIMESTAMP",
+        "SELECT COUNT(*) FROM o WHERE RAND() < 0.5",
+        "SELECT COUNT(*) FROM o WHERE UPPER(name) = ?",
+        "SELECT COUNT(*) FROM o WHERE amount > (SELECT 1)"
+      })
+  void wherePure_notAFunctionNorATimeKeywordNorASubquery(String sql) {
+    assertThat(shape(sql).wherePure()).isFalse();
+  }
+
+  @Test
+  void wherePure_notAnOperatorThatNeedsTheBaseTable() {
+    // full-text MATCH needs the table's FULLTEXT index, which the check's derived tables lack
+    assertThat(
+            StatementShape.of(
+                    "SELECT COUNT(*) FROM o WHERE MATCH(body) AGAINST ('x')", Engine.MYSQL)
+                .orElseThrow()
+                .wherePure())
+        .isFalse();
+  }
+
   @Test
   void columnNames_followTheEngineRule() {
     String unquoted = "update t set x = ? where amount = ?";

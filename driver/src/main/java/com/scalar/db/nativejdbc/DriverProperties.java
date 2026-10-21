@@ -25,9 +25,10 @@ final class DriverProperties {
   static final String CATALOG_TTL_MS = PREFIX + "catalogTtlMs";
   static final String ALLOW_NO_CATALOG = PREFIX + "allowNoCatalog";
   static final String INFLIGHT_WAIT_MS = PREFIX + "inflightWaitMs";
+  static final String PREDICATE_CHECKS = PREFIX + "predicateChecks";
 
   private static final Set<String> KNOWN =
-      Set.of(METADATA_SCHEMA, CATALOG_TTL_MS, ALLOW_NO_CATALOG, INFLIGHT_WAIT_MS);
+      Set.of(METADATA_SCHEMA, CATALOG_TTL_MS, ALLOW_NO_CATALOG, INFLIGHT_WAIT_MS, PREDICATE_CHECKS);
 
   /** A table registered with ScalarDB is protected after at most this long, whatever is set. */
   static final Duration MAX_CATALOG_TTL = Duration.ofHours(1);
@@ -41,13 +42,19 @@ final class DriverProperties {
   final Duration catalogTtl;
   final boolean allowNoCatalog;
   final Duration inflightWait;
+  final boolean predicateChecks;
 
   private DriverProperties(
-      String metadataSchema, Duration catalogTtl, boolean allowNoCatalog, Duration inflightWait) {
+      String metadataSchema,
+      Duration catalogTtl,
+      boolean allowNoCatalog,
+      Duration inflightWait,
+      boolean predicateChecks) {
     this.metadataSchema = metadataSchema;
     this.catalogTtl = catalogTtl;
     this.allowNoCatalog = allowNoCatalog;
     this.inflightWait = inflightWait;
+    this.predicateChecks = predicateChecks;
   }
 
   /**
@@ -102,7 +109,8 @@ final class DriverProperties {
         schema,
         Duration.ofMillis(ttl),
         bool(all, ALLOW_NO_CATALOG),
-        Duration.ofMillis(nonNegative(all, INFLIGHT_WAIT_MS, 0)));
+        Duration.ofMillis(nonNegative(all, INFLIGHT_WAIT_MS, 0)),
+        bool(all, PREDICATE_CHECKS));
   }
 
   /** The connect properties without this driver's keys, for the vendor driver. */
@@ -140,6 +148,12 @@ final class DriverProperties {
           Long.toString(current.inflightWait.toMillis()),
           "Under READ COMMITTED, how long a write waits for a row a ScalarDB transaction holds;"
               + " 0 aborts at once"),
+      choice(
+          PREDICATE_CHECKS,
+          current.predicateChecks,
+          "Under SNAPSHOT, and SERIALIZABLE on PostgreSQL, a read of one table that would abort"
+              + " on a row in flight in that table first checks whether its predicate matches one;"
+              + " experimental"),
     };
   }
 

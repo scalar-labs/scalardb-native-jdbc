@@ -7,7 +7,10 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
+import net.sf.jsqlparser.expression.BooleanValue;
+import net.sf.jsqlparser.expression.CaseExpression;
 import net.sf.jsqlparser.expression.CastExpression;
+import net.sf.jsqlparser.expression.DateTimeLiteralExpression;
 import net.sf.jsqlparser.expression.DateValue;
 import net.sf.jsqlparser.expression.DoubleValue;
 import net.sf.jsqlparser.expression.Expression;
@@ -16,13 +19,35 @@ import net.sf.jsqlparser.expression.HexValue;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.expression.LongValue;
+import net.sf.jsqlparser.expression.NotExpression;
+import net.sf.jsqlparser.expression.NullValue;
 import net.sf.jsqlparser.expression.SignedExpression;
 import net.sf.jsqlparser.expression.StringValue;
 import net.sf.jsqlparser.expression.TimeValue;
 import net.sf.jsqlparser.expression.TimestampValue;
+import net.sf.jsqlparser.expression.WhenClause;
+import net.sf.jsqlparser.expression.operators.arithmetic.Addition;
+import net.sf.jsqlparser.expression.operators.arithmetic.Concat;
+import net.sf.jsqlparser.expression.operators.arithmetic.Division;
+import net.sf.jsqlparser.expression.operators.arithmetic.IntegerDivision;
+import net.sf.jsqlparser.expression.operators.arithmetic.Modulo;
+import net.sf.jsqlparser.expression.operators.arithmetic.Multiplication;
+import net.sf.jsqlparser.expression.operators.arithmetic.Subtraction;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
+import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
+import net.sf.jsqlparser.expression.operators.relational.Between;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
+import net.sf.jsqlparser.expression.operators.relational.GreaterThan;
+import net.sf.jsqlparser.expression.operators.relational.GreaterThanEquals;
+import net.sf.jsqlparser.expression.operators.relational.InExpression;
+import net.sf.jsqlparser.expression.operators.relational.IsBooleanExpression;
+import net.sf.jsqlparser.expression.operators.relational.IsDistinctExpression;
+import net.sf.jsqlparser.expression.operators.relational.IsNullExpression;
+import net.sf.jsqlparser.expression.operators.relational.LikeExpression;
+import net.sf.jsqlparser.expression.operators.relational.MinorThan;
+import net.sf.jsqlparser.expression.operators.relational.MinorThanEquals;
+import net.sf.jsqlparser.expression.operators.relational.NotEqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
@@ -331,6 +356,82 @@ public final class StatementShape {
   public List<String> whereColumns() {
     return whereColumns;
   }
+
+  /**
+   * Returns whether the {@code WHERE} clause is built of columns, placeholders, literals,
+   * operators, CAST and CASE alone, so that it gives a row the same answer in every statement of a
+   * transaction: no function, no subquery, no keyword the engine evaluates as the statement runs,
+   * such as {@code CURRENT_TIMESTAMP}. A clause the tree does not show is not pure. True without a
+   * {@code WHERE} clause.
+   *
+   * @return whether the predicate is pure
+   */
+  public boolean wherePure() {
+    if (where == null) {
+      return true;
+    }
+    Set<Object> nodes = SqlAst.valuesUnder(where);
+    if (nodes == null) {
+      return false;
+    }
+    for (Object n : nodes) {
+      boolean pure =
+          n instanceof Column
+              || n instanceof Table
+              || n instanceof JdbcParameter
+              || n instanceof JdbcNamedParameter
+              || n instanceof LongValue
+              || n instanceof DoubleValue
+              || n instanceof StringValue
+              || n instanceof HexValue
+              || n instanceof NullValue
+              || n instanceof BooleanValue
+              || n instanceof DateValue
+              || n instanceof TimeValue
+              || n instanceof TimestampValue
+              || n instanceof DateTimeLiteralExpression
+              || n instanceof SignedExpression
+              || n instanceof NotExpression
+              || n instanceof CastExpression
+              || n instanceof CaseExpression
+              || n instanceof WhenClause
+              || PURE_OPERATORS.contains(n.getClass());
+      if (!pure) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * The operators a pure predicate may use, by exact class: not the rest of the parser's operators,
+   * among them full-text MATCH, which needs the base table's index, Oracle's (+) and JSON paths.
+   */
+  private static final Set<Class<?>> PURE_OPERATORS =
+      Set.of(
+          AndExpression.class,
+          OrExpression.class,
+          EqualsTo.class,
+          NotEqualsTo.class,
+          GreaterThan.class,
+          GreaterThanEquals.class,
+          MinorThan.class,
+          MinorThanEquals.class,
+          Between.class,
+          InExpression.class,
+          IsNullExpression.class,
+          IsBooleanExpression.class,
+          IsDistinctExpression.class,
+          LikeExpression.class,
+          ExpressionList.class,
+          ParenthesedExpressionList.class,
+          Addition.class,
+          Subtraction.class,
+          Multiplication.class,
+          Division.class,
+          IntegerDivision.class,
+          Modulo.class,
+          Concat.class);
 
   /**
    * Returns the resolved names in an {@code INSERT}'s column list; empty when the statement has

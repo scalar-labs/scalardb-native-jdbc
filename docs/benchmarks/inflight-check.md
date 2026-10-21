@@ -1,0 +1,181 @@
+# The in-flight check of the per-table path (2026-10-21)
+
+At SNAPSHOT, and at SERIALIZABLE on PostgreSQL, a read the row-by-row detector does not cover (a
+grouped, aggregate or DISTINCT read, a join or subquery past it, an OFFSET, a scrollable result)
+first checks each ScalarDB table it reaches for a row in flight, `SELECT 1 FROM T_meta WHERE
+tx_state IN (1, 2)`, and aborts with `40001` if one is there (design 4.2, the per-table check).
+That check ignores the read's predicate: a row in flight anywhere in the table aborts the read.
+How often that aborts reads that a row in flight could not have changed, and what a check that
+takes the predicate costs instead.
+
+Benchmark: `driver/src/integrationTest/.../jdbc/InFlightCheckBenchmark.java`, run with
+`./gradlew :driver:integrationTest --tests '*InFlightCheckBenchmark*' -Dnativejdbc.bench=true`;
+`-Dnativejdbc.bench.arms=true` runs the plan diagnostics of the last section instead.
+
+Setup: orders `o` (100k rows, 1,000 regions of 100, each order of a customer `cid`) and customers
+`c` (10k rows; a region's orders reach 10 of them), imported into ScalarDB decoupled, ScalarDB
+indexes on `o.region` and `o.cid`, the driver's setup run. Checks through the vendor drivers, so
+only the SQL is measured: median of 300 executions with a random region, after a warm-up; local
+containers on an Apple Silicon laptop, SQL Server under x86 emulation.
+
+The checks:
+
+- **table-wide** (today): the check above, per table.
+- **predicate**, one table: the read's WHERE over the before images UNION ALL over the after images
+  of the rows in flight, as the in-flight check of a locking read (`Router.inFlightStep`).
+- **own conjuncts**, a join: per table the conjuncts naming it alone (`o.region = ?`), a table with
+  none checked whole (`c`).
+- **in-flight pairs**, a join: the statement as `SELECT 1`, over every combination of pieces with a
+  row in flight, each by its after or before image: `(o after, c data)`, `(o before, c data)`,
+  `(o data, c after)`, `(o data, c before)`, `(o before, c before)`, the data table holding the
+  committed rows and the after images. A correlated `EXISTS (SELECT 1 FROM c WHERE c.id = o.cid)`
+  takes the same check: a row of `c` in flight reaches it only through a pair the join matches.
+
+Each check is correct: a row in flight that no image brings into the statement's rows changes
+nothing, whichever image is true; a dropped conjunct only widens what is checked.
+
+## Conclusions
+
+1. **The table-wide check aborts most grouped reads once ScalarDB writes the table.** One writer
+   (60-230 commits/s, split over the two tables) already aborts 22-28% of the one-table grouped
+   reads and 44-53% of the joins, four writers 64-99%, sixteen 97-100%: a retry loop starves.
+2. **The predicate check removes nearly all of it on one table**: 0-1.6% with `region = ?`, 0.1-11%
+   with a range of 1% of the table; what remains is mostly a row in flight the read does reach.
+   Cost over the table-wide check: 0-300 µs on PostgreSQL and MySQL, up to 1.1 ms on MariaDB and
+   SQL Server, 2.1 ms for Oracle's range with few rows in flight; and it runs on every read, where the table-wide check runs once per
+   table per transaction (`passed`).
+3. **Own conjuncts do not help joins.** A table without a selective condition of its own, the
+   usual lookup table or correlated subquery, is checked whole, and aborts as today: 23-26% at one
+   writer, 64-98% at four.
+4. **In-flight pairs do**: 0-3% at every writer count, about the single-table predicate check.
+   Cost on PostgreSQL, MySQL, MariaDB and Oracle 0.4-2.4 ms, about one more read of the statement.
+   SQL Server measured 16-18 ms with 100 rows in flight or fewer in the full run, 1.9-4.7 ms when
+   the statement is first planned with rows in flight (diagnostics below): a plan cached while no
+   row was in flight, reused after; to be solved before SQL Server takes this form.
+5. **Design that follows**: one table, the predicate check; a join or semi-joined subquery the
+   split covers, the in-flight pairs check, built from the split read's fragments; the table-wide
+   check kept for the shapes the split does not cover (a scalar subquery, a CTE, past the copy
+   limit) and as the cheaper choice where ScalarDB does not write concurrently. Under SERIALIZABLE
+   on MySQL, MariaDB and SQL Server the table-wide check stays: its locking read is what holds off
+   every later prepare, and a predicate would lock the same range.
+
+## Aborts with live ScalarDB writers
+
+ScalarDB transactions updating one random row of `o` or `c` each, w writer threads, 10 s, while one
+reader runs the checks in turn; the share of checks that find a row, which is the share of reads
+that abort. Writers at 1 / 4 / 16.
+
+One table, `SELECT region, SUM(amount) FROM o WHERE <region> GROUP BY region`:
+
+| engine | commits/s | table-wide (today) | `region = ?` | `region` in 10 (1%) |
+|---|---|---|---|---|
+| PostgreSQL | 234 / 761 / 1,773 | 28 / 70 / 99% | 0.0 / 0.1 / 0.2% | 0.2 / 0.5 / 3.7% |
+| MySQL | 75 / 235 / 581 | 25 / 71 / 97% | 0.0 / 0.1 / 0.3% | 0.3 / 0.9 / 3.6% |
+| MariaDB | 75 / 227 / 562 | 22 / 64 / 97% | 0.0 / 0.1 / 0.7% | 0.1 / 1.1 / 5.4% |
+| SQL Server | 62 / 177 / 359 | 27 / 69 / 99% | 0.2 / 0.0 / 0.4% | 0.2 / 1.2 / 4.8% |
+| Oracle | 119 / 304 / 735 | 26 / 87 / 100% | 0.0 / 0.0 / 1.6% | 0.3 / 2.7 / 11% |
+
+Two tables, `o JOIN c ON c.id = o.cid` or `o WHERE EXISTS (... c.id = o.cid)`, `WHERE o.region = ?
+GROUP BY o.region`:
+
+| engine | table-wide `o`, `c` (today) | own conjuncts | in-flight pairs |
+|---|---|---|---|
+| PostgreSQL | 44 / 92 / 100% | 23 / 64 / 99% | 0.0 / 0.2 / 0.8% |
+| MySQL | 49 / 94 / 100% | 25 / 71 / 98% | 0.1 / 0.4 / 0.8% |
+| MariaDB | 47 / 86 / 100% | 24 / 65 / 96% | 0.1 / 0.3 / 0.9% |
+| SQL Server | 53 / 93 / 100% | 26 / 71 / 98% | 0.0 / 0.1 / 0.0% |
+| Oracle | 53 / 99 / 100% | 24 / 98 / 100% | 0.0 / 0.8 / 3.1% |
+
+An earlier run with writers on `o` alone gave the one-table checks 45-52% / 79-99% / 100% for
+the table-wide check and the same order for the others.
+
+## Cost per check, rows in flight held fixed
+
+Rows in flight set in the metadata tables alone, spread over the regions and customers, their
+before images the rows' own values. Median µs at 0 / 10 / 100 / 1,000 / 10,000 rows in flight per
+table; the share of checks that find a row matched the expected one at every count (1% and 18% for
+the pairs at 10 and 100; at 1,000 every region holds a row in flight and every form aborts).
+
+One table:
+
+| engine | table-wide | `region = ?` | `region` in 10 | the read, `region = ?` |
+|---|---|---|---|---|
+| PostgreSQL | 390-930 (5,580-5,710 at 0 and 10) | 420-640 | 390-650 | 400-480 |
+| MySQL | 440-490 | 490-610 | 500-570 | 500-610 |
+| MariaDB | 370-930 | 580-1,090 | 530-1,470 | 460-660 |
+| SQL Server | 980-1,170 | 1,180-2,250 | 1,160-2,210 | 1,200-1,420 |
+| Oracle | 390-510 | 430-730 | 420-2,580 | 500-530 |
+
+Two tables:
+
+| engine | table-wide | own conjuncts | in-flight pairs | the join read |
+|---|---|---|---|---|
+| PostgreSQL | 400-420 | 400-540 | 410-1,310 | 450-540 |
+| MySQL | 460-610 | 500-610 | 620-2,420 | 590-1,180 |
+| MariaDB | 590-1,530 | 700-970 | 870-1,550 | 520-940 |
+| SQL Server | 600-2,240 | 610-2,350 | 690-18,100 | 2,750-2,930 |
+| Oracle | 410-760 | 440-1,020 | 450-1,850 | 530-570 |
+
+Outliers of the table-wide check: PostgreSQL 5.6-5.7 ms at 0 and 10 rows in flight in the last
+run (0.4-0.5 ms in the run before); MySQL 8.6 ms at 0 rows in flight in two runs, 0.46 ms in the
+third. Both came right after the setup's backfill wrote every metadata row; MySQL's is likely the
+full scan of the in-flight index under `LIMIT 1` of the diagnostics below. Not investigated
+further.
+
+## Plan diagnostics of the in-flight pairs (`-Dnativejdbc.bench.arms=true`)
+
+At 10 / 100 rows in flight per table, the check written four ways, median µs (PostgreSQL not run:
+the diagnostic's `FROM DUAL` failed there, since fixed):
+
+| engine | UNION ALL, row limit | OR'ed EXISTS | UNION ALL, no limit | separate statements |
+|---|---|---|---|---|
+| MySQL | 12,505 / 4,964 | 12,139 / 4,990 | 12,282 / 2,388 | 5,579 / 4,317 |
+| MariaDB | 815 / 1,165 | 788 / 1,174 | 753 / 1,256 | 2,481 / 2,918 |
+| SQL Server | 1,991 / 4,681 | 1,919 / 4,766 | 1,922 / 4,861 | 4,599 / 7,460 |
+| Oracle | 1,064 / 915 | 1,025 / 934 | 992 / 958 | 2,724 / 2,593 |
+
+- **The writing makes no difference**; separate statements pay a round trip each.
+- **MySQL** plans the arm `(o after, c data)` with `LIMIT 1` as a full scan of the in-flight index
+  (`type: index`, 9.8 ms; 1.9 ms without the limit), and `(o data, c before)` as a scan of `c`'s
+  metadata table (2.6 ms); its estimate of the rows in flight is 1, from statistics taken with
+  none. Not solved here: an index hint on the in-flight index, or the histogram the setup takes, is
+  the next thing to measure.
+- **SQL Server**: 1.9 / 4.7 ms here against 16.5 / 18.1 ms in the full run, the same statement and
+  rows in flight; the full run first planned it with no row in flight. `OPTION (RECOMPILE)` makes
+  each arm 8-17 ms, its compile alone.
+
+## Reads beside ScalarDB writers (stage 1, one table)
+
+`scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:
+`-Dnativejdbc.bench.writers=true`. Four driver transactions at SNAPSHOT, each two grouped reads
+`SELECT region, SUM(amount) FROM o WHERE region = ? GROUP BY region` by a random region, retried
+on `40001`, for 10 s, alongside ScalarDB writers updating random rows of `o`. Committed
+transactions per second, retries per commit, p50 / p99 ms of a commit retries included; first run,
+on a quiet machine (writers 0 / 1 / 4 / 16):
+
+| engine | committed/s off | committed/s on | retries per commit off | on | p99 ms off | on |
+|---|---|---|---|---|---|---|
+| PostgreSQL | 479* / 700 / 172 / 0 | 1,501* / 932 / 700 / 427 | 0 / 1.5 / 11 / - | 0 / 0 / 0.01 / 0.02 | 15 / 11 / 202 / - | 7 / 9 / 11 / 19 |
+| MySQL | 109* / 640 / 87 / 0 | 189* / 883 / 594 / 449 | 0 / 2.0 / 27 / 2,083 | 0 / 0 / 0.01 / 0.02 | 57 / 17 / 413 / 6,765 | 53 / 10 / 13 / 17 |
+| MariaDB | 1,416 / 780 / 187 / 4 | 1,404 / 979 / 580 / 337 | 0 / 1.5 / 11 / 386 | 0 / 0 / 0 / 0.02 | 6 / 11 / 192 / 4,932 | 6 / 11 / 13 / 22 |
+| SQL Server | 974 / 451 / 66 / 0 | 974 / 624 / 400 / 237 | 0 / 1.5 / 13 / 2,247 | 0 / 0 / 0 / 0.02 | 7 / 24 / 824 / 10,102 | 9 / 15 / 20 / 36 |
+| Oracle | 1,087 / 654 / 10 / 0 | 1,249 / 734 / 463 / 204 | 0 / 1.7 / 228 / - | 0 / 0 / 0.02 / 0.08 | 8 / 13 / 124 / - | 6 / 14 / 18 / 218 |
+
+\* The first configuration measured after the setup, cold: with no writer both settings run the
+same statements (no row in flight, the predicate's check never runs), as MariaDB and SQL Server
+show. The second run adds a pass not reported for this, but ran on a machine under load from
+other work (load average 20-27, every figure lower, ScalarDB's own commits included): there with no
+writer off / on gave 449 / 473 (PostgreSQL), 842 / 805 (MySQL), 284 / 521 (MariaDB), 220 / 246 (SQL
+Server), 844 / 1,033 (Oracle), and with writers the same picture as below.
+
+- **Without writers, nothing changes**, by construction: the predicate's check runs only when the
+  table's check finds a row, which is then cached as passed as before.
+- **With writers, today's check starves the readers**: 1.5-2 retries per commit at one writer,
+  11-228 at four, at sixteen no commit at all on three engines and 4 per second on MariaDB. With the
+  predicate's check retries stay under 0.1 per commit at every count, and committed reads per
+  second are 1.1-1.4x at one writer, 3-46x at four, and 204-449 against 0-4 at sixteen.
+- **ScalarDB's throughput**: unchanged within noise on PostgreSQL, MySQL, MariaDB and SQL Server;
+  on Oracle at sixteen writers 629 against 407 commits/s with the setting on (first run), and on
+  PostgreSQL and Oracle lower in the loaded second run. The readers take no lock at SNAPSHOT, so
+  this is the laptop's CPU shared with readers that now complete; to be confirmed on separate
+  machines.
