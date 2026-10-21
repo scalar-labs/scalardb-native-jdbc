@@ -57,6 +57,12 @@ class SplitTest {
         .containsExactly("a");
     assertThat(splittable("select a.x, upper(a.y) from a order by a.x limit 3"))
         .containsExactly("a");
+    // a subquery's own aggregate, correlated or not (todo 312)
+    assertThat(splittable("select (select max(b.y) from b where b.aid = a.id) from a"))
+        .containsExactly("a");
+    assertThat(splittable("select (select count(*) from b where b.aid = a.id) from a"))
+        .containsExactly("a");
+    assertThat(splittable("select (select max(y + a.x) from b) from a")).containsExactly("a");
   }
 
   @ParameterizedTest
@@ -78,7 +84,12 @@ class SplitTest {
         "with w as (select 1 as n) select * from a, w",
         "select * from a union all select * from b",
         "select * from a where id = :id",
-        "select distinct on (x) x from a"
+        "select distinct on (x) x from a",
+        // an aggregate of the outer query written in a subquery (todo 312)
+        "select (select max(a.x)) from a",
+        "select (select max((select b.y from b where b.id = o.id))) from a o",
+        "select (select count(*) filter (where o.x < 10)) from a o",
+        "select x from a o order by (select sum(o.x) from b)"
       })
   void splittableRefs_areNone_forShapesTheSplitDoesNotHandle(String sql) {
     assertThat(SqlAst.parse(sql).map(SqlAst::splittableRefs).orElse(List.of())).isEmpty();

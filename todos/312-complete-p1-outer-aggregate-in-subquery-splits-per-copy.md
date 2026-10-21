@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "312"
 tags: [read, split-read, aggregates, postgresql]
@@ -40,7 +40,7 @@ innermost level of those columns. **Effort:** Medium.
 
 ## Acceptance Criteria
 
-- [ ] Both statements pass in T4 (`-Dnativejdbc.regress=true`), and a unit test in `SplitTest`.
+- [x] Both statements pass in T4 (`-Dnativejdbc.regress=true`), and a unit test in `SplitTest`.
 
 ## Work Log
 
@@ -52,3 +52,13 @@ innermost level of those columns. **Effort:** Medium.
 ## Resources
 
 - docs/plans/testing.md, milestone T4.
+
+### 2026-10-21 - Fixed (Option 2, by qualifier)
+
+**By:** Claude Code
+- `SqlAst.OuterAggregates`: a subquery of the select list or ORDER BY is read for a function not
+  known as row-wise whose argument columns are all qualified by tables no query from the subquery
+  down binds; such a subquery makes the statement grouped and not row-wise, so it is not split.
+  An unqualified column counts as its own query's.
+- `SplitTest`: four such shapes are not split; correlated subqueries with their own aggregates
+  still are. T4 on PostgreSQL: both statements pass in both layouts (4,243 passed, 1 failed: 313).

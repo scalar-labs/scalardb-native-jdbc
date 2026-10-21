@@ -3290,13 +3290,15 @@ public final class SqlAst {
 
   /**
    * Whether an expression computes one value from one row: no aggregate, window function, unknown
-   * function or session variable. A subquery is its own scope and is not looked into. With
-   * aggregates allowed, the plain aggregates of {@link #AGGREGATES} pass, not nested, and the
-   * visitor collects them and the columns outside and inside them; a subquery then fails, since on
-   * top of the copies its columns would no longer resolve.
+   * function or session variable. A subquery is its own scope, looked into only for an aggregate of
+   * the enclosing query. With aggregates allowed, the plain aggregates of {@link #AGGREGATES} pass,
+   * not nested, and the visitor collects them and the columns outside and inside them; a subquery
+   * then fails, since on top of the copies its columns would no longer resolve.
    */
   private static class RowWise extends ExpressionVisitorAdapter<Void> {
     boolean rowWise = true;
+    // a subquery holds an aggregate of the query read (todo 312)
+    boolean outerAggregate;
     final boolean aggregates;
     final List<Function> found = new ArrayList<>();
     final List<Column> outside = new ArrayList<>();
@@ -3405,13 +3407,163 @@ public final class SqlAst {
 
     @Override
     public <S> Void visit(ParenthesedSelect select, S context) {
-      rowWise &= !aggregates;
-      return null;
+      return visit((Select) select, context);
     }
 
     @Override
     public <S> Void visit(Select select, S context) {
       rowWise &= !aggregates;
+      if (OuterAggregates.in(select)) {
+        rowWise = false;
+        outerAggregate = true;
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Finds in a subquery an aggregate of an enclosing query (todo 312). SQL computes an aggregate in
+   * the innermost query whose columns its arguments name, so {@code (select max(o.a))} aggregates
+   * the rows of the query that binds {@code o}; a split read would compute it once per copy. A
+   * function the split does not know as row-wise counts as an aggregate. A qualified column belongs
+   * to the innermost query that binds its qualifier and an unqualified one to the query it is
+   * written in; a lateral or correlated derived table is read as if it saw its siblings.
+   */
+  private static final class OuterAggregates extends ExpressionVisitorAdapter<Void> {
+    /** The tables each query binds, from the subquery's down to the one being read. */
+    private final List<Set<String>> scopes = new ArrayList<>();
+
+    /** The aggregates being read: the scope each is written in, and what its columns name. */
+    private final Deque<int[]> open = new ArrayDeque<>();
+
+    private boolean found;
+
+    static boolean in(Select subquery) {
+      OuterAggregates walk = new OuterAggregates();
+      walk.select(subquery);
+      return walk.found;
+    }
+
+    private void select(Select s) {
+      if (s instanceof ParenthesedSelect) {
+        select(((ParenthesedSelect) s).getSelect());
+      } else if (s instanceof SetOperationList) {
+        for (Select each : ((SetOperationList) s).getSelects()) {
+          select(each);
+        }
+      } else if (s instanceof PlainSelect) {
+        PlainSelect p = (PlainSelect) s;
+        List<FromItem> from = new ArrayList<>();
+        List<Expression> expressions = new ArrayList<>(selectAndOrderBy(p));
+        if (p.getFromItem() != null) {
+          from.add(p.getFromItem());
+        }
+        if (p.getJoins() != null) {
+          for (Join j : p.getJoins()) {
+            from.add(j.getFromItem());
+            expressions.addAll(j.getOnExpressions());
+          }
+        }
+        Set<String> bound = new HashSet<>();
+        for (FromItem f : from) {
+          if (f.getAlias() != null) {
+            bound.add(unquoted(f.getAlias().getName()).toLowerCase(Locale.ROOT));
+          } else if (f instanceof Table) {
+            bound.add(unquoted(((Table) f).getName()).toLowerCase(Locale.ROOT));
+          }
+        }
+        if (p.getWhere() != null) {
+          expressions.add(p.getWhere());
+        }
+        if (p.getHaving() != null) {
+          expressions.add(p.getHaving());
+        }
+        scopes.add(bound);
+        for (FromItem f : from) {
+          if (f instanceof Select) {
+            select((Select) f);
+          }
+        }
+        for (Expression e : expressions) {
+          e.accept(this, null);
+        }
+        scopes.remove(scopes.size() - 1);
+      }
+    }
+
+    /** Reads an aggregate's arguments and finds whether it belongs above the subquery. */
+    private void aggregate(List<Expression> arguments) {
+      // {its scope, a column names a query from the subquery down to it, a column names none}
+      int[] state = {scopes.size(), 0, 0};
+      open.push(state);
+      for (Expression e : arguments) {
+        e.accept(this, null);
+      }
+      open.pop();
+      found |= state[2] == 1 && state[1] == 0;
+    }
+
+    @Override
+    public <S> Void visit(Function function, S context) {
+      if (ROW_FUNCTIONS.contains(bareName(function)) || function.getParameters() == null) {
+        return super.visit(function, context);
+      }
+      List<Expression> arguments = new ArrayList<>(function.getParameters());
+      if (function.getOrderByElements() != null) {
+        for (OrderByElement o : function.getOrderByElements()) {
+          arguments.add(o.getExpression());
+        }
+      }
+      aggregate(arguments);
+      return null;
+    }
+
+    @Override
+    public <S> Void visit(AnalyticExpression e, S context) {
+      List<Expression> arguments = new ArrayList<>();
+      if (e.getExpression() != null) {
+        arguments.add(e.getExpression());
+      }
+      if (e.getFilterExpression() != null) {
+        arguments.add(e.getFilterExpression());
+      }
+      aggregate(arguments);
+      return null;
+    }
+
+    @Override
+    public <S> Void visit(Column column, S context) {
+      int level = scopes.size(); // an unqualified column: the query it is written in
+      Table t = column.getTable();
+      if (t != null && t.getName() != null) {
+        String q = unquoted(t.getName()).toLowerCase(Locale.ROOT);
+        level = 0;
+        for (int i = scopes.size() - 1; i >= 0; i--) {
+          if (scopes.get(i).contains(q)) {
+            level = i + 1;
+            break;
+          }
+        }
+      }
+      for (int[] state : open) {
+        if (level == 0) {
+          state[2] = 1;
+        } else if (level <= state[0]) {
+          state[1] = 1;
+        }
+      }
+      return null;
+    }
+
+    @Override
+    public <S> Void visit(ParenthesedSelect select, S context) {
+      select(select);
+      return null;
+    }
+
+    @Override
+    public <S> Void visit(Select select, S context) {
+      select(select);
       return null;
     }
   }
@@ -3442,7 +3594,7 @@ public final class SqlAst {
     for (Expression e : selectAndOrderBy(s)) {
       e.accept(check, null);
     }
-    return !check.found.isEmpty();
+    return !check.found.isEmpty() || check.outerAggregate;
   }
 
   /** A grouping statement's aggregates and columns, as the split reads it. */

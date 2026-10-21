@@ -192,10 +192,10 @@ and `ROLLBACK` run as JDBC calls, as an application makes them; a statement the 
 names no imported table runs in the driver's own session directly, as with the passthrough
 setting, so that what it creates exists for the next; a failure that follows from a refusal (an
 object not created, a table not written, a transaction whose mode or a statement was refused) is
-counted with the refusals; `EXPLAIN` is compared by whether it runs. Result: 4,241 passed, 745
-refused, 3 failed, the same in both layouts. Failures: an outer aggregate written inside a
-subquery returns a row per copy of the split read (todo 312, P1); a whole-row reference reports
-`record` (todo 313). Refusals: `EXPLAIN` of ScalarDB tables (199), statements the parser cannot read
+counted with the refusals; `EXPLAIN` is compared by whether it runs. Result: 4,243 passed, 745
+refused, 1 failed, the same in both layouts. An outer aggregate written inside a subquery returned
+a row per copy of the split read (todo 312, P1, fixed: such a statement is read through `rc_T`).
+The failure left: a whole-row reference reports `record` (todo 313). Refusals: `EXPLAIN` of ScalarDB tables (199), statements the parser cannot read
 even without a ScalarDB table (about 300: cursors, `RELEASE SAVEPOINT`, `ORDER BY ... USING`,
 `JOIN ... USING ... AS`, nested grouping sets; todo 314), PL/pgSQL bodies, views and `ANALYZE` over
 ScalarDB tables (todo 315). Next: the same with rows in flight (T2), and sqllogictest.
