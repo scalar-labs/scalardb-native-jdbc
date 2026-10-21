@@ -624,10 +624,14 @@ in order: the index, built without blocking writes where the engine can (`CREATE
 PostgreSQL, `ALGORITHM=INPLACE, LOCK=NONE` on MySQL and MariaDB, `ONLINE` on SQL Server editions that
 have online builds and on Oracle where the edition allows); on an imported table the backfill, which
 stamps `tx_id = 'scalardb-native-backfill'`; then the view, with `CREATE OR REPLACE` (`CREATE OR
-ALTER` on SQL Server); then, on Oracle and MySQL, a histogram on the metadata table's `tx_state`
-(`DBMS_STATS` with `FOR COLUMNS TX_STATE SIZE 254`; `ANALYZE TABLE ... UPDATE HISTOGRAM ON tx_state`),
+ALTER` on SQL Server); then, on Oracle and MySQL, a histogram on the metadata table's `tx_state`,
 without which both estimate `tx_state IN (1, 2)` as most of the table and scan it (Oracle 22x, MySQL
-12-69x on the split read); last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
+12-69x on the split read). On MySQL it is gathered (`ANALYZE TABLE ... UPDATE HISTOGRAM ON
+tx_state`), and MySQL never regathers it by itself. On Oracle it is set, not gathered: a frequency
+histogram assuming 10,000 rows in flight (at most half the table), with the table's statistics then
+locked so that the nightly job does not replace it; one gathered while nothing is in flight cost up to
+1654x when a burst followed (todo 094). An inline table's statistics are the application's, so they
+are set there but not locked. Teardown unlocks the others and deletes the histogram on both. Last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
 row, which carry `before_tx_id` NULL and `before_tx_version` 0, never for an in-flight insert.
 
 A table is set up when its index exists and is usable (an invalid index a failed concurrent build left

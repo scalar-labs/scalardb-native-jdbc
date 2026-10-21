@@ -338,7 +338,13 @@ public final class Setup {
       execute(viewDdl(t, view));
       done(actions, (found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);
       if (gatherHistogram(t)) {
-        done(actions, "gathered a histogram on " + meta + ".tx_state");
+        done(
+            actions,
+            engine != Engine.ORACLE
+                ? "gathered a histogram on " + meta + ".tx_state"
+                : t.layout() == Layout.INLINE
+                    ? "set fixed statistics on " + meta + ".tx_state"
+                    : "set and locked fixed statistics on " + meta + ".tx_state");
       }
       for (String g : grantees) {
         execute("GRANT SELECT ON " + name(ns, view) + " TO " + grantee(g));
@@ -370,6 +376,26 @@ public final class Setup {
         execute(dropIndex(t, index));
         done(actions, "dropped in-flight index " + index);
       }
+      if (engine == Engine.ORACLE) {
+        // the fixed histogram goes too: it would mislead the optimizer once nothing keeps it true
+        String meta = metadataTable(t);
+        String args = oracleLiteral('"' + ns + '"') + ", " + oracleLiteral('"' + meta + '"');
+        boolean locked = t.layout() != Layout.INLINE;
+        execute(
+            "BEGIN "
+                + (locked ? "DBMS_STATS.UNLOCK_TABLE_STATS(" + args + "); " : "")
+                + "DBMS_STATS.DELETE_COLUMN_STATS("
+                + args
+                + ", "
+                + oracleLiteral(txState)
+                + ", col_stat_type => 'HISTOGRAM'); END;");
+        done(
+            actions,
+            (locked ? "unlocked the statistics of " + meta + " and " : "")
+                + "deleted the histogram on "
+                + meta
+                + ".tx_state");
+      }
       return new Result(name, actions, 0, null);
     } catch (SQLException e) {
       return new Result(name, actions, 0, e);
@@ -377,23 +403,56 @@ public final class Setup {
   }
 
   /**
+   * The rows in flight Oracle's statistics on {@code tx_state} assume, at most half the table: a
+   * histogram gathered while few are in flight makes a burst of them cost up to 1650x, one assuming
+   * 10,000 costs little when there are 100 (docs/benchmarks/read-overhead.md, 2026-10-20).
+   */
+  static final int ORACLE_ASSUMED_INFLIGHT = 10_000;
+
+  /**
+   * The table's statistics with fixed ones on {@code tx_state}, then, unless the last bind is 0,
+   * locked so that neither the nightly job nor a manual gather replaces them; {@code force} past an
+   * earlier run's lock. Binds the owner and table quoted, so that DBMS_STATS takes them as stored,
+   * the column, the rows in flight to assume, and whether to lock.
+   */
+  private static final String ORACLE_FIXED_STATISTICS =
+      "DECLARE o VARCHAR2(260) := ?; t VARCHAR2(260) := ?; c VARCHAR2(260) := ?;"
+          + " n NUMBER; b NUMBER; l NUMBER; f NUMBER; r DBMS_STATS.STATREC;"
+          + " BEGIN"
+          + " DBMS_STATS.GATHER_TABLE_STATS(ownname => o, tabname => t,"
+          + " method_opt => 'FOR COLUMNS ' || c || ' SIZE 1', force => TRUE);"
+          + " DBMS_STATS.GET_TABLE_STATS(o, t, numrows => n, numblks => b, avgrlen => l);"
+          + " f := LEAST(?, GREATEST(1, FLOOR(n / 2)));"
+          + " r.epc := 3; r.bkvals := DBMS_STATS.NUMARRAY(f, 1, GREATEST(1, n - f - 1));"
+          + " DBMS_STATS.PREPARE_COLUMN_VALUES(r, DBMS_STATS.NUMARRAY(1, 2, 3));"
+          + " DBMS_STATS.SET_COLUMN_STATS(ownname => o, tabname => t, colname => c, distcnt => 3,"
+          + " density => 0.5 / GREATEST(1, n), nullcnt => 0, srec => r, avgclen => 3,"
+          + " force => TRUE);"
+          + " IF ? = 1 THEN DBMS_STATS.LOCK_TABLE_STATS(o, t); END IF;"
+          + " END;";
+
+  /**
    * On Oracle and MySQL, a histogram on the metadata table's {@code tx_state}: without one both
    * estimate {@code tx_state IN (1, 2)} as most of the table and scan it where the split read
-   * probes the in-flight index (design section 3).
+   * probes the in-flight index (design section 3). On Oracle a fixed one assuming {@link
+   * #ORACLE_ASSUMED_INFLIGHT} rows in flight, locked: a gathered one records whatever is in flight
+   * at that moment, usually nothing. Not locked on an inline table, whose lock would freeze the
+   * application's own statistics; the nightly job may replace it there. MySQL never regathers one
+   * by itself, and its plans did not depend on the moment (todo 094).
    *
-   * @return whether one was gathered
+   * @return whether one was set or gathered
    */
   private boolean gatherHistogram(TableInfo t) throws SQLException {
     if (planned != null && (engine == Engine.ORACLE || engine == Engine.MYSQL)) {
       planned.add(
           engine == Engine.ORACLE
-              ? "BEGIN DBMS_STATS.GATHER_TABLE_STATS(ownname => '\""
-                  + t.namespace()
-                  + "\"', tabname => '\""
-                  + metadataTable(t)
-                  + "\"', method_opt => 'FOR COLUMNS "
-                  + txState
-                  + " SIZE 254'); END;"
+              ? bound(
+                  ORACLE_FIXED_STATISTICS,
+                  oracleLiteral('"' + t.namespace() + '"'),
+                  oracleLiteral('"' + metadataTable(t) + '"'),
+                  oracleLiteral(txState),
+                  String.valueOf(ORACLE_ASSUMED_INFLIGHT),
+                  t.layout() == Layout.INLINE ? "0" : "1")
               : "ANALYZE TABLE "
                   + name(t.namespace(), metadataTable(t))
                   + " UPDATE HISTOGRAM ON "
@@ -403,14 +462,12 @@ public final class Setup {
     }
     switch (engine) {
       case ORACLE:
-        try (PreparedStatement ps =
-            connection.prepareStatement(
-                "BEGIN DBMS_STATS.GATHER_TABLE_STATS(ownname => ?, tabname => ?,"
-                    + " method_opt => ?); END;")) {
-          // quoted, so that DBMS_STATS takes the names as stored
+        try (PreparedStatement ps = connection.prepareStatement(ORACLE_FIXED_STATISTICS)) {
           ps.setString(1, '"' + t.namespace() + '"');
           ps.setString(2, '"' + metadataTable(t) + '"');
-          ps.setString(3, "FOR COLUMNS " + txState + " SIZE 254");
+          ps.setString(3, txState);
+          ps.setInt(4, ORACLE_ASSUMED_INFLIGHT);
+          ps.setInt(5, t.layout() == Layout.INLINE ? 0 : 1);
           ps.execute();
         }
         return true;
@@ -435,6 +492,22 @@ public final class Setup {
       default:
         return false;
     }
+  }
+
+  private static String oracleLiteral(String s) {
+    return "'" + s.replace("'", "''") + "'";
+  }
+
+  /** A statement with its placeholders replaced in order, for the plan of a dry run. */
+  private static String bound(String sql, String... values) {
+    StringBuilder out = new StringBuilder();
+    int from = 0;
+    for (String v : values) {
+      int at = sql.indexOf('?', from);
+      out.append(sql, from, at).append(v);
+      from = at + 1;
+    }
+    return out.append(sql.substring(from)).toString();
   }
 
   private String name(String schema, String object) {

@@ -124,6 +124,13 @@ class SetupIntegrationTest {
       assertThat(rows(c, "SELECT * FROM " + name(engine, su, comp.readView(engine)))).isEmpty();
     }
 
+    if (engine == Engine.ORACLE) {
+      // fixed statistics assuming rows in flight, locked (todo 094): of 3 rows, 1 prepared (half,
+      // rounded down), 1 deleted and 1 committed, as cumulative endpoints
+      assertThat(oracleStatistics(e, su, Objects.requireNonNull(imp.metadataTable())))
+          .isEqualTo("ALL FREQUENCY 1:1 2:2 3:3");
+    }
+
     // again: nothing to create, nothing to backfill
     List<Setup.Result> again = setup(e, catalog, Duration.ofMinutes(1));
     assertThat(again).allMatch(Setup.Result::succeeded, "succeeded");
@@ -213,6 +220,48 @@ class SetupIntegrationTest {
     }
     assertThat(down).hasSize(3).allMatch(Setup.Result::succeeded, "succeeded");
     assertThat(catalog.lookup(List.of(), su, e.storedTable("imp")).isSetUp()).isFalse();
+    if (engine == Engine.ORACLE) {
+      assertThat(oracleStatistics(e, su, Objects.requireNonNull(imp.metadataTable())))
+          .startsWith("null NONE");
+    }
+  }
+
+  /**
+   * Oracle: whether the table's statistics are locked, the histogram type of {@code tx_state}, and
+   * its endpoints as value:cumulative rows.
+   */
+  private static String oracleStatistics(Engines e, String owner, String table)
+      throws SQLException {
+    try (Connection c = e.open()) {
+      String locked =
+          rows(
+                  c,
+                  "SELECT stattype_locked FROM all_tab_statistics WHERE owner = '"
+                      + owner
+                      + "' AND table_name = '"
+                      + table
+                      + "' AND object_type = 'TABLE'")
+              .get(0);
+      String histogram =
+          rows(
+                  c,
+                  "SELECT histogram FROM all_tab_col_statistics WHERE owner = '"
+                      + owner
+                      + "' AND table_name = '"
+                      + table
+                      + "' AND column_name = 'tx_state'")
+              .get(0);
+      List<String> endpoints =
+          rows(
+              c,
+              "SELECT endpoint_value || ':' || endpoint_number FROM all_tab_histograms"
+                  + " WHERE owner = '"
+                  + owner
+                  + "' AND table_name = '"
+                  + table
+                  + "' AND column_name = 'tx_state' ORDER BY endpoint_number");
+      return locked + " " + histogram + " " + String.join(" ", endpoints);
+    }
   }
 
   private static List<Setup.Result> setup(Engines e, Catalog catalog, Duration wait)
