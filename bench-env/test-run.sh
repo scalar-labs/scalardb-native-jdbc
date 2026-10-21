@@ -23,7 +23,12 @@ esac
 S
 cat > "$t/bin/ssh" <<'S'
 #!/bin/bash
-case "$*" in *matrix.sh*) sleep "$MATRIX_SECONDS" ;; *"test -x"*) ;; *) cat > /dev/null ;; esac
+case "$*" in
+  *tiers.sh*) cd "$T/remote" && bash -c "${@: -1}" ;; # the launch, in a real shell
+  *matrix.sh*) sleep "$MATRIX_SECONDS" ;;
+  *"test -x"*) ;;
+  *) cat > /dev/null ;;
+esac
 S
 printf '#!/bin/bash\n' > "$t/bin/scp"
 chmod +x "$t/bin"/*
@@ -41,10 +46,14 @@ if AWS_OK_CALLS=3 MATRIX_SECONDS=60 perl -e 'alarm 30; exec @ARGV' bash "$here/r
 fi
 grep -q 'credentials expired' "$t/out" && [ "$(grep -c '^destroy key=fake3' "$t/terraform")" = 1 ] \
   || { cat "$t/out" "$t/terraform"; echo "FAIL: expired login"; exit 1; }
-# a detached run: applied, started on the client, nothing destroyed from here
+# a detached run: applied, started on the client with one line per tier, nothing destroyed from here
 rm "$t/terraform" "$t/aws"
+mkdir -p "$t/remote/a/bench-env" && printf 'echo started > started\n' > "$t/remote/a/bench-env/detached.sh"
+command -v setsid > /dev/null || { printf '#!/bin/bash\nexec "$@"\n' > "$t/bin/setsid"; chmod +x "$t/bin/setsid"; } # macOS has none
 AWS_OK_CALLS=1000 MATRIX_SECONDS=0 BENCH_BUCKET=bucket bash "$here/run.sh" run > "$t/out" 2>&1 || { cat "$t/out"; echo "FAIL: detached run exited non-zero"; exit 1; }
+sleep 1 # detached.sh runs in the background
 grep -q 'detached as' "$t/out" && [ "$(grep -c '^apply' "$t/terraform")" = 1 ] && ! grep -q '^destroy' "$t/terraform" \
+  && [ "$(grep -c 'matrix.sh a ' "$t/remote/tiers.sh")" = 1 ] && [ -f "$t/remote/started" ] \
   || { cat "$t/out" "$t/terraform"; echo "FAIL: detached run"; exit 1; }
 
 # detached.sh on the client: a tier that fails still ends in the upload and the end of every instance
