@@ -186,6 +186,20 @@ problem.
   final data as in T3. Left out: files about DDL, PL/pgSQL, types, catalogs and `EXPLAIN`, whose
   output the rewrite changes on purpose. A table a file creates for itself stays plain, so its
   statements only test the routing.
+**PostgreSQL started 2026-10-21** (`RegressIntegrationTest`, `-Dnativejdbc.regress=true`, about
+two minutes per layout): 21 query files of REL_16_15, 4,989 statements per layout. `BEGIN`, `COMMIT`
+and `ROLLBACK` run as JDBC calls, as an application makes them; a statement the driver refuses that
+names no imported table runs in the driver's own session directly, as with the passthrough
+setting, so that what it creates exists for the next; a failure that follows from a refusal (an
+object not created, a table not written, a transaction whose mode or a statement was refused) is
+counted with the refusals; `EXPLAIN` is compared by whether it runs. Result: 4,241 passed, 745
+refused, 3 failed, the same in both layouts. Failures: an outer aggregate written inside a
+subquery returns a row per copy of the split read (todo 312, P1); a whole-row reference reports
+`record` (todo 313). Refusals: `EXPLAIN` of ScalarDB tables (199), statements the parser cannot read
+even without a ScalarDB table (about 300: cursors, `RELEASE SAVEPOINT`, `ORDER BY ... USING`,
+`JOIN ... USING ... AS`, nested grouping sets; todo 314), PL/pgSQL bodies, views and `ANALYZE` over
+ScalarDB tables (todo 315). Next: the same with rows in flight (T2), and sqllogictest.
+
 - **sqllogictest**, for the other four engines, which have no public suite PostgreSQL's size (MySQL's
   and MariaDB's `mysql-test` may follow). Its SELECT corpus is loaded into ScalarDB tables and run in
   the same way, with the expected results ignored.
