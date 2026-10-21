@@ -112,7 +112,7 @@ for key, url in urls.items():
   # the working tree, tracked and untracked, without what git ignores (secrets, state, results)
   (cd "$repo" && git ls-files -co --exclude-standard -z | tar -c -f - --null -T -) |
     ssh_ "rm -rf $tier && mkdir $tier && tar -x -C $tier"
-  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
+  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-1}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
   if [ -n "${BENCH_BUCKET:-}" ]; then cmds+=("$cmd"); continue; fi
   (
     ssh_ "$cmd" > "$out/$tier.log" 2>&1 || echo "tier $tier failed, see $out/$tier.log"

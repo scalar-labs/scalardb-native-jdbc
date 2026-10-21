@@ -327,6 +327,29 @@ public enum Engines {
     };
   }
 
+  /**
+   * Drops the schemas given by their stored names, with what they hold, where they exist: what an
+   * external database keeps from an earlier run. Oracle 19c has no DROP USER IF EXISTS: ORA-01918
+   * is ignored.
+   */
+  public void dropSchemas(Connection c, String... stored) throws SQLException {
+    for (String s : stored) {
+      String schema = engine.quote(s);
+      execute(
+          c,
+          switch (this) {
+            case POSTGRESQL -> "DROP SCHEMA IF EXISTS " + schema + " CASCADE";
+            case MYSQL, MARIADB -> "DROP DATABASE IF EXISTS " + schema;
+            case ORACLE ->
+                "BEGIN EXECUTE IMMEDIATE 'DROP USER "
+                    + schema
+                    + " CASCADE';"
+                    + " EXCEPTION WHEN OTHERS THEN IF SQLCODE != -1918 THEN RAISE; END IF; END;";
+            default -> throw new UnsupportedOperationException("dropSchemas on " + engine);
+          });
+    }
+  }
+
   /** The statement that makes {@code schema} the session's first schema for unqualified names. */
   public String useSchema(String schema) {
     return switch (this) {

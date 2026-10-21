@@ -186,6 +186,14 @@ table of query shape to form per engine and the gaps against what the driver emi
 the router's rules (as `paging-route.md` does for paging). Then the same on tier B, then MySQL and
 MariaDB, then T5 and T6.
 
+**The predicate's check beside ScalarDB writers.** `WRITERS=1 READS=0 run.sh run` runs only
+`InFlightCheckBenchmark`'s writers mode (`docs/benchmarks/inflight-check.md`), `REPS` times per
+tier, one engine at a time so that the readers and writers of one engine have the client's CPU to
+themselves; each run drops what the one before left. It checks whether ScalarDB's own commits fall
+with `scalardbnative.predicateChecks` on, as Oracle's did on the laptop (629 against 407 commits/s at
+16 writers). About 2 minutes per engine and run, after the instances are up. Tier B's Oracle is 19c:
+the predicate's check has not run there before.
+
 ## Cost
 
 Rough, from memory of AWS on-demand prices in `us-east-1`, to be checked with the Pricing API before

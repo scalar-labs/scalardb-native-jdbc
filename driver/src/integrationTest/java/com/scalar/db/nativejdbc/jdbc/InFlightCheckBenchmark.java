@@ -93,6 +93,10 @@ class InFlightCheckBenchmark {
     String ns = e.storedSchema("ck");
     String n = e.intType();
     try (Connection c = e.open()) {
+      if (Boolean.getBoolean("nativejdbc.bench.dropExisting")) {
+        // what an earlier run left on an external database; ScalarDB's schemas in quoted lower case
+        e.dropSchemas(c, ns, "scalardb", "coordinator");
+      }
       e.execute(
           c,
           e.createSchema("ck"),
@@ -663,12 +667,13 @@ class InFlightCheckBenchmark {
         new StringBuilder(
             String.format(
                 Locale.ROOT,
-                "%n## %s%n%nBeside ScalarDB writers: %d driver transactions at SNAPSHOT, each two grouped reads"
+                "%n## %s (%s)%n%nBeside ScalarDB writers: %d driver transactions at SNAPSHOT, each two grouped reads"
                     + " of o by a random region, retried on 40001, for %d s, alongside ScalarDB"
                     + " writers updating random rows of o%n%n| writers | predicateChecks |"
                     + " committed/s | retries per commit | p50 ms | p99 ms | ScalarDB commits/s"
                     + " |%n|---|---|---|---|---|---|---|%n",
                 e,
+                System.getProperty("nativejdbc.bench.tier", "local"),
                 READERS,
                 LIVE_MS / 1000));
     try (DistributedTransactionManager tm = factory.getTransactionManager()) {
@@ -681,7 +686,8 @@ class InFlightCheckBenchmark {
       }
     }
     System.out.println(out);
-    Path file = Path.of("build/bench/inflight-writers-" + e.name().toLowerCase(Locale.ROOT) + ".md");
+    Path file =
+        Path.of("build/bench/inflight-writers-" + e.name().toLowerCase(Locale.ROOT) + ".md");
     Files.createDirectories(file.getParent());
     Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
