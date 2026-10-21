@@ -144,7 +144,13 @@ and a ScalarDB transaction writes every row and commits. Every engine passes; `b
 SELECT`, a subquery or join reading another table or the target, the upserts (`ON CONFLICT`, `ON
 DUPLICATE KEY UPDATE`, `INSERT IGNORE`, `REPLACE`, `MERGE`), `UPDATE` and `DELETE` with `LIMIT`,
 `RETURNING` on `UPDATE` and `DELETE`, a key's update.
-Open: rows in flight.
+
+**Rows in flight done 2026-10-21**: the same test again on fresh schemas (x*) with `InFlight` holding
+three-tenths of the keys prepared and `inflightWaitMs` 0. The twin's rows before and after each
+statement give the keys it writes: one that writes a key in flight must abort with `40001`, which 8
+to 13 statements per engine do; any other must match the twin, or abort for a row in flight it only
+reads. After the rollback the tables match and ScalarDB reads and writes every row. Every engine
+passes.
 
 - **Nothing in flight.** Each DML statement runs through the driver on the ScalarDB tables and directly
   on their plain copies. Compare the update counts, the generated keys and the final data. Then read

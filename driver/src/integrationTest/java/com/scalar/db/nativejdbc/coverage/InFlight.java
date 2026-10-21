@@ -29,9 +29,13 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
+import java.util.Set;
 
 /**
  * Milestone T2's ScalarDB transactions: over a share of the keys of every imported table of both
@@ -52,6 +56,8 @@ final class InFlight {
    * Prepares the transactions and adds them to {@code held}, which the caller rolls back.
    *
    * @param share the share of each table's keys to put in flight, and a fifth of it as new keys
+   * @param keys filled with the keys held, by {@code <schema>.<table>} as the corpus names them,
+   *     each as {@link WriteCorpusIntegrationTest#normal} spells its values
    */
   static void prepare(
       Engines e,
@@ -60,12 +66,14 @@ final class InFlight {
       String set,
       double share,
       Random random,
-      List<TwoPhaseCommitTransaction> held)
+      List<TwoPhaseCommitTransaction> held,
+      Map<String, Set<String>> keys)
       throws Exception {
     try (DistributedTransactionAdmin admin = e.admin()) {
       for (String layout : List.of("d", "i")) {
         String ns = e.storedSchema(set + layout);
         List<TwoPhaseCommitTransaction> txs = new ArrayList<>();
+        Map<TwoPhaseCommitTransaction, Map<String, Set<String>>> byTx = new HashMap<>();
         for (int i = 0; i < TRANSACTIONS; i++) {
           TwoPhaseCommitTransaction tx = tpc.begin();
           held.add(tx);
@@ -95,6 +103,10 @@ final class InFlight {
               continue;
             }
             TwoPhaseCommitTransaction tx = txs.get(random.nextInt(txs.size()));
+            Set<String> mine =
+                byTx.computeIfAbsent(tx, x -> new HashMap<>())
+                    .computeIfAbsent(set + layout + "." + t, x -> new HashSet<>());
+            mine.add(spelled(row, keyNames));
             Key partition = key(row, md.getPartitionKeyNames());
             if (random.nextInt(10) < 6) {
               var u = Upsert.newBuilder().namespace(ns).table(scalarDb).partitionKey(partition);
@@ -119,7 +131,13 @@ final class InFlight {
               for (String k : md.getPartitionKeyNames()) {
                 p.add(keyNames.get(0).equals(k) ? moved(col(row, k), fresh) : col(row, k));
               }
-              var ins = Insert.newBuilder().namespace(ns).table(scalarDb).partitionKey(p.build());
+              Key inserted = p.build();
+              List<String> spelled = new ArrayList<>();
+              for (Column<?> c : inserted.getColumns()) {
+                spelled.add(WriteCorpusIntegrationTest.normal(c.getValueAsObject()));
+              }
+              mine.add(spelled.toString());
+              var ins = Insert.newBuilder().namespace(ns).table(scalarDb).partitionKey(inserted);
               for (String c : values) {
                 ins.value(value(c, md.getColumnDataType(c), random));
               }
@@ -130,6 +148,8 @@ final class InFlight {
         for (TwoPhaseCommitTransaction tx : txs) {
           try {
             tx.prepare();
+            byTx.getOrDefault(tx, Map.of())
+                .forEach((k, v) -> keys.computeIfAbsent(k, x -> new HashSet<>()).addAll(v));
           } catch (PreparationConflictException ex) {
             // Oracle's SERIALIZABLE refuses a prepare for a block another changed (ORA-08177):
             // fewer rows in flight, which the caller's count still sees
@@ -149,6 +169,15 @@ final class InFlight {
       tx.commit();
       return rows;
     }
+  }
+
+  /** A row's key values as the write corpus spells them. */
+  private static String spelled(Result row, List<String> names) {
+    List<String> out = new ArrayList<>();
+    for (String n : names) {
+      out.add(WriteCorpusIntegrationTest.normal(col(row, n).getValueAsObject()));
+    }
+    return out.toString();
   }
 
   private static Key key(Result row, Iterable<String> names) {

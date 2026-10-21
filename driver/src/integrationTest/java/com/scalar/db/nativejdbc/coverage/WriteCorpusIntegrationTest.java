@@ -8,6 +8,8 @@ import com.scalar.db.api.DistributedTransactionManager;
 import com.scalar.db.api.Result;
 import com.scalar.db.api.Scan;
 import com.scalar.db.api.TableMetadata;
+import com.scalar.db.api.TwoPhaseCommitTransaction;
+import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.api.Upsert;
 import com.scalar.db.io.Column;
 import com.scalar.db.io.Key;
@@ -29,48 +31,72 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Properties;
+import java.util.Random;
+import java.util.Set;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * Milestone T3 of the testing plan, with nothing in flight: every statement of the write corpus
- * runs through the driver on the corpus's tables imported into ScalarDB, in each layout, and
- * directly on a plain twin of each. The update counts or returned rows, and then the three tables,
- * must be the same on both sides after every statement. At the end ScalarDB reads every row the
- * driver left and must see the twin's data, and a ScalarDB transaction writes every row: the
- * metadata the driver wrote is ScalarDB's. Writes {@code build/coverage/<engine>-writes.md}.
+ * Milestone T3 of the testing plan: every statement of the write corpus runs through the driver on
+ * the corpus's tables imported into ScalarDB, in each layout, and directly on a plain twin of each.
+ * The update counts or returned rows, and then the three tables, must be the same on both sides
+ * after every statement. At the end ScalarDB reads every row the driver left and must see the
+ * twin's data, and a ScalarDB transaction writes every row: the metadata the driver wrote is
+ * ScalarDB's. Run again with ScalarDB transactions holding a share of the keys prepared: a
+ * statement that writes a key in flight must abort, any other must still do what it does on the
+ * twin. Writes {@code build/coverage/<engine>-writes[-inflight].md}.
  */
 @EnabledIfSystemProperty(named = "nativejdbc.coverage", matches = "true")
 @SuppressFBWarnings(
-    value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
-    justification = "the corpus's statements and the test's own DDL")
+    value = {
+      "SQL_INJECTION_JDBC",
+      "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE",
+      "PREDICTABLE_RANDOM"
+    },
+    justification =
+        "the corpus's statements and the test's own DDL; a seeded generator, so a run reproduces")
 class WriteCorpusIntegrationTest {
 
   private static final List<String> IMPORTED = List.of("c", "o", "k");
 
-  /** Each layout's schema, and its plain twin's. */
-  private static final Map<String, String> TWINS = Map.of("wd", "wpd", "wi", "wpi");
+  /** The key columns of the corpus's tables. */
+  private static final Map<String, List<String>> KEYS =
+      Map.of("c", List.of("id"), "o", List.of("id"), "k", List.of("a", "b"));
 
   private static final String REFUSED = "0AN01";
 
-  static List<Engines> engines() {
-    return Engines.selected();
+  /** Every engine, with nothing in flight (schemas w*) and with rows in flight (schemas x*). */
+  static List<Arguments> engines() {
+    List<Arguments> out = new ArrayList<>();
+    for (Engines e : Engines.selected()) {
+      out.add(Arguments.of(e, false));
+      out.add(Arguments.of(e, true));
+    }
+    return out;
   }
 
   @ParameterizedTest
   @MethodSource("engines")
-  void writeCorpus_leavesThroughTheDriverWhatTheDatabaseLeaves(Engines e) throws Exception {
+  void writeCorpus_leavesThroughTheDriverWhatTheDatabaseLeaves(Engines e, boolean inFlight)
+      throws Exception {
     Engine engine = e.engine();
+    String set = inFlight ? "x" : "w";
+    // each layout's schema and its plain twin's
+    Map<String, String> twins = Map.of(set + "d", set + "pd", set + "i", set + "pi");
     String ddl =
         CorpusIntegrationTest.types(engine, CorpusIntegrationTest.resource("corpus/schema.sql"));
     try (Connection c = e.open()) {
-      for (String schema : List.of("wd", "wpd", "wi", "wpi")) {
+      for (String schema : List.of(set + "d", set + "pd", set + "i", set + "pi")) {
         e.execute(c, e.createSchema(schema));
         e.execute(
             c, CorpusIntegrationTest.statements(ddl.replace("{S}", schema)).toArray(String[]::new));
@@ -78,21 +104,21 @@ class WriteCorpusIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.scalarDb().getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
-      for (String layout : TWINS.keySet()) {
+      for (String layout : twins.keySet()) {
         String ns = e.storedSchema(layout);
         admin.createNamespace(ns, true);
         for (String t : IMPORTED) {
           admin.importTable(
               ns,
               e.storedTable(t),
-              layout.equals("wd") ? Map.of("transaction-metadata-decoupling", "true") : Map.of(),
+              layout.endsWith("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of(),
               Map.of());
         }
       }
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     try (Connection c = e.open()) {
-      List<String> scalarDb = List.of(e.storedSchema("wd"), e.storedSchema("wi"));
+      List<String> scalarDb = List.of(e.storedSchema(set + "d"), e.storedSchema(set + "i"));
       assertThat(
               Setup.run(
                   catalog,
@@ -106,53 +132,113 @@ class WriteCorpusIntegrationTest {
     StringBuilder report =
         new StringBuilder("# Write corpus on ")
             .append(engine)
+            .append(inFlight ? ", rows in flight" : ", nothing in flight")
             .append("\n\n| file | statement | layout | outcome |\n|---|---|---|---|\n");
     List<String> failures = new ArrayList<>();
     int passed = 0;
     int refused = 0;
-    try (Connection driver = e.openDriver()) {
-      for (String layout : List.of("wd", "wi")) {
-        String twin = Objects.requireNonNull(TWINS.get(layout));
-        try (Connection vendor = e.open()) {
-          vendor.setAutoCommit(false);
-          for (Corpus.Entry st : Corpus.load("writes", engine)) {
-            String sql = CorpusIntegrationTest.types(engine, st.sql());
-            String through = CorpusIntegrationTest.tables(sql, layout);
-            Outcome actual = Outcome.run(driver, through);
-            Outcome expected = Outcome.run(vendor, CorpusIntegrationTest.tables(sql, twin));
-            if (expected.state != null || REFUSED.equals(actual.state)) {
-              vendor.rollback();
-            } else {
-              vendor.commit();
+    int aborted = 0;
+    long seed = Long.getLong("nativejdbc.seed", System.nanoTime());
+    System.out.printf(
+        Locale.ROOT, "WriteCorpusIntegrationTest %s: -Dnativejdbc.seed=%d%n", engine, seed);
+    Properties noWait = new Properties();
+    noWait.setProperty("scalardbnative.inflightWaitMs", "0"); // a row in flight aborts at once
+    List<TwoPhaseCommitTransaction> held = new ArrayList<>();
+    Map<String, Set<String>> heldKeys = new HashMap<>();
+    try (Connection driver = e.openDriver(noWait);
+        TwoPhaseCommitTransactionManager tpc = e.scalarDb().getTwoPhaseCommitTransactionManager()) {
+      if (inFlight) {
+        InFlight.prepare(e, catalog, tpc, set, 0.3, new Random(seed), held, heldKeys);
+        assertThat(heldKeys.values().stream().mapToInt(Set::size).sum())
+            .as("keys in flight")
+            .isPositive();
+      }
+      try {
+        for (String layout : List.of(set + "d", set + "i")) {
+          String twin = Objects.requireNonNull(twins.get(layout));
+          try (Connection vendor = e.open()) {
+            vendor.setAutoCommit(false);
+            for (Corpus.Entry st : Corpus.load("writes", engine)) {
+              String sql = CorpusIntegrationTest.types(engine, st.sql());
+              String through = CorpusIntegrationTest.tables(sql, layout);
+              Map<String, Map<String, String>> before = inFlight ? rows(vendor, twin) : Map.of();
+              Outcome actual = Outcome.run(driver, through);
+              Outcome expected = Outcome.run(vendor, CorpusIntegrationTest.tables(sql, twin));
+              // the keys the statement writes, held by a ScalarDB transaction
+              List<String> reached = new ArrayList<>();
+              if (inFlight && expected.state == null) {
+                Map<String, Map<String, String>> after = rows(vendor, twin);
+                for (String t : IMPORTED) {
+                  Set<String> mine = heldKeys.getOrDefault(layout + "." + t, Set.of());
+                  for (String k : changed(before.get(t), after.get(t))) {
+                    if (mine.contains(k)) {
+                      reached.add(t + k);
+                    }
+                  }
+                }
+              }
+              boolean abort = actual.state != null && actual.state.startsWith("40");
+              if (expected.state != null || REFUSED.equals(actual.state) || abort) {
+                vendor.rollback();
+              } else {
+                vendor.commit();
+              }
+              String outcome;
+              if (abort && inFlight) {
+                // a statement may abort for a row in flight it only reads; one that writes such a
+                // row must
+                outcome = reached.isEmpty() ? "pass, aborted for a row it reads" : "pass, aborted";
+              } else if (!reached.isEmpty() && !REFUSED.equals(actual.state)) {
+                outcome =
+                    "wrote rows in flight "
+                        + reached
+                        + (actual.state == null ? "" : ", failing with " + actual.error);
+              } else {
+                outcome = compare(expected, actual);
+              }
+              if (outcome.equals("pass")) {
+                outcome = sameTables(vendor, driver, twin, layout);
+              }
+              if (outcome.startsWith("refused")) {
+                refused++;
+              } else if (outcome.startsWith("pass, aborted")) {
+                aborted++;
+              } else if (outcome.startsWith("pass")) {
+                passed++;
+              } else {
+                failures.add(st.file() + ": " + through + ": " + outcome);
+              }
+              report
+                  .append("| ")
+                  .append(st.file())
+                  .append(" | `")
+                  .append(through.replace("|", "\\|"))
+                  .append("` | ")
+                  .append(layout)
+                  .append(" | ")
+                  .append(outcome.replace("|", "\\|").replace('\n', ' '))
+                  .append(" |\n");
             }
-            String outcome = compare(expected, actual);
-            if (outcome.equals("pass")) {
-              outcome = sameTables(vendor, driver, twin, layout);
-            }
-            if (outcome.startsWith("refused")) {
-              refused++;
-            } else if (outcome.startsWith("pass")) {
-              passed++;
-            } else {
-              failures.add(st.file() + ": " + through + ": " + outcome);
-            }
-            report
-                .append("| ")
-                .append(st.file())
-                .append(" | `")
-                .append(through.replace("|", "\\|"))
-                .append("` | ")
-                .append(layout)
-                .append(" | ")
-                .append(outcome.replace("|", "\\|").replace('\n', ' '))
-                .append(" |\n");
           }
-          String scalarDb = scalarDbAgrees(e, catalog, vendor, twin, layout);
+        }
+      } finally {
+        for (TwoPhaseCommitTransaction tx : held) {
+          tx.rollback();
+        }
+      }
+      // with the transactions rolled back, the tables are the twins' and ScalarDB's own
+      try (Connection vendor = e.open()) {
+        vendor.setAutoCommit(false);
+        for (String layout : List.of(set + "d", set + "i")) {
+          String twin = Objects.requireNonNull(twins.get(layout));
+          String tables = sameTables(vendor, driver, twin, layout);
+          String scalarDb =
+              tables.startsWith("pass") ? scalarDbAgrees(e, catalog, vendor, twin, layout) : tables;
           if (!scalarDb.equals("pass")) {
-            failures.add(layout + ", read through ScalarDB: " + scalarDb);
+            failures.add(layout + ", at the end: " + scalarDb);
           }
-          report.append("\nRead through ScalarDB, ").append(layout).append(": ").append(scalarDb);
-          report.append("\n");
+          report.append("\nAt the end, read through ScalarDB, ").append(layout).append(": ");
+          report.append(scalarDb).append("\n");
         }
       }
     }
@@ -160,14 +246,68 @@ class WriteCorpusIntegrationTest {
         report.indexOf("\n\n") + 2,
         String.format(
             Locale.ROOT,
-            "%d passed, %d refused, %d failed (each statement in both layouts).%n%n",
+            "%d passed, %d aborted for rows in flight, %d refused, %d failed (each statement in"
+                + " both layouts). Keys in flight: %s.%n%n",
             passed,
+            aborted,
             refused,
-            failures.size()));
-    Path out = Path.of("build", "coverage", engine.name().toLowerCase(Locale.ROOT) + "-writes.md");
+            failures.size(),
+            heldKeys));
+    Path out =
+        Path.of(
+            "build",
+            "coverage",
+            engine.name().toLowerCase(Locale.ROOT)
+                + (inFlight ? "-writes-inflight" : "-writes")
+                + ".md");
     Files.createDirectories(Objects.requireNonNull(out.getParent()));
     Files.writeString(out, report.toString(), StandardCharsets.UTF_8);
     assertThat(failures).as("statements whose effects differ; see " + out).isEmpty();
+  }
+
+  /** The rows of the twin's tables by table and key, as {@link #normal} spells them. */
+  private static Map<String, Map<String, String>> rows(Connection vendor, String twin)
+      throws SQLException {
+    Map<String, Map<String, String>> out = new HashMap<>();
+    for (String t : IMPORTED) {
+      List<String> keys = Objects.requireNonNull(KEYS.get(t));
+      Map<String, String> byKey = new HashMap<>();
+      try (Statement st = vendor.createStatement();
+          ResultSet rs =
+              st.executeQuery(
+                  "SELECT " + String.join(", ", keys) + ", t.* FROM " + twin + "." + t + " t")) {
+        int n = rs.getMetaData().getColumnCount();
+        while (rs.next()) {
+          List<String> key = new ArrayList<>();
+          List<String> row = new ArrayList<>();
+          for (int i = 1; i <= n; i++) {
+            (i <= keys.size() ? key : row).add(normal(rs.getObject(i)));
+          }
+          byKey.put(key.toString(), row.toString());
+        }
+      }
+      out.put(t, byKey);
+    }
+    return out;
+  }
+
+  /** The keys whose rows differ, appear or disappear. */
+  private static Set<String> changed(
+      @Nullable Map<String, String> before, @Nullable Map<String, String> after) {
+    Map<String, String> b = Objects.requireNonNullElse(before, Map.of());
+    Map<String, String> a = Objects.requireNonNullElse(after, Map.of());
+    Set<String> out = new HashSet<>();
+    for (String k : b.keySet()) {
+      if (!Objects.equals(b.get(k), a.get(k))) {
+        out.add(k);
+      }
+    }
+    for (String k : a.keySet()) {
+      if (!b.containsKey(k)) {
+        out.add(k);
+      }
+    }
+    return out;
   }
 
   /** "pass", "refused: ...", or what differs between the two results of one statement. */
@@ -235,7 +375,7 @@ class WriteCorpusIntegrationTest {
       for (String t : IMPORTED) {
         String table = e.storedTable(t);
         String scalarDb =
-            layout.equals("wd")
+            layout.endsWith("d")
                 ? Objects.requireNonNull(catalog.lookup(List.of(), ns, table).virtualTable())
                 : table;
         TableMetadata md = Objects.requireNonNull(admin.getTableMetadata(ns, scalarDb));

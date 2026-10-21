@@ -24,6 +24,7 @@ import java.sql.Types;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -135,7 +136,8 @@ class CorpusIntegrationTest {
       try (TwoPhaseCommitTransactionManager tpc =
           e.scalarDb().getTwoPhaseCommitTransactionManager()) {
         try {
-          InFlight.prepare(e, catalog, tpc, set, large ? 0.1 : 1.0, new Random(seed), held);
+          InFlight.prepare(
+              e, catalog, tpc, set, large ? 0.1 : 1.0, new Random(seed), held, new HashMap<>());
           // not vacuous: the inline tables hold their rows' states, prepared (1) and deleted (2)
           for (String t : IMPORTED) {
             try (Statement st = vendor.createStatement();
