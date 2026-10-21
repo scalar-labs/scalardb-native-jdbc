@@ -123,8 +123,9 @@ for key, url in urls.items():
 done
 if [ -n "${BENCH_BUCKET:-}" ]; then
   run=$(basename "$out")
-  printf '%s\n' "${cmds[@]}" | ssh_ "umask 077 && cat > tiers.sh && cp a/bench-env/detached.sh . &&
-    BUCKET='$BENCH_BUCKET' RUN='$run' MAX_RUN_MINUTES='${MAX_RUN_MINUTES:-480}' setsid nohup bash detached.sh < /dev/null > detached.log 2>&1 &"
+  # only detached.sh in the background: a backgrounded `cat` would read /dev/null
+  printf '%s\n' "${cmds[@]}" | ssh_ "umask 077 && cat > tiers.sh && cp a/bench-env/detached.sh . && { BUCKET='$BENCH_BUCKET' RUN='$run' \
+    MAX_RUN_MINUTES='${MAX_RUN_MINUTES:-480}' setsid nohup bash detached.sh < /dev/null > detached.log 2>&1 & }"
   trap - EXIT INT TERM
   pkill -P "$heartbeat,$deadline" 2>/dev/null; kill "$heartbeat" "$deadline" 2>/dev/null || true # their sleeps too
   rm -rf "$(dirname "$creds")"
