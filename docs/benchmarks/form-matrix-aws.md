@@ -342,6 +342,66 @@ left out.
 - **VIEW_CASE with the plain filter settles PostgreSQL's paged joins:** 0.15 to 0.58 ms against
   DRIVER's 1.1 to 629 (4.9x to 1,400x), so the open cell is VIEW_CASE.
 
+### AWS results with 10x the data
+
+A third run, 2026-10-21 15:45 to 17:26 UTC, with no laptop attached (reports in
+`bench-env/results/20261022-0044/`). It ran the modes BASE, VIEW_LJ, VIEW_CASE, CORR and DRIVER on
+the same 12 queries, with these settings:
+
+- `scale=10`: `c` has 1M rows and `o` has 5M. The query names still say 100k and 500k.
+- `inflightAt=newest`: the rows in flight are at the highest ids, where the pages read.
+- Tier A's databases are capped at 1 GB: `docker --memory=1024m`, `shared_buffers` 256 MB and an
+  InnoDB pool of 384 MB. RDS is not capped.
+- A 60 s timeout per statement.
+- Two timed repetitions and one run with changed images, at 100 and 10,000 in flight.
+
+**Correct wherever it could be checked.** With changed images, CORR, VIEW_CASE and DRIVER return
+VIEW_LJ's rows on all seven databases. Two things are unchecked or missing:
+
+- **MariaDB's two paged joins are unchecked.** VIEW_LJ timed out on them, which left nothing to
+  compare with. The reports show `!` there; since 28c51d9 that case shows `?`.
+- **Tier A's MySQL failed from 16:54 on:** the changed run at 10,000 and the writers runs. The log
+  names only the failed task. The 1 GB cap is the likely cause, but this is not verified.
+
+CORR's DISTINCT also gave `error` on MySQL at 100 in flight on both tiers.
+
+Median ms, CORR or VIEW_CASE against DRIVER (DRIVER / form, so above 1x the form wins), tier B,
+100 / 10,000 in flight; tier A gives the same picture:
+
+| Query | Form | PostgreSQL | MySQL | MariaDB | Oracle |
+|---|---|---|---|---|---|
+| COUNT of 1M | CORR | 7.3x / 2.3x | 1.5x / 3.0x | 1.9x / 1.7x | 2.2x / 0.8x |
+| SUM of 5M | CORR | 5.6x / 2.3x | 1.5x / 3.1x | 1.8x / 1.8x | 2.5x / 1.0x |
+| GROUP BY of 1M | CORR | 4.1x / 2.4x | 3.2x / 2.7x | 1.9x / 1.6x | 1.3x / 0.8x |
+| hot COUNT of 20k | CORR | 2.2x / 1.0x | 1.5x / 1.2x | 1.8x / 0.9x | 2.7x / 1.0x |
+| COUNT by FK | CORR | 0.6x / 0.2x | 0.9x / 0.0x | 0.9x / 0.0x | 0.7x / 0.0x |
+| DISTINCT | CORR | 4.2x / 1.7x | error / 0.1x | 77x / 14x | 0.2x / 0.0x |
+| page of 5M, no offset | VIEW_CASE | 1.8x / 48x | 3.6x / 189x | 2.2x / 19x | 451x / 538x |
+| page after 10k | VIEW_CASE | 0.3x / 1.3x | 125x / 3.5x | 0.5x / 3.7x | 12x / 14x |
+| page: JOIN FK | VIEW_CASE | 4.7x / 563x | 13x / 719x | 17,700x / 20,500x | 3.3x / 657x |
+| page: keyset | VIEW_CASE | 1.1x / 14x | 1.3x / 18x | 1.5x / 1.4x | 1.0x / 1.0x |
+| page: 3 tables | VIEW_CASE | 105x / 2,200x | 14,700x / 33,200x | 15,800x / 18,700x | 290x / 1,460x |
+| page: indexed range | VIEW_CASE | 2.6x / 20x | 1.7x / 45x | 1.6x / 22x | 1.0x / 11x |
+
+- **The paging rule holds at 10x.** VIEW_CASE ties or beats DRIVER on every page without an
+  OFFSET, on every database at both counts. There is one exception: PostgreSQL's keyset page on
+  EC2 at 100 in flight, 0.51 ms against 0.35. With rows in flight at the newest ids, DRIVER's
+  pages fall 10x to 1,000x behind at 10,000. VIEW_CASE stays within 1.1x to 2.4x of BASE, except
+  the 3-table page on EC2 (28.7 ms, the same as BASE).
+- **MariaDB's joins are slow even without the driver.** Its plain paged joins take 5 to 9 s, and
+  VIEW_CASE takes 0.4 to 0.6 ms.
+- **Deep OFFSET is mixed.** At 100 in flight VIEW_CASE loses to DRIVER on PostgreSQL and MariaDB
+  (0.3x to 0.6x) and wins on MySQL and Oracle. At 10,000 it wins everywhere (1.3x to 14x). So
+  pages with an OFFSET stay with the split read.
+- **CORR holds for full-table COUNT, SUM and GROUP BY**, within 1.05x of BASE at 100 in flight. It
+  is 1.3x to 7.3x faster than DRIVER at 100 in flight and 1.4x to 5.4x at 10,000. Oracle at
+  10,000 is the exception: there it is 0.8x to 1.0x.
+- **CORR's DISTINCT now also wins on PostgreSQL** (1.7x to 9.1x). It stays far ahead on MariaDB
+  and loses badly on MySQL and Oracle.
+- **CORR loses where it lost before:** COUNT by FK, which the driver already reads by index. On
+  the cached hot COUNT at 10,000 it is about even.
+- **VIEW_CASE never helps an aggregate.** It is 1.4x to 10x slower than DRIVER on every full scan.
+
 ## Rankings
 
 ### Tier A (EC2)
