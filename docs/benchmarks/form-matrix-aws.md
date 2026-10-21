@@ -125,15 +125,15 @@ Brackets give the gain over DRIVER measured here.
 |---|---|---|---|---|
 | Key lookups, filters, FK filters, IN / NOT EXISTS subqueries, LEFT JOIN, 2-4 table joins | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, DISTINCT set) | Keep (SPLIT_DRV, DISTINCT set) |
 | Paging: ORDER BY key + LIMIT, keyset, indexed range + LIMIT | VIEW_CASE (1.7x-14x) | VIEW_CASE (10x-37x) | VIEW_CASE (2x-111x) | VIEW_CASE (1.5x-11x) |
-| Paged join, 2-3 tables | SPLIT_DRVP (3.6x-7.4x); VIEW_CASE with the plain filter to confirm | VIEW_CASE (4x-163x) | VIEW_CASE (8x-2,800x) | VIEW_CASE (530x-1,200x) |
-| Deep OFFSET page | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, NOT EXISTS) | VIEW_CASE (3.5x-13x) | VIEW_CASE (3.7x-4.5x) |
-| Full-scan aggregates | SPLIT_DRVN (1.6x-8x) | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, DISTINCT set) | Keep (SPLIT_DRV, DISTINCT set) |
-| DISTINCT | SPLIT_NI or SPLIT_DHDP (1.5x-2.3x) | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, DISTINCT set); no form helps | Keep (SPLIT_DRV, DISTINCT set); no form helps |
+| Paged join, 2-3 tables | VIEW_CASE, plain filter (4.9x-1,400x) | VIEW_CASE (4x-163x) | VIEW_CASE (8x-2,800x) | VIEW_CASE (530x-1,200x) |
+| Deep OFFSET page | Keep (SPLIT_DRV, NOT EXISTS) | OVER (3.2x-13x) | VIEW_CASE (3.5x-13x) | VIEW_CASE (3.7x-4.5x) |
+| Full-scan COUNT, SUM, GROUP BY | CORR (1.4x-11x) | CORR for COUNT (1.1x-2.1x); Keep (SPLIT_DRV, NOT EXISTS) for SUM and GROUP BY | CORR (1.5x-2.8x) | CORR (1.1x-2.6x) |
+| DISTINCT | SPLIT_NI or SPLIT_DHDP (1.5x-2.3x) | Keep (SPLIT_DRV, NOT EXISTS) | Keep (SPLIT_DRV, DISTINCT set); no form helps | CORR (1.5x-14x) |
 | Wide tables, 4-table key lookup | VIEW_CASE (3.2x-3.5x) | Keep (SPLIT_DRV, NOT EXISTS) | VIEW_CASE (1.7x-2.7x) | VIEW_LJ (2.3x-3.1x) |
 
-This run's VIEW_CASE used the `COALESCE` filter, not the plain one the driver emits; on PostgreSQL's
-paged joins that form is the planner's misestimate, so those cells need a rerun with
-`-Dnativejdbc.bench.plainCaseFilter=true`. Forms that beat DRIVER by up to 1.5x on joins at 100 rows
+The first run's VIEW_CASE used the `COALESCE` filter, not the plain one the driver emits; the
+second run (below) used the plain one, which settles PostgreSQL's paged joins on VIEW_CASE. The
+CORR and OVER cells and that one come from the second run, three repetitions each. Forms that beat DRIVER by up to 1.5x on joins at 100 rows
 in flight lose to it at 10,000, and the driver cannot know the count when it plans, so those stay Keep.
 
 ## The approaches
@@ -286,9 +286,61 @@ the fastest is in bold.
 - **C does not pay.** SEMI loses to DRIVER everywhere except MySQL's NOT EXISTS at 100 in flight
   (1.1 against 9.0 ms), and loses by 2 to 40x at 10,000.
 
-So the recommendation gains three cells: CORR for COUNT, SUM and GROUP BY over a whole table on
-all four engines, and CORR's DISTINCT on MariaDB. OVER is for an ORDER BY past a deep OFFSET on Oracle. SEMI adds
-none. All three are to confirm on AWS before the driver takes them.
+So locally CORR is worth taking for COUNT, SUM and GROUP BY over a whole table on all four
+engines, and for DISTINCT on MariaDB; OVER for an ORDER BY past a deep OFFSET on Oracle; SEMI for
+nothing. The AWS run below confirms them.
+
+### AWS results of A and B
+
+A second run on the same AWS setup, 2026-10-21 16:01 to 16:48 (reports in
+`bench-env/results/20261021-1601/`): the modes BASE, VIEW_LJ, VIEW_CASE, SPLIT_DRVP, SPLIT_DRVN,
+CORR, OVER and DRIVER on the 12 aggregate, DISTINCT and paging queries, `plainCaseFilter=true`, 100
+and 10,000 rows in flight, three timed repetitions and one run with changed images each. The
+repetitions agree within a few percent; the figures are their medians. The working tree it ran
+from held another session's uncommitted `predicateChecks` property, off by default.
+
+**Correct everywhere.** With changed images, CORR and OVER return VIEW_LJ's rows on all seven
+databases at both counts. The only errors are SPLIT_DRVN's on the keyset and 3-table pages.
+
+Median ms, CORR or OVER / DRIVER / the best other form where DRIVER is not it:
+
+| Query | Tier | PostgreSQL 100 | MySQL 100 | MariaDB 100 | Oracle 100 | PostgreSQL 10k | MySQL 10k | MariaDB 10k | Oracle 10k |
+|---|---|---|---|---|---|---|---|---|---|
+| A: COUNT of 100k | A | **3.7** / 11.9 / 7.2 | **8.7** / 13.3 | **11.1** / 22.4 | | **14.3** / 24.7 / 14.3 | **38.9** / 72.6 | **38.6** / 47.8 | |
+| | B | **4.5** / 12.5 / 8.2 | **15.4** / 22.8 | **15.1** / 39.9 | **3.2** / 6.6 | **16.2** / 28.2 / 16.3 | **62.8** / 108.6 | **52.7** / 60.6 | **15.4** / 17.6 |
+| A: SUM of 500k | A | **15.3** / 169.4 / 21.7 | **57.1** / 91.7 | **63.6** / 128.8 | | 40.4 / 182.5 / **29.7** | **100.1** / 277.9 | **99.0** / 164.3 | |
+| | B | **18.8** / 62.1 / 24.8 | **100.0** / 152.2 | **89.7** / 217.5 | **18.2** / 27.0 | 48.3 / 91.5 / **36.5** | **163.7** / 416.8 | **135.1** / 211.3 | 49.9 / **41.6** |
+| A: GROUP BY of 100k | A | **11.7** / 38.6 / 38.5 | **12.6** / 31.4 | **12.6** / 24.1 | | **15.9** / 52.7 / 45.4 | **45.9** / 82.0 | **44.4** / 50.9 | |
+| | B | **14.7** / 20.8 / 20.6 | **20.5** / 55.2 / 52.9 | **17.1** / 42.5 | 12.7 / **11.4** | **18.4** / 37.0 / 27.9 | **73.9** / 118.3 | **57.0** / 64.4 | 25.0 / **22.7** |
+| A: hot COUNT of 20k | A | **0.94** / 2.6 / 2.5 | **2.3** / 3.4 | **2.6** / 4.6 | | 8.3 / 8.2 / **5.4** | 24.7 / 32.3 / **22.0** | 22.8 / 23.0 / **21.1** | |
+| | B | **1.3** / 2.9 / 2.8 | **3.7** / 5.2 | **3.6** / 8.3 | **1.4** / 3.7 / 2.9 | 9.3 / 9.2 / **7.1** | 39.4 / 47.6 / **34.3** | 31.3 / **28.3** | 10.9 / 10.3 / **4.6** |
+| A: COUNT by FK | A | 0.12 / 0.14 / **0.11** | 0.57 / **0.53** | 0.44 / **0.37** | | 1.05 / **0.14** | 15.1 / **0.49** | 13.3 / **0.34** | |
+| | B | 0.36 / 0.37 / **0.35** | 0.74 / **0.63** | 0.55 / **0.50** | 0.48 / **0.32** | 1.6 / **0.37** | 21.5 / **0.54** | 18.4 / **0.40** | 3.4 / **0.32** |
+| A: DISTINCT | A | 48.0 / 39.2 / **37.7** | 546 / 28.6 / **24.5** | **4.3** / 40.8 / 32.6 | | **32.9** / 49.8 / 41.7 | 519 / 89.6 / **85.4** | **38.1** / 66.5 / 56.2 | |
+| | B | 31.6 / 19.8 / **19.2** | 1016 / 46.3 / **40.4** | **5.4** / 77.5 / 40.2 | 199 / 13.1 / **10.4** | 59.5 / 35.4 / **26.1** | 958 / 134.3 / **125.9** | **58.0** / 87.3 / 70.5 | 218 / 25.0 / **22.7** |
+| B: page after 10k | A | 4.9 / 3.2 / **3.2** | 68.1 / 163.3 / **13.4** | 7.1 / 7.2 / **6.6** | | **7.3** / 19.0 / 13.7 | 47.3 / 48.0 / **13.4** | 37.2 / 52.7 / **12.1** | |
+| | B | 5.9 / 4.2 / **4.1** | 120.7 / 276.8 / **21.5** | **9.3** / 9.4 | **9.1** / 122.6 | 28.1 / 24.9 / **16.7** | 73.6 / 74.9 / **21.4** | 46.7 / 63.1 / **20.9** | **48.5** / 157.5 |
+
+The fastest is in bold. On the other pages (of 500k, JOIN FK, keyset, 3 tables, indexed range)
+VIEW_CASE is within 2.2x of BASE on every database (and far ahead of it on MariaDB's joins) and OVER is
+1.2x to 2,500x behind it, so they are
+left out.
+
+- **A holds up on AWS.** CORR is within 1.12x of BASE on COUNT, SUM and GROUP BY over a whole table at
+  100 in flight on every database but Oracle's GROUP BY (1.5x), and 1.4x to 11x faster than DRIVER
+  (PostgreSQL's SUM on EC2: 15 ms against 169). At 10,000 it still beats DRIVER everywhere except
+  Oracle's SUM and GROUP BY (by 10 to 20%), and loses only PostgreSQL's SUM to SPLIT_DRVN (1.4x).
+  Taken for the whole category, its worst case is that 1.4x and its best case 11x, so the cell is
+  CORR on PostgreSQL, MySQL and MariaDB, and CORR for COUNT only on Oracle. The cached hot COUNT is
+  the exception: at 10,000 in flight VIEW_CASE or DRIVER takes it by 8 to 140%; the driver can't tell it
+  from a full scan, and at 100 in flight CORR is 1.4x to 2.7x the faster.
+- **CORR's DISTINCT is for MariaDB only:** 4.3 ms against 40.8 at 100 in flight (14x on RDS), 1.5x
+  to 1.7x at 10,000. On MySQL and Oracle it is 6x to 22x slower than DRIVER; on PostgreSQL it wins
+  only on EC2 at 10,000.
+- **B only for Oracle's deep OFFSET:** 9.1 ms against DRIVER's 123 at 100 in flight, 48 against 157
+  at 10,000, where no other form comes close. Elsewhere VIEW_CASE or DRIVER is faster.
+- **VIEW_CASE with the plain filter settles PostgreSQL's paged joins:** 0.15 to 0.58 ms against
+  DRIVER's 1.1 to 629 (4.9x to 1,400x), so the open cell is VIEW_CASE.
 
 ## Rankings
 

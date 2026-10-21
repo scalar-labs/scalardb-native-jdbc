@@ -69,7 +69,7 @@ main=$$
 
 destroy() {
   trap - EXIT INT TERM
-  kill "$heartbeat" "$deadline" 2>/dev/null || true
+  pkill -P "$heartbeat,$deadline" 2>/dev/null; kill "$heartbeat" "$deadline" 2>/dev/null || true # their sleeps too
   echo "=== destroy $(date +%T)"
   refresh || echo "credentials not refreshed: destroying with the last ones" >&2
   tf destroy -auto-approve -input=false -var-file=${TFVARS:-bench.tfvars} >/dev/null && echo destroyed || recover
@@ -126,7 +126,7 @@ if [ -n "${BENCH_BUCKET:-}" ]; then
   printf '%s\n' "${cmds[@]}" | ssh_ "umask 077 && cat > tiers.sh && cp a/bench-env/detached.sh . &&
     BUCKET='$BENCH_BUCKET' RUN='$run' MAX_RUN_MINUTES='${MAX_RUN_MINUTES:-480}' setsid nohup bash detached.sh < /dev/null > detached.log 2>&1 &"
   trap - EXIT INT TERM
-  kill "$heartbeat" "$deadline" 2>/dev/null || true
+  pkill -P "$heartbeat,$deadline" 2>/dev/null; kill "$heartbeat" "$deadline" 2>/dev/null || true # their sleeps too
   rm -rf "$(dirname "$creds")"
   echo "=== detached as $run: the client ends the instances itself; later: run.sh fetch $run"
   exit
