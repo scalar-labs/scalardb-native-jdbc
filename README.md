@@ -170,8 +170,10 @@ first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
 - On MySQL an INSERT has no `RETURNING`, and gives each key column a literal or a placeholder of the
   column's type, or leaves out an `AUTO_INCREMENT` key (not NULL or 0 for it). It needs a strict `sql_mode`,
   and no `BEFORE INSERT` trigger on the table.
-  On MySQL and MariaDB a `CHAR` column of a ScalarDB table reads as `VARCHAR`, and a `BOOLEAN` as
-  `TINYINT`, whose `getObject` is an `Integer`: read it with `getBoolean`.
+  On MySQL and MariaDB a `CHAR` column of a ScalarDB table reads as `VARCHAR`. A `BOOLEAN` column
+  that a SELECT returns as it is, by name or through `*`, reads as on the database; one returned
+  through a derived table, a CTE or a `*` that also covers a plain table reads as `TINYINT`, whose
+  `getObject` is an `Integer`: read it with `getBoolean`.
   On MySQL and MariaDB, `useAffectedRows` must stay false, the drivers' default, and a locking read
   takes `FOR UPDATE` or `FOR SHARE` (`LOCK IN SHARE MODE`).
 - On SQL Server an INSERT has no `RETURNING` (the driver reads its keys back with `OUTPUT`, which a

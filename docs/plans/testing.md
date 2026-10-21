@@ -70,7 +70,8 @@ nullability reported apart), and `build/coverage/<engine>[-large].md` with each 
 `VARCHAR` came back as `LONGVARCHAR` on MySQL and MariaDB (todo 303, fixed: the before image is cast
 to the column's type, and a `DATETIME`'s to its precision); nullability differs on PostgreSQL and
 Oracle (todo 302). `columns.sql` (2026-10-21) reads every column by name and by `*`: on MySQL and
-MariaDB a `BOOLEAN` comes back as `TINYINT` (todo 304), the only failures left. About a quarter of the
+MariaDB a `BOOLEAN` came back as `TINYINT` (todo 304, fixed: the driver reports a column the select
+list returns as it is with the column's own type, and returns a `Boolean`). About a quarter of the
 statements fall back to `rc_T`: right and full joins, CTEs, window functions, GROUP BY an expression,
 a derived table with DISTINCT. Open: decimals and CHAR, the locking clauses, JSON functions, more
 statements per area.

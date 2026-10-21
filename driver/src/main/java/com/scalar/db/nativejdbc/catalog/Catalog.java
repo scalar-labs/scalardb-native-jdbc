@@ -922,6 +922,7 @@ public final class Catalog implements AutoCloseable {
             columns.dataColumns,
             columns.indexed,
             columns.floats,
+            columns.booleans,
             setupObjects.beforeTypes(q.schema(), unqualified(v.left)),
             setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
@@ -948,6 +949,7 @@ public final class Catalog implements AutoCloseable {
             columns.dataColumns,
             columns.indexed,
             columns.floats,
+            columns.booleans,
             setupObjects.beforeTypes(q.schema(), unqualified(v.left)),
             setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
       }
@@ -977,6 +979,7 @@ public final class Catalog implements AutoCloseable {
             columns.dataColumns,
             columns.indexed,
             columns.floats,
+            columns.booleans,
             setupObjects.beforeTypes(q.schema(), q.table()),
             setupObjects.isSetUp(q.schema(), q.table(), q.table(), columns.dataColumns));
       }
@@ -1027,6 +1030,9 @@ public final class Catalog implements AutoCloseable {
         if ("FLOAT".equalsIgnoreCase(col.dataType)) {
           out.floats.add(col.name);
         }
+        if ("BOOLEAN".equalsIgnoreCase(col.dataType)) {
+          out.booleans.add(col.name);
+        }
         if (col.keyType != null) {
           String kt = col.keyType.toUpperCase(Locale.ROOT);
           if (kt.equals("PARTITION")) {
@@ -1059,6 +1065,7 @@ public final class Catalog implements AutoCloseable {
     final List<String> dataColumns = new ArrayList<>();
     final List<String> indexed = new ArrayList<>();
     final List<String> floats = new ArrayList<>();
+    final List<String> booleans = new ArrayList<>();
     boolean transactional;
   }
 

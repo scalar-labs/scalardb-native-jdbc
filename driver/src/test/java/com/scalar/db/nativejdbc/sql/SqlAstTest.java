@@ -36,6 +36,35 @@ class SqlAstTest {
     assertThat(o.withoutSchemaQualifiers(o.tableRefs().get(0), other)).isEqualTo(other);
   }
 
+  /** The sources as "table.column", "-" for none; columns of c and o known, of r not (todo 304). */
+  private static @Nullable List<String> sources(String sql) {
+    SqlAst ast = parse(sql);
+    List<SqlAst.@Nullable ColumnSource> out =
+        ast.selectSources(
+            r ->
+                r.name().equals("c")
+                    ? List.of("id", "vip")
+                    : r.name().equals("o") ? List.of("id", "vip", "total") : null);
+    return out == null
+        ? null
+        : out.stream().map(c -> c == null ? "-" : c.table().name() + "." + c.column()).toList();
+  }
+
+  @Test
+  void selectSources_namesTheTableColumnEachReturnedColumnPlainlyIs() {
+    assertThat(sources("SELECT * FROM c")).containsExactly("c.id", "c.vip");
+    assertThat(sources("SELECT x.vip AS v, total, VIP + 0, c.* FROM c x JOIN o c ON true"))
+        .containsExactly("c.vip", "o.total", "-", "o.id", "o.vip", "o.total");
+    // ambiguous, or a table whose columns are unknown may hold the name
+    assertThat(sources("SELECT vip, c.vip FROM c JOIN o ON true")).containsExactly("-", "c.vip");
+    assertThat(sources("SELECT vip, c.vip FROM c JOIN r ON true")).containsExactly("-", "c.vip");
+    // the columns cannot be counted
+    assertThat(sources("SELECT * FROM c JOIN r ON true")).isNull();
+    assertThat(sources("SELECT vip FROM c UNION ALL SELECT vip FROM o")).isNull();
+    assertThat(sources("SELECT * FROM c JOIN o USING (id)")).isNull();
+    assertThat(sources("SELECT * FROM (SELECT vip FROM c) d")).isNull();
+  }
+
   @Test
   void kind_isDecidedByTheTree_notTheFirstWord() {
     assertThat(parse("/* hint */ select 1 from t").kind()).isEqualTo(SqlAst.Kind.SELECT);

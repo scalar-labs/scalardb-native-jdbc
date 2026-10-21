@@ -2984,6 +2984,143 @@ public final class SqlAst {
     return out;
   }
 
+  /** A column of a table the statement reads, as a select list returns it. */
+  public static final class ColumnSource {
+    private final TableRef table;
+    private final String column;
+
+    ColumnSource(TableRef table, String column) {
+      this.table = table;
+      this.column = column;
+    }
+
+    /**
+     * Returns the table.
+     *
+     * @return the table reference
+     */
+    public TableRef table() {
+      return table;
+    }
+
+    /**
+     * Returns the column's name, as the table's columns spell it.
+     *
+     * @return the column name
+     */
+    public String column() {
+      return column;
+    }
+  }
+
+  /**
+   * For each column the statement returns, the table column it is when it is one plainly: a column
+   * reference, or a column of a {@code *} or {@code t.*}, of a table in the FROM clause of a plain
+   * SELECT; null for an expression or a column it cannot place.
+   *
+   * @param columnsOf a table's columns in order, or null where they are not known
+   * @return per returned column its source or null; null when the columns cannot be counted
+   */
+  public @Nullable List<@Nullable ColumnSource> selectSources(
+      java.util.function.Function<TableRef, @Nullable List<String>> columnsOf) {
+    if (!(statement instanceof PlainSelect) || ((PlainSelect) statement).getFromItem() == null) {
+      return null;
+    }
+    PlainSelect s = (PlainSelect) statement;
+    List<FromItem> items = new ArrayList<>();
+    items.add(s.getFromItem());
+    if (s.getJoins() != null) {
+      for (Join j : s.getJoins()) {
+        if (j.isNatural() || (j.getUsingColumns() != null && !j.getUsingColumns().isEmpty())) {
+          return null; // the joined columns are merged
+        }
+        items.add(j.getFromItem());
+      }
+    }
+    List<@Nullable TableRef> from = new ArrayList<>();
+    for (FromItem f : items) {
+      TableRef found = null;
+      for (TableRef r : tableRefs) {
+        if (r.node() == f) {
+          found = r;
+        }
+      }
+      from.add(found);
+    }
+    List<@Nullable ColumnSource> out = new ArrayList<>();
+    for (SelectItem<?> item : s.getSelectItems()) {
+      Expression e = item.getExpression();
+      if (e instanceof AllTableColumns) {
+        TableRef r = named(from, ((AllTableColumns) e).getTable());
+        List<String> columns = r == null ? null : columnsOf.apply(r);
+        if (r == null || columns == null) {
+          return null;
+        }
+        for (String c : columns) {
+          out.add(new ColumnSource(r, c));
+        }
+      } else if (e instanceof AllColumns) {
+        for (TableRef r : from) {
+          List<String> columns = r == null ? null : columnsOf.apply(r);
+          if (r == null || columns == null) {
+            return null;
+          }
+          for (String c : columns) {
+            out.add(new ColumnSource(r, c));
+          }
+        }
+      } else if (e instanceof Column) {
+        out.add(source((Column) e, from, columnsOf));
+      } else {
+        out.add(null);
+      }
+    }
+    return out;
+  }
+
+  /** The one table of {@code from} a qualifier names, or null. */
+  private static @Nullable TableRef named(List<@Nullable TableRef> from, @Nullable Table q) {
+    if (q == null || q.getName() == null) {
+      return null;
+    }
+    TableRef out = null;
+    for (TableRef r : from) {
+      if (r != null && r.exposedName().equals(lowerUnquoted(q.getName()))) {
+        if (out != null) {
+          return null;
+        }
+        out = r;
+      }
+    }
+    return out;
+  }
+
+  /** The table column a column reference of the select list is, or null. */
+  private static @Nullable ColumnSource source(
+      Column c,
+      List<@Nullable TableRef> from,
+      java.util.function.Function<TableRef, @Nullable List<String>> columnsOf) {
+    String name = lowerUnquoted(c.getColumnName());
+    Table q = c.getTable();
+    boolean qualified = q != null && q.getName() != null;
+    ColumnSource out = null;
+    for (TableRef r : qualified ? Collections.singletonList(named(from, q)) : from) {
+      List<String> columns = r == null ? null : columnsOf.apply(r);
+      if (r == null || columns == null) {
+        return null; // a table whose columns are not known may hold the name
+      }
+      for (String column : columns) {
+        if (column.toLowerCase(Locale.ROOT).equals(name)) {
+          if (out != null) {
+            return null;
+          }
+          out = new ColumnSource(r, column);
+        }
+      }
+    }
+    return out;
+  }
+
   /**
    * Returns the references the statement reaches through a column that leads one of their indexes,
    * as far as the statement shows: a top-level conjunct of the WHERE clause or of a join's ON

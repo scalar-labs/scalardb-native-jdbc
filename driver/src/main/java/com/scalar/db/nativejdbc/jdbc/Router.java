@@ -134,6 +134,9 @@ final class Router {
      */
     final Writes.@Nullable Step fallback;
 
+    /** The returned columns that are BOOLEAN columns of ScalarDB tables, or null (todo 304). */
+    final @Nullable Booleans booleans;
+
     private Route(
         String source,
         String sql,
@@ -156,7 +159,9 @@ final class Router {
         @Nullable Anchored anchored,
         @Nullable Boolean anchoring,
         List<String> checks,
-        Writes.@Nullable Step fallback) {
+        Writes.@Nullable Step fallback,
+        @Nullable Booleans booleans) {
+      this.booleans = booleans;
       this.anchoring = anchoring;
       this.checks = List.copyOf(checks);
       this.fallback = fallback;
@@ -187,7 +192,16 @@ final class Router {
      */
     Route anchored(@Nullable Anchored a, @Nullable Boolean anchoring) {
       return copy(
-          sql, parameterSources, perRow, countsOnly, parallel, a, anchoring, checks, fallback);
+          sql,
+          parameterSources,
+          perRow,
+          countsOnly,
+          parallel,
+          a,
+          anchoring,
+          checks,
+          fallback,
+          booleans);
     }
 
     /**
@@ -204,7 +218,8 @@ final class Router {
           anchored,
           anchoring,
           checks,
-          fallback);
+          fallback,
+          booleans);
     }
 
     /** This route with another statement text and what goes with it. */
@@ -223,7 +238,23 @@ final class Router {
           anchored,
           anchoring,
           checks,
-          fallback);
+          fallback,
+          booleans);
+    }
+
+    /** This route, its returned BOOLEAN columns as {@code b} says. */
+    Route booleans(@Nullable Booleans b) {
+      return copy(
+          sql,
+          parameterSources,
+          perRow,
+          countsOnly,
+          parallel,
+          anchored,
+          anchoring,
+          checks,
+          fallback,
+          b);
     }
 
     private Route copy(
@@ -235,7 +266,8 @@ final class Router {
         @Nullable Anchored anchored,
         @Nullable Boolean anchoring,
         List<String> checks,
-        Writes.@Nullable Step fallback) {
+        Writes.@Nullable Step fallback,
+        @Nullable Booleans booleans) {
       return new Route(
           source,
           sql,
@@ -258,7 +290,24 @@ final class Router {
           anchored,
           anchoring,
           checks,
-          fallback);
+          fallback,
+          booleans);
+    }
+  }
+
+  /**
+   * The returned columns, by position, that are BOOLEAN columns of ScalarDB tables on MySQL and
+   * MariaDB, where a UNION ALL, as a split read and a read view are, widens {@code TINYINT(1)} to
+   * {@code TINYINT}, which the vendor then reports as a number (todo 304); and a read of one such
+   * column as it is, whose metadata the vendor reports for them.
+   */
+  static final class Booleans {
+    final List<Integer> columns;
+    final String probe;
+
+    Booleans(List<Integer> columns, String probe) {
+      this.columns = List.copyOf(columns);
+      this.probe = probe;
     }
   }
 
@@ -548,12 +597,13 @@ final class Router {
     }
     if (!scalarDb.isEmpty()) {
       return read(
-          vendor,
-          sql,
-          ast,
-          scalarDb,
-          forcedPerRow,
-          forcedAnchoring != null ? forcedAnchoring : anchoring(vendor));
+              vendor,
+              sql,
+              ast,
+              scalarDb,
+              forcedPerRow,
+              forcedAnchoring != null ? forcedAnchoring : anchoring(vendor))
+          .booleans(booleans(ast, scalarDb));
     }
     String routed = sql;
     if ((kind == SqlAst.Kind.SELECT || (kind == SqlAst.Kind.DML && engine == Engine.SQLSERVER))
@@ -582,6 +632,38 @@ final class Router {
         0,
         List.of(),
         plansParallel);
+  }
+
+  /** The returned BOOLEAN columns of a read of ScalarDB tables, on MySQL and MariaDB (todo 304). */
+  private @Nullable Booleans booleans(
+      SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+    if (engine != Engine.MYSQL && engine != Engine.MARIADB) {
+      return null;
+    }
+    List<SqlAst.@Nullable ColumnSource> sources =
+        ast.selectSources(
+            r -> {
+              TableInfo t = scalarDb.get(r);
+              return t == null ? null : t.dataColumns();
+            });
+    List<Integer> columns = new ArrayList<>();
+    String probe = null;
+    for (int i = 0; sources != null && i < sources.size(); i++) {
+      SqlAst.ColumnSource c = sources.get(i);
+      TableInfo t = c == null ? null : scalarDb.get(c.table());
+      if (c != null && t != null && t.booleanColumns().contains(c.column())) {
+        columns.add(i + 1);
+        probe =
+            "SELECT "
+                + engine.quote(c.column())
+                + " FROM "
+                + engine.quote(t.namespace())
+                + "."
+                + engine.quote(t.dataTable())
+                + " WHERE 1 = 0";
+      }
+    }
+    return probe == null ? null : new Booleans(columns, probe);
   }
 
   /** A write of a ScalarDB table: planned now, run by the driver (design 4.3, milestone 4a). */
@@ -645,6 +727,7 @@ final class Router {
         null,
         null,
         List.of(),
+        null,
         null);
   }
 
@@ -972,6 +1055,7 @@ final class Router {
         null,
         null,
         List.of(),
+        null,
         null);
   }
 
@@ -1825,6 +1909,7 @@ final class Router {
         null,
         null,
         List.of(),
+        null,
         null);
   }
 

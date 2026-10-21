@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "304"
 tags: [read, metadata, mysql, mariadb]
@@ -39,7 +39,7 @@ Read booleans with `getBoolean` on MySQL and MariaDB. **Effort:** Small.
 
 ## Acceptance Criteria
 
-- [ ] The read corpus's `columns.sql` passes on MySQL and MariaDB, or the difference is documented.
+- [x] The read corpus's `columns.sql` passes on MySQL and MariaDB, or the difference is documented.
 
 ## Work Log
 
@@ -51,3 +51,15 @@ Read booleans with `getBoolean` on MySQL and MariaDB. **Effort:** Small.
 ## Resources
 
 - docs/plans/testing.md, milestones T1 and T3; todos 302, 303.
+
+### 2026-10-21 - Fixed (Option 1)
+
+- `SqlAst.selectSources` names the table column each returned column plainly is (a column
+  reference, `*`, `t.*` of a table in the FROM clause of a plain SELECT); `Router` keeps the
+  positions of ScalarDB `BOOLEAN` columns on MySQL and MariaDB (`Route.booleans`), with a read of one
+  such column (`WHERE 1 = 0`) whose metadata the vendor reports as for the column itself, read once
+  per connection before a statement runs. `Proxies.BooleanColumns` answers `getObject` with a
+  `Boolean` and the metadata as for the column.
+- Left as `TINYINT`: a column through a derived table, a CTE, or a `*` that also covers a plain
+  table, whose columns the driver does not know (README).
+- Read corpus (T1, T2), write corpus (T3) and the full integration suites pass on MySQL and MariaDB.

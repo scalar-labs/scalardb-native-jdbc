@@ -20,6 +20,7 @@ public final class TableInfo {
   private final List<String> dataColumns;
   private final List<String> indexedColumns;
   private final List<String> floatColumns;
+  private final List<String> booleanColumns;
   private final Map<String, String> beforeTypes;
   private final boolean setUp;
 
@@ -47,6 +48,7 @@ public final class TableInfo {
         dataColumns,
         indexedColumns,
         List.of(),
+        List.of(),
         Map.of(),
         setUp);
   }
@@ -63,6 +65,7 @@ public final class TableInfo {
       List<String> dataColumns,
       List<String> indexedColumns,
       List<String> floatColumns,
+      List<String> booleanColumns,
       Map<String, String> beforeTypes,
       boolean setUp) {
     this.namespace = namespace;
@@ -76,6 +79,7 @@ public final class TableInfo {
     this.dataColumns = List.copyOf(dataColumns);
     this.indexedColumns = List.copyOf(indexedColumns);
     this.floatColumns = List.copyOf(floatColumns);
+    this.booleanColumns = List.copyOf(booleanColumns);
     this.beforeTypes = Map.copyOf(beforeTypes);
     this.setUp = setUp;
   }
@@ -240,6 +244,15 @@ public final class TableInfo {
    */
   public List<String> floatColumns() {
     return floatColumns;
+  }
+
+  /**
+   * Returns the columns of ScalarDB's BOOLEAN type.
+   *
+   * @return the column names
+   */
+  public List<String> booleanColumns() {
+    return booleanColumns;
   }
 
   /**

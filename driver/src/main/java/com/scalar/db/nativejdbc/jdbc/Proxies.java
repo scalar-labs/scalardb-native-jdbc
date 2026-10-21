@@ -160,6 +160,8 @@ public final class Proxies {
     // the versions the open transaction read, the anchors of its writes (4.2)
     final Anchors anchors = new Anchors();
     final Duration inflightWait;
+    // what the vendor reports for a BOOLEAN column of a ScalarDB table read as it is (todo 304)
+    volatile @Nullable BooleanType booleanType;
 
     ConnectionHandler(Connection vendor, Router router, Session session, Duration inflightWait) {
       super(vendor);
@@ -171,6 +173,29 @@ public final class Proxies {
 
     Router.Route route(String sql) throws SQLException {
       return router.route(vendor, sql);
+    }
+
+    /**
+     * What the vendor reports for the BOOLEAN columns a route returns, read once with its probe,
+     * before the statement runs: a streaming result would hold the connection then; null to leave
+     * the columns as the vendor returns them.
+     */
+    @SuppressFBWarnings(
+        value = "SQL_INJECTION_JDBC",
+        justification = "the driver's own read of a column, its names quoted from the catalog")
+    @Nullable BooleanType booleanType(Router.@Nullable Booleans b) {
+      BooleanType t = booleanType;
+      if (b == null || t != null) {
+        return b == null ? null : t;
+      }
+      try (Statement st = vendor.createStatement();
+          ResultSet rs = st.executeQuery(b.probe)) {
+        t = new BooleanType(rs.getMetaData());
+      } catch (SQLException e) {
+        return null; // ponytail: the columns stay as the vendor returns them; read again next time
+      }
+      booleanType = t;
+      return t;
     }
 
     Router.Route current(Router.Route prepared) throws SQLException {
@@ -513,6 +538,9 @@ public final class Proxies {
     // the last execute's anchored read, whose result sets hide and record the versions, and whether
     // it ran in a transaction, the only place its anchors serve
     Router.@Nullable Anchored anchored;
+    // the last execute's returned BOOLEAN columns of ScalarDB tables (todo 304)
+    Router.@Nullable Booleans booleans;
+    @Nullable BooleanType booleanType;
     boolean recording;
     long epoch;
     // whether the last execute ran in a transaction
@@ -796,6 +824,8 @@ public final class Proxies {
       }
       if (name.startsWith("execute")) {
         anchored = ran.size() == 1 ? ran.get(0).anchored : null;
+        booleans = ran.size() == 1 ? ran.get(0).booleans : null;
+        booleanType = owner.booleanType(booleans);
         // nothing to anchor in autocommit, nor where nothing can be written (todo 146)
         recording = anchored != null && !owner.vendor.getAutoCommit() && !owner.vendor.isReadOnly();
         epoch = owner.anchors.epoch();
@@ -815,9 +845,18 @@ public final class Proxies {
         Object md = forward(vendor(), method, args);
         return md == null
             ? null
-            : proxy(
-                java.sql.ResultSetMetaData.class,
-                new HiddenColumns(md, prepared.anchored.hidden()));
+            : booleanMetaData(
+                proxy(
+                    java.sql.ResultSetMetaData.class,
+                    new HiddenColumns(md, prepared.anchored.hidden())),
+                prepared.booleans,
+                owner.booleanType(prepared.booleans));
+      }
+      if (name.equals("getMetaData") && prepared != null && prepared.booleans != null) {
+        Object md = forward(vendor(), method, args);
+        return md == null
+            ? null
+            : booleanMetaData(md, prepared.booleans, owner.booleanType(prepared.booleans));
       }
       Router.Route checked = ran.size() == 1 && !ran.get(0).checks.isEmpty() ? ran.get(0) : null;
       if (checked != null
@@ -908,8 +947,8 @@ public final class Proxies {
         return result;
       }
       // only the statement's own result is anchored, not getGeneratedKeys' (todo 144)
-      Router.Anchored a =
-          name.startsWith("execute") || name.equals("getResultSet") ? anchored : null;
+      boolean itsOwn = name.startsWith("execute") || name.equals("getResultSet");
+      Router.Anchored a = itsOwn ? anchored : null;
       // a vendor error a row brings can end the transaction too, as SQL Server's 3960 and
       // deadlocks do while rows stream: marked as at the execute (todo 263)
       UnaryOperator<SQLException> failed =
@@ -919,23 +958,26 @@ public final class Proxies {
             }
             return Writes.asRetryable(e);
           };
-      return a == null
-          ? proxy(ResultSet.class, new ChildHandler(result, connection, (Statement) proxy, failed))
-          : proxy(
-              ResultSet.class,
-              new AnchoredHandler(
-                  result,
-                  connection,
-                  (Statement) proxy,
-                  a,
-                  recording ? owner.anchors : null,
-                  epoch,
-                  () -> {
-                    if (marks && owner.anchors.epoch() == at) {
-                      owner.rollbackOnly = true;
-                    }
-                  },
-                  failed));
+      Object rows =
+          a == null
+              ? proxy(
+                  ResultSet.class, new ChildHandler(result, connection, (Statement) proxy, failed))
+              : proxy(
+                  ResultSet.class,
+                  new AnchoredHandler(
+                      result,
+                      connection,
+                      (Statement) proxy,
+                      a,
+                      recording ? owner.anchors : null,
+                      epoch,
+                      () -> {
+                        if (marks && owner.anchors.epoch() == at) {
+                          owner.rollbackOnly = true;
+                        }
+                      },
+                      failed));
+      return itsOwn ? withBooleans(rows, booleans, booleanType) : rows;
     }
 
     /** Ends the transaction a checked read ran in, in autocommit, and restores autocommit. */
@@ -979,6 +1021,7 @@ public final class Proxies {
         Object proxy, String name, @Nullable Object[] args, Router.Route route)
         throws SQLException {
       Writes.Plan plan = Objects.requireNonNull(route.write);
+      BooleanType booleanType = owner.booleanType(route.booleans);
       if (name.equals("executeQuery") && !plan.returnsRows()) {
         throw new SQLException("the statement returns no result set", "02000");
       }
@@ -1013,7 +1056,12 @@ public final class Proxies {
       }
       writeReturns = plan.returnsRows();
       writeCount = writeReturns ? -1L : count[0];
-      writeResult = out.rows == null ? null : driverRows(proxy, plan, out.rows, out.hidden);
+      writeResult =
+          out.rows == null
+              ? null
+              : (ResultSet)
+                  withBooleans(
+                      driverRows(proxy, plan, out.rows, out.hidden), route.booleans, booleanType);
       // with its own RETURNING, the generated keys asked for are its rows, as pgjdbc returns them
       writeKeys = keys == null ? null : writeResult;
       switch (name) {
@@ -1541,6 +1589,117 @@ public final class Proxies {
       return result instanceof ResultSet
           ? proxy(ResultSet.class, new ChildHandler(result, connection, null))
           : result;
+    }
+  }
+
+  /** What the vendor reports for a BOOLEAN column of a ScalarDB table read as it is (todo 304). */
+  static final class BooleanType {
+    final int type;
+    final String typeName;
+    final String className;
+    final int precision;
+    final int scale;
+    final int displaySize;
+    final boolean signed;
+
+    BooleanType(java.sql.ResultSetMetaData md) throws SQLException {
+      type = md.getColumnType(1);
+      typeName = md.getColumnTypeName(1);
+      className = md.getColumnClassName(1);
+      precision = md.getPrecision(1);
+      scale = md.getScale(1);
+      displaySize = md.getColumnDisplaySize(1);
+      signed = md.isSigned(1);
+    }
+  }
+
+  /** Rows whose BOOLEAN columns of ScalarDB tables read as the columns themselves do. */
+  private static Object withBooleans(
+      Object rows, Router.@Nullable Booleans b, @Nullable BooleanType t) {
+    return b == null || t == null ? rows : proxy(ResultSet.class, new BooleanColumns(rows, b, t));
+  }
+
+  private static Object booleanMetaData(
+      Object md, Router.@Nullable Booleans b, @Nullable BooleanType t) {
+    return b == null || t == null
+        ? md
+        : proxy(java.sql.ResultSetMetaData.class, new BooleanMetaData(md, b, t));
+  }
+
+  /**
+   * The BOOLEAN columns of ScalarDB tables that a UNION ALL widened on MySQL and MariaDB, read as
+   * the vendor reads such a column on its own: {@code getObject} a {@code Boolean} where it returns
+   * one, and the column's metadata (todo 304).
+   */
+  private static final class BooleanColumns extends Handler {
+    final Router.Booleans booleans;
+    final BooleanType type;
+
+    BooleanColumns(Object rows, Router.Booleans booleans, BooleanType type) {
+      super(rows);
+      this.booleans = booleans;
+      this.type = type;
+    }
+
+    @Override
+    @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+      String name = method.getName();
+      if (name.equals("getMetaData")) {
+        Object md = forward(target, method, args);
+        return md == null ? null : booleanMetaData(md, booleans, type);
+      }
+      if (name.equals("getObject")
+          && args != null
+          && args.length == 1
+          && type.className.equals(Boolean.class.getName())) {
+        ResultSet rs = (ResultSet) target;
+        int i = args[0] instanceof Integer ? (Integer) args[0] : rs.findColumn((String) args[0]);
+        if (booleans.columns.contains(i)) {
+          boolean v = rs.getBoolean(i);
+          return rs.wasNull() ? null : v;
+        }
+      }
+      return forward(target, method, args);
+    }
+  }
+
+  /** The metadata of {@link BooleanColumns}. */
+  private static final class BooleanMetaData extends Handler {
+    final Router.Booleans booleans;
+    final BooleanType type;
+
+    BooleanMetaData(Object md, Router.Booleans booleans, BooleanType type) {
+      super(md);
+      this.booleans = booleans;
+      this.type = type;
+    }
+
+    @Override
+    @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+      if (args != null
+          && args.length == 1
+          && args[0] instanceof Integer
+          && booleans.columns.contains((Integer) args[0])) {
+        switch (method.getName()) {
+          case "getColumnType":
+            return type.type;
+          case "getColumnTypeName":
+            return type.typeName;
+          case "getColumnClassName":
+            return type.className;
+          case "getPrecision":
+            return type.precision;
+          case "getScale":
+            return type.scale;
+          case "getColumnDisplaySize":
+            return type.displaySize;
+          case "isSigned":
+            return type.signed;
+          default:
+            break;
+        }
+      }
+      return forward(target, method, args);
     }
   }
 
