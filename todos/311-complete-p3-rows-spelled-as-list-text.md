@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "311"
 tags: [code-review, testing]
@@ -37,3 +37,7 @@ Compare `List<String>` (or `List<List<String>>`) values instead of their text; k
 ### 2026-10-21 - Found by the review of T3
 
 **By:** Claude Code
+
+### 2026-10-21 - Fixed
+
+Fixed with the other T3 review todos (305-311); five engines pass, both phases.

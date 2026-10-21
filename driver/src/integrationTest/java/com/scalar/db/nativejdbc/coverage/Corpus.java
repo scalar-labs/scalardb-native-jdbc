@@ -19,8 +19,11 @@ import java.util.stream.Stream;
  */
 final class Corpus {
 
-  /** One statement: its file, its text, and whether its rows compare in order. */
-  record Entry(String file, String sql, boolean ordered) {}
+  /**
+   * One statement: its file, its text, whether its rows compare in order, and whether the driver
+   * refuses it.
+   */
+  record Entry(String file, String sql, boolean ordered, boolean refused) {}
 
   private static final Pattern LIMIT =
       Pattern.compile("(?i)\\b(LIMIT|FETCH\\s+FIRST|FETCH\\s+NEXT|OFFSET|TOP)\\b");
@@ -60,16 +63,22 @@ final class Corpus {
 
   /**
    * The statements of one file. A statement with a row limit must be marked {@code -- ordered}:
-   * without a total order its rows are any of several, and the comparison would be noise.
+   * without a total order its rows are any of several, and the comparison would be noise. One the
+   * driver must refuse is marked {@code -- refused}: a refusal elsewhere is a failure.
    */
   static List<Entry> parse(String file, String text) {
     List<Entry> out = new ArrayList<>();
     StringBuilder cur = new StringBuilder();
     boolean ordered = false;
+    boolean refused = false;
     for (String line : text.split("\n", -1)) {
       String t = line.strip();
       if (t.equals("-- ordered")) {
         ordered = true;
+        continue;
+      }
+      if (t.equals("-- refused")) {
+        refused = true;
         continue;
       }
       if (t.isEmpty() || t.startsWith("--")) {
@@ -82,9 +91,10 @@ final class Corpus {
           throw new IllegalStateException(
               file + ": a row limit needs -- ordered and a total ORDER BY: " + sql);
         }
-        out.add(new Entry(file, sql, ordered));
+        out.add(new Entry(file, sql, ordered, refused));
         cur.setLength(0);
         ordered = false;
+        refused = false;
       }
     }
     return out;

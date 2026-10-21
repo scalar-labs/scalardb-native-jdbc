@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "305"
 tags: [code-review, testing, write, mysql, mariadb]
@@ -55,3 +55,7 @@ Also compare the column count and labels (only the JDBC type set apart). **Effor
 ## Resources
 
 - docs/plans/testing.md, milestone T3; todo 304.
+
+### 2026-10-21 - Fixed
+
+Fixed with the other T3 review todos (305-311); five engines pass, both phases.

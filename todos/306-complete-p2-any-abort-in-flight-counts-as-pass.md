@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "306"
 tags: [code-review, testing, write, in-flight]
@@ -54,3 +54,7 @@ In both, require SQLState `40001` exactly.
 ## Resources
 
 - docs/plans/testing.md, milestone T3; docs/design.md section 6.
+
+### 2026-10-21 - Fixed
+
+Fixed with the other T3 review todos (305-311); five engines pass, both phases.

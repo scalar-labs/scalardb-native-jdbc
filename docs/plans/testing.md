@@ -146,11 +146,13 @@ DUPLICATE KEY UPDATE`, `INSERT IGNORE`, `REPLACE`, `MERGE`), `UPDATE` and `DELET
 `RETURNING` on `UPDATE` and `DELETE`, a key's update.
 
 **Rows in flight done 2026-10-21**: the same test again on fresh schemas (x*) with `InFlight` holding
-three-tenths of the keys prepared and `inflightWaitMs` 0. The twin's rows before and after each
-statement give the keys it writes: one that writes a key in flight must abort with `40001`, which 8
-to 13 statements per engine do; any other must match the twin, or abort for a row in flight it only
-reads. After the rollback the tables match and ScalarDB reads and writes every row. Every engine
-passes.
+three-tenths of the keys prepared (some in every table) and `inflightWaitMs` 0. The keys a
+statement reaches are those its `VALUES` name or its `WHERE` matches on the twin, read before it
+runs, and those whose rows it changes: one that reaches a key in flight must abort with `40001`,
+which 8 to 19 statements per engine do; any other must match the twin, and an abort there fails.
+After every statement, aborted and refused ones too, all three tables match; after the rollback
+ScalarDB reads and writes every row. A statement outside the write scope is marked `-- refused`, and
+a refusal of any other fails, in the read corpus too. Every engine passes (review todos 305-311).
 
 - **Nothing in flight.** Each DML statement runs through the driver on the ScalarDB tables and directly
   on their plain copies. Compare the update counts, the generated keys and the final data. Then read

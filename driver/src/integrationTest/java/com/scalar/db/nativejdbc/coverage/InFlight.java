@@ -67,13 +67,13 @@ final class InFlight {
       double share,
       Random random,
       List<TwoPhaseCommitTransaction> held,
-      Map<String, Set<String>> keys)
+      Map<String, Set<List<String>>> keys)
       throws Exception {
     try (DistributedTransactionAdmin admin = e.admin()) {
       for (String layout : List.of("d", "i")) {
         String ns = e.storedSchema(set + layout);
         List<TwoPhaseCommitTransaction> txs = new ArrayList<>();
-        Map<TwoPhaseCommitTransaction, Map<String, Set<String>>> byTx = new HashMap<>();
+        Map<TwoPhaseCommitTransaction, Map<String, Set<List<String>>>> byTx = new HashMap<>();
         for (int i = 0; i < TRANSACTIONS; i++) {
           TwoPhaseCommitTransaction tx = tpc.begin();
           held.add(tx);
@@ -98,12 +98,17 @@ final class InFlight {
             }
           }
           int fresh = 0;
-          for (Result row : committed(e, ns, scalarDb)) {
-            if (random.nextDouble() >= share) {
+          List<Result> rows = committed(e, ns, scalarDb);
+          boolean any = false;
+          for (int r = 0; r < rows.size(); r++) {
+            Result row = rows.get(r);
+            // at least the last row, so every table holds some
+            if (random.nextDouble() >= share && (any || r < rows.size() - 1)) {
               continue;
             }
+            any = true;
             TwoPhaseCommitTransaction tx = txs.get(random.nextInt(txs.size()));
-            Set<String> mine =
+            Set<List<String>> mine =
                 byTx.computeIfAbsent(tx, x -> new HashMap<>())
                     .computeIfAbsent(set + layout + "." + t, x -> new HashSet<>());
             mine.add(spelled(row, keyNames));
@@ -136,7 +141,7 @@ final class InFlight {
               for (Column<?> c : inserted.getColumns()) {
                 spelled.add(WriteCorpusIntegrationTest.normal(c.getValueAsObject()));
               }
-              mine.add(spelled.toString());
+              mine.add(spelled);
               var ins = Insert.newBuilder().namespace(ns).table(scalarDb).partitionKey(inserted);
               for (String c : values) {
                 ins.value(value(c, md.getColumnDataType(c), random));
@@ -172,12 +177,12 @@ final class InFlight {
   }
 
   /** A row's key values as the write corpus spells them. */
-  private static String spelled(Result row, List<String> names) {
+  private static List<String> spelled(Result row, List<String> names) {
     List<String> out = new ArrayList<>();
     for (String n : names) {
       out.add(WriteCorpusIntegrationTest.normal(col(row, n).getValueAsObject()));
     }
-    return out.toString();
+    return out;
   }
 
   private static Key key(Result row, Iterable<String> names) {

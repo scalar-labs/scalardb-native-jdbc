@@ -1696,7 +1696,7 @@ final class Writes {
           if (keys.rows.size() != count) {
             throw new SQLException(
                 "the database reported " + keys.rows.size() + " keys for " + count + " rows",
-                "0AN01");
+                "XX000");
           }
         } else if (readBack.isEmpty()) {
           ps = run.prepare(insert, null, returning != null);
@@ -1795,7 +1795,7 @@ final class Writes {
         ps.setObject(1, rowid);
         try (ResultSet r = ps.executeQuery()) {
           if (!r.next()) {
-            throw new SQLException("the row inserted is not found by its ROWID", "0AN01");
+            throw new SQLException("the row inserted is not found by its ROWID", "XX000");
           }
           keys.read(r, 1, n.keyColumns.size());
         }

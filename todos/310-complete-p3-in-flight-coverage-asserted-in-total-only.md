@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "310"
 tags: [code-review, testing, in-flight]
@@ -39,3 +39,7 @@ through the decoupled metadata table); assert `aborted > 0` per layout in T3. **
 ### 2026-10-21 - Found by the review of T3
 
 **By:** Claude Code
+
+### 2026-10-21 - Fixed
+
+Fixed with the other T3 review todos (305-311); five engines pass, both phases.

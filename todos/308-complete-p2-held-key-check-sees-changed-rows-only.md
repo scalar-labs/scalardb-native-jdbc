@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "308"
 tags: [code-review, testing, write, in-flight]
@@ -51,3 +51,7 @@ Add `UPDATE {c} SET name = name` and `UPDATE {k} SET v = v WHERE b = 1` to the c
 ## Resources
 
 - docs/plans/testing.md, milestone T3.
+
+### 2026-10-21 - Fixed
+
+Fixed with the other T3 review todos (305-311); five engines pass, both phases.

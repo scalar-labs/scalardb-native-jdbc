@@ -138,24 +138,33 @@ class CorpusIntegrationTest {
         try {
           InFlight.prepare(
               e, catalog, tpc, set, large ? 0.1 : 1.0, new Random(seed), held, new HashMap<>());
-          // not vacuous: the inline tables hold their rows' states, prepared (1) and deleted (2)
-          for (String t : IMPORTED) {
-            try (Statement st = vendor.createStatement();
-                ResultSet rs =
-                    st.executeQuery(
-                        "SELECT COUNT(*) FROM "
-                            + set
-                            + "i."
-                            + t
-                            + " WHERE "
-                            + engine.quote("tx_state")
-                            + " IN (1, 2)")) {
-              rs.next();
-              int n = rs.getInt(1);
-              assertThat(n).as("rows in flight in " + t).isPositive();
-              report.insert(
-                  report.indexOf("\n\n") + 2,
-                  String.format(Locale.ROOT, "In flight in %si.%s: %d rows.%n%n", set, t, n));
+          // not vacuous: every table of both layouts holds rows prepared (1) and deleted (2), the
+          // inline tables in themselves, the decoupled ones in their metadata tables
+          for (String layout : List.of(set + "d", set + "i")) {
+            for (String t : IMPORTED) {
+              String ns = e.storedSchema(layout);
+              String states =
+                  layout.endsWith("d")
+                      ? Objects.requireNonNull(
+                          catalog.lookup(List.of(), ns, e.storedTable(t)).metadataTable())
+                      : e.storedTable(t);
+              try (Statement st = vendor.createStatement();
+                  ResultSet rs =
+                      st.executeQuery(
+                          "SELECT COUNT(*) FROM "
+                              + engine.quote(ns)
+                              + "."
+                              + engine.quote(states)
+                              + " WHERE "
+                              + engine.quote("tx_state")
+                              + " IN (1, 2)")) {
+                rs.next();
+                int n = rs.getInt(1);
+                assertThat(n).as("rows in flight in " + layout + "." + t).isPositive();
+                report.insert(
+                    report.indexOf("\n\n") + 2,
+                    String.format(Locale.ROOT, "In flight in %s.%s: %d rows.%n%n", layout, t, n));
+              }
             }
           }
           runCorpus(engine, vendor, driver, set, "in flight", report, tally);
@@ -220,7 +229,7 @@ class CorpusIntegrationTest {
           tally.routes.merge(route.startsWith("refused") ? "refused" : route, 1, Integer::sum);
         }
         Side actual = Side.run(driver, through);
-        String outcome = compare(expected, actual, st.ordered());
+        String outcome = expectRefusal(compare(expected, actual, st.ordered()), st);
         if (outcome.startsWith("refused")) {
           tally.refused++;
         } else if (outcome.equals("pass") || outcome.startsWith("pass,")) {
@@ -336,6 +345,18 @@ class CorpusIntegrationTest {
       return "rc_T";
     }
     return lower.contains("union all") ? "split" : "rewritten";
+  }
+
+  /**
+   * A refusal of a statement not marked {@code -- refused}, or none of one marked, as a failure.
+   */
+  static String expectRefusal(String outcome, Corpus.Entry st) {
+    if (outcome.startsWith("refused") == st.refused()) {
+      return outcome;
+    }
+    return st.refused()
+        ? "marked -- refused, but " + outcome
+        : "not marked -- refused, but " + outcome;
   }
 
   /**

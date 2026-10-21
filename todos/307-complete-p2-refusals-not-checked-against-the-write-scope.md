@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "307"
 tags: [code-review, testing, write]
@@ -52,3 +52,7 @@ mismatch) is a failure; better, give those two runtime errors another SQLState. 
 ## Resources
 
 - docs/plans/testing.md, milestone T3 (the refusal list).
+
+### 2026-10-21 - Fixed
+
+Fixed with the other T3 review todos (305-311); five engines pass, both phases.

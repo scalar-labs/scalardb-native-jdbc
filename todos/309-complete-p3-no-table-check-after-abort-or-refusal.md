@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "309"
 tags: [code-review, testing, write]
@@ -37,3 +37,7 @@ Run `sameTables` after every statement whose outcome is a pass, an abort or a re
 ### 2026-10-21 - Found by the review of T3
 
 **By:** Claude Code
+
+### 2026-10-21 - Fixed
+
+Fixed with the other T3 review todos (305-311); five engines pass, both phases.

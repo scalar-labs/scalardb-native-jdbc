@@ -40,6 +40,9 @@ import java.util.Objects;
 import java.util.Properties;
 import java.util.Random;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -53,8 +56,10 @@ import org.junit.jupiter.params.provider.MethodSource;
  * after every statement. At the end ScalarDB reads every row the driver left and must see the
  * twin's data, and a ScalarDB transaction writes every row: the metadata the driver wrote is
  * ScalarDB's. Run again with ScalarDB transactions holding a share of the keys prepared: a
- * statement that writes a key in flight must abort, any other must still do what it does on the
- * twin. Writes {@code build/coverage/<engine>-writes[-inflight].md}.
+ * statement that reaches a key in flight, by its {@code VALUES} or by its {@code WHERE} on the
+ * committed rows, must abort with 40001, and any other must do what it does on the twin. A
+ * statement marked {@code -- refused} must be refused, and no other. Writes {@code
+ * build/coverage/<engine>-writes[-inflight].md}.
  */
 @EnabledIfSystemProperty(named = "nativejdbc.coverage", matches = "true")
 @SuppressFBWarnings(
@@ -144,14 +149,19 @@ class WriteCorpusIntegrationTest {
     Properties noWait = new Properties();
     noWait.setProperty("scalardbnative.inflightWaitMs", "0"); // a row in flight aborts at once
     List<TwoPhaseCommitTransaction> held = new ArrayList<>();
-    Map<String, Set<String>> heldKeys = new HashMap<>();
+    Map<String, Set<List<String>>> heldKeys = new HashMap<>();
+    Map<String, Integer> abortsByLayout = new HashMap<>();
     try (Connection driver = e.openDriver(noWait);
         TwoPhaseCommitTransactionManager tpc = e.scalarDb().getTwoPhaseCommitTransactionManager()) {
       if (inFlight) {
         InFlight.prepare(e, catalog, tpc, set, 0.3, new Random(seed), held, heldKeys);
-        assertThat(heldKeys.values().stream().mapToInt(Set::size).sum())
-            .as("keys in flight")
-            .isPositive();
+        for (String layout : List.of(set + "d", set + "i")) {
+          for (String t : IMPORTED) {
+            assertThat(heldKeys.getOrDefault(layout + "." + t, Set.of()))
+                .as("keys in flight in " + layout + "." + t)
+                .isNotEmpty();
+          }
+        }
       }
       try {
         for (String layout : List.of(set + "d", set + "i")) {
@@ -161,16 +171,25 @@ class WriteCorpusIntegrationTest {
             for (Corpus.Entry st : Corpus.load("writes", engine)) {
               String sql = CorpusIntegrationTest.types(engine, st.sql());
               String through = CorpusIntegrationTest.tables(sql, layout);
-              Map<String, Map<String, String>> before = inFlight ? rows(vendor, twin) : Map.of();
+              String onTwin = CorpusIntegrationTest.tables(sql, twin);
+              // the held keys of the committed rows the statement reaches, which must abort it
+              Set<String> reached = new TreeSet<>();
+              Map<String, Set<List<String>>> reaches = Map.of();
+              Map<String, Map<List<String>, List<String>>> before = Map.of();
+              if (inFlight && !st.refused()) {
+                reaches = reaches(vendor, onTwin, twin);
+                before = rows(vendor, twin);
+              }
               Outcome actual = Outcome.run(driver, through);
-              Outcome expected = Outcome.run(vendor, CorpusIntegrationTest.tables(sql, twin));
-              // the keys the statement writes, held by a ScalarDB transaction
-              List<String> reached = new ArrayList<>();
-              if (inFlight && expected.state == null) {
-                Map<String, Map<String, String>> after = rows(vendor, twin);
+              Outcome expected = Outcome.run(vendor, onTwin);
+              if (inFlight && !st.refused()) {
+                Map<String, Map<List<String>, List<String>>> after =
+                    expected.state == null ? rows(vendor, twin) : before;
                 for (String t : IMPORTED) {
-                  Set<String> mine = heldKeys.getOrDefault(layout + "." + t, Set.of());
-                  for (String k : changed(before.get(t), after.get(t))) {
+                  Set<List<String>> mine = heldKeys.getOrDefault(layout + "." + t, Set.of());
+                  Set<List<String>> keys = new HashSet<>(reaches.getOrDefault(t, Set.of()));
+                  keys.addAll(changed(before.get(t), after.get(t)));
+                  for (List<String> k : keys) {
                     if (mine.contains(k)) {
                       reached.add(t + k);
                     }
@@ -184,20 +203,34 @@ class WriteCorpusIntegrationTest {
                 vendor.commit();
               }
               String outcome;
-              if (abort && inFlight) {
-                // a statement may abort for a row in flight it only reads; one that writes such a
-                // row must
-                outcome = reached.isEmpty() ? "pass, aborted for a row it reads" : "pass, aborted";
-              } else if (!reached.isEmpty() && !REFUSED.equals(actual.state)) {
+              if (st.refused() || REFUSED.equals(actual.state)) {
+                outcome = compare(expected, actual);
+              } else if (inFlight && reaches.isEmpty()) {
+                outcome = "the test cannot tell the rows it reaches: add its form to reaches()";
+              } else if (!reached.isEmpty()) {
                 outcome =
-                    "wrote rows in flight "
-                        + reached
-                        + (actual.state == null ? "" : ", failing with " + actual.error);
+                    "40001".equals(actual.state)
+                        ? "pass, aborted"
+                        : "reaches rows in flight "
+                            + reached
+                            + (actual.state == null
+                                ? " and runs"
+                                : ", failing with " + actual.error);
+              } else if (abort && inFlight) {
+                outcome = "aborted, reaching no row in flight: " + actual.error;
               } else {
                 outcome = compare(expected, actual);
               }
-              if (outcome.equals("pass")) {
-                outcome = sameTables(vendor, driver, twin, layout);
+              outcome = CorpusIntegrationTest.expectRefusal(outcome, st);
+              // after an abort or a refusal too: neither may leave a write behind
+              if (outcome.startsWith("pass") || outcome.startsWith("refused")) {
+                String tables = sameTables(vendor, driver, twin, layout);
+                if (!tables.startsWith("pass") || outcome.equals("pass")) {
+                  outcome = tables;
+                }
+              }
+              if (outcome.startsWith("pass, aborted")) {
+                abortsByLayout.merge(layout, 1, Integer::sum);
               }
               if (outcome.startsWith("refused")) {
                 refused++;
@@ -224,6 +257,13 @@ class WriteCorpusIntegrationTest {
       } finally {
         for (TwoPhaseCommitTransaction tx : held) {
           tx.rollback();
+        }
+      }
+      if (inFlight) {
+        for (String layout : List.of(set + "d", set + "i")) {
+          if (abortsByLayout.getOrDefault(layout, 0) == 0) {
+            failures.add(layout + ": no statement reached a row in flight");
+          }
         }
       }
       // with the transactions rolled back, the tables are the twins' and ScalarDB's own
@@ -266,12 +306,12 @@ class WriteCorpusIntegrationTest {
   }
 
   /** The rows of the twin's tables by table and key, as {@link #normal} spells them. */
-  private static Map<String, Map<String, String>> rows(Connection vendor, String twin)
+  private static Map<String, Map<List<String>, List<String>>> rows(Connection vendor, String twin)
       throws SQLException {
-    Map<String, Map<String, String>> out = new HashMap<>();
+    Map<String, Map<List<String>, List<String>>> out = new HashMap<>();
     for (String t : IMPORTED) {
       List<String> keys = Objects.requireNonNull(KEYS.get(t));
-      Map<String, String> byKey = new HashMap<>();
+      Map<List<String>, List<String>> byKey = new HashMap<>();
       try (Statement st = vendor.createStatement();
           ResultSet rs =
               st.executeQuery(
@@ -283,7 +323,7 @@ class WriteCorpusIntegrationTest {
           for (int i = 1; i <= n; i++) {
             (i <= keys.size() ? key : row).add(normal(rs.getObject(i)));
           }
-          byKey.put(key.toString(), row.toString());
+          byKey.put(key, row);
         }
       }
       out.put(t, byKey);
@@ -292,21 +332,143 @@ class WriteCorpusIntegrationTest {
   }
 
   /** The keys whose rows differ, appear or disappear. */
-  private static Set<String> changed(
-      @Nullable Map<String, String> before, @Nullable Map<String, String> after) {
-    Map<String, String> b = Objects.requireNonNullElse(before, Map.of());
-    Map<String, String> a = Objects.requireNonNullElse(after, Map.of());
-    Set<String> out = new HashSet<>();
-    for (String k : b.keySet()) {
-      if (!Objects.equals(b.get(k), a.get(k))) {
-        out.add(k);
+  private static Set<List<String>> changed(
+      @Nullable Map<List<String>, List<String>> before,
+      @Nullable Map<List<String>, List<String>> after) {
+    Map<List<String>, List<String>> b = Objects.requireNonNullElse(before, Map.of());
+    Map<List<String>, List<String>> a = Objects.requireNonNullElse(after, Map.of());
+    Set<List<String>> out = new HashSet<>();
+    for (Map.Entry<List<String>, List<String>> r : b.entrySet()) {
+      if (!Objects.equals(r.getValue(), a.get(r.getKey()))) {
+        out.add(r.getKey());
       }
     }
-    for (String k : a.keySet()) {
+    for (List<String> k : a.keySet()) {
       if (!b.containsKey(k)) {
         out.add(k);
       }
     }
+    return out;
+  }
+
+  /**
+   * Per table, the keys of the twin's rows the statement reaches: those its {@code VALUES} name, or
+   * those its {@code WHERE} matches, read before it runs. Empty for a form the test does not take
+   * apart; the corpus's writes in scope are single-table {@code INSERT ... VALUES}, {@code UPDATE}
+   * and {@code DELETE}.
+   */
+  static Map<String, Set<List<String>>> reaches(Connection vendor, String sql, String twin)
+      throws SQLException {
+    Matcher m = INSERT.matcher(sql);
+    if (m.matches()) {
+      String t = table(m.group(1), twin);
+      if (t == null) {
+        return Map.of();
+      }
+      List<String> columns = new ArrayList<>();
+      for (String c : split(m.group(2))) {
+        columns.add(c.strip().toLowerCase(Locale.ROOT));
+      }
+      Set<List<String>> keys = new HashSet<>();
+      String rest = m.group(3).strip();
+      while (rest.startsWith("(")) {
+        int end = topLevel(rest, ")", 1);
+        List<String> values = split(rest.substring(1, end));
+        List<String> key = new ArrayList<>();
+        for (String k : Objects.requireNonNull(KEYS.get(t))) {
+          int i = columns.indexOf(k);
+          String v = i < 0 || i >= values.size() ? "" : values.get(i).strip();
+          if (!v.matches("-?\\d+")) {
+            return Map.of();
+          }
+          key.add(normal(new BigDecimal(v)));
+        }
+        keys.add(key);
+        rest = rest.substring(end + 1).strip();
+        rest = rest.startsWith(",") ? rest.substring(1).strip() : rest;
+      }
+      return Map.of(t, keys);
+    }
+    String target;
+    String where;
+    Matcher update = UPDATE.matcher(sql);
+    Matcher delete = DELETE.matcher(sql);
+    if (update.matches()) {
+      target = update.group(1);
+      int w = topLevel(sql, " WHERE ", 0);
+      where = w < 0 ? "" : sql.substring(w);
+    } else if (delete.matches()) {
+      target = delete.group(1);
+      where = Objects.requireNonNullElse(delete.group(2), "");
+    } else {
+      return Map.of();
+    }
+    String t = table(target, twin);
+    if (t == null || TRAILER.matcher(where).find()) {
+      return Map.of();
+    }
+    List<String> keyColumns = Objects.requireNonNull(KEYS.get(t));
+    Set<List<String>> keys = new HashSet<>();
+    try (Statement st = vendor.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT " + String.join(", ", keyColumns) + " FROM " + target + where)) {
+      while (rs.next()) {
+        List<String> key = new ArrayList<>();
+        for (int i = 1; i <= keyColumns.size(); i++) {
+          key.add(normal(rs.getObject(i)));
+        }
+        keys.add(key);
+      }
+    }
+    return Map.of(t, keys);
+  }
+
+  private static final Pattern INSERT =
+      Pattern.compile("(?is)INSERT INTO (\\S+) \\(([^)]*)\\) VALUES (.*)");
+  private static final Pattern UPDATE = Pattern.compile("(?is)UPDATE (\\S+) SET .*");
+  private static final Pattern DELETE = Pattern.compile("(?is)DELETE FROM (\\S+)( WHERE .*)?");
+
+  /** What follows a WHERE that a key read cannot take: the statement is outside the scope. */
+  private static final Pattern TRAILER =
+      Pattern.compile("(?i)\\b(RETURNING|ORDER BY|LIMIT|OUTPUT)\\b");
+
+  /** The corpus's name of a twin's table, or null for another table. */
+  private static @Nullable String table(String name, String twin) {
+    for (String t : IMPORTED) {
+      if (name.equalsIgnoreCase(twin + "." + t)) {
+        return t;
+      }
+    }
+    return null;
+  }
+
+  /** The first {@code token} outside parentheses and quotes from {@code from}, or -1. */
+  private static int topLevel(String s, String token, int from) {
+    int depth = 0;
+    boolean quoted = false;
+    for (int i = from; i < s.length(); i++) {
+      char ch = s.charAt(i);
+      if (ch == '\'') {
+        quoted = !quoted;
+      } else if (!quoted) {
+        if (depth == 0 && s.regionMatches(true, i, token, 0, token.length())) {
+          return i;
+        }
+        depth += ch == '(' ? 1 : ch == ')' ? -1 : 0;
+      }
+    }
+    return -1;
+  }
+
+  /** A list split at its commas outside parentheses and quotes. */
+  private static List<String> split(String list) {
+    List<String> out = new ArrayList<>();
+    int start = 0;
+    for (int i; (i = topLevel(list, ",", start)) >= 0; start = i + 1) {
+      out.add(list.substring(start, i));
+    }
+    out.add(list.substring(start));
     return out;
   }
 
@@ -342,25 +504,37 @@ class WriteCorpusIntegrationTest {
   /** The three tables, the twin's read directly and the layout's through the driver. */
   private static String sameTables(Connection vendor, Connection driver, String twin, String layout)
       throws SQLException {
+    StringBuilder types = new StringBuilder();
     for (String t : IMPORTED) {
       CorpusIntegrationTest.Side want =
           CorpusIntegrationTest.Side.run(vendor, "SELECT * FROM " + twin + "." + t);
       vendor.rollback(); // the read's own transaction
       CorpusIntegrationTest.Side got =
           CorpusIntegrationTest.Side.run(driver, "SELECT * FROM " + layout + "." + t);
+      if (got.error == null && !names(got.columns).equals(names(want.columns))) {
+        return "then " + t + " has columns " + got.columns + ", expected " + want.columns;
+      }
       // the rows decide here; a column type that differs is the read corpus's to fail (T1)
-      String types = got.columns.equals(want.columns) ? "" : ", types of " + t + " " + got.columns;
+      if (!got.columns.equals(want.columns)) {
+        types.append(", types of ").append(t).append(' ').append(got.columns);
+      }
       got.columns.clear();
       got.columns.addAll(want.columns);
       String outcome = CorpusIntegrationTest.compare(want, got, false);
       if (!outcome.startsWith("pass")) {
         return "then " + t + " differs: " + outcome;
       }
-      if (!types.isEmpty()) {
-        return "pass" + types;
-      }
     }
-    return "pass";
+    return "pass" + types;
+  }
+
+  /** The labels of {@link CorpusIntegrationTest.Side#columns}, without their types. */
+  private static List<String> names(List<String> columns) {
+    List<String> out = new ArrayList<>();
+    for (String c : columns) {
+      out.add(c.substring(0, c.lastIndexOf(':')));
+    }
+    return out;
   }
 
   /**
@@ -385,7 +559,7 @@ class WriteCorpusIntegrationTest {
             columns.add(c);
           }
         }
-        List<String> want = new ArrayList<>();
+        List<List<String>> want = new ArrayList<>();
         try (Statement st = vendor.createStatement();
             ResultSet rs =
                 st.executeQuery(
@@ -407,11 +581,11 @@ class WriteCorpusIntegrationTest {
                           ? rs.getObject(i, LocalDateTime.class)
                           : rs.getObject(i)));
             }
-            want.add(row.toString());
+            want.add(row);
           }
         }
         vendor.rollback();
-        List<String> got = new ArrayList<>();
+        List<List<String>> got = new ArrayList<>();
         DistributedTransaction tx = tm.begin();
         List<Result> rows = tx.scan(Scan.newBuilder().namespace(ns).table(scalarDb).all().build());
         for (Result r : rows) {
@@ -420,7 +594,7 @@ class WriteCorpusIntegrationTest {
             Column<?> col = Objects.requireNonNull(r.getColumns().get(c), c);
             row.add(col.hasNullValue() ? null : normal(col.getValueAsObject()));
           }
-          got.add(row.toString());
+          got.add(row);
         }
         // ScalarDB writes every row the driver left: their versions and states are its own
         for (Result r : rows) {
@@ -432,8 +606,8 @@ class WriteCorpusIntegrationTest {
               Upsert.newBuilder().namespace(ns).table(scalarDb).partitionKey(key.build()).build());
         }
         tx.commit();
-        want.sort(null);
-        got.sort(null);
+        want.sort(CorpusIntegrationTest.Side.ROW_ORDER);
+        got.sort(CorpusIntegrationTest.Side.ROW_ORDER);
         if (!want.equals(got)) {
           return t + ": " + got + ", expected " + want;
         }
