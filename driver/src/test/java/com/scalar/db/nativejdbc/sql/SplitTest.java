@@ -62,7 +62,7 @@ class SplitTest {
         .containsExactly("a");
     assertThat(splittable("select (select count(*) from b where b.aid = a.id) from a"))
         .containsExactly("a");
-    assertThat(splittable("select (select max(y + a.x) from b) from a")).containsExactly("a");
+    assertThat(splittable("select (select max(b.y + a.x) from b) from a")).containsExactly("a");
   }
 
   @ParameterizedTest
@@ -89,7 +89,10 @@ class SplitTest {
         "select (select max(a.x)) from a",
         "select (select max((select b.y from b where b.id = o.id))) from a o",
         "select (select count(*) filter (where o.x < 10)) from a o",
-        "select x from a o order by (select sum(o.x) from b)"
+        "select x from a o order by (select sum(o.x) from b)",
+        // an unqualified column may be the outer query's
+        "select (select max(y) from b) from a",
+        "select (select max(y + a.x) from b) from a"
       })
   void splittableRefs_areNone_forShapesTheSplitDoesNotHandle(String sql) {
     assertThat(SqlAst.parse(sql).map(SqlAst::splittableRefs).orElse(List.of())).isEmpty();

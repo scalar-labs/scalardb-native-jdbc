@@ -59,6 +59,9 @@ innermost level of those columns. **Effort:** Medium.
 - `SqlAst.OuterAggregates`: a subquery of the select list or ORDER BY is read for a function not
   known as row-wise whose argument columns are all qualified by tables no query from the subquery
   down binds; such a subquery makes the statement grouped and not row-wise, so it is not split.
-  An unqualified column counts as its own query's.
+  An unqualified column may be any query's: an aggregate counts as the subquery's only when one of
+  its columns is qualified by a table the subquery binds, so `(select max(y) from b)` is not split
+  either (read through `rc_T`, correct but slower). Resolving unqualified columns from the catalog
+  would let those split again.
 - `SplitTest`: four such shapes are not split; correlated subqueries with their own aggregates
   still are. T4 on PostgreSQL: both statements pass in both layouts (4,243 passed, 1 failed: 313).

@@ -3426,8 +3426,9 @@ public final class SqlAst {
    * the innermost query whose columns its arguments name, so {@code (select max(o.a))} aggregates
    * the rows of the query that binds {@code o}; a split read would compute it once per copy. A
    * function the split does not know as row-wise counts as an aggregate. A qualified column belongs
-   * to the innermost query that binds its qualifier and an unqualified one to the query it is
-   * written in; a lateral or correlated derived table is read as if it saw its siblings.
+   * to the innermost query that binds its qualifier; an unqualified one may belong to any query, so
+   * an aggregate is taken as the subquery's only when one of its columns is qualified by a table
+   * the subquery binds. A lateral or correlated derived table is read as if it saw its siblings.
    */
   private static final class OuterAggregates extends ExpressionVisitorAdapter<Void> {
     /** The tables each query binds, from the subquery's down to the one being read. */
@@ -3533,11 +3534,10 @@ public final class SqlAst {
 
     @Override
     public <S> Void visit(Column column, S context) {
-      int level = scopes.size(); // an unqualified column: the query it is written in
+      int level = 0; // unqualified: a column of any query, the enclosing ones included
       Table t = column.getTable();
       if (t != null && t.getName() != null) {
         String q = unquoted(t.getName()).toLowerCase(Locale.ROOT);
-        level = 0;
         for (int i = scopes.size() - 1; i >= 0; i--) {
           if (scopes.get(i).contains(q)) {
             level = i + 1;
