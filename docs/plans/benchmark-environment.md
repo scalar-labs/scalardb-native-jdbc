@@ -95,6 +95,12 @@ The harness targets an external database through `-Dnativejdbc.<engine>.url`, `.
   only; the databases reachable only from the client), the client, and the instances of both tiers,
   chosen per run by the variables `tier_a` and `tier_b`. Tier A's Oracle needs `oracle_image` and a
   login to Oracle's registry, both from the user; without them tier A runs no Oracle.
+- **Data read from disk on tier A:** `db_memory_mb` in `bench.tfvars` limits each tier A database
+  container to that much memory, the OS's file cache in it included (a container's memory limit
+  counts its page cache), with the buffer pool shrunk to fit (PostgreSQL `shared_buffers` a
+  quarter, MySQL and MariaDB's InnoDB pool three eighths), so `-Dnativejdbc.bench.scale` data larger than it
+  is read from the NVMe. 0, the default, keeps the settings above. RDS has no such limit without
+  custom parameter groups, which the role may not create: tier B stays in memory.
 - `rank.py`: ranks the forms per engine, in-flight count and query from a directory of reports
   (rows checked against BASE, forms that failed left out), and flags where a form beats DRIVER by
   more than 1.5x.

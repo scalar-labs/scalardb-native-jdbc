@@ -11,3 +11,5 @@ oracle_registry_token = ""
 # db_password comes from the environment: export BENCH_DB_PASSWORD=..., which run.sh passes on
 # for runs without the laptop: the instance profile of setup-account.sh, with BENCH_BUCKET=scalardb-bench-<account>
 client_profile = ""
+# tier A: memory per database container (file cache included), e.g. 1536 for data read from disk; 0 for none
+db_memory_mb = 0
