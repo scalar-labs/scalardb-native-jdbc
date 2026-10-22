@@ -131,10 +131,16 @@ retries per commit (off) to 2,098/s with none (on). The writers reports are in
 
 Turn it on by default once these are settled:
 
-- **Oracle:** with one writer the reads are slower with the checks on, 30 commits/s against 211.
-- **MySQL:** the baseline with the checks off and no writers is 158/s, against about 2,000 on the
-  other engines. Until that is explained, the gain on MySQL is unproven. The writers mode also
-  failed on tier A's MySQL.
+- **Oracle: off for now.** Since 7cb8c4e on `predicate-checks` the setting does nothing on Oracle.
+  On RDS (19c SE2) the check is the cost: with rows in flight a read takes about 300 ms, and with
+  one writer reads commit at 30/s against 211/s with the check off. On the laptop's Oracle 23 the
+  check gains like on the other engines (4 writers: 23 to 505 commits/s). The open item is the
+  check's plan on RDS: look at it with DBMS_XPLAN.
+- **MySQL: the check holds on RDS; two benchmark items remain.**
+  - The first configuration measured after the warm-up is cold: with no writers, 158/s with the
+    check off against 1,997/s on, with stalls (p99 above 90 ms). With nothing in flight both run
+    the same statements, so this is not the check. A longer warm-up should fix it; not yet tried.
+  - The writers mode failed on tier A's MySQL. The cause was not recorded.
 - **Joins:** stage 1 covers reads of one table only. Joins still abort table-wide, including the
   paged joins below, where VIEW_CASE gains the most.
 
@@ -147,9 +153,18 @@ Turn it on by default once these are settled:
 | COUNT, SUM, GROUP BY over a whole table | CORR | 1.3x-11x; Oracle at 10,000 in flight 0.8x-1.0x |
 
 The rules work together with the predicate checks. With the checks on, reads that meet rows in flight
-go ahead instead of retrying, so what a form costs with rows in flight is what users pay. And a
-grouped read under SNAPSHOT reads the same in-flight images twice, once for the check and once for
-CORR's correction. The CORR rewriter should take both from one read.
+go ahead instead of retrying, so what a form costs with rows in flight is what users pay. They don't
+overlap on CORR. Its whole-table aggregates have no WHERE clause, so any row in flight fails the
+check, and when the check finds a row stage 1 aborts. Correcting instead of aborting would be a
+design change and needs its own write-up first.
+
+**Next to measure: the plain query after a passed check.** This applies to a read of one table
+with a pure WHERE clause, under SNAPSHOT (or SERIALIZABLE on PostgreSQL). If the check passes, no
+row in flight matches the WHERE clause by either image. So the plain query on the data table
+returns exactly the committed rows in that snapshot, and the driver could run it (BASE) instead of
+the split read. The split read is 1.1x to 1,000x behind BASE in these runs, so this is likely the
+largest gain left. It would be a fourth rule: filtered reads of one table whose check passes run
+as the plain query. It doesn't apply on Oracle until the check's plan is fixed.
 
 What the short rules give up, against the per-engine table below:
 
