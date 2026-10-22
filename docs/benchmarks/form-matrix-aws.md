@@ -190,6 +190,11 @@ cost one indexed statement: 0.5-2 ms for the predicate check and 0.4-2.4 ms for 
   likely Free's CPU cap (not confirmed).
 - **SQL Server:** not measured on AWS. Its in-flight pairs check took 16-18 ms because it reuses a
   plan cached while nothing was in flight; this needs solving before SQL Server takes that form.
+- **MySQL's in-flight pairs plan:** with `LIMIT 1` it scans the whole in-flight index for the
+  `(o after, c data)` arm, 9.8 ms against 1.9 ms without the limit, because its statistics,
+  taken with nothing in flight, estimate one row. An index hint or the setup's histogram is the
+  next thing to measure. Until both plan problems are solved, SQL Server and MySQL keep the
+  table-wide check for joins.
 - **MySQL on tier A:** the writers runs failed there. MySQL's first configuration after the
   warm-up also measures cold (158/s with the check off against 1,997/s on with no writers), which
   is the benchmark, not the check.
