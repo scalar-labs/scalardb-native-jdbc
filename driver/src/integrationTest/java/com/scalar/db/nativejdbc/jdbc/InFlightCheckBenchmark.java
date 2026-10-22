@@ -802,6 +802,9 @@ class InFlightCheckBenchmark {
       out.append("not available: ").append(String.valueOf(ex.getMessage()).trim()).append('\n');
     }
     c.commit();
+    // back to the connection's defaults: inFlight's UPDATE at SERIALIZABLE can fail, ORA-08177
+    c.setAutoCommit(true);
+    c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
     out.append('\n');
   }
 
