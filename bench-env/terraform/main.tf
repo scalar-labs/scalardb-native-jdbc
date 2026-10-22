@@ -45,7 +45,7 @@ variable "tier_b" {
 }
 
 variable "oracle_image" {
-  description = "Oracle 23ai Enterprise Edition image; container-registry.oracle.com needs the user's login"
+  description = "Oracle 23ai Enterprise Edition image (container-registry.oracle.com needs the user's login); empty runs Oracle Free"
   type        = string
   default     = ""
 }
@@ -172,8 +172,6 @@ resource "aws_key_pair" "bench" {
 
 locals {
   subnet = aws_subnet.bench[0].id
-  # Oracle on tier A only with an image to run; Oracle Free's 2 CPU and 2 GB cap makes it pointless
-  tier_a = var.oracle_image == "" ? setsubtract(var.tier_a, ["oracle"]) : var.tier_a
   rds = {
     postgresql = { engine = "postgres", version = "16", license = null }
     oracle     = { engine = "oracle-se2", version = "19", license = "license-included" }
@@ -202,7 +200,7 @@ resource "aws_instance" "client" {
 }
 
 resource "aws_instance" "db" {
-  for_each                             = local.tier_a
+  for_each                             = toset(var.tier_a)
   ami                                  = data.aws_ami.ubuntu.id
   instance_type                        = "m6id.2xlarge"
   subnet_id                            = local.subnet
@@ -263,7 +261,7 @@ output "urls" {
   value = merge(
     { for e, i in aws_instance.db : "a-${e}" => {
       postgresql = "jdbc:postgresql://${i.private_ip}:5432/postgres"
-      oracle     = "jdbc:oracle:thin:@${i.private_ip}:1521/ORCLPDB1"
+      oracle     = "jdbc:oracle:thin:@${i.private_ip}:1521/${var.oracle_image == "" ? "FREEPDB1" : "ORCLPDB1"}"
       mysql      = "jdbc:mysql://${i.private_ip}:3306/?allowPublicKeyRetrieval=true"
       mariadb    = "jdbc:mariadb://${i.private_ip}:3306/"
     }[e] },

@@ -93,8 +93,14 @@ The harness targets an external database through `-Dnativejdbc.<engine>.url`, `.
 
 - `terraform/`: the VPC, subnets and security groups (SSH to the client from the user's address
   only; the databases reachable only from the client), the client, and the instances of both tiers,
-  chosen per run by the variables `tier_a` and `tier_b`. Tier A's Oracle needs `oracle_image` and a
-  login to Oracle's registry, both from the user; without them tier A runs no Oracle.
+  chosen per run by the variables `tier_a` and `tier_b`. Tier A's Oracle is Enterprise Edition
+  with `oracle_image` and a login to Oracle's registry, both from the user, and otherwise Oracle
+  Free (`gvenzl/oracle-free:23-slim`, the tests' 23.26 without their fast start), with no licence
+  to buy. The product caps Free at 2 CPUs, 2 GB and 12 GB of user data; the benchmark's data is
+  216 MB at scale 1 and about 2.2 GB at scale 10. With `db_memory_mb` the other tier A databases are
+  capped at that much memory, close to Free's 2 GB, but not at 2 CPUs: compare Free with them
+  for the order of the forms, not for the times. It is a host for 23 against RDS's 19c, as for the
+  predicate's check (`docs/benchmarks/inflight-check.md`).
 - **Data read from disk on tier A:** `db_memory_mb` in `bench.tfvars` limits each tier A database
   container to that much memory, the OS's file cache in it included (a container's memory limit
   counts its page cache), with the buffer pool shrunk to fit (PostgreSQL `shared_buffers` a
