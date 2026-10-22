@@ -218,3 +218,12 @@ sixteen writers:
 - **Not measured.** Tier A's MySQL failed from the writers runs on (the cap is the suspect); SQL
   Server is not in the AWS plan. MySQL B's first configuration ran cold (158 against 1,997 with no
   writer, the same statements).
+
+The diagnostic: `-Dnativejdbc.bench.checkPlan=true` (Oracle only) writes
+`build/bench/inflight-plan-oracle.txt`: the server, the statistics and indexes of `o` and its
+metadata table, and with 100 rows in flight held fixed, then beside 4 ScalarDB writers, the median
+of the table-wide check, the predicate's check, each of its halves and the read, and the
+predicate's check's plan as estimated and as run (`DBMS_XPLAN.DISPLAY_CURSOR`, `ALLSTATS LAST`).
+On AWS, tier B's Oracle alone (`tier_a = []`, `tier_b = ["oracle"]`):
+`WRITERS=1 READS=0 REPS=1 run.sh run -Dnativejdbc.bench.checkPlan=true`. On the laptop's Oracle 23
+every statement takes 1-2 ms, the check driven by the `region` indexes of both images.

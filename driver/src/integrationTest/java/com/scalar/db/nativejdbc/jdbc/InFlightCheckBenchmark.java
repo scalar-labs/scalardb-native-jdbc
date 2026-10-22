@@ -157,6 +157,10 @@ class InFlightCheckBenchmark {
       arms(e, o, cu);
       return;
     }
+    if (Boolean.getBoolean("nativejdbc.bench.checkPlan")) {
+      checkPlan(e, factory, ns, vo, o);
+      return;
+    }
     if (Boolean.getBoolean("nativejdbc.bench.writers")) {
       besideWriters(e, factory, ns, vo);
       return;
@@ -654,6 +658,164 @@ class InFlightCheckBenchmark {
   }
 
   private static final int READERS = 4;
+
+  /**
+   * With {@code -Dnativejdbc.bench.checkPlan=true} only, on Oracle: why the predicate's check of a
+   * grouped read of o is slow on one instance and not another. The server and the statistics of o
+   * and its metadata table, then, with 100 rows in flight held fixed and again beside 4 ScalarDB
+   * writers, the median of the table-wide check, the predicate's check, each of its two halves and
+   * the read, each statement its own SERIALIZABLE transaction as a driver reader's, and the
+   * predicate's check's plan as estimated and as run; written to {@code
+   * build/bench/inflight-plan-<engine>.txt}.
+   */
+  private static void checkPlan(
+      Engines e, TransactionFactory factory, String ns, String vo, TableInfo o) throws Exception {
+    if (e.engine() != Engine.ORACLE) {
+      return;
+    }
+    Engine engine = e.engine();
+    List<Form> forms = single(e, o);
+    String region = "o." + engine.quote(e.storedColumn("region"));
+    String eq = " o WHERE " + region + " = ?";
+    Map<String, String> checks = new LinkedHashMap<>();
+    checks.put("table-wide", forms.get(0).sql());
+    checks.put("predicate", forms.get(1).sql());
+    checks.put(
+        "before images alone",
+        Writes.anyRow(
+            engine, "SELECT 1 FROM " + SplitRead.inFlight(engine, o, o.dataColumns()) + eq));
+    checks.put(
+        "after images alone",
+        Writes.anyRow(
+            engine, "SELECT 1 FROM " + SplitRead.afterImages(engine, o, o.dataColumns()) + eq));
+    checks.put("read", forms.get(3).sql());
+    StringBuilder out = new StringBuilder(String.format(Locale.ROOT, "## %s (%s)%n%n", e,
+        System.getProperty("nativejdbc.bench.tier", "local")));
+    try (Connection c = e.open()) {
+      out.append(c.getMetaData().getDatabaseProductVersion().replace('\n', ' ')).append("\n\n");
+      String owner = "'" + o.namespace().replace("'", "''") + "'";
+      String tables =
+          "'" + o.dataTable().replace("'", "''") + "', '" + Objects.requireNonNull(o.metadataTable()).replace("'", "''") + "'";
+      out.append(
+          rows(
+              c,
+              "SELECT table_name || ': num_rows=' || num_rows || ' blocks=' || blocks"
+                  + " || ' analyzed=' || TO_CHAR(last_analyzed, 'YYYY-MM-DD HH24:MI')"
+                  + " || ' locked=' || stattype_locked FROM all_tab_statistics WHERE owner = "
+                  + owner + " AND table_name IN (" + tables + ") AND object_type = 'TABLE'"));
+      out.append(
+          rows(
+              c,
+              "SELECT table_name || '.' || column_name || ': distinct=' || num_distinct"
+                  + " || ' nulls=' || num_nulls || ' histogram=' || histogram"
+                  + " FROM all_tab_col_statistics WHERE owner = " + owner
+                  + " AND table_name IN (" + tables + ") ORDER BY table_name, column_name"));
+      out.append(
+          rows(
+              c,
+              "SELECT i.table_name || ' ' || i.index_name || ' (' || LISTAGG(ic.column_name, ', ')"
+                  + " WITHIN GROUP (ORDER BY ic.column_position) || ') ' || i.status"
+                  + " FROM all_indexes i JOIN all_ind_columns ic ON ic.index_owner = i.owner"
+                  + " AND ic.index_name = i.index_name WHERE i.table_owner = " + owner
+                  + " AND i.table_name IN (" + tables + ")"
+                  + " GROUP BY i.table_name, i.index_name, i.status ORDER BY 1"));
+      out.append('\n');
+
+      inFlight(e, c, o, ROWS, 100, oBefore(e));
+      out.append("### 100 rows in flight, no writer\n\n");
+      checkPlan(c, checks, out);
+      inFlight(e, c, o, ROWS, 0, oBefore(e));
+      try (DistributedTransactionManager tm = factory.getTransactionManager()) {
+        AtomicBoolean stop = new AtomicBoolean();
+        List<Thread> threads = writers(tm, ns, vo, null, READERS, stop, new AtomicLong());
+        try {
+          Thread.sleep(2000);
+          out.append("### beside 4 ScalarDB writers\n\n");
+          checkPlan(c, checks, out);
+        } finally {
+          stop.set(true);
+          for (Thread th : threads) {
+            th.join();
+          }
+        }
+      }
+    }
+    System.out.println(out);
+    Path file = Path.of("build/bench/inflight-plan-" + e.name().toLowerCase(Locale.ROOT) + ".txt");
+    Files.createDirectories(file.getParent());
+    Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
+  }
+
+  private static void checkPlan(Connection c, Map<String, String> checks, StringBuilder out)
+      throws SQLException {
+    c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+    c.setAutoCommit(false);
+    Random random = new Random(42);
+    for (Map.Entry<String, String> check : checks.entrySet()) {
+      try (PreparedStatement ps = c.prepareStatement(check.getValue())) {
+        long[] times = new long[30];
+        int found = 0;
+        for (int i = -5; i < times.length; i++) {
+          long start = System.nanoTime();
+          boolean row = run(ps, new Form(check.getKey(), check.getValue(), false), random);
+          c.commit();
+          if (i >= 0) {
+            times[i] = System.nanoTime() - start;
+            found += row ? 1 : 0;
+          }
+        }
+        Arrays.sort(times);
+        out.append(
+            String.format(
+                Locale.ROOT,
+                "%s: %.1f ms median, %.1f ms max, %d of %d found%n",
+                check.getKey(),
+                times[times.length / 2] / 1e6,
+                times[times.length - 1] / 1e6,
+                found,
+                times.length));
+      }
+    }
+    String sql = Objects.requireNonNull(checks.get("predicate"));
+    out.append("\nThe predicate's check, estimated (region 7):\n");
+    try (java.sql.Statement st = c.createStatement()) {
+      st.execute("EXPLAIN PLAN FOR " + sql.replace("?", "7"));
+      out.append(rows(c, "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY(NULL, NULL,"
+          + " 'TYPICAL +PREDICATE'))"));
+    } catch (SQLException ex) {
+      out.append("not available: ").append(String.valueOf(ex.getMessage()).trim()).append('\n');
+    }
+    out.append("\nAs run (region 7, its last execution):\n");
+    try (java.sql.Statement st = c.createStatement()) {
+      st.execute("ALTER SESSION SET statistics_level = ALL");
+      try (PreparedStatement ps = c.prepareStatement(sql)) {
+        ps.setInt(1, 7);
+        ps.setInt(2, 7);
+        try (ResultSet rs = ps.executeQuery()) {
+          rs.next();
+        }
+      }
+      out.append(rows(c, "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL,"
+          + " NULL, 'ALLSTATS LAST +PEEKED_BINDS +PREDICATE'))"));
+      st.execute("ALTER SESSION SET statistics_level = TYPICAL");
+    } catch (SQLException ex) {
+      out.append("not available: ").append(String.valueOf(ex.getMessage()).trim()).append('\n');
+    }
+    c.commit();
+    out.append('\n');
+  }
+
+  /** The first column of every row, one per line. */
+  private static String rows(Connection c, String sql) throws SQLException {
+    StringBuilder out = new StringBuilder();
+    try (java.sql.Statement st = c.createStatement();
+        ResultSet rs = st.executeQuery(sql)) {
+      while (rs.next()) {
+        out.append(rs.getString(1)).append('\n');
+      }
+    }
+    return out.toString();
+  }
 
   /**
    * With {@code -Dnativejdbc.bench.writers=true} only: {@link #READERS} driver transactions at

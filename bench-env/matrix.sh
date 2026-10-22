@@ -6,7 +6,8 @@
 # Environment: BENCH_DB_PASSWORD; INFLIGHT (default "100 10000"); REPS (default 3); CHANGED=1 adds
 # a run per in-flight count with changed images, its rows checked against VIEW_LJ. WRITERS=1 adds
 # InFlightCheckBenchmark's writers mode, REPS runs, one engine at a time so that the engines do not
-# share the client's CPU; READS=0 leaves out the read benchmark.
+# share the client's CPU (with -Dnativejdbc.bench.checkPlan=true, Oracle's plan of the predicate's
+# check instead); READS=0 leaves out the read benchmark.
 set -uo pipefail
 tier=$1; shift
 tasks=(); wtasks=(); props=()
@@ -39,7 +40,7 @@ if [ -n "${WRITERS:-}" ]; then for rep in $(seq 1 "${REPS:-3}"); do
   ./gradlew "${wtasks[@]}" "${props[@]}" -Dnativejdbc.bench=true -Dnativejdbc.bench.writers=true \
     -Dnativejdbc.bench.dropExisting=true "-Dnativejdbc.bench.tier=$tier" \
     --continue -Pnativejdbc.parallelEngines=1 "$@" 2>&1 | grep -E 'BUILD|FAILED'
-  for f in driver/build/bench/inflight-writers-*.md; do
+  for f in driver/build/bench/inflight-writers-*.md driver/build/bench/inflight-plan-*.txt; do
     if [ -e "$f" ]; then mv "$f" "results/writers-$rep-$(basename "$f")"; fi
   done
 done; fi
