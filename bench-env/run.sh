@@ -112,6 +112,7 @@ for key, url in urls.items():
   # the working tree, tracked and untracked, without what git ignores (secrets, state, results)
   (cd "$repo" && git ls-files -co --exclude-standard -z | tar -c -f - --null -T -) |
     ssh_ "rm -rf $tier && mkdir $tier && tar -x -C $tier"
+  copied=$tier
   cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-1}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
   if [ -n "${BENCH_BUCKET:-}" ]; then cmds+=("$cmd"); continue; fi
   (
@@ -124,7 +125,7 @@ done
 if [ -n "${BENCH_BUCKET:-}" ]; then
   run=$(basename "$out")
   # only detached.sh in the background: a backgrounded `cat` would read /dev/null
-  printf '%s\n' "${cmds[@]}" | ssh_ "umask 077 && cat > tiers.sh && cp a/bench-env/detached.sh . && { BUCKET='$BENCH_BUCKET' RUN='$run' \
+  printf '%s\n' "${cmds[@]}" | ssh_ "umask 077 && cat > tiers.sh && cp $copied/bench-env/detached.sh . && { BUCKET='$BENCH_BUCKET' RUN='$run' \
     MAX_RUN_MINUTES='${MAX_RUN_MINUTES:-480}' setsid nohup bash detached.sh < /dev/null > detached.log 2>&1 & }"
   trap - EXIT INT TERM
   pkill -P "$heartbeat,$deadline" 2>/dev/null; kill "$heartbeat" "$deadline" 2>/dev/null || true # their sleeps too
