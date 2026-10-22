@@ -17,6 +17,7 @@ import java.sql.Savepoint;
 import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -33,6 +34,9 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.statement.select.ForMode;
+import net.sf.jsqlparser.statement.select.Join;
+import net.sf.jsqlparser.statement.select.PlainSelect;
+import net.sf.jsqlparser.statement.select.SelectItem;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -1200,7 +1204,13 @@ final class Router {
    */
   private Writes.@Nullable Step fallback(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
-    if (!predicateChecks || scalarDb.size() != 1) {
+    if (!predicateChecks) {
+      return null;
+    }
+    if (scalarDb.size() > 1) {
+      return pairs(ast, scalarDb);
+    }
+    if (scalarDb.size() != 1) {
       return null;
     }
     StatementShape shape = StatementShape.of(ast).orElse(null);
@@ -1234,6 +1244,177 @@ final class Router {
     int[] span = ast.span(Objects.requireNonNull(shape.where()));
     List<Integer> inWhere = span == null ? null : ast.placeholdersIn(span[0], span[1]);
     return span == null || inWhere == null ? null : inFlightStep(t, ref, ast, span, inWhere);
+  }
+
+  /**
+   * The most ScalarDB tables a join's check takes: 2^n - 1 + n statements for n tables, 10 for
+   * three.
+   */
+  private static final int PAIRS_TABLES = 3;
+
+  /**
+   * Stage 2 of the predicate's check (design 4.2), the in-flight pairs: for a single SELECT whose
+   * ScalarDB tables, two or three and no other table, are joined by inner joins in its FROM clause
+   * or semi-joined by an IN or EXISTS conjunct of its WHERE clause, with pure ON and WHERE clauses,
+   * the statement's FROM and WHERE clauses over every combination of pieces with a row in flight:
+   * the before images on a non-empty subset of the tables and the data table on the rest; and the
+   * after images on one table and the data table on the rest. The data table holds the after images
+   * too, so these cover every combination; a row in flight that no combination brings into the
+   * statement's rows changes nothing, whichever image is true. An outer join or an anti-join, whose
+   * rows a row's absence changes, keeps the table-wide check. PostgreSQL and MariaDB only, where
+   * the statements were measured to plan well: MySQL plans them under the row limit as a full scan,
+   * SQL Server keeps a plan made with no row in flight, and Oracle's are unchecked on 19c. Null
+   * otherwise.
+   */
+  private Writes.@Nullable Step pairs(
+      SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+    if ((engine != Engine.POSTGRESQL && engine != Engine.MARIADB)
+        || scalarDb.size() > PAIRS_TABLES
+        || ast.tableRefs().size() != scalarDb.size()
+        || !(ast.statement() instanceof PlainSelect)) {
+      return null;
+    }
+    PlainSelect select = (PlainSelect) ast.statement();
+    Expression where = select.getWhere();
+    if (where == null || !StatementShape.pure(where, true)) {
+      return null;
+    }
+    if (select.getJoins() != null) {
+      for (Join j : select.getJoins()) {
+        // an outer join changes its rows through a row's absence, which no inner pair shows
+        if (j.isLeft()
+            || j.isRight()
+            || j.isFull()
+            || j.isOuter()
+            || j.isNatural()
+            || j.isApply()
+            || (j.getUsingColumns() != null && !j.getUsingColumns().isEmpty())) {
+          return null;
+        }
+        for (Expression on : j.getOnExpressions()) {
+          if (!StatementShape.pure(on, false)) {
+            return null;
+          }
+        }
+      }
+    }
+    SqlAst.Split split =
+        ast.split(
+            r -> {
+              TableInfo t = scalarDb.get(r);
+              return t == null ? null : t.keyColumns();
+            });
+    Set<String> columns = new HashSet<>();
+    for (Map.Entry<SqlAst.TableRef, TableInfo> e : scalarDb.entrySet()) {
+      SqlAst.Place place = split.places().get(e.getKey());
+      if ((place != SqlAst.Place.INNER && place != SqlAst.Place.SEMI_JOINED)
+          || e.getKey().hasHintOrLink()) {
+        return null;
+      }
+      for (String c : e.getValue().dataColumns()) {
+        columns.add(engine.columnKey(c));
+      }
+    }
+    // the FROM and WHERE clauses alone: what the statement groups, limits or returns is made of
+    // their rows, and a HAVING or OFFSET over the pieces would hide one
+    int[] whereSpan = ast.span(where);
+    int fromAt = -1;
+    for (SelectItem<?> item : select.getSelectItems()) {
+      int[] s = ast.span(item.getExpression());
+      fromAt = s == null ? Integer.MAX_VALUE : Math.max(fromAt, s[1]);
+    }
+    if (whereSpan == null || fromAt < 0 || fromAt == Integer.MAX_VALUE) {
+      return null;
+    }
+    int from = ast.startOfFirstAfter("FROM", fromAt);
+    List<Integer> inClauses = from < 0 ? null : ast.placeholdersIn(from, whereSpan[1]);
+    SqlAst cut =
+        inClauses == null
+            ? null
+            : ast.reparse("SELECT 1 " + ast.source().substring(from, whereSpan[1]));
+    if (cut == null || cut.tableRefs().size() != scalarDb.size()) {
+      return null;
+    }
+    // the cut's references in the order of the text, as the statement's are
+    List<SqlAst.TableRef> refs = inTextOrder(ast, new ArrayList<>(scalarDb.keySet()));
+    List<SqlAst.TableRef> cutRefs = inTextOrder(cut, new ArrayList<>(cut.tableRefs()));
+    if (refs == null || cutRefs == null) {
+      return null;
+    }
+    // the tables' own columns only, a pseudo-column reads as one; a schema in a qualifier would
+    // name the data table, which the pieces replace under its alias; a piece is a derived table,
+    // which needs an alias, the reference's own or its name where a qualifier names it
+    Set<String> qualifying = new HashSet<>();
+    for (SqlAst.ColumnRef c : cut.columnRefs()) {
+      SqlAst.TableRef q = c.qualifier();
+      if (c.isAllColumnsOfTable()
+          || (q != null && q.schema() != null)
+          || !columns.contains(engine.columnKey(engine.resolveIdentifier(c.name())))) {
+        return null;
+      }
+      if (q != null) {
+        qualifying.add(engine.nameKey(engine.resolveIdentifier(q.name())));
+      }
+    }
+    for (SqlAst.TableRef r : cutRefs) {
+      if (!r.hasAlias()
+          && !qualifying.contains(engine.nameKey(engine.resolveIdentifier(r.name())))) {
+        return null;
+      }
+    }
+    int n = refs.size();
+    List<String> arms = new ArrayList<>();
+    List<Integer> binds = new ArrayList<>();
+    // the before images on a non-empty subset, bit i for table i, then the after images on one
+    List<char[]> assignments = new ArrayList<>();
+    for (int mask = 1; mask < (1 << n); mask++) {
+      char[] a = new char[n];
+      for (int i = 0; i < n; i++) {
+        a[i] = (mask & (1 << i)) != 0 ? 'B' : 'D';
+      }
+      assignments.add(a);
+    }
+    for (int i = 0; i < n; i++) {
+      char[] a = new char[n];
+      Arrays.fill(a, 'D');
+      a[i] = 'A';
+      assignments.add(a);
+    }
+    for (char[] a : assignments) {
+      IdentityHashMap<SqlAst.TableRef, String> pieces = new IdentityHashMap<>();
+      for (int i = 0; i < n; i++) {
+        TableInfo t = Objects.requireNonNull(scalarDb.get(refs.get(i)));
+        pieces.put(
+            cutRefs.get(i),
+            a[i] == 'B'
+                ? SplitRead.inFlight(engine, t, t.dataColumns())
+                : a[i] == 'A'
+                    ? SplitRead.afterImages(engine, t, t.dataColumns())
+                    : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable()));
+      }
+      String arm = cut.joinTokens(pieces::get);
+      if (arm == null) {
+        return null;
+      }
+      arms.add(arm);
+      binds.addAll(inClauses);
+    }
+    return new Writes.Step(Writes.anyRow(engine, String.join(" UNION ALL ", arms)), binds);
+  }
+
+  /** References sorted by where their names stand, or null when one cannot be placed. */
+  private static @Nullable List<SqlAst.TableRef> inTextOrder(
+      SqlAst ast, List<SqlAst.TableRef> refs) {
+    Map<SqlAst.TableRef, Integer> at = new IdentityHashMap<>();
+    for (SqlAst.TableRef r : refs) {
+      int[] s = ast.nameSpan(r);
+      if (s == null) {
+        return null;
+      }
+      at.put(r, s[0]);
+    }
+    refs.sort((x, y) -> Integer.compare(at.get(x), at.get(y)));
+    return refs;
   }
 
   /** Per ScalarDB table of a read, the check for a row in flight anywhere in it (design 4.2). */
@@ -1503,6 +1684,8 @@ final class Router {
   @SuppressFBWarnings(value = "SQL_INJECTION_JDBC", justification = "the driver's own statements")
   void check(Connection vendor, Route route, int timeout, @Nullable Binder binder)
       throws SQLException {
+    // the fallback covers every table of the read: once it found none, the rest need no check
+    boolean cleared = false;
     for (String check : route.checks) {
       boolean inFlight;
       lock.lock();
@@ -1521,6 +1704,9 @@ final class Router {
             inFlight = rs.next();
           }
         }
+      }
+      if (inFlight && cleared) {
+        continue;
       }
       if (inFlight) {
         Writes.Step fallback = route.fallback;
@@ -1548,6 +1734,7 @@ final class Router {
             }
           }
         }
+        cleared = true;
         continue; // passed for this predicate only, not recorded
       }
       lock.lock();
