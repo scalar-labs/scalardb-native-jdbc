@@ -62,7 +62,9 @@ nothing, whichever image is true; a dropped conjunct only widens what is checked
    and MariaDB, ScalarDB's own commits unchanged. On Oracle 19c (RDS) it took about 300 ms a read
    with rows in flight and lowered both reads and ScalarDB's commits: its plan drove the before
    images from the data table and probed their index once per row. Read from the metadata table
-   alone, the check takes 0.7 ms there (below).
+   alone, the check takes 0.7 ms there, and reads gain with ScalarDB's commits unchanged, as on the
+   others. On Oracle 23 Free (2 CPUs) ScalarDB's commits fall about 30% with it: the cost where the
+   database is short of CPU (below).
 
 ## Aborts with live ScalarDB writers
 
@@ -232,7 +234,30 @@ On RDS 19c (run 20261022-1707, 100,000 rows of `o`) the before images were the c
 beside 4 writers, the after images 0.8 ms. They joined the data table only for the key, and without
 statistics on it 19c read all of its key index (`INDEX FAST FULL SCAN`, 100K rows) and probed the
 metadata table's `before_region` index once per key, so the cost grew with the table, not with the
-rows in flight. Read from the metadata table alone, which
-holds the key too, the before images start from its in-flight index: 0.3 ms, the predicate's check
-0.7 ms against the table-wide check's 0.3 ms (run 20261022-2018). The setting is on for Oracle
-again.
+rows in flight. Read from the metadata table alone, which holds the key too, the before images
+start from its in-flight index: 0.3 ms, the predicate's check 0.7 ms against the table-wide check's
+0.3 ms (run 20261022-2018). The setting is on for Oracle again.
+
+With that, the writers mode on both Oracles, run `20261022-2108`: tier A Oracle 23 Free on EC2
+(`gvenzl/oracle-free:23-slim`, which the product caps at 2 CPUs and 2 GB), tier B RDS 19c SE2, two
+runs each. Committed reads per second off → on, and ScalarDB's commits per second off → on:
+
+| engine | writers | reads/s | p50 ms on | ScalarDB commits/s |
+|---|---|---|---|---|
+| Oracle B (19c) | 0 | 2,689-2,722 → 2,662-2,712 | 1.4 | - |
+| | 1 | 1,321-1,370 → 1,691-1,746 | 2.3-2.6 | 160-172 → 166-170 |
+| | 4 | 3 → 1,182-1,223 | 3.2-3.3 | 550-560 → 523-560 |
+| | 16 | 0 → 848-876 | 4.3-4.4 | 1,725-1,756 → 1,711-1,737 |
+| Oracle A (23 Free) | 0 | 2,062-2,073 → 2,034-2,047 | 1.9 | - |
+| | 1 | 1,164-1,217 → 1,005-1,110 | 3.4-3.5 | 202-239 → 190-227 |
+| | 4 | 11-58 → 657-739 | 4.1 | 786-865 → 614-625 |
+| | 16 | 0 → 280-283 | 5.7-5.8 | 929-962 → 602-609 |
+
+- **Oracle 19c: now as the others.** Reads gain from one writer on, ScalarDB's commits within 5%,
+  retries at or below 0.13 per commit. This run's reads with no writer take 1.4 ms against the
+  first run's 16 ms, from a setup the reports do not show, so compare off with on within a run.
+- **Oracle 23 Free: ScalarDB pays.** Reads gain as on 19c, but ScalarDB's commits fall 28% at four
+  writers and 35% at sixteen, and reads at one writer by 9-14%. Free's 2 CPUs are the suspect, not
+  checked: reads that now commit use the CPU that aborted ones left to the writers, where the RDS
+  instance's 8 vCPUs leave room for both. As MariaDB A at one writer, it is the cost on a database
+  short of CPU.
