@@ -118,33 +118,13 @@ One repetition only: single-digit factors are indicative; the large ones are not
 
 ### Strategy
 
-Two layers, applied to every read. Neither depends on the engine, and the driver can choose
-each from the statement alone.
+The strategy depends on the isolation level, because the two levels face different problems.
+Under READ COMMITTED a read never aborts: it returns the before image of a row in flight, and the
+question is how fast it can do that. Under SNAPSHOT and SERIALIZABLE a read must abort when a row
+in flight could change its result, and the question is how rarely. Neither part depends on the
+engine, and the driver can choose from the statement alone.
 
-**1. Whether a read aborts on rows in flight: predicate checks.** With
-`scalardbnative.predicateChecks` on, a read aborts only when its WHERE clause matches the in-flight
-before or after images, not whenever its table has a row in flight. This is the larger effect under
-write load. With 4 ScalarDB writers on RDS PostgreSQL, grouped reads went from 90 commits/s at 72
-retries per commit (off) to 2,098/s with none (on). The writers reports are in
-`bench-env/results/20261022-0044/*/writers-*.md`, and the method is in
-[the in-flight check benchmark](inflight-check.md) on the `predicate-checks` branch.
-
-Turn it on by default once these are settled:
-
-- **Oracle: off for now.** Since 7cb8c4e on `predicate-checks` the setting does nothing on Oracle.
-  On RDS (19c SE2) the check is the cost: with rows in flight a read takes about 300 ms, and with
-  one writer reads commit at 30/s against 211/s with the check off. On the laptop's Oracle 23 the
-  check gains like on the other engines (4 writers: 23 to 505 commits/s). The open item is the
-  check's plan on RDS: look at it with DBMS_XPLAN.
-- **MySQL: the check holds on RDS; two benchmark items remain.**
-  - The first configuration measured after the warm-up is cold: with no writers, 158/s with the
-    check off against 1,997/s on, with stalls (p99 above 90 ms). With nothing in flight both run
-    the same statements, so this is not the check. A longer warm-up should fix it; not yet tried.
-  - The writers mode failed on tier A's MySQL. The cause was not recorded.
-- **Joins:** stage 1 covers reads of one table only. Joins still abort table-wide, including the
-  paged joins below, where VIEW_CASE gains the most.
-
-**2. How a read that goes ahead is read: three rules by query shape.**
+#### READ COMMITTED: three read rules by query shape
 
 | Query shape | Form | Gain over DRIVER, 1x and 10x data |
 |---|---|---|
@@ -152,21 +132,76 @@ Turn it on by default once these are settled:
 | ORDER BY + LIMIT with no OFFSET, joined or not, keyset or range | VIEW_CASE, plain filter | 1.0x-33,000x |
 | COUNT, SUM, GROUP BY over a whole table | CORR | 1.3x-11x; Oracle at 10,000 in flight 0.8x-1.0x |
 
-The rules work together with the predicate checks. With the checks on, reads that meet rows in flight
-go ahead instead of retrying, so what a form costs with rows in flight is what users pay. They don't
-overlap on CORR. Its whole-table aggregates have no WHERE clause, so any row in flight fails the
-check, and when the check finds a row stage 1 aborts. Correcting instead of aborting would be a
-design change and needs its own write-up first.
+What these rules give up, against the per-engine table below:
 
-**Next to measure: the plain query after a passed check.** This applies to a read of one table
-with a pure WHERE clause, under SNAPSHOT (or SERIALIZABLE on PostgreSQL). If the check passes, no
-row in flight matches the WHERE clause by either image. So the plain query on the data table
-returns exactly the committed rows in that snapshot, and the driver could run it (BASE) instead of
-the split read. The split read is 1.1x to 1,000x behind BASE in these runs, so this is likely the
-largest gain left. It would be a fourth rule: filtered reads of one table whose check passes run
-as the plain query. It doesn't apply on Oracle until the check's plan is fixed.
+- CORR's DISTINCT on MariaDB (14x-77x) and PostgreSQL at 10x data (1.7x-9.1x).
+- OVER for Oracle's deep OFFSET (3.2x-13x at 1x data).
+- Up to 20% on Oracle's whole-table aggregates at 10,000 in flight.
 
-The rule holds only under these conditions:
+If MariaDB matters, a DISTINCT rule for it is the one engine-specific exception worth adding.
+
+#### SNAPSHOT and SERIALIZABLE: when to abort
+
+Today (design 4.2), a read whose rows reach the application directly gets an exact check: it
+aborts only on a row in flight that the WHERE clause matches by its after or before image. Every
+other shape takes the table-wide check, which aborts on a row in flight anywhere in the table:
+
+- grouped, aggregate and DISTINCT reads;
+- OFFSET and scrollable result sets;
+- joins and subqueries past the row-by-row detector.
+
+Under ScalarDB writers that starves those reads. With 4 writers on RDS PostgreSQL, grouped reads
+committed 90/s at 72 retries per commit. On a join, 44-53% of reads abort at one writer and
+92-100% at sixteen. The strategy narrows the table-wide check in three tiers:
+
+| Shape | Check | Status |
+|---|---|---|
+| One table, pure WHERE clause | **Predicate check**: the WHERE clause over the in-flight rows' before and after images; abort only on a match | Built (`scalardbnative.predicateChecks`, `predicate-checks` branch), measured on AWS |
+| Joins and semi-joined subqueries the split read covers | **In-flight pairs**: the statement as `SELECT 1` over every combination with at least one table's row in flight, by its before or after image, and the data tables for the rest | Designed and measured as SQL; not built |
+| Scalar subqueries, CTEs, past the copy limit | Table-wide check, as today | - |
+
+Both narrowed checks run only when the cheap table-wide probe finds a row in flight. Then they
+cost one indexed statement: 0.5-2 ms for the predicate check and 0.4-2.4 ms for in-flight pairs.
+
+**Measured** (the reports are `bench-env/results/20261022-0044/*/writers-*.md` and
+`20261022-2108`; the method is in [the in-flight check benchmark](inflight-check.md) on
+`predicate-checks`):
+
+- **Predicate check, reads committed/s, check off → on:**
+  - RDS PostgreSQL at 4 writers: 90 → 2,098.
+  - RDS Oracle 19c: 3 → about 1,200 at 4 writers, 0 → about 860 at 16.
+  - PostgreSQL on EC2 and RDS, MySQL on RDS, MariaDB on EC2 and RDS: large gains.
+
+  ScalarDB's own commits stay within 5-13%. Oracle 19c's check took about 300 ms until eef0e86,
+  because it joined the data table for the before images; it now reads them from the metadata
+  table alone, 47 → 0.7 ms.
+- **In-flight pairs, joins:** aborts fall to 0-3% at 1, 4 and 16 writers on all five engines,
+  about the single-table check's level. Checking each table against only its own conditions does
+  not work: a lookup table usually has none, is checked whole, and still aborts 64-98% at four
+  writers.
+
+**Limits:**
+
+- **SERIALIZABLE on MySQL, MariaDB and SQL Server keeps the table-wide check.** Its locking read is
+  what holds off later prepares, and a predicate would lock the same range.
+- **Writers pay on CPU-bound hosts.** Reads that now succeed compete with ScalarDB's writers. On
+  Oracle 23 Free (2 CPUs) ScalarDB's commits fell 28-35%; on MariaDB on EC2, reads fell 9% at one
+  writer. This is a product tradeoff, more reads that finish against writer throughput, and is
+  likely Free's CPU cap (not confirmed).
+- **SQL Server:** not measured on AWS. Its in-flight pairs check took 16-18 ms because it reuses a
+  plan cached while nothing was in flight; this needs solving before SQL Server takes that form.
+- **MySQL on tier A:** the writers runs failed there. MySQL's first configuration after the
+  warm-up also measures cold (158/s with the check off against 1,997/s on with no writers), which
+  is the benchmark, not the check.
+
+**Default:** keep the predicate check experimental and off by default until SQL Server and tier A
+MySQL are measured, then make it the default. Build in-flight pairs next, as stage 2.
+
+**Next to measure: the plain query after a passed check.** If the check passes, no row in flight
+matches the read by either image, so the plain query on the data tables returns exactly the
+committed rows in that snapshot. The driver could run it (BASE) instead of the split read, which
+is 1.1x to 1,000x behind BASE in these runs. This holds for one table after a predicate check,
+and for joins after in-flight pairs. It needs these conditions:
 
 - **One snapshot.** The check and the plain query must run in the same snapshot. Inside a
   transaction they do. In autocommit they must still share one transaction: as two autocommit
@@ -178,13 +213,9 @@ The rule holds only under these conditions:
   covers prepared updates, inserts (whose after image is in the table) and deletes (tx_state 2).
   Nothing else is needed.
 
-What the short rules give up, against the per-engine table below:
-
-- CORR's DISTINCT on MariaDB (14x-77x) and PostgreSQL at 10x data (1.7x-9.1x).
-- OVER for Oracle's deep OFFSET (3.2x-13x at 1x data).
-- Up to 20% on Oracle's whole-table aggregates at 10,000 in flight.
-
-If MariaDB matters, a DISTINCT rule for it is the one engine-specific exception worth adding.
+CORR does not combine with the checks. Its whole-table aggregates have no WHERE clause, so any row
+in flight fails the check and the read aborts. Correcting instead of aborting would be a design
+change and needs its own write-up first.
 
 ### Per engine
 
