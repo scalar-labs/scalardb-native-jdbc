@@ -315,7 +315,9 @@ public final class Setup {
       if (engine == Engine.SQLSERVER && t.layout() == Layout.DECOUPLED_IMPORTED) {
         refuseDatetimeKey(t);
       }
-      if (found.hasView(ns, view) && !found.viewMatches(ns, view, t.dataColumns())) {
+      // a read view in the key-first order of a setup before todo 316 is the setup's own
+      boolean reorders = found.viewReorders(ns, view, t.dataColumns());
+      if (found.hasView(ns, view) && !reorders && !found.viewMatches(ns, view, t.dataColumns())) {
         throw new SQLNonTransientException(
             "a view "
                 + ns
@@ -334,6 +336,9 @@ public final class Setup {
       if (t.layout() == Layout.DECOUPLED_IMPORTED || t.layout() == Layout.INLINE) {
         stamped = backfill(t);
         done(actions, "backfilled " + stamped + " rows");
+      }
+      if (reorders) {
+        execute("DROP VIEW " + name(ns, view)); // CREATE OR REPLACE cannot reorder columns
       }
       execute(viewDdl(t, view));
       done(actions, (found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);

@@ -734,6 +734,7 @@ public final class Catalog implements AutoCloseable {
     Set<String> views = new LinkedHashSet<>();
     Set<String> indexes = new LinkedHashSet<>();
     Set<String> dataTables = new LinkedHashSet<>();
+    Set<String> userTables = new LinkedHashSet<>();
     List<String> users = new ArrayList<>(inline);
     for (VirtualTable v : virtualTables) {
       users.add(v.inner ? v.name : v.left);
@@ -741,6 +742,7 @@ public final class Catalog implements AutoCloseable {
     for (String name : users) {
       QualifiedName user = split(name);
       schemas.add(user.schema());
+      userTables.add(user.table());
       views.add(engine.readViewName(user.table()));
       indexes.add(engine.inflightIndexName(user.table()));
     }
@@ -755,6 +757,7 @@ public final class Catalog implements AutoCloseable {
     try {
       SetupObjects out = engine.setupObjects(c, schemas, views, indexes, caseInsensitive);
       engine.addBeforeTypes(c, out, schemas, dataTables, caseInsensitive);
+      engine.addColumnOrder(c, out, schemas, userTables, caseInsensitive);
       return out;
     } catch (SQLException e) {
       if (isConnectionFailure(e)) {
@@ -909,6 +912,7 @@ public final class Catalog implements AutoCloseable {
         // ScalarDB registers metadata for the source tables, not for the virtual table: the keys
         // and the user's columns are the data table's entry
         Columns columns = keyed(v.left, full);
+        setupObjects.order(q.schema(), q.table(), columns.dataColumns);
         String meta = unqualified(v.right);
         return new TableInfo(
             q.schema(),
@@ -936,6 +940,7 @@ public final class Catalog implements AutoCloseable {
               "42000");
         }
         Columns columns = keyed(full, full); // the user's name is the data table
+        setupObjects.order(q.schema(), q.table(), columns.dataColumns);
         String meta = unqualified(v.right);
         return new TableInfo(
             q.schema(),
@@ -967,6 +972,7 @@ public final class Catalog implements AutoCloseable {
         keyed(full, full); // throws: a ScalarDB table without a key
       }
       if (columns.transactional) {
+        setupObjects.order(q.schema(), q.table(), columns.dataColumns);
         return new TableInfo(
             q.schema(),
             q.table(),

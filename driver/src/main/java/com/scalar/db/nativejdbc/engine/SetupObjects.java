@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc.engine;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -18,6 +19,7 @@ public final class SetupObjects {
   private final Engine engine;
   private final boolean caseInsensitive;
   private final Map<String, List<String>> viewColumns = new HashMap<>();
+  private final Map<String, List<String>> tableColumns = new HashMap<>();
   private final Set<String> indexes = new HashSet<>();
   private final Map<String, Map<String, String>> beforeTypes = new HashMap<>();
 
@@ -38,6 +40,59 @@ public final class SetupObjects {
 
   void addViewColumn(String schema, String view, String column) {
     viewColumns.computeIfAbsent(key(schema, view), k -> new ArrayList<>()).add(column);
+  }
+
+  void addTableColumn(String schema, String table, String column) {
+    tableColumns.computeIfAbsent(key(schema, table), k -> new ArrayList<>()).add(column);
+  }
+
+  /**
+   * Orders {@code columns} as the table holds them, which {@code SELECT *} returns; a column the
+   * listing lacks goes last.
+   *
+   * @param schema the table's schema
+   * @param table the name statements use for the table
+   * @param columns the columns, reordered in place
+   */
+  public void order(String schema, String table, List<String> columns) {
+    List<String> found = tableColumns.getOrDefault(key(schema, table), List.of());
+    boolean anyCase = engine != Engine.POSTGRESQL && engine != Engine.ORACLE;
+    List<String> keys = new ArrayList<>();
+    for (String c : found) {
+      keys.add(anyCase ? c.toLowerCase(Locale.ROOT) : c);
+    }
+    columns.sort(
+        Comparator.comparingInt(
+            c -> {
+              int i = keys.indexOf(anyCase ? c.toLowerCase(Locale.ROOT) : c);
+              return i < 0 ? Integer.MAX_VALUE : i;
+            }));
+  }
+
+  /**
+   * Returns whether a view of this name exists with these columns in another order: the read view a
+   * setup before todo 316 created, in the key-first order.
+   *
+   * @param schema the schema
+   * @param view the view's name
+   * @param columns the expected columns
+   * @return whether it holds them in another order
+   */
+  public boolean viewReorders(String schema, String view, List<String> columns) {
+    List<String> found = viewColumns.get(key(schema, view));
+    if (found == null || viewMatches(schema, view, columns)) {
+      return false;
+    }
+    List<String> a = new ArrayList<>(found);
+    List<String> b = new ArrayList<>(columns);
+    boolean anyCase = engine != Engine.POSTGRESQL && engine != Engine.ORACLE;
+    if (anyCase) {
+      a.replaceAll(c -> c.toLowerCase(Locale.ROOT));
+      b.replaceAll(c -> c.toLowerCase(Locale.ROOT));
+    }
+    a.sort(null);
+    b.sort(null);
+    return a.equals(b);
   }
 
   void addIndex(String schema, String table, String index) {

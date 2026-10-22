@@ -141,6 +141,40 @@ class SetupReviewIntegrationTest {
   }
 
   @Test
+  void todo316_aKeyFirstViewOfAnEarlierSetup_isReplaced_andSelectStarKeepsTheTablesOrder()
+      throws Exception {
+    try (Connection c = PG.open()) {
+      PG.execute(
+          c,
+          "CREATE SCHEMA r316",
+          "CREATE TABLE r316.t (x TEXT, id INT PRIMARY KEY)",
+          "INSERT INTO r316.t VALUES ('a', 1)");
+    }
+    try (DistributedTransactionAdmin admin = PG.admin()) {
+      admin.createNamespace("r316", true);
+      admin.importTable("r316", "t", DECOUPLED, Map.of());
+    }
+    try (Connection c = PG.open()) {
+      // the read view an earlier setup made, in ScalarDB's key-first order
+      PG.execute(
+          c,
+          "CREATE VIEW r316.rc_t AS SELECT t.id, t.x FROM r316.t t",
+          "CREATE INDEX t_inflight ON r316.t_tx_metadata (tx_id)");
+    }
+    Catalog catalog = catalog();
+    assertThat(catalog.lookup(List.of(), "r316", "t").dataColumns()).containsExactly("x", "id");
+    assertThat(catalog.lookup(List.of(), "r316", "t").isSetUp()).isFalse();
+    assertThat(setup(catalog(), "r316", Duration.ofSeconds(2))).isEqualTo("completed");
+    try (Connection c = PG.openDriver();
+        Statement st = c.createStatement();
+        ResultSet rs = st.executeQuery("SELECT * FROM r316.t")) {
+      assertThat(rs.getMetaData().getColumnName(1)).isEqualTo("x");
+      assertThat(rs.next()).isTrue();
+      assertThat(rs.getString(1) + rs.getInt(2)).isEqualTo("a1");
+    }
+  }
+
+  @Test
   void todo071_aPredicateOnANonKeyColumn_usesTheTablesIndexThroughTheView() throws Exception {
     try (Connection c = PG.open()) {
       PG.execute(

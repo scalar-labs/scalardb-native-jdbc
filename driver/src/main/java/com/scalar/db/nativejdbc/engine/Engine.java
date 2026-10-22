@@ -261,7 +261,8 @@ public enum Engine {
     List<String> s = spellings(schemas, caseInsensitive);
     List<String> v = spellings(views, caseInsensitive);
     List<String> i = spellings(indexes, caseInsensitive);
-    try (PreparedStatement ps = connection.prepareStatement(viewColumnsQuery(s.size(), v.size()))) {
+    try (PreparedStatement ps =
+        connection.prepareStatement(columnsQuery(s.size(), v.size(), true))) {
       bind(ps, s, v);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -352,6 +353,43 @@ public enum Engine {
     }
   }
 
+  /**
+   * Adds to {@code out} the columns of the given tables, in the table's own order, which {@code
+   * SELECT *} returns: ScalarDB's catalog lists the key first (todo 316).
+   *
+   * @param connection a connection to the database
+   * @param out the listing to add to
+   * @param schemas the schemas, in their stored spelling
+   * @param tables the names statements use for the tables, views included
+   * @param caseInsensitive whether the database compares table names without regard to case
+   * @throws SQLException if the engine's catalog cannot be read
+   */
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "the query text is constant apart from the number of placeholders")
+  public void addColumnOrder(
+      Connection connection,
+      SetupObjects out,
+      Collection<String> schemas,
+      Collection<String> tables,
+      boolean caseInsensitive)
+      throws SQLException {
+    if (schemas.isEmpty() || tables.isEmpty()) {
+      return;
+    }
+    List<String> s = spellings(schemas, caseInsensitive);
+    List<String> t = spellings(tables, caseInsensitive);
+    try (PreparedStatement ps =
+        connection.prepareStatement(columnsQuery(s.size(), t.size(), false))) {
+      bind(ps, s, t);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.addTableColumn(rs.getString(1), rs.getString(2), rs.getString(3));
+        }
+      }
+    }
+  }
+
   /** The names to ask for: as given, and lower-cased where the database ignores case. */
   private static List<String> spellings(Collection<String> names, boolean caseInsensitive) {
     Set<String> out = new LinkedHashSet<>(names);
@@ -378,8 +416,11 @@ public enum Engine {
     return String.join(", ", Collections.nCopies(n, "?"));
   }
 
-  /** Schema, view, column of the named views, in column order; tables of the same name excluded. */
-  private String viewColumnsQuery(int schemas, int names) {
+  /**
+   * Schema, relation, column of the named relations, in column order: views only, tables of the
+   * same name excluded, or tables and views.
+   */
+  private String columnsQuery(int schemas, int names, boolean views) {
     String s = marks(schemas);
     String n = marks(names);
     switch (this) {
@@ -388,7 +429,8 @@ public enum Engine {
         return "SELECT n.nspname, c.relname, a.attname FROM pg_catalog.pg_attribute a"
             + " JOIN pg_catalog.pg_class c ON c.oid = a.attrelid"
             + " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
-            + " WHERE c.relkind = 'v' AND a.attnum > 0 AND NOT a.attisdropped"
+            + (views ? " WHERE c.relkind = 'v'" : " WHERE c.relkind IN ('r', 'p', 'v')")
+            + " AND a.attnum > 0 AND NOT a.attisdropped"
             + " AND n.nspname IN ("
             + s
             + ") AND c.relname IN ("
@@ -398,8 +440,10 @@ public enum Engine {
       case MYSQL:
       case MARIADB:
         return "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME FROM information_schema.COLUMNS c"
-            + " JOIN information_schema.VIEWS v"
-            + " ON v.TABLE_SCHEMA = c.TABLE_SCHEMA AND v.TABLE_NAME = c.TABLE_NAME"
+            + (views
+                ? " JOIN information_schema.VIEWS v"
+                    + " ON v.TABLE_SCHEMA = c.TABLE_SCHEMA AND v.TABLE_NAME = c.TABLE_NAME"
+                : "")
             + " WHERE c.TABLE_SCHEMA IN ("
             + s
             + ") AND c.TABLE_NAME IN ("
@@ -407,10 +451,13 @@ public enum Engine {
             + ")"
             + " ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION";
       case SQLSERVER:
-        return "SELECT s.name, v.name, c.name FROM sys.views v"
+        return "SELECT s.name, v.name, c.name FROM "
+            + (views ? "sys.views v" : "sys.objects v")
             + " JOIN sys.schemas s ON s.schema_id = v.schema_id"
             + " JOIN sys.columns c ON c.object_id = v.object_id"
-            + " WHERE s.name IN ("
+            + " WHERE "
+            + (views ? "" : "v.type IN ('U', 'V') AND ")
+            + "s.name IN ("
             + s
             + ") AND v.name IN ("
             + n
@@ -418,7 +465,7 @@ public enum Engine {
             + " ORDER BY s.name, v.name, c.column_id";
       case ORACLE:
         return "SELECT c.OWNER, c.TABLE_NAME, c.COLUMN_NAME FROM ALL_TAB_COLUMNS c"
-            + " JOIN ALL_VIEWS v ON v.OWNER = c.OWNER AND v.VIEW_NAME = c.TABLE_NAME"
+            + (views ? " JOIN ALL_VIEWS v ON v.OWNER = c.OWNER AND v.VIEW_NAME = c.TABLE_NAME" : "")
             + " WHERE c.OWNER IN ("
             + s
             + ") AND c.TABLE_NAME IN ("
