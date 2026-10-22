@@ -858,7 +858,9 @@ class InFlightCheckBenchmark {
    * With {@code -Dnativejdbc.bench.writers=true} only: {@link #READERS} driver transactions at
    * SNAPSHOT, each two grouped reads of o by a random region, retried on {@code 40001}, alongside
    * ScalarDB writers on o, with {@code scalardbnative.predicateChecks} off and on; written to
-   * {@code build/bench/inflight-writers-<engine>.md}.
+   * {@code build/bench/inflight-writers-<engine>.md}. With {@code
+   * -Dnativejdbc.bench.writersRead=join} as well, the reads are of o JOIN c on c.id = o.cid and the
+   * writers write both tables; written to {@code build/bench/inflight-writers-<engine>-join.md}.
    */
   private static void besideWriters(
       Engines e, TransactionFactory factory, String ns, String vo, String vc) throws Exception {

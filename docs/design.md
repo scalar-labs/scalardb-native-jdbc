@@ -1125,10 +1125,13 @@ union as a derived table.
   flight that no statement brings into the FROM and WHERE clauses' rows changes nothing,
   whichever image is true; what the statement groups, limits or returns is made of those rows.
   An outer join, NOT EXISTS and NOT IN, whose rows a row's absence changes, keep the per-table
-  check; so do MySQL, whose plan of the statements under the row limit scans the in-flight index
+  check, and so do a USING join, an IN or EXISTS under an OR, and a WITH clause, which stands
+  before the FROM clause the check is cut from; so do MySQL, whose plan of the statements under the row limit scans the in-flight index
   whole, SQL Server, which keeps a plan made while no row was in flight, and Oracle, whose plans
   of them are not yet checked on 19c (`docs/benchmarks/inflight-check.md`). The check runs once
-  per execution, however many of the read's tables have a row in flight.
+  per execution, however many of the read's tables have a row in flight. The statements with D on
+  one table and B on another read the data table by the join column from the other's rows in
+  flight, so the join column wants an index: without one, each costs about the read's own scan.
 - The driver's own reads that produce anchors for writes follow the same rules.
 
 ### 4.3 Writes on one ScalarDB table `T`, key `k`

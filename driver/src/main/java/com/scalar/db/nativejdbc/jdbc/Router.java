@@ -33,6 +33,7 @@ import java.util.TreeSet;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.ForMode;
 import net.sf.jsqlparser.statement.select.Join;
 import net.sf.jsqlparser.statement.select.PlainSelect;
@@ -1271,8 +1272,8 @@ final class Router {
     if ((engine != Engine.POSTGRESQL && engine != Engine.MARIADB)
         || scalarDb.size() > PAIRS_TABLES
         || ast.tableRefs().size() != scalarDb.size()
-        || !(ast.statement() instanceof PlainSelect)) {
-      return null;
+        || !ast.singleSelect()) {
+      return null; // a WITH clause stands before the FROM clause the check is cut from
     }
     PlainSelect select = (PlainSelect) ast.statement();
     Expression where = select.getWhere();
@@ -1318,12 +1319,15 @@ final class Router {
     // the FROM and WHERE clauses alone: what the statement groups, limits or returns is made of
     // their rows, and a HAVING or OFFSET over the pieces would hide one
     int[] whereSpan = ast.span(where);
-    int fromAt = -1;
+    int fromAt = 0;
     for (SelectItem<?> item : select.getSelectItems()) {
+      if (item.getExpression() instanceof AllColumns) {
+        continue; // a star, a table's star included, has no span and holds no FROM
+      }
       int[] s = ast.span(item.getExpression());
       fromAt = s == null ? Integer.MAX_VALUE : Math.max(fromAt, s[1]);
     }
-    if (whereSpan == null || fromAt < 0 || fromAt == Integer.MAX_VALUE) {
+    if (whereSpan == null || fromAt == Integer.MAX_VALUE) {
       return null;
     }
     int from = ast.startOfFirstAfter("FROM", fromAt);

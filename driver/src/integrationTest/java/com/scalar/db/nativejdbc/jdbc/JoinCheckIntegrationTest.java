@@ -40,9 +40,9 @@ import org.junit.jupiter.params.provider.MethodSource;
  * only where a combination of the tables' pieces with that row, by its before image or its after
  * image, gives the statement a row (design 4.2, the in-flight pairs), on PostgreSQL and MariaDB: a
  * row in flight on either side, on both, moved out of the predicate, inserted, deleted; a
- * placeholder's value. An outer join and an anti-join keep the table-wide check, and so do the
- * other engines. Orders 1 to 10 are in region 'a', 11 to 20 in 'b', order i of customer i, amount
- * i; customer i of tier i % 2.
+ * placeholder's value; comma and CROSS joins, a star. An outer join, an anti-join, USING, an IN
+ * under an OR and a WITH clause keep the table-wide check, and so do the other engines. Orders 1 to
+ * 10 are in region 'a', 11 to 20 in 'b', order i of customer i, amount i; customer i of tier i % 2.
  */
 class JoinCheckIntegrationTest {
 
@@ -192,6 +192,76 @@ class JoinCheckIntegrationTest {
           d,
           "SELECT COUNT(*) FROM " + O + " JOIN " + C + " ON c.id = o.cid WHERE o.region = 'b'",
           at + ": no aliases, 'b'");
+      d.rollback();
+      // a comma join, a CROSS JOIN and a star: the pairs check too
+      assertThat(
+              rows(
+                  d,
+                  "SELECT COUNT(*) FROM "
+                      + O
+                      + " o, "
+                      + C
+                      + " c WHERE c.id = o.cid AND o.region = 'a'"))
+          .as("%s: a comma join, 'a' clear", at)
+          .containsExactly("10");
+      assertThat(
+              rows(
+                  d,
+                  "SELECT COUNT(*) FROM "
+                      + O
+                      + " o CROSS JOIN "
+                      + C
+                      + " c WHERE c.id = o.cid AND o.region = 'a'"))
+          .as("%s: a CROSS JOIN, 'a' clear", at)
+          .containsExactly("10");
+      assertThat(
+              rows(
+                  d,
+                  "SELECT * FROM "
+                      + O
+                      + " o JOIN "
+                      + C
+                      + " c ON c.id = o.cid WHERE o.region = 'a'"))
+          .as("%s: a star, 'a' clear", at)
+          .hasSize(10);
+      assertThat(
+              rows(
+                  d,
+                  "SELECT o.*, c.tier FROM "
+                      + O
+                      + " o JOIN "
+                      + C
+                      + " c ON c.id = o.cid WHERE o.region = 'a'"))
+          .as("%s: a table's star, 'a' clear", at)
+          .hasSize(10);
+      assertAborts(
+          d,
+          "SELECT * FROM " + O + " o JOIN " + C + " c ON c.id = o.cid WHERE o.region = 'b'",
+          at + ": a star, 'b'");
+      d.rollback();
+      // USING, an IN under an OR and a WITH clause keep the table-wide check
+      assertAborts(
+          d,
+          "SELECT COUNT(*) FROM " + O + " o JOIN " + C + " c USING (id) WHERE o.region = 'a'",
+          at + ": USING");
+      d.rollback();
+      assertAborts(
+          d,
+          "SELECT COUNT(*) FROM "
+              + O
+              + " o WHERE o.region = 'a' AND (o.amount < 0 OR o.cid IN (SELECT c.id FROM "
+              + C
+              + " c WHERE c.tier = 1))",
+          at + ": an IN under an OR");
+      d.rollback();
+      assertAborts(
+          d,
+          "WITH k AS (SELECT 1 AS one) SELECT COUNT(*) FROM "
+              + O
+              + " o JOIN "
+              + C
+              + " c ON c.id = o.cid WHERE o.region = 'a'",
+          at + ": a WITH clause");
       d.rollback();
       // an outer join and an anti-join keep the table-wide check
       assertAborts(
