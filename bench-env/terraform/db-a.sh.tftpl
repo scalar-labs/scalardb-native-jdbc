@@ -33,10 +33,16 @@ case "${engine}" in
       -e MARIADB_ROOT_PASSWORD='${password}' mariadb:11.4 \
       $pool --innodb-log-file-size=4294967296 ;;
   oracle)
-    echo '${registry_token}' | docker login container-registry.oracle.com -u '${registry_user}' --password-stdin
     mkdir -p /data/oracle && chown 54321:54321 /data/oracle
+%{ if oracle_image == "" ~}
+    # Oracle Free, the tests' database: the product caps it at 2 CPUs and 2 GB, so no limit here
+    docker run -d --name db --network host -v /data/oracle:/opt/oracle/oradata \
+      -e ORACLE_PASSWORD='${password}' gvenzl/oracle-free:23-slim ;;
+%{ else ~}
+    echo '${registry_token}' | docker login container-registry.oracle.com -u '${registry_user}' --password-stdin
     # no limit: an SGA of 16 GB is the image's minimum here
     docker run -d --name db --network host -v /data/oracle:/opt/oracle/oradata \
       -e ORACLE_PWD='${password}' -e INIT_SGA_SIZE=16384 -e INIT_PGA_SIZE=4096 \
       --shm-size=17g '${oracle_image}' ;;
+%{ endif ~}
 esac

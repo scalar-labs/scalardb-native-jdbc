@@ -116,6 +116,78 @@ One repetition only: single-digit factors are indicative; the large ones are not
 
 ## Recommendation
 
+### Strategy
+
+Two layers, applied to every read. Neither depends on the engine, and the driver can choose
+each from the statement alone.
+
+**1. Whether a read aborts on rows in flight: predicate checks.** With
+`scalardbnative.predicateChecks` on, a read aborts only when its WHERE clause matches the in-flight
+before or after images, not whenever its table has a row in flight. This is the larger effect under
+write load. With 4 ScalarDB writers on RDS PostgreSQL, grouped reads went from 90 commits/s at 72
+retries per commit (off) to 2,098/s with none (on). The writers reports are in
+`bench-env/results/20261022-0044/*/writers-*.md`, and the method is in
+[the in-flight check benchmark](inflight-check.md) on the `predicate-checks` branch.
+
+Turn it on by default once these are settled:
+
+- **Oracle: off for now.** Since 7cb8c4e on `predicate-checks` the setting does nothing on Oracle.
+  On RDS (19c SE2) the check is the cost: with rows in flight a read takes about 300 ms, and with
+  one writer reads commit at 30/s against 211/s with the check off. On the laptop's Oracle 23 the
+  check gains like on the other engines (4 writers: 23 to 505 commits/s). The open item is the
+  check's plan on RDS: look at it with DBMS_XPLAN.
+- **MySQL: the check holds on RDS; two benchmark items remain.**
+  - The first configuration measured after the warm-up is cold: with no writers, 158/s with the
+    check off against 1,997/s on, with stalls (p99 above 90 ms). With nothing in flight both run
+    the same statements, so this is not the check. A longer warm-up should fix it; not yet tried.
+  - The writers mode failed on tier A's MySQL. The cause was not recorded.
+- **Joins:** stage 1 covers reads of one table only. Joins still abort table-wide, including the
+  paged joins below, where VIEW_CASE gains the most.
+
+**2. How a read that goes ahead is read: three rules by query shape.**
+
+| Query shape | Form | Gain over DRIVER, 1x and 10x data |
+|---|---|---|
+| Everything else: key lookups, filters, joins, subqueries, pages with an OFFSET, COUNT by FK, DISTINCT | Keep (the split read, SPLIT_DRV) | - |
+| ORDER BY + LIMIT with no OFFSET, joined or not, keyset or range | VIEW_CASE, plain filter | 1.0x-33,000x |
+| COUNT, SUM, GROUP BY over a whole table | CORR | 1.3x-11x; Oracle at 10,000 in flight 0.8x-1.0x |
+
+The rules work together with the predicate checks. With the checks on, reads that meet rows in flight
+go ahead instead of retrying, so what a form costs with rows in flight is what users pay. They don't
+overlap on CORR. Its whole-table aggregates have no WHERE clause, so any row in flight fails the
+check, and when the check finds a row stage 1 aborts. Correcting instead of aborting would be a
+design change and needs its own write-up first.
+
+**Next to measure: the plain query after a passed check.** This applies to a read of one table
+with a pure WHERE clause, under SNAPSHOT (or SERIALIZABLE on PostgreSQL). If the check passes, no
+row in flight matches the WHERE clause by either image. So the plain query on the data table
+returns exactly the committed rows in that snapshot, and the driver could run it (BASE) instead of
+the split read. The split read is 1.1x to 1,000x behind BASE in these runs, so this is likely the
+largest gain left. It would be a fourth rule: filtered reads of one table whose check passes run
+as the plain query. It doesn't apply on Oracle until the check's plan is fixed.
+
+The rule holds only under these conditions:
+
+- **One snapshot.** The check and the plain query must run in the same snapshot. Inside a
+  transaction they do. In autocommit they must still share one transaction: as two autocommit
+  statements, a row can go in flight between them.
+- **The user's columns only.** In the inline layout the data table also holds ScalarDB's metadata
+  columns, so `SELECT *` or `t.*` against it would return them too. The plain query must name the
+  user's columns, or the rule is limited to decoupled tables.
+- **ScalarDB's layout.** The data table holds the committed image of every row not in flight. That
+  covers prepared updates, inserts (whose after image is in the table) and deletes (tx_state 2).
+  Nothing else is needed.
+
+What the short rules give up, against the per-engine table below:
+
+- CORR's DISTINCT on MariaDB (14x-77x) and PostgreSQL at 10x data (1.7x-9.1x).
+- OVER for Oracle's deep OFFSET (3.2x-13x at 1x data).
+- Up to 20% on Oracle's whole-table aggregates at 10,000 in flight.
+
+If MariaDB matters, a DISTINCT rule for it is the one engine-specific exception worth adding.
+
+### Per engine
+
 Which form to read each kind of query with, per engine. Keep means the split read the driver emits
 today (SPLIT_DRV, `SplitRead.java`): the committed copy excludes rows in flight by `NOT EXISTS` on
 PostgreSQL and Oracle, and by a left join to the DISTINCT in-flight keys on MySQL and MariaDB.
@@ -341,6 +413,66 @@ left out.
   at 10,000, where no other form comes close. Elsewhere VIEW_CASE or DRIVER is faster.
 - **VIEW_CASE with the plain filter settles PostgreSQL's paged joins:** 0.15 to 0.58 ms against
   DRIVER's 1.1 to 629 (4.9x to 1,400x), so the open cell is VIEW_CASE.
+
+### AWS results with 10x the data
+
+A third run, 2026-10-21 15:45 to 17:26 UTC, with no laptop attached (reports in
+`bench-env/results/20261022-0044/`). It ran the modes BASE, VIEW_LJ, VIEW_CASE, CORR and DRIVER on
+the same 12 queries, with these settings:
+
+- `scale=10`: `c` has 1M rows and `o` has 5M. The query names still say 100k and 500k.
+- `inflightAt=newest`: the rows in flight are at the highest ids, where the pages read.
+- Tier A's databases are capped at 1 GB: `docker --memory=1024m`, `shared_buffers` 256 MB and an
+  InnoDB pool of 384 MB. RDS is not capped.
+- A 60 s timeout per statement.
+- Two timed repetitions and one run with changed images, at 100 and 10,000 in flight.
+
+**Correct wherever it could be checked.** With changed images, CORR, VIEW_CASE and DRIVER return
+VIEW_LJ's rows on all seven databases. Two things are unchecked or missing:
+
+- **MariaDB's two paged joins are unchecked.** VIEW_LJ timed out on them, which left nothing to
+  compare with. The reports show `!` there; since 28c51d9 that case shows `?`.
+- **Tier A's MySQL failed from 16:54 on:** the changed run at 10,000 and the writers runs. The log
+  names only the failed task. The 1 GB cap is the likely cause, but this is not verified.
+
+CORR's DISTINCT also gave `error` on MySQL at 100 in flight on both tiers.
+
+Median ms, CORR or VIEW_CASE against DRIVER (DRIVER / form, so above 1x the form wins), tier B,
+100 / 10,000 in flight; tier A gives the same picture:
+
+| Query | Form | PostgreSQL | MySQL | MariaDB | Oracle |
+|---|---|---|---|---|---|
+| COUNT of 1M | CORR | 7.3x / 2.3x | 1.5x / 3.0x | 1.9x / 1.7x | 2.2x / 0.8x |
+| SUM of 5M | CORR | 5.6x / 2.3x | 1.5x / 3.1x | 1.8x / 1.8x | 2.5x / 1.0x |
+| GROUP BY of 1M | CORR | 4.1x / 2.4x | 3.2x / 2.7x | 1.9x / 1.6x | 1.3x / 0.8x |
+| hot COUNT of 20k | CORR | 2.2x / 1.0x | 1.5x / 1.2x | 1.8x / 0.9x | 2.7x / 1.0x |
+| COUNT by FK | CORR | 0.6x / 0.2x | 0.9x / 0.0x | 0.9x / 0.0x | 0.7x / 0.0x |
+| DISTINCT | CORR | 4.2x / 1.7x | error / 0.1x | 77x / 14x | 0.2x / 0.0x |
+| page of 5M, no offset | VIEW_CASE | 1.8x / 48x | 3.6x / 189x | 2.2x / 19x | 451x / 538x |
+| page after 10k | VIEW_CASE | 0.3x / 1.3x | 125x / 3.5x | 0.5x / 3.7x | 12x / 14x |
+| page: JOIN FK | VIEW_CASE | 4.7x / 563x | 13x / 719x | 17,700x / 20,500x | 3.3x / 657x |
+| page: keyset | VIEW_CASE | 1.1x / 14x | 1.3x / 18x | 1.5x / 1.4x | 1.0x / 1.0x |
+| page: 3 tables | VIEW_CASE | 105x / 2,200x | 14,700x / 33,200x | 15,800x / 18,700x | 290x / 1,460x |
+| page: indexed range | VIEW_CASE | 2.6x / 20x | 1.7x / 45x | 1.6x / 22x | 1.0x / 11x |
+
+- **The paging rule holds at 10x.** VIEW_CASE ties or beats DRIVER on every page without an
+  OFFSET, on every database at both counts. There is one exception: PostgreSQL's keyset page on
+  EC2 at 100 in flight, 0.51 ms against 0.35. With rows in flight at the newest ids, DRIVER's
+  pages fall 10x to 1,000x behind at 10,000. VIEW_CASE stays within 1.1x to 2.4x of BASE, except
+  the 3-table page on EC2 (28.7 ms, the same as BASE).
+- **MariaDB's joins are slow even without the driver.** Its plain paged joins take 5 to 9 s, and
+  VIEW_CASE takes 0.4 to 0.6 ms.
+- **Deep OFFSET is mixed.** At 100 in flight VIEW_CASE loses to DRIVER on PostgreSQL and MariaDB
+  (0.3x to 0.6x) and wins on MySQL and Oracle. At 10,000 it wins everywhere (1.3x to 14x). So
+  pages with an OFFSET stay with the split read.
+- **CORR holds for full-table COUNT, SUM and GROUP BY**, within 1.05x of BASE at 100 in flight. It
+  is 1.3x to 7.3x faster than DRIVER at 100 in flight and 1.4x to 5.4x at 10,000. Oracle at
+  10,000 is the exception: there it is 0.8x to 1.0x.
+- **CORR's DISTINCT now also wins on PostgreSQL** (1.7x to 9.1x). It stays far ahead on MariaDB
+  and loses badly on MySQL and Oracle.
+- **CORR loses where it lost before:** COUNT by FK, which the driver already reads by index. On
+  the cached hot COUNT at 10,000 it is about even.
+- **VIEW_CASE never helps an aggregate.** It is 1.4x to 10x slower than DRIVER on every full scan.
 
 ## Rankings
 
