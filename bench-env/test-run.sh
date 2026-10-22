@@ -57,6 +57,7 @@ grep -q 'detached as' "$t/out" && [ "$(grep -c '^apply' "$t/terraform")" = 1 ] &
   || { cat "$t/out" "$t/terraform"; echo "FAIL: detached run"; exit 1; }
 
 # detached.sh on the client: a tier that fails still ends in the upload and the end of every instance
+# of its own VPC
 mkdir -p "$t/home/a" "$t/home/b"
 command -v timeout > /dev/null || printf '#!/bin/bash\nshift; exec "$@"\n' > "$t/bin/timeout" # macOS has none
 chmod +x "$t/bin"/*
@@ -66,9 +67,15 @@ cat > "$t/bin/aws" <<'S'
 echo "$*" >> "$T/calls"
 case "$*" in *describe-db-instances*) echo bench-b-pg-1 ;; *describe-instances*) echo i-1 i-2 ;; esac
 S
+cat > "$t/bin/curl" <<'S'
+#!/bin/bash
+case "${@: -1}" in */token) echo tok ;; */mac) echo m1 ;; */macs/m1/vpc-id) echo vpc-1 ;; *) exit 22 ;; esac
+S
+chmod +x "$t/bin/curl"
 HOME="$t/home" BUCKET=bucket RUN=r bash "$here/detached.sh" > "$t/home/detached.log" 2>&1
 grep -q 's3 cp --recursive --quiet a/results s3://bucket/r/a/' "$t/calls" &&
   grep -q 'delete-db-instance --db-instance-identifier bench-b-pg-1' "$t/calls" &&
-  grep -q 'terminate-instances --instance-ids i-1 i-2' "$t/calls" && grep -q 'tier b failed' "$t/home/detached.log" \
+  grep -q 'terminate-instances --instance-ids i-1 i-2' "$t/calls" &&
+  [ "$(grep -c vpc-1 "$t/calls")" = 2 ] && grep -q 'tier b failed' "$t/home/detached.log" \
   || { cat "$t/home/detached.log" "$t/calls"; echo "FAIL: detached.sh teardown"; exit 1; }
 echo "run.sh teardown ok"
