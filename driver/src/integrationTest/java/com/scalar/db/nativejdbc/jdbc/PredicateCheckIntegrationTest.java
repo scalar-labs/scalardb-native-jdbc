@@ -23,7 +23,6 @@ import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -44,9 +43,6 @@ import org.junit.jupiter.params.provider.MethodSource;
  * value; a predicate it cannot evaluate alike in two statements, which aborts as before; and the
  * table's check not recorded as passed. Rows 1 to 10 hold x = 'a', 11 to 20 x = 'b', v = id.
  */
-@SuppressFBWarnings(
-    value = {"SQL_INJECTION_JDBC", "OBL_UNSATISFIED_OBLIGATION"},
-    justification = "statements written in the test sources, closed with their connection")
 class PredicateCheckIntegrationTest {
 
   private static final String T = "pc.t";

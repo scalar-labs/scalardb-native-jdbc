@@ -68,8 +68,14 @@ import org.junit.jupiter.params.provider.MethodSource;
  */
 @EnabledIfSystemProperty(named = "nativejdbc.bench", matches = "true")
 @SuppressFBWarnings(
-    value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
-    justification = "benchmark SQL written in this file")
+    value = {
+      "SQL_INJECTION_JDBC",
+      "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE",
+      "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
+      "PREDICTABLE_RANDOM",
+      "DMI_RANDOM_USED_ONLY_ONCE"
+    },
+    justification = "benchmark SQL written in this file; seeded randoms, so runs repeat")
 class InFlightCheckBenchmark {
 
   private static final int ROWS = 100_000;
@@ -216,7 +222,7 @@ class InFlightCheckBenchmark {
     }
     System.out.println(out);
     Path file = Path.of("build/bench/inflight-check-" + e.name().toLowerCase(Locale.ROOT) + ".md");
-    Files.createDirectories(file.getParent());
+    Files.createDirectories(Objects.requireNonNull(file.getParent()));
     Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
 
@@ -487,7 +493,7 @@ class InFlightCheckBenchmark {
       }
     }
     Path file = Path.of("build/bench/inflight-arms-" + e.name().toLowerCase(Locale.ROOT) + ".txt");
-    Files.createDirectories(file.getParent());
+    Files.createDirectories(Objects.requireNonNull(file.getParent()));
     Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
 
@@ -689,35 +695,53 @@ class InFlightCheckBenchmark {
         Writes.anyRow(
             engine, "SELECT 1 FROM " + SplitRead.afterImages(engine, o, o.dataColumns()) + eq));
     checks.put("read", forms.get(3).sql());
-    StringBuilder out = new StringBuilder(String.format(Locale.ROOT, "## %s (%s)%n%n", e,
-        System.getProperty("nativejdbc.bench.tier", "local")));
+    StringBuilder out =
+        new StringBuilder(
+            String.format(
+                Locale.ROOT,
+                "## %s (%s)%n%n",
+                e,
+                System.getProperty("nativejdbc.bench.tier", "local")));
     try (Connection c = e.open()) {
       out.append(c.getMetaData().getDatabaseProductVersion().replace('\n', ' ')).append("\n\n");
       String owner = "'" + o.namespace().replace("'", "''") + "'";
       String tables =
-          "'" + o.dataTable().replace("'", "''") + "', '" + Objects.requireNonNull(o.metadataTable()).replace("'", "''") + "'";
+          "'"
+              + o.dataTable().replace("'", "''")
+              + "', '"
+              + Objects.requireNonNull(o.metadataTable()).replace("'", "''")
+              + "'";
       out.append(
           rows(
               c,
               "SELECT table_name || ': num_rows=' || num_rows || ' blocks=' || blocks"
                   + " || ' analyzed=' || TO_CHAR(last_analyzed, 'YYYY-MM-DD HH24:MI')"
                   + " || ' locked=' || stattype_locked FROM all_tab_statistics WHERE owner = "
-                  + owner + " AND table_name IN (" + tables + ") AND object_type = 'TABLE'"));
+                  + owner
+                  + " AND table_name IN ("
+                  + tables
+                  + ") AND object_type = 'TABLE'"));
       out.append(
           rows(
               c,
               "SELECT table_name || '.' || column_name || ': distinct=' || num_distinct"
                   + " || ' nulls=' || num_nulls || ' histogram=' || histogram"
-                  + " FROM all_tab_col_statistics WHERE owner = " + owner
-                  + " AND table_name IN (" + tables + ") ORDER BY table_name, column_name"));
+                  + " FROM all_tab_col_statistics WHERE owner = "
+                  + owner
+                  + " AND table_name IN ("
+                  + tables
+                  + ") ORDER BY table_name, column_name"));
       out.append(
           rows(
               c,
               "SELECT i.table_name || ' ' || i.index_name || ' (' || LISTAGG(ic.column_name, ', ')"
                   + " WITHIN GROUP (ORDER BY ic.column_position) || ') ' || i.status"
                   + " FROM all_indexes i JOIN all_ind_columns ic ON ic.index_owner = i.owner"
-                  + " AND ic.index_name = i.index_name WHERE i.table_owner = " + owner
-                  + " AND i.table_name IN (" + tables + ")"
+                  + " AND ic.index_name = i.index_name WHERE i.table_owner = "
+                  + owner
+                  + " AND i.table_name IN ("
+                  + tables
+                  + ")"
                   + " GROUP BY i.table_name, i.index_name, i.status ORDER BY 1"));
       out.append('\n');
 
@@ -742,7 +766,7 @@ class InFlightCheckBenchmark {
     }
     System.out.println(out);
     Path file = Path.of("build/bench/inflight-plan-" + e.name().toLowerCase(Locale.ROOT) + ".txt");
-    Files.createDirectories(file.getParent());
+    Files.createDirectories(Objects.requireNonNull(file.getParent()));
     Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
 
@@ -780,8 +804,11 @@ class InFlightCheckBenchmark {
     out.append("\nThe predicate's check, estimated (region 7):\n");
     try (java.sql.Statement st = c.createStatement()) {
       st.execute("EXPLAIN PLAN FOR " + sql.replace("?", "7"));
-      out.append(rows(c, "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY(NULL, NULL,"
-          + " 'TYPICAL +PREDICATE'))"));
+      out.append(
+          rows(
+              c,
+              "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY(NULL, NULL,"
+                  + " 'TYPICAL +PREDICATE'))"));
     } catch (SQLException ex) {
       out.append("not available: ").append(String.valueOf(ex.getMessage()).trim()).append('\n');
     }
@@ -795,8 +822,11 @@ class InFlightCheckBenchmark {
           rs.next();
         }
       }
-      out.append(rows(c, "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL,"
-          + " NULL, 'ALLSTATS LAST +PEEKED_BINDS +PREDICATE'))"));
+      out.append(
+          rows(
+              c,
+              "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL,"
+                  + " NULL, 'ALLSTATS LAST +PEEKED_BINDS +PREDICATE'))"));
       st.execute("ALTER SESSION SET statistics_level = TYPICAL");
     } catch (SQLException ex) {
       out.append("not available: ").append(String.valueOf(ex.getMessage()).trim()).append('\n');
@@ -853,7 +883,7 @@ class InFlightCheckBenchmark {
     System.out.println(out);
     Path file =
         Path.of("build/bench/inflight-writers-" + e.name().toLowerCase(Locale.ROOT) + ".md");
-    Files.createDirectories(file.getParent());
+    Files.createDirectories(Objects.requireNonNull(file.getParent()));
     Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
 
@@ -907,7 +937,7 @@ class InFlightCheckBenchmark {
                       latencies.add(System.nanoTime() - start);
                     }
                   }
-                } catch (Exception x) {
+                } catch (SQLException | RuntimeException x) {
                   failures.add(x);
                 }
               });
