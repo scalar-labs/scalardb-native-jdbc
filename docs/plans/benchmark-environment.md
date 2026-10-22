@@ -100,7 +100,11 @@ The harness targets an external database through `-Dnativejdbc.<engine>.url`, `.
   216 MB at scale 1 and about 2.2 GB at scale 10. With `db_memory_mb` the other tier A databases are
   capped at that much memory, close to Free's 2 GB, but not at 2 CPUs: compare Free with them
   for the order of the forms, not for the times. It is a host for 23 against RDS's 19c, as for the
-  predicate's check (`docs/benchmarks/inflight-check.md`).
+  predicate's check (`docs/benchmarks/inflight-check.md`). Tier A also runs SQL Server
+  (`sqlserver`): the tests' image, `mcr.microsoft.com/mssql/server:2022-latest`, in Developer
+  edition, free for testing. The setup makes the database `appdb` as the tests make it, with
+  `READ_COMMITTED_SNAPSHOT` and `ALLOW_SNAPSHOT_ISOLATION` on. It keeps to 80% of `db_memory_mb`.
+  RDS has no SQL Server here, because its licence-included editions cost more per hour.
 - **Data read from disk on tier A:** `db_memory_mb` in `bench.tfvars` limits each tier A database
   container to that much memory, the OS's file cache in it included (a container's memory limit
   counts its page cache), with the buffer pool shrunk to fit (PostgreSQL `shared_buffers` a
