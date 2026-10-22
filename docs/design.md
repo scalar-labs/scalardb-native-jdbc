@@ -1110,9 +1110,7 @@ union as a derived table.
   value that can be read once (a stream, a LOB, SQLXML, an array, a struct or a ref), which the
   read alone must consume, keeps the abort. With no row in flight the cost is the per-table check's; with one, a
   second statement driven by the in-flight index. At SERIALIZABLE on MySQL, MariaDB and SQL Server
-  the per-table check stays as it is: its locking read is what holds off every later prepare. On
-  Oracle the setting does nothing for now: on 19c (RDS) the predicate's check took about 300 ms a read
-  with rows in flight, against a few ms on 23, its plan not yet known. Joins
+  the per-table check stays as it is: its locking read is what holds off every later prepare. Joins
   and subqueries are stage 2 (the statement's own in-flight pairs, measured in the same report).
 - The driver's own reads that produce anchors for writes follow the same rules.
 

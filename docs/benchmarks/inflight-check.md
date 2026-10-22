@@ -60,8 +60,9 @@ nothing, whichever image is true; a dropped conjunct only widens what is checked
    every later prepare, and a predicate would lock the same range.
 6. **On dedicated machines (AWS, last section)** the predicate check holds on PostgreSQL, MySQL
    and MariaDB, ScalarDB's own commits unchanged. On Oracle 19c (RDS) it took about 300 ms a read
-   with rows in flight and lowered both reads and ScalarDB's commits; the setting does nothing on
-   Oracle until that plan is understood.
+   with rows in flight and lowered both reads and ScalarDB's commits: its plan drove the before
+   images from the data table and probed their index once per row. Read from the metadata table
+   alone, the check takes 0.7 ms there (below).
 
 ## Aborts with live ScalarDB writers
 
@@ -213,8 +214,7 @@ sixteen writers:
   writers by 28%, as on the laptop (629 → 407): readers using the database's CPU on slow checks.
   Oracle 23 on the laptop, with the same setup, gains as the others do (4 writers: 23 → 505, p50
   7 ms), so this is the instance: version, edition, storage or the data table's statistics, which
-  RDS's nightly job gathers. Its plan of the predicate's check is the next thing to look at; until
-  then the setting does nothing on Oracle.
+  RDS's nightly job gathers. It was the plan (below), since fixed.
 - **Not measured.** Tier A's MySQL failed from the writers runs on (the cap is the suspect); SQL
   Server is not in the AWS plan. MySQL B's first configuration ran cold (158 against 1,997 with no
   writer, the same statements).
@@ -227,3 +227,12 @@ predicate's check's plan as estimated and as run (`DBMS_XPLAN.DISPLAY_CURSOR`, `
 On AWS, tier B's Oracle alone (`tier_a = []`, `tier_b = ["oracle"]`):
 `WRITERS=1 READS=0 REPS=1 run.sh run -Dnativejdbc.bench.checkPlan=true`. On the laptop's Oracle 23
 every statement takes 1-2 ms, the check driven by the `region` indexes of both images.
+
+On RDS 19c (run 20261022-1707, 100,000 rows of `o`) the before images were the cost: 47 ms a check
+beside 4 writers, the after images 0.8 ms. They joined the data table only for the key, and without
+statistics on it 19c read all of its key index (`INDEX FAST FULL SCAN`, 100K rows) and probed the
+metadata table's `before_region` index once per key, so the cost grew with the table, not with the
+rows in flight. Read from the metadata table alone, which
+holds the key too, the before images start from its in-flight index: 0.3 ms, the predicate's check
+0.7 ms against the table-wide check's 0.3 ms (run 20261022-2018). The setting is on for Oracle
+again.
