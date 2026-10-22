@@ -204,12 +204,34 @@ the driver set to abort at once on a row in flight: a write or locking read of a
 aborts so is counted as such and not run on the plain side, nor is the rest of its transaction; a
 statement with a window function is compared by its number of rows, since the committed image is
 read by another plan and a window that does not order its rows sees them in another order. Result:
-the same as settled, over several seeds (`-Dnativejdbc.seed`), a write aborted in some. Next:
-sqllogictest.
+the same as settled, over several seeds (`-Dnativejdbc.seed`), a write aborted in some.
 
 - **sqllogictest**, for the other four engines, which have no public suite PostgreSQL's size (MySQL's
   and MariaDB's `mysql-test` may follow). Its SELECT corpus is loaded into ScalarDB tables and run in
   the same way, with the expected results ignored.
+**Every engine run 2026-10-22** (`SqlLogicIntegrationTest`, `-Dnativejdbc.slt=true`; the first
+1,000 queries of each of 15 files, `-Dnativejdbc.slt.queries`): select1-5, `index/*/10` and
+`random/*`, fetched at a pinned commit of its GitHub mirror. Each file's tables are made in a plain
+schema and in one imported into ScalarDB, in each layout; a table without a primary key gets
+`slt_rowid` as its last column, on both sides; the engine's types and `skipif`/`onlyif` labels
+apply, and on Oracle a table's alias loses its `AS`. Per layout, the same in both:
+
+| engine | passed | refused | failed |
+|---|---|---|---|
+| PostgreSQL | 13,275 | 1,457 | 0 |
+| SQL Server | 13,233 | 1,454 | 45 |
+| Oracle | 11,834 | 1,454 | 1,444 |
+| MySQL | 9,513 | 1,454 | 3,033 |
+| MariaDB | 9,511 | 1,454 | 3,035 |
+
+Every refusal is a sign after a sign, `- - 27`, which the parser cannot read (todo 317, P3). Every
+failure is a column label, the values matching: MySQL and MariaDB label an unaliased expression with
+its text and Oracle with that text upper-cased, which the driver rewrites; SQL Server labels
+`+ col` grouped as the split read's alias (todo 320, P2); ten of them on MySQL and MariaDB report
+another integer type too. Found and fixed: `SELECT *` of an imported table listed its key first
+(todo 316, P1; the setup must run again after an upgrade), and a table named in a query and in its
+subquery was refused on the read views (todo 318). select5, joins of up to 17 tables, is skipped on
+MySQL and MariaDB, whose join-order search takes minutes a query over the read views (todo 319).
 - **Random statements.** Later, and only once the above runs clean: a generator over the T1 schema in
   the manner of SQLancer, its statements kept when the database accepts them. Both T1 and T2 run its
   output, from a seed.

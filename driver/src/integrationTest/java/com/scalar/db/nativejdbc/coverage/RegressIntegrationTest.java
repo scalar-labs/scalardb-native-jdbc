@@ -560,17 +560,21 @@ class RegressIntegrationTest {
 
   /** A file of the suite, fetched once into {@code build/regress/<tag>/}. */
   private static String fetch(String path) throws IOException, InterruptedException {
-    Path local = Path.of("build", "regress", TAG, path);
+    return download(SOURCE + path, Path.of("build", "regress", TAG, path));
+  }
+
+  /** A file fetched once into {@code local}. */
+  static String download(String url, Path local) throws IOException, InterruptedException {
     if (!Files.exists(local)) {
       HttpResponse<String> r =
           HttpClient.newBuilder()
               .followRedirects(HttpClient.Redirect.NORMAL)
               .build()
               .send(
-                  HttpRequest.newBuilder(URI.create(SOURCE + path)).build(),
+                  HttpRequest.newBuilder(URI.create(url)).build(),
                   HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
       if (r.statusCode() != 200) {
-        throw new IOException(SOURCE + path + ": HTTP " + r.statusCode());
+        throw new IOException(url + ": HTTP " + r.statusCode());
       }
       Files.createDirectories(Objects.requireNonNull(local.getParent()));
       Files.writeString(local, r.body(), StandardCharsets.UTF_8);
