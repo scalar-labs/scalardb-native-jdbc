@@ -166,6 +166,18 @@ the split read. The split read is 1.1x to 1,000x behind BASE in these runs, so t
 largest gain left. It would be a fourth rule: filtered reads of one table whose check passes run
 as the plain query. It doesn't apply on Oracle until the check's plan is fixed.
 
+The rule holds only under these conditions:
+
+- **One snapshot.** The check and the plain query must run in the same snapshot. Inside a
+  transaction they do. In autocommit they must still share one transaction: as two autocommit
+  statements, a row can go in flight between them.
+- **The user's columns only.** In the inline layout the data table also holds ScalarDB's metadata
+  columns, so `SELECT *` or `t.*` against it would return them too. The plain query must name the
+  user's columns, or the rule is limited to decoupled tables.
+- **ScalarDB's layout.** The data table holds the committed image of every row not in flight. That
+  covers prepared updates, inserts (whose after image is in the table) and deletes (tx_state 2).
+  Nothing else is needed.
+
 What the short rules give up, against the per-engine table below:
 
 - CORR's DISTINCT on MariaDB (14x-77x) and PostgreSQL at 10x data (1.7x-9.1x).
