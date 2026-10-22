@@ -98,14 +98,14 @@ mkdir -p "$out"
 pids=(); cmds=()
 for tier in a b; do
   args=$(python3 -c '
-import json, sys
+import json, shlex, sys
 tier, urls = sys.argv[1], json.loads(sys.argv[2])
 user = {"a": {"postgresql": "postgres", "oracle": "system", "mysql": "root", "mariadb": "root", "sqlserver": "sa"}}
 for key, url in urls.items():
     t, engine = key.split("-", 1)
     if t == tier:
         name = user.get(tier, {}).get(engine, "bench")
-        print(f"{engine}={url}={name}")
+        print(shlex.quote(f"{engine}={url}={name}"))  # a SQL Server URL holds ; for the remote shell
 ' "$tier" "$urls")
   [ -z "$args" ] && continue
   echo "=== tier $tier: $(echo $args | tr '\n' ' ')"

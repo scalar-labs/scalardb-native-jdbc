@@ -18,7 +18,7 @@ shift # -chdir
 echo "$1 key=$AWS_ACCESS_KEY_ID" >> "$T/terraform"
 case "$1 $2" in
   "output -raw") echo 127.0.0.1 ;;
-  "output -json") echo '{"a-postgresql": "jdbc:postgresql://x:5432/postgres"}' ;;
+  "output -json") echo '{"a-postgresql": "jdbc:postgresql://x:5432/postgres", "a-sqlserver": "jdbc:sqlserver://x:1433;encrypt=false"}' ;;
 esac
 S
 cat > "$t/bin/ssh" <<'S'
@@ -55,6 +55,11 @@ sleep 1 # detached.sh runs in the background
 grep -q 'detached as' "$t/out" && [ "$(grep -c '^apply' "$t/terraform")" = 1 ] && ! grep -q '^destroy' "$t/terraform" \
   && [ "$(grep -c 'matrix.sh a ' "$t/remote/tiers.sh")" = 1 ] && [ -f "$t/remote/started" ] \
   || { cat "$t/out" "$t/terraform"; echo "FAIL: detached run"; exit 1; }
+# the tier's command reaches matrix.sh with each engine's URL whole, SQL Server's ';' included
+printf 'printf "%%s\\n" "$@" > "$T/args"\n' > "$t/remote/a/bench-env/matrix.sh"
+(cd "$t/remote" && bash -c "$(cat tiers.sh)")
+grep -qx 'sqlserver=jdbc:sqlserver://x:1433;encrypt=false=sa' "$t/args" \
+  || { cat "$t/remote/tiers.sh" "$t/args"; echo "FAIL: a URL with ';' split on the client"; exit 1; }
 
 # detached.sh on the client: a tier that fails still ends in the upload and the end of every instance
 # of its own VPC
