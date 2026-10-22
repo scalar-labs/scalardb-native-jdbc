@@ -100,7 +100,7 @@ for tier in a b; do
   args=$(python3 -c '
 import json, sys
 tier, urls = sys.argv[1], json.loads(sys.argv[2])
-user = {"a": {"postgresql": "postgres", "oracle": "system", "mysql": "root", "mariadb": "root"}}
+user = {"a": {"postgresql": "postgres", "oracle": "system", "mysql": "root", "mariadb": "root", "sqlserver": "sa"}}
 for key, url in urls.items():
     t, engine = key.split("-", 1)
     if t == tier:

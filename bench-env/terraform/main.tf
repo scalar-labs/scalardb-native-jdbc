@@ -33,7 +33,7 @@ variable "db_password" {
 }
 
 variable "tier_a" {
-  description = "Engines on EC2: postgresql, oracle, mysql, mariadb"
+  description = "Engines on EC2: postgresql, oracle, mysql, mariadb, sqlserver"
   type        = set(string)
   default     = ["postgresql", "oracle"]
 }
@@ -264,6 +264,7 @@ output "urls" {
       oracle     = "jdbc:oracle:thin:@${i.private_ip}:1521/${var.oracle_image == "" ? "FREEPDB1" : "ORCLPDB1"}"
       mysql      = "jdbc:mysql://${i.private_ip}:3306/?allowPublicKeyRetrieval=true"
       mariadb    = "jdbc:mariadb://${i.private_ip}:3306/"
+      sqlserver  = "jdbc:sqlserver://${i.private_ip}:1433;encrypt=false;databaseName=appdb"
     }[e] },
     { for e, d in aws_db_instance.db : "b-${e}" => {
       postgresql = "jdbc:postgresql://${d.address}:5432/bench"

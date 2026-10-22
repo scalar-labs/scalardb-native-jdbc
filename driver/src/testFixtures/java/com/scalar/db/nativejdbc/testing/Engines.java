@@ -345,6 +345,24 @@ public enum Engines {
                     + schema
                     + " CASCADE';"
                     + " EXCEPTION WHEN OTHERS THEN IF SQLCODE != -1918 THEN RAISE; END IF; END;";
+            // a schema drops only when empty: its views, foreign keys and tables first
+            case SQLSERVER -> {
+              String name = "N'" + s.replace("'", "''") + "'";
+              yield "DECLARE @d nvarchar(max) = N'';"
+                  + " SELECT @d += N'DROP VIEW ' + QUOTENAME(SCHEMA_NAME(schema_id)) + N'.'"
+                  + " + QUOTENAME(name) + N';' FROM sys.views WHERE SCHEMA_NAME(schema_id) = "
+                  + name
+                  + "; SELECT @d += N'ALTER TABLE ' + QUOTENAME(SCHEMA_NAME(schema_id)) + N'.'"
+                  + " + QUOTENAME(OBJECT_NAME(parent_object_id)) + N' DROP CONSTRAINT '"
+                  + " + QUOTENAME(name) + N';' FROM sys.foreign_keys"
+                  + " WHERE SCHEMA_NAME(schema_id) = "
+                  + name
+                  + "; SELECT @d += N'DROP TABLE ' + QUOTENAME(SCHEMA_NAME(schema_id)) + N'.'"
+                  + " + QUOTENAME(name) + N';' FROM sys.tables WHERE SCHEMA_NAME(schema_id) = "
+                  + name
+                  + "; EXEC sp_executesql @d; DROP SCHEMA IF EXISTS "
+                  + schema;
+            }
             default -> throw new UnsupportedOperationException("dropSchemas on " + engine);
           });
     }

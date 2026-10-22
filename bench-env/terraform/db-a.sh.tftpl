@@ -32,6 +32,18 @@ case "${engine}" in
     docker run -d --name db --network host $limit -v /data/mariadb:/var/lib/mysql \
       -e MARIADB_ROOT_PASSWORD='${password}' mariadb:11.4 \
       $pool --innodb-log-file-size=4294967296 ;;
+  sqlserver)
+    # Developer edition, the tests' image: free for testing; it keeps to 80% of the container's limit
+    mkdir -p /data/mssql && chown 10001:0 /data/mssql
+    docker run -d --name db --network host $limit -v /data/mssql:/var/opt/mssql \
+      -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e MSSQL_SA_PASSWORD='${password}' \
+      mcr.microsoft.com/mssql/server:2022-latest
+    # the driver needs a database with READ_COMMITTED_SNAPSHOT (design section 1), as the tests make
+    sql="IF DB_ID('appdb') IS NULL CREATE DATABASE appdb; ALTER DATABASE appdb SET READ_COMMITTED_SNAPSHOT ON;
+      ALTER DATABASE appdb SET ALLOW_SNAPSHOT_ISOLATION ON"
+    until docker exec db /opt/mssql-tools18/bin/sqlcmd -b -C -S localhost -U sa -P '${password}' -Q "$sql"; do
+      sleep 5
+    done ;;
   oracle)
     mkdir -p /data/oracle && chown 54321:54321 /data/oracle
 %{ if oracle_image == "" ~}
