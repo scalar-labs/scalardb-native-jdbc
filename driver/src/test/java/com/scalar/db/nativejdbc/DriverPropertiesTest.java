@@ -82,7 +82,8 @@ class DriverPropertiesTest {
             "scalardbnative.metadataSchema",
             "scalardbnative.catalogTtlMs",
             "scalardbnative.allowNoCatalog",
-            "scalardbnative.inflightWaitMs");
+            "scalardbnative.inflightWaitMs",
+            "scalardbnative.predicateChecks");
     assertThat(infos[1].value).isEqualTo("1000");
     assertThat(infos[2].choices).containsExactly("true", "false");
   }

@@ -9,6 +9,7 @@ import com.scalar.db.nativejdbc.sql.SqlAst;
 import com.scalar.db.nativejdbc.sql.StatementShape;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLSyntaxErrorException;
@@ -121,6 +122,13 @@ final class Router {
      */
     final List<String> checks;
 
+    /**
+     * For a read of one ScalarDB table, the check for rows in flight its predicate matches by
+     * either image, run when its table's check finds a row: none found, the read goes on (design
+     * 4.2); null otherwise.
+     */
+    final Writes.@Nullable Step fallback;
+
     private Route(
         String source,
         String sql,
@@ -142,9 +150,11 @@ final class Router {
         Writes.@Nullable Plan write,
         @Nullable Anchored anchored,
         @Nullable Boolean anchoring,
-        List<String> checks) {
+        List<String> checks,
+        Writes.@Nullable Step fallback) {
       this.anchoring = anchoring;
       this.checks = List.copyOf(checks);
+      this.fallback = fallback;
       this.parallel = parallel;
       this.plansParallel = plansParallel;
       this.write = write;
@@ -171,12 +181,25 @@ final class Router {
      * {@code anchoring} as {@link #anchoring} says.
      */
     Route anchored(@Nullable Anchored a, @Nullable Boolean anchoring) {
-      return copy(sql, parameterSources, perRow, countsOnly, parallel, a, anchoring, checks);
+      return copy(
+          sql, parameterSources, perRow, countsOnly, parallel, a, anchoring, checks, fallback);
     }
 
-    /** This route, with the checks a read at SNAPSHOT or SERIALIZABLE runs first. */
-    Route checked(List<String> checks) {
-      return copy(sql, parameterSources, perRow, countsOnly, parallel, anchored, anchoring, checks);
+    /**
+     * This route, with the checks a read at SNAPSHOT or SERIALIZABLE runs first and the predicate's
+     * check that may clear a row they find.
+     */
+    Route checked(List<String> checks, Writes.@Nullable Step fallback) {
+      return copy(
+          sql,
+          parameterSources,
+          perRow,
+          countsOnly,
+          parallel,
+          anchored,
+          anchoring,
+          checks,
+          fallback);
     }
 
     /** This route with another statement text and what goes with it. */
@@ -186,7 +209,16 @@ final class Router {
         List<Integer> perRow,
         boolean countsOnly,
         boolean parallel) {
-      return copy(sql, parameterSources, perRow, countsOnly, parallel, anchored, anchoring, checks);
+      return copy(
+          sql,
+          parameterSources,
+          perRow,
+          countsOnly,
+          parallel,
+          anchored,
+          anchoring,
+          checks,
+          fallback);
     }
 
     private Route copy(
@@ -197,7 +229,8 @@ final class Router {
         boolean parallel,
         @Nullable Anchored anchored,
         @Nullable Boolean anchoring,
-        List<String> checks) {
+        List<String> checks,
+        Writes.@Nullable Step fallback) {
       return new Route(
           source,
           sql,
@@ -219,7 +252,8 @@ final class Router {
           write,
           anchored,
           anchoring,
-          checks);
+          checks,
+          fallback);
     }
   }
 
@@ -329,8 +363,19 @@ final class Router {
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
   // the checks for rows in flight the open transaction passed, in its snapshot
   private final Set<String> passed = new HashSet<>();
+  // the checks that found a row in flight in the open transaction's snapshot, which keeps it:
+  // not run again, the predicate's check run at once
+  private final Set<String> found = new HashSet<>();
+  // scalardbnative.predicateChecks: a read of one table checks its predicate's rows in flight
+  // before it aborts on its table's
+  private final boolean predicateChecks;
 
   Router(Engine engine, Catalog catalog, Session session) {
+    this(engine, catalog, session, false);
+  }
+
+  Router(Engine engine, Catalog catalog, Session session, boolean predicateChecks) {
+    this.predicateChecks = predicateChecks;
     this.engine = engine;
     this.catalog = catalog;
     this.session = session;
@@ -594,7 +639,8 @@ final class Router {
         plan,
         null,
         null,
-        List.of());
+        List.of(),
+        null);
   }
 
   /**
@@ -920,7 +966,8 @@ final class Router {
         plan,
         null,
         null,
-        List.of());
+        List.of(),
+        null);
   }
 
   /**
@@ -1119,7 +1166,7 @@ final class Router {
       }
       if (snapshot) {
         // with states, run only for a scrollable result, whose moves pass over rows unchecked
-        r = r.checked(checks(scalarDb));
+        r = r.checked(checks(scalarDb), fallback(ast, scalarDb));
       }
       return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
           ? r.with(r.sql, r.parameterSources, r.perRow, false, true)
@@ -1142,7 +1189,51 @@ final class Router {
             0,
             List.of(),
             true);
-    return snapshot ? r.checked(checks(scalarDb)) : r;
+    return snapshot ? r.checked(checks(scalarDb), fallback(ast, scalarDb)) : r;
+  }
+
+  /**
+   * With {@code scalardbnative.predicateChecks}, for a read of one ScalarDB table alone with a pure
+   * predicate on its own columns, the check for rows in flight that predicate matches by either
+   * image (design 4.2): a row in flight neither image brings into the statement's rows changes
+   * nothing, whichever is true. Null otherwise.
+   */
+  private Writes.@Nullable Step fallback(
+      SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+    if (!predicateChecks || scalarDb.size() != 1) {
+      return null;
+    }
+    StatementShape shape = StatementShape.of(ast).orElse(null);
+    if (shape == null
+        || shape.kind() != StatementShape.Kind.SELECT
+        || shape.where() == null
+        || !shape.wherePure()) {
+      return null;
+    }
+    SqlAst.TableRef ref = shape.table();
+    TableInfo t = scalarDb.get(ref);
+    if (t == null) {
+      return null;
+    }
+    // the table's own columns only: a pseudo-column, as Oracle's SYSDATE, reads as one
+    Set<String> columns = new HashSet<>();
+    for (String c : t.dataColumns()) {
+      columns.add(engine.columnKey(c));
+    }
+    for (String c : shape.whereColumns()) {
+      if (!columns.contains(engine.columnKey(c))) {
+        return null;
+      }
+    }
+    for (SqlAst.ColumnRef c : ast.columnRefs()) {
+      SqlAst.TableRef q = c.qualifier();
+      if (q != null && q.schema() != null) {
+        return null; // the check names the table by its alias alone
+      }
+    }
+    int[] span = ast.span(Objects.requireNonNull(shape.where()));
+    List<Integer> inWhere = span == null ? null : ast.placeholdersIn(span[0], span[1]);
+    return span == null || inWhere == null ? null : inFlightStep(t, ref, ast, span, inWhere);
   }
 
   /** Per ScalarDB table of a read, the check for a row in flight anywhere in it (design 4.2). */
@@ -1238,7 +1329,7 @@ final class Router {
             0,
             List.of(),
             true);
-    return r.checked(checks(scalarDb, true));
+    return r.checked(checks(scalarDb, true), null);
   }
 
   /**
@@ -1391,34 +1482,73 @@ final class Router {
     }
   }
 
+  /** Binds the application's value of one of its placeholders to a driver statement. */
+  @FunctionalInterface
+  interface Binder {
+    void bind(PreparedStatement ps, int position, int placeholder) throws SQLException;
+  }
+
   /**
    * Runs a read's checks for rows in flight, those its transaction has not passed yet: in one
-   * snapshot a table without rows in flight stays so (design 4.2).
+   * snapshot a table without rows in flight stays so (design 4.2). A table with one is cleared, for
+   * this read only, by the route's {@link Route#fallback} finding none its predicate matches.
    *
    * @param vendor the vendor connection, in a transaction
    * @param route the read
    * @param timeout the statement's query timeout in seconds, 0 for none
+   * @param binder the application's values for the fallback, or null when they cannot be read twice
+   *     (a stream): no fallback then
    * @throws SQLException {@code 40001} when a table has a row in flight
    */
   @SuppressFBWarnings(value = "SQL_INJECTION_JDBC", justification = "the driver's own statements")
-  void check(Connection vendor, Route route, int timeout) throws SQLException {
+  void check(Connection vendor, Route route, int timeout, @Nullable Binder binder)
+      throws SQLException {
     for (String check : route.checks) {
+      boolean inFlight;
       lock.lock();
       try {
         if (passed.contains(check)) {
           continue;
         }
+        inFlight = found.contains(check);
       } finally {
         lock.unlock();
       }
-      try (Statement st = vendor.createStatement()) {
-        st.setQueryTimeout(timeout);
-        try (ResultSet rs = st.executeQuery(check)) {
-          if (rs.next()) {
-            throw new Writes.Aborted(
-                "a table the read reaches has a row a ScalarDB transaction is writing");
+      if (!inFlight) {
+        try (Statement st = vendor.createStatement()) {
+          st.setQueryTimeout(timeout);
+          try (ResultSet rs = st.executeQuery(check)) {
+            inFlight = rs.next();
           }
         }
+      }
+      if (inFlight) {
+        Writes.Step fallback = route.fallback;
+        if (fallback != null) {
+          lock.lock();
+          try {
+            found.add(check);
+          } finally {
+            lock.unlock();
+          }
+        }
+        if (fallback == null || binder == null) {
+          throw new Writes.Aborted(
+              "a table the read reaches has a row a ScalarDB transaction is writing");
+        }
+        try (PreparedStatement ps = vendor.prepareStatement(fallback.sql)) {
+          ps.setQueryTimeout(timeout);
+          int i = 1;
+          for (int b : fallback.binds) {
+            binder.bind(ps, i++, b);
+          }
+          try (ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+              throw new Writes.Aborted("the read matches a row a ScalarDB transaction is writing");
+            }
+          }
+        }
+        continue; // passed for this predicate only, not recorded
       }
       lock.lock();
       try {
@@ -1469,7 +1599,8 @@ final class Router {
         null,
         null,
         null,
-        List.of());
+        List.of(),
+        null);
   }
 
   /**
@@ -1743,6 +1874,7 @@ final class Router {
     lock.lock();
     try {
       passed.clear();
+      found.clear();
       if (workersSetInTransaction) {
         sessionWorkers = -1;
         workersOff = null;

@@ -1089,6 +1089,29 @@ union as a derived table.
   run as a locking read through `rc_T`, `LOCK IN SHARE MODE` or `WITH (HOLDLOCK)`, which these engines
   apply to the base rows and ranges behind the view, giving two-phase locking between driver
   transactions. Coarse and correct, phantoms included.
+- **The predicate's check** (experimental, `scalardbnative.predicateChecks`, off by default;
+  measured in `docs/benchmarks/inflight-check.md`). The per-table check aborts on a row in flight
+  anywhere in the table, which with ScalarDB writing the table aborts most such reads (one writer,
+  a quarter of them; four, most). Under SNAPSHOT, and SERIALIZABLE on PostgreSQL, a read of one
+  ScalarDB table alone whose WHERE clause is pure, made of the table's own columns, placeholders,
+  literals, operators, CAST and CASE (no function, subquery, pseudo-column or keyword the engine
+  evaluates as the statement runs, such as `CURRENT_TIMESTAMP`), runs the per-table check first as
+  before; only when it finds a row does the driver run the locking read's in-flight check over the
+  same WHERE clause, its before images UNION ALL its after images, and abort only if that finds one.
+  Why it is enough: a row in flight ends at its before image or its after image, and the snapshot
+  shows neither moving; if neither image matches the WHERE clause, the row is outside the rows the
+  statement groups, counts, orders, skips or returns whichever way it ends, so no aggregate, DISTINCT,
+  OFFSET or scrolled position can change. HAVING, window functions and ORDER BY act on those rows
+  only. Purity is what makes the two statements agree: the check and the read evaluate the WHERE
+  clause in one snapshot with the same values bound, which also rules out an operator that needs the
+  base table, as MySQL's full-text `MATCH`. A check cleared this way is not recorded as passed,
+  which holds for this predicate only; a table check that found a row is not run again in the
+  transaction, its snapshot keeping the row, and later reads go to the predicate's check at once. A
+  value that can be read once (a stream, a LOB, SQLXML, an array, a struct or a ref), which the
+  read alone must consume, keeps the abort. With no row in flight the cost is the per-table check's; with one, a
+  second statement driven by the in-flight index. At SERIALIZABLE on MySQL, MariaDB and SQL Server
+  the per-table check stays as it is: its locking read is what holds off every later prepare. Joins
+  and subqueries are stage 2 (the statement's own in-flight pairs, measured in the same report).
 - The driver's own reads that produce anchors for writes follow the same rules.
 
 ### 4.3 Writes on one ScalarDB table `T`, key `k`

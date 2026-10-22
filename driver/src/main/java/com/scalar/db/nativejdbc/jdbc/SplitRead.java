@@ -326,23 +326,23 @@ final class SplitRead {
     return String.join(", ", cols);
   }
 
-  /** The before image of each of the table's rows in flight that has one, columns {@code read}. */
+  /**
+   * The before image of each of the table's rows in flight that has one, columns {@code read}: the
+   * metadata table alone, which holds the key too, so a predicate on the image can start from its
+   * index (joined with the data table, Oracle 19c without statistics probed it once per row).
+   */
   static String inFlight(Engine engine, TableInfo t, List<String> read) {
     List<String> cols = new ArrayList<>();
     List<String> keys = t.keyColumns();
     for (String c : read) {
       String q = engine.quote(c);
-      cols.add(keys.contains(c) ? "t." + q : t.beforeImage(engine, "m", c) + " AS " + q);
+      cols.add(keys.contains(c) ? "m." + q : t.beforeImage(engine, "m", c) + " AS " + q);
     }
     return "(SELECT "
         + String.join(", ", cols)
         + " FROM "
-        + data(engine, t)
-        + " t JOIN "
         + meta(engine, t)
-        + " m ON "
-        + keyJoin(engine, t, "m")
-        + " WHERE m."
+        + " m WHERE m."
         + engine.quote("tx_state")
         + " IN (1, 2) AND (m."
         + engine.quote("before_tx_id")

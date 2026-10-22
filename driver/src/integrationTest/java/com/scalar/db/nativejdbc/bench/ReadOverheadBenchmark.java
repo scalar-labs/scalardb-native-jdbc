@@ -2108,31 +2108,10 @@ class ReadOverheadBenchmark {
   /**
    * Drops the schemas a run creates, which a container never has but an external database keeps
    * from the run before: the benchmark's, and ScalarDB's metadata and coordinator, which ScalarDB
-   * names in lower case quoted. Oracle 19c has no DROP USER IF EXISTS: ORA-01918 is ignored.
+   * names in lower case quoted.
    */
   private static void dropExisting(Engines e, Connection c) throws SQLException {
-    for (String stored : List.of(e.storedSchema("bn"), "scalardb", "coordinator")) {
-      String schema = e.engine().quote(stored);
-      switch (e.engine()) {
-        case POSTGRESQL:
-          e.execute(c, "DROP SCHEMA IF EXISTS " + schema + " CASCADE");
-          break;
-        case MYSQL:
-        case MARIADB:
-          e.execute(c, "DROP DATABASE IF EXISTS " + schema);
-          break;
-        case ORACLE:
-          e.execute(
-              c,
-              "BEGIN EXECUTE IMMEDIATE 'DROP USER "
-                  + schema
-                  + " CASCADE';"
-                  + " EXCEPTION WHEN OTHERS THEN IF SQLCODE != -1918 THEN RAISE; END IF; END;");
-          break;
-        default:
-          throw new UnsupportedOperationException("dropExisting on " + e.engine());
-      }
-    }
+    e.dropSchemas(c, e.storedSchema("bn"), "scalardb", "coordinator");
   }
 
   /** The settings that change plans, per engine, recorded in each report. */
