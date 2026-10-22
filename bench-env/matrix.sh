@@ -23,6 +23,12 @@ while [ $# -gt 0 ] && [ "$1" != "--" ]; do
 done
 shift || true
 mkdir -p results
+# a failed test's report, its stack trace and output, kept with the run's reports as PREFIX-<file>
+failures() {
+  for f in $(grep -l '<failure' driver/build/test-results/*/*.xml 2>/dev/null); do
+    cp "$f" "results/$1-$(basename "$f")"
+  done
+}
 [ "${READS:-1}" = 0 ] || for n in ${INFLIGHT:-100 10000}; do
   for rep in $(seq 1 "${REPS:-3}") ${CHANGED:+changed}; do
     changed=(); [ "$rep" = changed ] && changed=(-Dnativejdbc.bench.changed=true)
@@ -33,6 +39,7 @@ mkdir -p results
     for f in driver/build/bench/read-overhead-*.md driver/build/bench/explain-*.txt; do
       if [ -e "$f" ]; then mv "$f" "results/i$n-$rep-$(basename "$f")"; fi
     done
+    failures "i$n-$rep"
   done
 done
 if [ -n "${WRITERS:-}" ]; then for rep in $(seq 1 "${REPS:-3}"); do
@@ -43,4 +50,5 @@ if [ -n "${WRITERS:-}" ]; then for rep in $(seq 1 "${REPS:-3}"); do
   for f in driver/build/bench/inflight-writers-*.md driver/build/bench/inflight-plan-*.txt; do
     if [ -e "$f" ]; then mv "$f" "results/writers-$rep-$(basename "$f")"; fi
   done
+  failures "writers-$rep"
 done; fi
