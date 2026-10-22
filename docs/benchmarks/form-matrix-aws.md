@@ -510,6 +510,45 @@ Median ms, CORR or VIEW_CASE against DRIVER (DRIVER / form, so above 1x the form
   the cached hot COUNT at 10,000 it is about even.
 - **VIEW_CASE never helps an aggregate.** It is 1.4x to 10x slower than DRIVER on every full scan.
 
+### Tier A with Oracle Free and MySQL at 1.5 GB
+
+A fourth run, 2026-10-22 12:41 to 13:56 UTC (reports in `bench-env/results/20261022-2140/`). It
+covers the two gaps the 10x run left on tier A. Tier A had never run Oracle, and its MySQL failed
+under the 1 GB cap. The settings are the 10x run's: `scale=10`, `inflightAt=newest`, the same
+modes and queries, two timed repetitions and a changed-data run at 100 and 10,000 in flight. Two
+differences:
+
+- **Oracle is Oracle Free 23.26.** The product caps it at 2 CPUs and 2 GB, and it has no Docker
+  limit.
+- **MySQL is capped at 1.5 GB:** a 640 MB InnoDB pool.
+
+All six sets succeeded on both, and the changed-data runs return VIEW_LJ's rows everywhere. So
+MySQL's correctness on tier A is now checked at 10,000 in flight too. CORR's DISTINCT errored on
+MySQL at 100 and on Oracle at 10,000, as it errored on MySQL in the 10x run.
+
+DRIVER / form at 100 / 10,000 in flight; above 1x the form wins:
+
+| Query | Form | Oracle Free (A) | Oracle 19c (RDS, 10x run) | MySQL 1.5 GB (A) |
+|---|---|---|---|---|
+| COUNT of 1M | CORR | 2.7x / 0.9x | 2.2x / 0.8x | 1.7x / 3.9x |
+| SUM of 5M | CORR | 2.9x / 1.0x | 2.5x / 1.0x | 1.1x / 1.4x |
+| GROUP BY of 1M | CORR | 1.3x / 0.9x | 1.3x / 0.8x | 2.8x / 3.3x |
+| page of 5M, no offset | VIEW_CASE | 229x / 279x | 451x / 538x | 2.2x / 90x |
+| page after 10k | VIEW_CASE | 8.8x / 10x | 12x / 14x | 388x / 3.5x |
+| page: JOIN FK | VIEW_CASE | 824x / 1,410x | 3.3x / 657x | 7.8x / 395x |
+| page: keyset | VIEW_CASE | 1.0x / 1.0x | 1.0x / 1.0x | 1.3x / 15x |
+| page: 3 tables | VIEW_CASE | 198x / 976x | 290x / 1,460x | 24,500x / 14,400x |
+| page: indexed range | VIEW_CASE | 1.0x / 5.1x | 1.0x / 11x | 1.3x / 20x |
+
+- **Oracle 23 behaves like 19c.** CORR wins whole-table aggregates at 100 in flight (1.3x to
+  2.9x) and only ties or loses at 10,000 (0.9x to 1.0x). So the Oracle exception in the READ
+  COMMITTED rules is not a 19c artifact. VIEW_CASE never loses a page on Oracle, the deep OFFSET
+  included (8.8x to 14x).
+- **MySQL at 1.5 GB matches MySQL at 1 GB.** The plain SUM of 5M rows is disk-bound at both caps
+  (4.0 to 4.5 s, against 1.0 s on RDS), so CORR's lead there is small (1.1x to 1.4x), but it wins.
+  The paging and aggregate rules hold.
+- **Nothing here changes the strategy.**
+
 ## Rankings
 
 ### Tier A (EC2)
