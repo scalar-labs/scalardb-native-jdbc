@@ -1,6 +1,6 @@
 # Plan: SQL coverage, isolation and performance testing
 
-Status: accepted 2026-10-20, with the decisions under "Decisions". T0 done, T1 first pass done (see each milestone).
+Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements (see each milestone).
 
 ## Goal
 
@@ -219,16 +219,17 @@ apply, and on Oracle a table's alias loses its `AS`. Per layout, the same in bot
 | engine | passed | refused | failed |
 |---|---|---|---|
 | PostgreSQL | 13,275 | 1,457 | 0 |
-| SQL Server | 13,233 | 1,454 | 45 |
-| Oracle | 11,834 | 1,454 | 1,444 |
-| MySQL | 9,513 | 1,454 | 3,033 |
-| MariaDB | 9,511 | 1,454 | 3,035 |
+| SQL Server | 13,278 | 1,454 | 0 |
+| Oracle | 13,252 | 1,454 | 26 |
+| MySQL | 12,542 | 1,454 | 4 |
+| MariaDB | 12,540 | 1,454 | 6 |
 
-Every refusal is a sign after a sign, `- - 27`, which the parser cannot read (todo 317, P3). Every
-failure is a column label, the values matching: MySQL and MariaDB label an unaliased expression with
-its text and Oracle with that text upper-cased, which the driver rewrites; SQL Server labels
-`+ col` grouped as the split read's alias (todo 320, P2); ten of them on MySQL and MariaDB report
-another integer type too. Found and fixed: `SELECT *` of an imported table listed its key first
+Every refusal is a sign after a sign, `- - 27`, which the parser cannot read (todo 317, P3). The
+failures match in values: on MySQL and MariaDB an integer result reports another integer type
+(todo 321, P3), on Oracle `SELECT *` of a self-join labels its columns `QCSJ_C...` (todo 322, P3).
+Before, an unaliased expression's label differed on every engine but PostgreSQL, the driver
+re-spacing its text or renaming a table in it (MySQL 3,033 failures, MariaDB 3,035, Oracle 1,444,
+SQL Server 45): such an item now keeps its text (todo 320, P2, fixed). Found and fixed: `SELECT *` of an imported table listed its key first
 (todo 316, P1; the setup must run again after an upgrade), and a table named in a query and in its
 subquery was refused on the read views (todo 318). select5, joins of up to 17 tables, is skipped on
 MySQL and MariaDB, whose join-order search takes minutes a query over the read views (todo 319).

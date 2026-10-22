@@ -418,6 +418,44 @@ class SplitTest {
   }
 
   @Test
+  void anUnaliasedExpression_keepsTheLabelTheEngineGivesItsText() {
+    // MySQL labels it with its text as written: kept, where a renamed table is aliased so
+    SqlAst my =
+        SqlAst.parse(
+                "SELECT a.x+1, (select max(b.y) from b), a.x FROM a WHERE a.k = ?", Engine.MYSQL)
+            .orElseThrow();
+    assertThat(split(my, Map.of()).sql())
+        .isEqualTo(
+            "SELECT a.x+1,(select max(b.y) from (select * from b0) b ) AS `(select max(b.y) from b)`, a.x FROM (select * from a0) a WHERE a.k = ? UNION ALL SELECT a.x+1,(select max(b.y) from (select * from b1) b ) AS `(select max(b.y) from b)`, a.x FROM (select * from a1) a WHERE a.k = ?");
+    assertThat(my.joinTokens(r -> "rc_" + r.name()))
+        .isEqualTo(
+            "SELECT a.x+1,(select max(b.y) from rc_b b ) AS `(select max(b.y) from b)`, a.x FROM rc_a a WHERE a.k = ?");
+    // Oracle by its text upper-cased, blanks removed
+    SqlAst ora =
+        SqlAst.parse("SELECT (select max(b.y) from b) FROM a", Engine.ORACLE).orElseThrow();
+    assertThat(ora.joinTokens(r -> "rc_" + r.name()))
+        .isEqualTo("SELECT(select max(b.y) from rc_b b ) AS \"(SELECTMAX(B.Y)FROMB)\" FROM rc_a");
+    SqlAst oraGrouped =
+        SqlAst.parse("SELECT + ( a.x ) FROM a GROUP BY a.x", Engine.ORACLE).orElseThrow();
+    assertThat(split(oraGrouped, Map.of()).sql()).startsWith("SELECT +(v.g1) AS x FROM");
+    // SQL Server, MySQL and MariaDB label + col and (col) as the column
+    SqlAst ms =
+        SqlAst.parse("SELECT + a.x, ( + a.y ) FROM a GROUP BY a.x, a.y", Engine.SQLSERVER)
+            .orElseThrow();
+    assertThat(split(ms, Map.of()).sql())
+        .isEqualTo(
+            "SELECT + v.g1 AS x,(+ v.g2) AS y FROM (SELECT a.x AS g1, a.y AS g2 FROM (select * from a0) a GROUP BY a.x, a.y UNION ALL SELECT a.x AS g1, a.y AS g2 FROM (select * from a1) a GROUP BY a.x, a.y) v GROUP BY v.g1, v.g2");
+    // in a lifted read, an item that keeps its columns keeps its text too
+    SqlAst grouped =
+        SqlAst.parse(
+                "SELECT + a.x, CAST( NULL AS SIGNED ), ( + 39 ) FROM a GROUP BY a.x", Engine.MYSQL)
+            .orElseThrow();
+    assertThat(split(grouped, Map.of()).sql())
+        .isEqualTo(
+            "SELECT + v.g1 AS `x`, CAST(NULL AS SIGNED) AS `CAST( NULL AS SIGNED )`,(+ 39) AS `39` FROM (SELECT a.x AS g1 FROM (select * from a0) a GROUP BY a.x UNION ALL SELECT a.x AS g1 FROM (select * from a1) a GROUP BY a.x) v GROUP BY v.g1");
+  }
+
+  @Test
   void emitSplit_combinesPartialAggregates_onTheOtherEngines() {
     SqlAst ast =
         SqlAst.parse(

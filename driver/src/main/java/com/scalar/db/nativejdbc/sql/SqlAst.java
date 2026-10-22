@@ -36,6 +36,7 @@ import net.sf.jsqlparser.expression.LongValue;
 import net.sf.jsqlparser.expression.MySQLGroupConcat;
 import net.sf.jsqlparser.expression.NextValExpression;
 import net.sf.jsqlparser.expression.NotExpression;
+import net.sf.jsqlparser.expression.SignedExpression;
 import net.sf.jsqlparser.expression.StringValue;
 import net.sf.jsqlparser.expression.UserVariable;
 import net.sf.jsqlparser.expression.VariableAssignment;
@@ -1716,6 +1717,7 @@ public final class SqlAst {
         return null;
       }
     }
+    keepLabels(from, to, Map.of());
     if (numbered) {
       int n = 0;
       for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
@@ -3864,6 +3866,8 @@ public final class SqlAst {
     if (!onTop) {
       List<String> texts = new ArrayList<>();
       for (int c = 0; c < copies.size(); c++) {
+        // the first copy's labels are the result's; the select list on top keeps them otherwise
+        keepLabels(edits.get(c).from, edits.get(c).to, edits.get(c).splices);
         Emitter e = new Emitter(edits.get(c), placeholders, sources);
         if (extras == 0) {
           e.tokens(start, null);
@@ -4657,6 +4661,9 @@ public final class SqlAst {
         if (label == null) {
           return null;
         }
+      } else if (engine == Engine.MYSQL || engine == Engine.MARIADB || engine == Engine.ORACLE) {
+        // re-emitted, the item is re-spaced: give it its text as written (todo 320)
+        label = Objects.requireNonNullElse(expressionLabel(e, first, last), "");
       }
       lift.outer.add(new Part(first, last, label.isEmpty() ? "" : "AS " + label));
     }
@@ -4681,6 +4688,24 @@ public final class SqlAst {
    * labels no expression, PostgreSQL labels a function call by its name, and MySQL, MariaDB and
    * Oracle by the expression's text.
    */
+  /**
+   * The expression inside {@code + x} or {@code (x)}: every engine but PostgreSQL labels such a
+   * column as the column, and MySQL and MariaDB such a number as the number.
+   */
+  private static Expression unwrapped(Expression e) {
+    Expression x = e;
+    while (true) {
+      if (x instanceof SignedExpression && ((SignedExpression) x).getSign() == '+') {
+        x = ((SignedExpression) x).getExpression();
+      } else if (x instanceof ParenthesedExpressionList
+          && ((ParenthesedExpressionList<?>) x).size() == 1) {
+        x = ((ParenthesedExpressionList<?>) x).get(0);
+      } else {
+        return x;
+      }
+    }
+  }
+
   private @Nullable String expressionLabel(Expression e, Token first, Token last) {
     if (engine != Engine.SQLSERVER && engine != Engine.POSTGRESQL) {
       for (Token t = first; t != null; t = t.next) {
@@ -4692,19 +4717,29 @@ public final class SqlAst {
         }
       }
     }
+    Expression bare = unwrapped(e);
     switch (engine) {
       case SQLSERVER:
-        return "";
+        return bare instanceof Column ? columnLabel((Column) bare) : "";
       case POSTGRESQL:
         return e instanceof Function ? "" : null;
       case MYSQL:
       case MARIADB:
         {
+          if (bare instanceof Column) {
+            return columnLabel((Column) bare);
+          }
+          if (bare instanceof LongValue) {
+            return engine.quote(((LongValue) bare).getStringValue());
+          }
           String text = sourceText(first, last);
           return text == null || text.length() > 64 ? null : engine.quote(text);
         }
       case ORACLE:
         {
+          if (bare instanceof Column) {
+            return columnLabel((Column) bare);
+          }
           String text = sourceText(first, last);
           if (text == null) {
             return null;
@@ -4715,6 +4750,79 @@ public final class SqlAst {
         }
     }
     throw new AssertionError(engine);
+  }
+
+  /**
+   * Keeps the label MySQL, MariaDB and Oracle give an unaliased expression in the select list, its
+   * text as written (todo 320): the emitter re-spaces tokens, so such an item is emitted as
+   * written; one whose text the rewrite changes, a table renamed in it, gets the label as its
+   * alias. An item with a placeholder, which MySQL labels with the value bound, or a splice is left
+   * as it is.
+   *
+   * @param from the replacements, to which the items' texts and aliases are added
+   * @param to where each replacement ends
+   * @param splices the splices, keyed by their first token
+   */
+  private void keepLabels(Map<Token, String> from, Map<Token, Token> to, Map<Token, ?> splices) {
+    if ((engine != Engine.MYSQL && engine != Engine.MARIADB && engine != Engine.ORACLE)
+        || !(statement instanceof PlainSelect)) {
+      return;
+    }
+    for (SelectItem<?> item : ((PlainSelect) statement).getSelectItems()) {
+      Expression e = item.getExpression();
+      Node n = item.getASTNode();
+      Token first = n == null ? null : n.jjtGetFirstToken();
+      Token last = n == null ? null : n.jjtGetLastToken();
+      if (item.getAlias() != null
+          || e instanceof Column
+          || e instanceof AllColumns
+          || first == null
+          || last == null
+          || first == last) {
+        continue;
+      }
+      boolean replaced = false;
+      boolean skip = false;
+      Token aliasAt = last; // the replacement the alias follows: one ending at the last token
+      for (Token t = first; t != null; t = t.next) {
+        if (t.image.equals("?") || splices.containsKey(t)) {
+          skip = true;
+          break;
+        }
+        Token end = from.containsKey(t) ? to.get(t) : null;
+        if (end != null) {
+          replaced = true;
+          if (end == last) {
+            aliasAt = t;
+          }
+          t = end;
+        }
+        if (t == last) {
+          break;
+        }
+      }
+      if (skip) {
+        continue;
+      }
+      if (!replaced) {
+        String text = sourceText(first, last);
+        if (text != null) {
+          from.put(first, text);
+          to.put(first, last);
+        }
+        continue;
+      }
+      String label = expressionLabel(e, first, last);
+      if (label == null || label.isEmpty()) {
+        continue;
+      }
+      if (aliasAt == last && !from.containsKey(last)) {
+        from.put(last, last.image + " AS " + label);
+        to.put(last, last);
+      } else if (to.get(aliasAt) == last) {
+        from.put(aliasAt, from.get(aliasAt) + " AS " + label);
+      }
+    }
   }
 
   /**

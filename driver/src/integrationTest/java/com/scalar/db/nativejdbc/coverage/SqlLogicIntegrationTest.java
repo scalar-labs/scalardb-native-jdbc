@@ -167,6 +167,9 @@ class SqlLogicIntegrationTest {
       int filePassed = 0;
       int fileRefused = 0;
       int fileFailed = 0;
+      // the database labels an expression by its text, which names the plain schema
+      Pattern plainName =
+          Pattern.compile("(?i)(" + Pattern.quote(e.storedSchema(scalarDb)) + ")p(?!\\w)");
       try (Connection vendor = e.open();
           Connection driver = e.openDriver()) {
         for (Item r : queries) {
@@ -176,6 +179,9 @@ class SqlLogicIntegrationTest {
               WriteCorpusIntegrationTest.Outcome.run(driver, through);
           WriteCorpusIntegrationTest.Outcome expected =
               WriteCorpusIntegrationTest.Outcome.run(vendor, qualified(sql, e.storedSchema(plain)));
+          if (expected.rows != null) {
+            expected.rows.columns.replaceAll(c -> plainName.matcher(c).replaceAll("$1"));
+          }
           String outcome = WriteCorpusIntegrationTest.compare(expected, actual);
           String shown = r.sql.replace('\n', ' ');
           if (outcome.startsWith("refused")) {
