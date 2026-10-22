@@ -278,6 +278,19 @@ class SqlAstTest {
   }
 
   @Test
+  void joinTokens_aliasesTablesOfOneNameInNestedQueries_eachWithItsName() {
+    // the inner t1 hides the outer one as its name did; x.b < t1.b names the outer one
+    SqlAst ast =
+        parse(
+            "select (select avg(c) from t1), (select count(*) from t1 as x where x.b < t1.b)"
+                + " from t1");
+    assertThat(ast.joinTokens(ref -> "rc_t1"))
+        .isEqualTo(
+            "select(select avg(c) from rc_t1 t1),(select count(*) from rc_t1 as x where x.b <"
+                + " t1.b) from rc_t1 t1");
+  }
+
+  @Test
   void cteBody_seesTheTableOfTheSameName_unlessRecursive() {
     SqlAst shadow =
         parse("with orders as (select * from orders where id = 1) select * from orders");

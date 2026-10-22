@@ -464,7 +464,7 @@ public final class SqlAst {
       if (!seen.add(t)) {
         continue; // the walk returns the body of a CTE twice
       }
-      TableRef ref = new TableRef(t, false);
+      TableRef ref = new TableRef(t, false, walker.scopes.get(t));
       String name = key(engine, t.getName());
       if (t.getSchemaName() == null
           && cteKeys.contains(name)
@@ -1777,15 +1777,19 @@ public final class SqlAst {
     }
     // A replaced reference without an alias may be named by a column qualifier. The only alias that
     // keeps such a qualifier meaning the same table is the table's own name, so it gets that one.
+    // Two of one name in one FROM, of two schemas, would share it; in nested queries the inner
+    // one's hides the outer one's as its name did (todo 318)
     List<TableRef> renamedWithoutAlias = new ArrayList<>();
-    Set<String> aliasesGiven = new LinkedHashSet<>();
+    Map<PlainSelect, Set<String>> aliasesGiven = new IdentityHashMap<>();
     for (TableRef r : plan.tables.keySet()) {
       if (r.hasAlias()) {
         continue;
       }
       renamedWithoutAlias.add(r);
       if (aliasAll || usedAsColumnQualifier(r)) {
-        if (!aliasesGiven.add(key(engine, r.name()))) {
+        if (!aliasesGiven
+            .computeIfAbsent(r.scope, k -> new HashSet<>())
+            .add(key(engine, r.name()))) {
           plan.unrepresentable = true; // two tables of one name would share the alias
         }
         plan.aliases.put(r, r.name());
@@ -4792,15 +4796,17 @@ public final class SqlAst {
   public static final class TableRef {
     private final Table node;
     private final boolean qualifier;
+    private final @Nullable PlainSelect scope; // the query whose FROM holds it; null for the top
 
     /** The parser's node. */
     Table node() {
       return node;
     }
 
-    private TableRef(Table node, boolean qualifier) {
+    private TableRef(Table node, boolean qualifier, @Nullable PlainSelect scope) {
       this.node = node;
       this.qualifier = qualifier;
+      this.scope = scope;
     }
 
     /**
@@ -4952,7 +4958,7 @@ public final class SqlAst {
      */
     public @Nullable TableRef qualifier() {
       Table t = qualifierNode();
-      return t == null ? null : new TableRef(t, true);
+      return t == null ? null : new TableRef(t, true, null);
     }
 
     private @Nullable Table qualifierNode() {
@@ -4997,7 +5003,11 @@ public final class SqlAst {
     /** For each table node, the non-recursive CTEs whose bodies contain it, names as written. */
     final Map<Table, List<String>> enclosingCtes = new IdentityHashMap<>();
 
+    /** For each table node, the query whose FROM holds it; none for the statement's own. */
+    final Map<Table, PlainSelect> scopes = new IdentityHashMap<>();
+
     private final Deque<String> withBodies = new ArrayDeque<>();
+    private final Deque<PlainSelect> open = new ArrayDeque<>();
 
     @Override
     public <S> Void visit(PlainSelect plainSelect, S context) {
@@ -5009,7 +5019,12 @@ public final class SqlAst {
           parameters.add(e); // TOP ? is neither a tree node nor visited
         }
       }
-      return super.visit(plainSelect, context);
+      open.push(plainSelect);
+      try {
+        return super.visit(plainSelect, context);
+      } finally {
+        open.pop();
+      }
     }
 
     @Override
@@ -5051,6 +5066,10 @@ public final class SqlAst {
     @Override
     public <S> Void visit(Table table, S context) {
       tables.add(table);
+      PlainSelect scope = open.peek();
+      if (scope != null) {
+        scopes.put(table, scope);
+      }
       if (!withBodies.isEmpty()) {
         enclosingCtes.computeIfAbsent(table, k -> new ArrayList<>()).addAll(withBodies);
       }
