@@ -176,7 +176,12 @@ cost one indexed statement: 0.5-2 ms for the predicate check and 0.4-2.4 ms for 
   because it joined the data table for the before images; it now reads them from the metadata
   table alone, 47 → 0.7 ms.
 - **In-flight pairs, joins:** aborts fall to 0-3% at 1, 4 and 16 writers on all five engines,
-  about the single-table check's level. Checking each table against only its own conditions does
+  about the single-table check's level. Through the driver on branch `stage2-inflight-pairs`
+  (laptop containers, `-Dnativejdbc.bench.writersRead=join`: grouped reads of `o JOIN c` beside
+  ScalarDB writers on both tables), reads committed/s, check off → on: PostgreSQL 122 → 545 at 4
+  writers and 0 → 327 at 16, ScalarDB's commits unchanged; MariaDB 164 → 419 and 1 → 242,
+  ScalarDB's commits 10-14% lower. MySQL, which keeps the table-wide check for joins, stays as
+  it was (86 against 79 at 4 writers). Checking each table against only its own conditions does
   not work: a lookup table usually has none, is checked whole, and still aborts 64-98% at four
   writers.
 
