@@ -194,6 +194,23 @@ Retries fall to 0.08 per commit or fewer. ScalarDB's commits fall on both where 
 beside them, as with the one-table check on Oracle 23 Free (2 CPUs) and on this laptop's emulated
 SQL Server; on dedicated machines that is to be measured.
 
+On AWS, run `20261023-1231` (SQL Server 2022 Developer on EC2 in Docker at 1.5 GB, Oracle 19c SE2
+on RDS db.m5.2xlarge; two runs each), reads committed/s, check off → on:
+
+| engine | 1 writer | 4 writers | 16 writers | ScalarDB's commits at 4 / 16 |
+|---|---|---|---|---|
+| SQL Server (EC2) | 722-761 → 826-898 | 55-80 → 104-136 | 0 → 8-14 | 639-653 → 569-578 / 2,120-2,192 → 1,657-1,711 |
+| Oracle 19c (RDS) | 374-391 → 203-210 | 0-2 → 97 | 0 → 78 | 616-624 → 505-506 / 1,880-1,947 → 1,156-1,238 |
+
+- **Neither gains as PostgreSQL and MariaDB do** (1,514-1,575 and 427-462 at four writers on EC2).
+- **SQL Server**: reads gain 70-90% at four writers, but at sixteen p50 is 224-360 ms and p99 2-3 s;
+  ScalarDB's commits 11% lower at four, 20-24% at sixteen.
+- **Oracle 19c loses at one writer**: 45% fewer reads, p50 10 → 16 ms, so the check costs about
+  6 ms a read there; from four writers on, reads that never finished do. ScalarDB's commits 18%
+  lower at four, 36-38% at sixteen.
+- So the check's own cost on these two is to be measured on the AWS machines (the static mode, a
+  fixed number of rows in flight, and the plans) before either takes this form.
+
 ## Reads beside ScalarDB writers (stage 1, one table)
 
 `scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:

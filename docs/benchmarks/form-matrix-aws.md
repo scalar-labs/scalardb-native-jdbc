@@ -157,7 +157,7 @@ committed 90/s at 72 retries per commit. On a join, 44-53% of reads abort at one
 | Shape | Check | Status |
 |---|---|---|
 | One table, pure WHERE clause | **Predicate check**: the WHERE clause over the in-flight rows' before and after images; abort only on a match | Built (`scalardbnative.predicateChecks`, `predicate-checks` branch), measured on AWS |
-| Joins and semi-joined subqueries the split read covers | **In-flight pairs**: the statement as `SELECT 1` over every combination with at least one table's row in flight, by its before or after image, and the data tables for the rest | Built for PostgreSQL and MariaDB (main) and for Oracle and SQL Server (branch `pairs-oracle-sqlserver`), two or three tables; measured on EC2 for PostgreSQL and MariaDB, on the laptop for Oracle and SQL Server |
+| Joins and semi-joined subqueries the split read covers | **In-flight pairs**: the statement as `SELECT 1` over every combination with at least one table's row in flight, by its before or after image, and the data tables for the rest | Built for PostgreSQL and MariaDB (main) and for Oracle and SQL Server (branch `pairs-oracle-sqlserver`), two or three tables; measured on EC2 for PostgreSQL and MariaDB; on AWS, Oracle 19c and SQL Server gain less and Oracle 19c loses at one writer (`inflight-check.md`) |
 | Scalar subqueries, CTEs, past the copy limit | Table-wide check, as today | - |
 
 Both narrowed checks run only when the cheap table-wide probe finds a row in flight. Then they
