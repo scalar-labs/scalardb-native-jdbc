@@ -1,6 +1,6 @@
 # Plan: SQL coverage, isolation and performance testing
 
-Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements (see each milestone).
+Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append (see each milestone).
 
 ## Goal
 
@@ -265,6 +265,22 @@ history with Elle. Our part is one Java node. No Clojure.
 - **The checker must catch something.** Two runs must fail: the driver with passthrough on (`setClientInfo`
   `scalardbnative.passthrough`, no protocol at all), and SERIALIZABLE without the ScalarDB settings the README requires. If they pass,
   the workload is too weak to show anything.
+
+**List-append done 2026-10-23** (`isolation/ListAppendIntegrationTest`, `-Dnativejdbc.isolation=true`;
+Maelstrom v0.2.4 fetched and checked by its hash; the node is `isolation/MaelstromNode`, started with
+the test's database as the fixtures' external one). Per engine and level, in both layouts, two runs:
+driver and ScalarDB (`n0`, `n1`), checked against the weaker level, and the driver on both nodes,
+checked against its own. ScalarDB's SNAPSHOT is read-committed snapshot isolation, which allows read
+skew (its documentation; a SQL Server run found one inside a ScalarDB transaction), so a mixed
+SNAPSHOT run is checked as Elle's cursor stability, read committed without lost updates; a
+driver-only one as snapshot isolation. Result, 20 seconds a run, SERIALIZABLE 60: every run valid,
+about 800 transactions committed a run (2,200 at 60 seconds), a tenth aborted. The two that must
+fail do, on every engine: a plain vendor connection in the driver's place (G0, and G1c and
+incompatible orders on SQL Server), and SERIALIZABLE without ScalarDB's settings (G2-item, and
+G-single-item on MariaDB and SQL Server, every cycle with driver and ScalarDB transactions in it; on
+SQL Server only at 60 seconds, which is why those runs are as long). Passthrough was the first
+control, until the discussion it started made the driver refuse it on ScalarDB tables (todo 323).
+Left: `txn-rw-register`, the bank test, the faults, and the long runs in the cloud.
 
 ### Milestone T6: performance, with BenchBase
 

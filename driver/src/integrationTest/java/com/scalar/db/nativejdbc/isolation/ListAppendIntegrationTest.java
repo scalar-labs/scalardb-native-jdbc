@@ -1,0 +1,371 @@
+package com.scalar.db.nativejdbc.isolation;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.api.TableMetadata;
+import com.scalar.db.io.DataType;
+import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.engine.Engine;
+import com.scalar.db.nativejdbc.setup.Setup;
+import com.scalar.db.nativejdbc.testing.Engines;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.sql.Connection;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+/**
+ * Isolation with Maelstrom and Elle (testing plan T5): Maelstrom's {@code txn-list-append} workload
+ * against two {@link MaelstromNode}s on one ScalarDB table, and Elle checking the history.
+ *
+ * <ul>
+ *   <li>{@link Sides#MIXED}: {@code n0} runs its transactions through the driver and {@code n1}
+ *       through ScalarDB, ScalarDB with the settings the README gives the level, and the history is
+ *       checked against the weaker of the two levels: ScalarDB's SNAPSHOT is read-committed
+ *       snapshot isolation, which allows read skew (its documentation), so SNAPSHOT is checked as
+ *       Elle's cursor stability, read committed without lost updates;
+ *   <li>{@link Sides#DRIVER}: both nodes through the driver, checked against the driver's level.
+ * </ul>
+ *
+ * <p>Two runs must fail, or the workload shows nothing: a plain vendor connection in the driver's
+ * place, which runs no protocol, and SERIALIZABLE without ScalarDB's settings; these and the
+ * SERIALIZABLE runs last at least {@value #ANOMALY_SECONDS} seconds.
+ *
+ * <p>{@code -Dnativejdbc.isolation=true}; {@code -Dnativejdbc.isolation.seconds} sets each run's
+ * length (default 30), {@code -Dnativejdbc.isolation.rate} its requests a second (default 50).
+ */
+@EnabledIfSystemProperty(named = "nativejdbc.isolation", matches = "true")
+@SuppressFBWarnings(
+    value = {"SQL_INJECTION_JDBC", "COMMAND_INJECTION"},
+    justification = "statements and commands written in the test sources")
+class ListAppendIntegrationTest {
+
+  private static final String MAELSTROM = "v0.2.4";
+  private static final String MAELSTROM_SHA256 =
+      "301ec71d6b12af0d765edb413f5cf5aa1046b5609bd4e31376a0b549548e5799";
+  private static final Path HOME = Path.of("build", "maelstrom", MAELSTROM);
+  private static final String VALID = "Everything looks good!";
+  private static final String INVALID = "Analysis invalid!";
+  // SQL Server at SERIALIZABLE commits few transactions: 20 seconds showed no anomaly there without
+  // ScalarDB's settings, 60 did; the runs with them are as long, for the comparison to hold
+  private static final int ANOMALY_SECONDS = 60;
+
+  enum Level {
+    READ_COMMITTED(Connection.TRANSACTION_READ_COMMITTED, "read-committed", "read-committed"),
+    SNAPSHOT(Connection.TRANSACTION_REPEATABLE_READ, "cursor-stability", "snapshot-isolation"),
+    SERIALIZABLE(Connection.TRANSACTION_SERIALIZABLE, "serializable", "serializable");
+
+    final int jdbc;
+    final String mixed;
+    final String driver;
+
+    Level(int jdbc, String mixed, String driver) {
+      this.jdbc = jdbc;
+      this.mixed = mixed;
+      this.driver = driver;
+    }
+  }
+
+  enum Sides {
+    MIXED("n0"),
+    DRIVER("n0,n1");
+
+    final String drivers;
+
+    Sides(String drivers) {
+      this.drivers = drivers;
+    }
+  }
+
+  static Stream<Arguments> runs() {
+    List<Arguments> runs = new ArrayList<>();
+    for (Engines e : engines().toList()) {
+      for (Level level : Level.values()) {
+        // Oracle refuses SERIALIZABLE (design section 5)
+        if (level == Level.SERIALIZABLE && e.engine() == Engine.ORACLE) {
+          continue;
+        }
+        for (Sides sides : Sides.values()) {
+          for (boolean inline : List.of(false, true)) {
+            runs.add(Arguments.of(e, level, sides, inline));
+          }
+        }
+      }
+    }
+    return runs.stream();
+  }
+
+  static Stream<Engines> engines() {
+    return Engines.selected().stream().filter(e -> e != Engines.MYSQL_LOWER_CASE);
+  }
+
+  @ParameterizedTest(name = "{0} {1} {2} inline={3}")
+  @MethodSource("runs")
+  void listAppend_holdsTheLevel(Engines e, Level level, Sides sides, boolean inline)
+      throws Exception {
+    String model = sides == Sides.MIXED ? level.mixed : level.driver;
+    String output =
+        run(
+            e,
+            level.name() + "-" + sides + (inline ? "-inline" : ""),
+            level,
+            scalarDbSettings(e, level),
+            sides.drivers,
+            inline,
+            false,
+            model,
+            level == Level.SERIALIZABLE ? ANOMALY_SECONDS : 0);
+    assertThat(output).contains(VALID);
+  }
+
+  /** A vendor connection runs no protocol: not even read committed holds. */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("engines")
+  void listAppend_failsWithoutTheDriver(Engines e) throws Exception {
+    String output =
+        run(
+            e,
+            "VENDOR",
+            Level.READ_COMMITTED,
+            new Properties(),
+            Sides.MIXED.drivers,
+            true,
+            true,
+            Level.READ_COMMITTED.mixed,
+            ANOMALY_SECONDS);
+    assertThat(output).contains(INVALID);
+  }
+
+  /** SERIALIZABLE between the driver and ScalarDB needs ScalarDB's settings (README). */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("engines")
+  void listAppend_failsAtSerializableWithoutScalarDbsSettings(Engines e) throws Exception {
+    assumeTrue(e.engine() != Engine.ORACLE, "Oracle refuses SERIALIZABLE");
+    String output =
+        run(
+            e,
+            "SERIALIZABLE-UNSET",
+            Level.SERIALIZABLE,
+            new Properties(),
+            Sides.MIXED.drivers,
+            false,
+            false,
+            Level.SERIALIZABLE.mixed,
+            ANOMALY_SECONDS);
+    assertThat(output).contains(INVALID);
+  }
+
+  /** One Maelstrom run, its output; the run's files in {@code build/isolation/<engine>/<name>/}. */
+  private static String run(
+      Engines e,
+      String name,
+      Level level,
+      Properties scalarDb,
+      String drivers,
+      boolean inline,
+      boolean vendor,
+      String model,
+      int minimumSeconds)
+      throws Exception {
+    Path maelstrom = maelstrom();
+    String table = "kv_" + name.toLowerCase(Locale.ROOT).replace('-', '_');
+    String namespace = e.storedSchema("iso");
+    String kv = e.storedTable(table);
+    String k = e.storedColumn("k");
+    String v = e.storedColumn("v");
+    try (DistributedTransactionAdmin admin = e.scalarDb(scalarDb).getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace(namespace, true);
+      admin.dropTable(namespace, kv, true);
+      admin.createTable(
+          namespace,
+          kv,
+          TableMetadata.newBuilder()
+              .addColumn(k, DataType.INT)
+              .addColumn(v, DataType.TEXT)
+              .addPartitionKey(k)
+              .build(),
+          inline ? Map.of() : Map.of("transaction-metadata-decoupling", "true"));
+    }
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
+                  c,
+                  t -> t.namespace().equals(namespace),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .allMatch(Setup.Result::succeeded, "setup succeeded");
+    }
+
+    Path run = Path.of("build", "isolation", e.name(), name);
+    if (Files.exists(run.resolve("store"))) {
+      // a run of an earlier build: Maelstrom adds to it otherwise
+      Files.move(run, run.resolveSibling(name + "-" + System.currentTimeMillis()));
+    }
+    Files.createDirectories(run);
+    List<String> node = new ArrayList<>();
+    node.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+    node.add("-cp");
+    node.add(System.getProperty("java.class.path"));
+    String prefix = "-Dnativejdbc." + e.name().toLowerCase(Locale.ROOT) + ".";
+    node.add("-Dnativejdbc.engines=" + e.name().toLowerCase(Locale.ROOT));
+    node.add(prefix + "url=" + e.url());
+    node.add(prefix + "username=" + e.username());
+    node.add(prefix + "password=" + e.password());
+    node.add("-Diso.engine=" + e.name());
+    node.add("-Diso.table=iso." + table);
+    node.add("-Diso.namespace=" + namespace);
+    node.add("-Diso.kv=" + kv);
+    node.add("-Diso.k=" + k);
+    node.add("-Diso.v=" + v);
+    node.add("-Diso.concat=" + concat(e.engine()));
+    node.add("-Diso.level=" + level.jdbc);
+    node.add("-Diso.drivers=" + drivers);
+    node.add("-Diso.vendor=" + vendor);
+    for (String property : scalarDb.stringPropertyNames()) {
+      node.add("-Diso.prop." + property + "=" + scalarDb.getProperty(property));
+    }
+    node.add(MaelstromNode.class.getName());
+    Path script = run.resolve("node.sh");
+    StringBuilder sh = new StringBuilder("#!/bin/sh\nexec");
+    for (String arg : node) {
+      sh.append(" '").append(arg.replace("'", "'\\''")).append('\'');
+    }
+    Files.writeString(script, sh.append('\n').toString(), StandardCharsets.UTF_8);
+    assertThat(script.toFile().setExecutable(true)).isTrue();
+
+    String seconds =
+        String.valueOf(
+            Math.max(
+                minimumSeconds,
+                Integer.parseInt(System.getProperty("nativejdbc.isolation.seconds", "30"))));
+    List<String> test =
+        List.of(
+            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            "-Djava.awt.headless=true",
+            "-jar",
+            maelstrom.toAbsolutePath().toString(),
+            "test",
+            "-w",
+            "txn-list-append",
+            "--bin",
+            script.toAbsolutePath().toString(),
+            "--node-count",
+            "2",
+            "--concurrency",
+            "4n",
+            "--time-limit",
+            seconds,
+            "--rate",
+            System.getProperty("nativejdbc.isolation.rate", "50"),
+            "--consistency-models",
+            model);
+    Path log = run.resolve("maelstrom.log");
+    Process p =
+        new ProcessBuilder(test)
+            .directory(run.toFile())
+            .redirectErrorStream(true)
+            .redirectOutput(log.toFile())
+            .start();
+    assertThat(p.waitFor(Long.parseLong(seconds) + 600, TimeUnit.SECONDS))
+        .as("Maelstrom ends")
+        .isTrue();
+    String output = Files.readString(log, StandardCharsets.UTF_8);
+    assertThat(output)
+        .as("%s %s checked as %s: Elle's verdict, in %s", e, name, model, run.resolve("store"))
+        .containsAnyOf(VALID, INVALID);
+    return output;
+  }
+
+  /** ScalarDB's settings the README gives the level. */
+  private static Properties scalarDbSettings(Engines e, Level level) {
+    Properties p = new Properties();
+    if (level == Level.SERIALIZABLE) {
+      p.setProperty("scalar.db.consensus_commit.isolation_level", "SERIALIZABLE");
+      if (e.engine() == Engine.POSTGRESQL) {
+        p.setProperty("scalar.db.jdbc.isolation_level", "SERIALIZABLE");
+      }
+    }
+    return p;
+  }
+
+  /** The SQL that appends the parameter to {@code v}. */
+  private static String concat(Engine engine) {
+    return switch (engine) {
+      case MYSQL, MARIADB -> "CONCAT(v, ?)";
+      case SQLSERVER -> "v + ?";
+      default -> "v || ?";
+    };
+  }
+
+  /** Maelstrom's jar, fetched once into {@code build/maelstrom/<version>/} and checked. */
+  private static Path maelstrom() throws IOException, InterruptedException {
+    Path jar = HOME.resolve("maelstrom/lib/maelstrom.jar");
+    if (Files.exists(jar)) {
+      return jar;
+    }
+    Files.createDirectories(HOME);
+    Path archive = HOME.resolve("maelstrom.tar.bz2");
+    HttpResponse<InputStream> r =
+        HttpClient.newBuilder()
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .build()
+            .send(
+                HttpRequest.newBuilder(
+                        URI.create(
+                            "https://github.com/jepsen-io/maelstrom/releases/download/"
+                                + MAELSTROM
+                                + "/maelstrom.tar.bz2"))
+                    .build(),
+                HttpResponse.BodyHandlers.ofInputStream());
+    if (r.statusCode() != 200) {
+      throw new IOException("Maelstrom " + MAELSTROM + ": HTTP " + r.statusCode());
+    }
+    try (InputStream in = r.body()) {
+      Files.copy(in, archive);
+    }
+    try {
+      String sha256 =
+          HexFormat.of()
+              .formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(archive)));
+      if (!sha256.equals(MAELSTROM_SHA256)) {
+        Files.delete(archive);
+        throw new IOException("Maelstrom " + MAELSTROM + ": SHA-256 " + sha256);
+      }
+    } catch (java.security.NoSuchAlgorithmException ex) {
+      throw new IllegalStateException(ex);
+    }
+    Process tar =
+        new ProcessBuilder("tar", "xjf", archive.getFileName().toString())
+            .directory(HOME.toFile())
+            .inheritIO()
+            .start();
+    if (tar.waitFor() != 0) {
+      throw new IOException("Maelstrom " + MAELSTROM + ": tar failed");
+    }
+    return jar;
+  }
+}
