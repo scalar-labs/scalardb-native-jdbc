@@ -157,14 +157,14 @@ committed 90/s at 72 retries per commit. On a join, 44-53% of reads abort at one
 | Shape | Check | Status |
 |---|---|---|
 | One table, pure WHERE clause | **Predicate check**: the WHERE clause over the in-flight rows' before and after images; abort only on a match | Built (`scalardbnative.predicateChecks`, `predicate-checks` branch), measured on AWS |
-| Joins and semi-joined subqueries the split read covers | **In-flight pairs**: the statement as `SELECT 1` over every combination with at least one table's row in flight, by its before or after image, and the data tables for the rest | Designed and measured as SQL; not built |
+| Joins and semi-joined subqueries the split read covers | **In-flight pairs**: the statement as `SELECT 1` over every combination with at least one table's row in flight, by its before or after image, and the data tables for the rest | Built on branch `stage2-inflight-pairs` for PostgreSQL and MariaDB, two or three tables; measured through the driver on the laptop and on EC2 |
 | Scalar subqueries, CTEs, past the copy limit | Table-wide check, as today | - |
 
 Both narrowed checks run only when the cheap table-wide probe finds a row in flight. Then they
 cost one indexed statement: 0.5-2 ms for the predicate check and 0.4-2.4 ms for in-flight pairs.
 
 **Measured** (the reports are `bench-env/results/20261022-0044/*/writers-*.md`, `20261022-2108`,
-`20261023-0132` and `20261023-0147`; the method is in [the in-flight check benchmark](inflight-check.md) on
+`20261023-0132`, `20261023-0147` and `20261023-1010`; the method is in [the in-flight check benchmark](inflight-check.md) on
 `predicate-checks`):
 
 - **Predicate check, reads committed/s, check off → on:**
@@ -179,7 +179,16 @@ cost one indexed statement: 0.5-2 ms for the predicate check and 0.4-2.4 ms for 
   because it joined the data table for the before images; it now reads them from the metadata
   table alone, 47 → 0.7 ms.
 - **In-flight pairs, joins:** aborts fall to 0-3% at 1, 4 and 16 writers on all five engines,
-  about the single-table check's level. Checking each table against only its own conditions does
+  about the single-table check's level. Through the driver on branch `stage2-inflight-pairs`
+  (laptop containers, `-Dnativejdbc.bench.writersRead=join`: grouped reads of `o JOIN c` beside
+  ScalarDB writers on both tables), reads committed/s, check off → on: PostgreSQL 122 → 545 at 4
+  writers and 0 → 327 at 16, ScalarDB's commits unchanged; MariaDB 164 → 419 and 1 → 242,
+  ScalarDB's commits 10-14% lower. MySQL, which keeps the table-wide check for joins, stays as
+  it was (86 against 79 at 4 writers). On EC2 (tier A, Docker capped at 1.5 GB, two runs,
+  `20261023-1010`), check off → on: PostgreSQL 357-400 → 1,514-1,575 at 4 writers and 0 → 950-963
+  at 16, p99 at 4 writers 75-92 → 3.4-3.5 ms, ScalarDB's commits unchanged at 4 and 4% lower at 16;
+  MariaDB 277-323 → 427-462 at 4 writers and 0 → 163-173 at 16, p99 57-69 → 16 ms, ScalarDB's
+  commits 2-6% lower. Retries fall to 0.01 per commit or fewer. Checking each table against only its own conditions does
   not work: a lookup table usually has none, is checked whole, and still aborts 64-98% at four
   writers.
 
@@ -204,7 +213,8 @@ cost one indexed statement: 0.5-2 ms for the predicate check and 0.4-2.4 ms for 
   so this is the benchmark's order of measuring, not the check.
 
 **Default:** every engine is now measured on AWS, SQL Server on EC2 only. The predicate check can
-become the default for one-table reads; in-flight pairs, stage 2, next.
+become the default for one-table reads. In-flight pairs, stage 2, is measured on EC2 for
+PostgreSQL and MariaDB too.
 
 **Next to measure: the plain query after a passed check.** If the check passes, no row in flight
 matches the read by either image, so the plain query on the data tables returns exactly the

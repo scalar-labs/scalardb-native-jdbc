@@ -1110,8 +1110,28 @@ union as a derived table.
   value that can be read once (a stream, a LOB, SQLXML, an array, a struct or a ref), which the
   read alone must consume, keeps the abort. With no row in flight the cost is the per-table check's; with one, a
   second statement driven by the in-flight index. At SERIALIZABLE on MySQL, MariaDB and SQL Server
-  the per-table check stays as it is: its locking read is what holds off every later prepare. Joins
-  and subqueries are stage 2 (the statement's own in-flight pairs, measured in the same report).
+  the per-table check stays as it is: its locking read is what holds off every later prepare.
+  **Stage 2, the in-flight pairs**, takes joins and semi-joins under the same setting, on
+  PostgreSQL and MariaDB. It applies to a single SELECT of two or three ScalarDB table references
+  and no other table, each joined by an inner join in the FROM clause or semi-joined by an IN or
+  EXISTS conjunct of the WHERE clause, with a pure WHERE clause and pure ON clauses on the tables'
+  own columns. Each table may be the data table (D, its committed rows and the after images of
+  its rows in flight), its after images alone (A), or its before images (B). The check is the
+  statement's FROM and WHERE clauses, as `SELECT 1`, over these combinations: B on a non-empty
+  subset of the tables and D on the rest; and A on one table and D on the rest. That is
+  2^n - 1 + n statements joined by UNION ALL, 5 for two tables and 10 for three. They cover every
+  combination with a row in flight: one with a B is inside its B-and-D statement, D holding every
+  A, and one with A's alone is inside the statement with one of them and D elsewhere. So a row in
+  flight that no statement brings into the FROM and WHERE clauses' rows changes nothing,
+  whichever image is true; what the statement groups, limits or returns is made of those rows.
+  An outer join, NOT EXISTS and NOT IN, whose rows a row's absence changes, keep the per-table
+  check, and so do a USING join, an IN or EXISTS under an OR, and a WITH clause, which stands
+  before the FROM clause the check is cut from; so do MySQL, whose plan of the statements under the row limit scans the in-flight index
+  whole, SQL Server, which keeps a plan made while no row was in flight, and Oracle, whose plans
+  of them are not yet checked on 19c (`docs/benchmarks/inflight-check.md`). The check runs once
+  per execution, however many of the read's tables have a row in flight. The statements with D on
+  one table and B on another read the data table by the join column from the other's rows in
+  flight, so the join column wants an index: without one, each costs about the read's own scan.
 - The driver's own reads that produce anchors for writes follow the same rules.
 
 ### 4.3 Writes on one ScalarDB table `T`, key `k`

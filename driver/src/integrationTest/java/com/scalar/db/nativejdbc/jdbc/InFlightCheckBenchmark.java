@@ -168,7 +168,7 @@ class InFlightCheckBenchmark {
       return;
     }
     if (Boolean.getBoolean("nativejdbc.bench.writers")) {
-      besideWriters(e, factory, ns, vo);
+      besideWriters(e, factory, ns, vo, vc);
       return;
     }
     StringBuilder out = new StringBuilder(String.format(Locale.ROOT, "%n## %s%n", e));
@@ -850,21 +850,31 @@ class InFlightCheckBenchmark {
     return out.toString();
   }
 
+  // -Dnativejdbc.bench.writersRead=join: the writers mode reads o JOIN c, ScalarDB writing both
+  private static final boolean JOIN_READ =
+      "join".equals(System.getProperty("nativejdbc.bench.writersRead"));
+
   /**
    * With {@code -Dnativejdbc.bench.writers=true} only: {@link #READERS} driver transactions at
    * SNAPSHOT, each two grouped reads of o by a random region, retried on {@code 40001}, alongside
    * ScalarDB writers on o, with {@code scalardbnative.predicateChecks} off and on; written to
-   * {@code build/bench/inflight-writers-<engine>.md}.
+   * {@code build/bench/inflight-writers-<engine>.md}. With {@code
+   * -Dnativejdbc.bench.writersRead=join} as well, the reads are of o JOIN c on c.id = o.cid and the
+   * writers write both tables; written to {@code build/bench/inflight-writers-<engine>-join.md}.
    */
-  private static void besideWriters(Engines e, TransactionFactory factory, String ns, String vo)
-      throws Exception {
+  private static void besideWriters(
+      Engines e, TransactionFactory factory, String ns, String vo, String vc) throws Exception {
     StringBuilder out =
         new StringBuilder(
             String.format(
                 Locale.ROOT,
                 "%n## %s (%s)%n%nBeside ScalarDB writers: %d driver transactions at SNAPSHOT, each two grouped reads"
-                    + " of o by a random region, retried on 40001, for %d s, alongside ScalarDB"
-                    + " writers updating random rows of o%n%n| writers | predicateChecks |"
+                    + (JOIN_READ ? " of o JOIN c" : " of o")
+                    + " by a random region, retried on 40001, for %d s, alongside ScalarDB"
+                    + (JOIN_READ
+                        ? " writers updating random rows of o and c"
+                        : " writers updating random rows of o")
+                    + "%n%n| writers | predicateChecks |"
                     + " committed/s | retries per commit | p50 ms | p99 ms | ScalarDB commits/s"
                     + " |%n|---|---|---|---|---|---|---|%n",
                 e,
@@ -873,32 +883,46 @@ class InFlightCheckBenchmark {
                 LIVE_MS / 1000));
     try (DistributedTransactionManager tm = factory.getTransactionManager()) {
       // a pass not reported: the first after the setup's backfill runs slow
-      besideWriters(e, tm, ns, vo, 0, true);
+      besideWriters(e, tm, ns, vo, vc, 0, true);
       for (int writers : new int[] {0, 1, 4, 16}) {
         for (boolean on : new boolean[] {false, true}) {
-          out.append(besideWriters(e, tm, ns, vo, writers, on));
+          out.append(besideWriters(e, tm, ns, vo, vc, writers, on));
         }
       }
     }
     System.out.println(out);
     Path file =
-        Path.of("build/bench/inflight-writers-" + e.name().toLowerCase(Locale.ROOT) + ".md");
+        Path.of(
+            "build/bench/inflight-writers-"
+                + e.name().toLowerCase(Locale.ROOT)
+                + (JOIN_READ ? "-join" : "")
+                + ".md");
     Files.createDirectories(Objects.requireNonNull(file.getParent()));
     Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
 
   private static String besideWriters(
-      Engines e, DistributedTransactionManager tm, String ns, String vo, int writers, boolean on)
+      Engines e,
+      DistributedTransactionManager tm,
+      String ns,
+      String vo,
+      String vc,
+      int writers,
+      boolean on)
       throws Exception {
     Properties props = new Properties();
     props.setProperty("scalardbnative.predicateChecks", Boolean.toString(on));
     // the driver's own catalog TTL, not the tests' 0, which reads the catalog on every route
     props.setProperty(
         "scalardbnative.catalogTtlMs", String.valueOf(Catalog.DEFAULT_TTL.toMillis()));
-    String sql = "SELECT region, SUM(amount) FROM ck.o WHERE region = ? GROUP BY region";
+    String sql =
+        JOIN_READ
+            ? "SELECT o.region, SUM(o.amount) FROM ck.o o JOIN ck.c c ON c.id = o.cid"
+                + " WHERE o.region = ? GROUP BY o.region"
+            : "SELECT region, SUM(amount) FROM ck.o WHERE region = ? GROUP BY region";
     AtomicBoolean stop = new AtomicBoolean();
     AtomicLong commits = new AtomicLong();
-    List<Thread> threads = writers(tm, ns, vo, null, writers, stop, commits);
+    List<Thread> threads = writers(tm, ns, vo, JOIN_READ ? vc : null, writers, stop, commits);
     long end = System.currentTimeMillis() + LIVE_MS;
     List<Long> latencies = Collections.synchronizedList(new ArrayList<>());
     AtomicLong retries = new AtomicLong();

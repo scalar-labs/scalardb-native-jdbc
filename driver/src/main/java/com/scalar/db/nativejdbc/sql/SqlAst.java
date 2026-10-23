@@ -687,6 +687,17 @@ public final class SqlAst {
   }
 
   /**
+   * Parses another statement under this one's rules: its engine and whether {@code "x"} quotes an
+   * identifier in the session.
+   *
+   * @param text the statement
+   * @return its AST, or {@code null} when it does not parse
+   */
+  public @Nullable SqlAst reparse(String text) {
+    return analyze(text, engine, doubleQuotesQuoteIdentifiers).toOptional().orElse(null);
+  }
+
+  /**
    * Parses the statement again without the text in {@code [from, to)} of {@link #source}, under the
    * same rules: a clause cut out.
    *

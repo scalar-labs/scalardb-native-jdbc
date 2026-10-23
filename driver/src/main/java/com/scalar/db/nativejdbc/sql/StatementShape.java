@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
+import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.BooleanValue;
 import net.sf.jsqlparser.expression.CaseExpression;
 import net.sf.jsqlparser.expression.CastExpression;
@@ -37,6 +38,7 @@ import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
 import net.sf.jsqlparser.expression.operators.relational.Between;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
+import net.sf.jsqlparser.expression.operators.relational.ExistsExpression;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.GreaterThan;
 import net.sf.jsqlparser.expression.operators.relational.GreaterThanEquals;
@@ -58,6 +60,7 @@ import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
 import net.sf.jsqlparser.statement.select.ForMode;
 import net.sf.jsqlparser.statement.select.FromItem;
+import net.sf.jsqlparser.statement.select.ParenthesedSelect;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.SelectItem;
 import net.sf.jsqlparser.statement.select.Values;
@@ -367,14 +370,28 @@ public final class StatementShape {
    * @return whether the predicate is pure
    */
   public boolean wherePure() {
-    if (where == null) {
-      return true;
-    }
-    Set<Object> nodes = SqlAst.valuesUnder(where);
+    return where == null || pure(where, false);
+  }
+
+  /**
+   * Returns whether an expression is pure as {@link #wherePure()} says, or, with {@code
+   * subqueries}, built of such expressions and of IN and EXISTS subqueries over tables whose own
+   * clauses are such expressions: a join's ON clause, or a WHERE clause that semi-joins another
+   * table.
+   *
+   * @param e the expression
+   * @param subqueries whether a subquery may stand in it
+   * @return whether it is pure
+   */
+  public static boolean pure(Expression e, boolean subqueries) {
+    Set<Object> nodes = SqlAst.valuesUnder(e);
     if (nodes == null) {
       return false;
     }
     for (Object n : nodes) {
+      if (subqueries && SUBQUERY_PARTS.contains(n.getClass())) {
+        continue;
+      }
       boolean pure =
           n instanceof Column
               || n instanceof Table
@@ -402,6 +419,16 @@ public final class StatementShape {
     }
     return true;
   }
+
+  /** What a subquery adds to a pure expression's tree: the subquery itself, its FROM and SELECT. */
+  private static final Set<Class<?>> SUBQUERY_PARTS =
+      Set.of(
+          ExistsExpression.class,
+          ParenthesedSelect.class,
+          PlainSelect.class,
+          SelectItem.class,
+          AllColumns.class,
+          Alias.class);
 
   /**
    * The operators a pure predicate may use, by exact class: not the rest of the parser's operators,
