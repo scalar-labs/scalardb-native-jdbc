@@ -1,6 +1,6 @@
 # Plan: SQL coverage, isolation and performance testing
 
-Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append, rw-register, bank and faults (see each milestone).
+Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append, rw-register, bank, faults, dependency counts and membership (see each milestone).
 
 ## Goal
 
@@ -305,12 +305,37 @@ its prepare, undecided (lazy recovery aborts it after 15 seconds) or with its co
 COMMITTED (recovery rolls it forward), and replies indefinite. The driver's node drops its
 connection (`Connection.abort`) before a statement or the commit, a definite abort, or while the
 commit runs, indefinite, and after a failed statement closes it without a rollback. Per engine and
-level, in both layouts, 20 seconds a run, SERIALIZABLE 60: every run valid, about 100 to 1,950
-transactions committed a run, up to a tenth indefinite; fewer on SQL Server, where an undecided row
-blocks its key until recovery. Writing the last fault found that Oracle's driver commits an open
+level, in both layouts, 60 seconds a run (an undecided row blocks its key for recovery's 15
+seconds): every run valid, with each side's dependencies on the other counted as below. A first
+round looked valid on PostgreSQL with the driver's node committing nothing: the ScalarDB node's
+extra pools had taken PostgreSQL's 100 connections, and Elle found ScalarDB's history alone valid.
+The count below now catches such a run. Writing the last fault found that Oracle's driver commits an open
 transaction at `close()`, which committed what the driver had refused after a `40001` (todo 325,
 P1, fixed: the driver rolls back first, `jdbc/CloseIntegrationTest`). The restart of the database
 stays with the long runs.
+**Dependency counts done 2026-10-23** (`isolation/Dependencies`): Elle checks the dependencies
+between transactions but does not count them for a valid history, so a valid run says nothing about
+pairs that never met. Each mixed list-append run, with faults or without, now counts the
+write-write, write-read and read-write dependencies between the driver's node and ScalarDB's, each
+way, from the history (Maelstrom gives the driver's node the even processes), writes them to the
+run's `dependencies.txt`, and needs 20 of each: driver writes against ScalarDB writes, against
+ScalarDB reads, and driver reads against ScalarDB writes. On every engine the fewest was 34 (SQL
+Server, SNAPSHOT), most runs hundreds.
+**Membership done 2026-10-23** (`isolation/MembershipIntegrationTest`, the same property): scans by
+predicate against inserts and deletes, which Elle's single-key models do not reach. Driver and
+ScalarDB transactions scan a group (`WHERE grp = ?`; ScalarDB with cross-partition scan filtering)
+and write from what it returned, in three regions of one table: moves (delete a row of the group,
+insert one under an unused key, or increment a row read by key), whose row count never changes;
+groups that must keep a row (delete one only if the scan shows two or more), write skew through
+deletes; and groups that may hold one (insert only into an empty group, release by a predicate
+`DELETE`), the phantom. Per engine and level, in both layouts, mixed and driver only. Result: the
+count held at every level on every engine, in every concurrent read too but at READ COMMITTED with
+ScalarDB writing, as that level allows; at SERIALIZABLE no group lost its last row or held two, in
+the reads or at the end; at SNAPSHOT and READ COMMITTED the reads saw both, as those levels allow,
+so the workload does produce what SERIALIZABLE must block. A plain vendor connection broke the
+count on every engine (42 to 51 rows for 24). On SQL Server at SERIALIZABLE with ScalarDB writing,
+the scans starve the writers as well as the readers: 9 to 23 writes in 60 seconds (todo 324, with
+the evidence; the test checks no progress there).
 Left: the long runs in the cloud.
 
 ### Milestone T6: performance, with BenchBase

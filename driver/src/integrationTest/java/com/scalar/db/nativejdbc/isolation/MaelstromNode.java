@@ -157,16 +157,22 @@ public final class MaelstromNode {
         nodeId = id;
         if (!List.of(System.getProperty("iso.drivers", "n0").split(",")).contains(id)) {
           TransactionFactory f = engine.scalarDb(scalarDb);
-          manager = f.getTransactionManager();
           if (faults > 0) {
             twoPhase = f.getTwoPhaseCommitTransactionManager();
+            // a pool as small as the fixture's: ScalarDB's 20 idle connections, with the
+            // managers', took PostgreSQL's 100 and left the driver's node none
             Properties p = new Properties();
             p.putAll(scalarDb);
             p.setProperty("scalar.db.storage", "jdbc");
             p.setProperty("scalar.db.contact_points", engine.url());
             p.setProperty("scalar.db.username", engine.username());
             p.setProperty("scalar.db.password", engine.password());
+            p.setProperty("scalar.db.jdbc.connection_pool.min_idle", "1");
+            p.setProperty("scalar.db.jdbc.table_metadata.connection_pool.min_idle", "1");
+            p.setProperty("scalar.db.jdbc.admin.connection_pool.min_idle", "1");
             coordinator = new CoordinatorStateAccessor(StorageFactory.create(p).getStorage());
+          } else {
+            manager = f.getTransactionManager();
           }
         }
         reply(message, body("init_ok"));
@@ -183,7 +189,7 @@ public final class MaelstromNode {
   private Map<String, @Nullable Object> txn(List<?> ops) {
     DistributedTransactionManager m = manager;
     TwoPhaseCommitTransactionManager t = twoPhase;
-    return m == null ? driver(ops) : t != null ? twoPhase(t, ops) : scalarDb(m, ops);
+    return t != null ? twoPhase(t, ops) : m != null ? scalarDb(m, ops) : driver(ops);
   }
 
   /** Whether this transaction meets a fault of a kind that takes half the share. */

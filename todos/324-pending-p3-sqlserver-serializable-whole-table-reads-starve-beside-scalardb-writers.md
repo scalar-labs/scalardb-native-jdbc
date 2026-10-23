@@ -29,6 +29,14 @@ transfers and 5,000 reads.
 - A read of the whole table meets one of the in-flight rows of ScalarDB's two writers nearly every
   time; the other engines at SERIALIZABLE read about 1,200 to 9,000 times in the same test.
 - Not a correctness issue: every total held, on every engine, level and layout.
+- 2026-10-23, the membership test (`isolation/MembershipIntegrationTest`), whose writers scan a group
+  (`WHERE grp = ?`, a whole-table scan for both sides) before they insert or delete: at SERIALIZABLE
+  with ScalarDB writing, 60 seconds committed 9 to 23 writes in all and 7 to 24 reads, against 465
+  to 520 aborted reads; the writers spent the run mostly waiting. The same test without ScalarDB's
+  writers committed about 300 writes and 2,300 reads (decoupled), and every other engine thousands.
+  Deadlock victims (1205) on both sides, ScalarDB's scans and validations among them, and the
+  driver's in-flight `40001`. The rules and the count held. So the starvation reaches writers that
+  read by predicate, not only readers of the whole table: a scan-then-write workload hardly runs.
 
 ## Proposed Solutions
 
@@ -53,3 +61,7 @@ bounds every wait). **Effort:** Medium. **Risk:** stalls; needs the bounded wait
 
 ### 2026-10-23 - found by the T5 bank test
 - 20 and 60 seconds a run, both layouts; the test checks no read count for this case.
+
+### 2026-10-23 - the membership test too
+- The test checks no progress for this case. Worth re-triaging: a scan-then-write workload at
+  SERIALIZABLE on SQL Server beside ScalarDB writers is close to stopped, which may be more than P3.

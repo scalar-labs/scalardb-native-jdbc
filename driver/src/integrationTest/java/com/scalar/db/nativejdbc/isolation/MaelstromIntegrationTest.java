@@ -79,6 +79,9 @@ class MaelstromIntegrationTest {
   // SQL Server at SERIALIZABLE commits few transactions: 20 seconds showed no anomaly there without
   // ScalarDB's settings, 60 did; the runs with them are as long, for the comparison to hold
   static final int ANOMALY_SECONDS = 60;
+  // the least of each dependency between the driver's and ScalarDB's transactions a mixed
+  // list-append run must have, of the 100 to 500 a 20-second run has
+  private static final long PAIRS = 20;
 
   enum Level {
     READ_COMMITTED(Connection.TRANSACTION_READ_COMMITTED, "read-committed", "read-committed"),
@@ -174,6 +177,9 @@ class MaelstromIntegrationTest {
             level == Level.SERIALIZABLE ? ANOMALY_SECONDS : 0,
             0);
     assertThat(output).contains(VALID);
+    if (w == Workload.LIST_APPEND && sides == Sides.MIXED) {
+      assertPairsMeet(e, w, level.name() + "-" + sides + (inline ? "-inline" : ""));
+    }
   }
 
   /** The same levels when transactions on either side are left part way. */
@@ -191,9 +197,27 @@ class MaelstromIntegrationTest {
             inline,
             false,
             level.mixed,
-            level == Level.SERIALIZABLE ? ANOMALY_SECONDS : 0,
+            // a row left undecided blocks its key for recovery's 15 seconds: on SQL Server at
+            // SNAPSHOT 20 seconds met each pair of sides about ten times
+            ANOMALY_SECONDS,
             Double.parseDouble(System.getProperty("nativejdbc.isolation.faults", "0.1")));
     assertThat(output).contains(VALID);
+    assertPairsMeet(e, Workload.LIST_APPEND, level.name() + "-FAULTS" + (inline ? "-inline" : ""));
+  }
+
+  /**
+   * A valid history shows the level held only where the two sides met: each dependency, both ways,
+   * between the driver's transactions and ScalarDB's ({@link Dependencies}), counted into the run's
+   * {@code dependencies.txt}.
+   */
+  private static void assertPairsMeet(Engines e, Workload w, String name) throws IOException {
+    Path run = Path.of("build", "isolation", e.name(), w.name(), name);
+    Dependencies d = Dependencies.of(run.resolve("store"));
+    Files.writeString(run.resolve("dependencies.txt"), d + "\n", StandardCharsets.UTF_8);
+    for (String kind : List.of("ww", "wr", "rw")) {
+      assertThat(d.get(kind, "n0", "n1")).as("%s %s: %s", e, name, d).isGreaterThanOrEqualTo(PAIRS);
+      assertThat(d.get(kind, "n1", "n0")).as("%s %s: %s", e, name, d).isGreaterThanOrEqualTo(PAIRS);
+    }
   }
 
   /** A vendor connection runs no protocol: not even read committed holds. */
