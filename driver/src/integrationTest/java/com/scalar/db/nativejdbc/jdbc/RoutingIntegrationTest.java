@@ -167,6 +167,10 @@ class RoutingIntegrationTest {
       assertRefused(() -> st.executeQuery("SELECT * FROM m1.s_tx_metadata"), "42000", "metadata");
       // a subquery in a SET is a read whose result changes the session: not a plain read
       assertRefused(() -> st.execute("SET x.y = (SELECT x FROM m1.s LIMIT 1)"), "0AN01", "m1.s");
+      // a schema change goes through ScalarDB's admin, then the setup
+      assertRefused(() -> st.execute("ALTER TABLE m1.s ADD COLUMN y INT"), "0AN01", "admin");
+      assertRefused(() -> st.execute("CREATE INDEX s_x ON m1.s (x)"), "0AN01", "admin");
+      assertRefused(() -> st.execute("TRUNCATE m1.s"), "0AN01", "admin");
       assertRefused(
           () ->
               st.executeQuery(

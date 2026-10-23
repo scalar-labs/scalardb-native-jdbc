@@ -1030,11 +1030,12 @@ final class Router {
     }
     String tables = " (" + String.join(", ", names) + ")";
     boolean snapshot = snapshot();
+    if (ast.kind() == SqlAst.Kind.DDL || ast.kind() == SqlAst.Kind.TRUNCATE) {
+      // run raw, even in passthrough, it would leave ScalarDB's metadata and the setup behind
+      throw Errors.unsupported(SCHEMA_CHANGE + tables);
+    }
     if (ast.kind() != SqlAst.Kind.SELECT) {
-      throw Errors.unsupported(
-          "only reads of ScalarDB tables are supported so far; writes and other statements come"
-              + " later"
-              + tables);
+      throw Errors.unsupported(OTHER_STATEMENT + tables);
     }
     if (!levelSupported()) {
       throw Errors.unsupported(LEVELS + tables);
@@ -1537,6 +1538,15 @@ final class Router {
           + " or an isolation hint that holds no lock (NOLOCK, READPAST, READCOMMITTED, SNAPSHOT), or a call of a SQL Server function of your own, whose reads no lock"
           + " hint reaches, cannot be given; use -- or /* */ comments, read information_schema on"
           + " its own, name every table in OF, and leave those hints and functions out";
+
+  private static final String SCHEMA_CHANGE =
+      "DDL and TRUNCATE on a ScalarDB table are not supported, in passthrough mode neither; change"
+          + " or truncate it through ScalarDB's admin, then run scalardb-native-tools setup again"
+          + " and refresh the catalog";
+
+  private static final String OTHER_STATEMENT =
+      "a ScalarDB table is supported in SELECT and in INSERT, UPDATE and DELETE of that one table"
+          + " only, not in this statement";
 
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
