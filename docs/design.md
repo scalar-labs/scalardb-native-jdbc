@@ -1127,12 +1127,12 @@ union as a derived table.
   An outer join, NOT EXISTS and NOT IN, whose rows a row's absence changes, keep the per-table
   check, and so do a USING join, an IN or EXISTS under an OR, and a WITH clause, which stands
   before the FROM clause the check is cut from; so does MySQL, whose plan of the statements under
-  the row limit scans the in-flight index whole (`docs/benchmarks/inflight-check.md`). On SQL
-  Server the statements read each metadata table through the in-flight index, by a table hint:
-  the filtered index's statistics are taken with no row in flight and rarely updated, and a plan
-  made from them scans a metadata table whole; through the index the cost follows the rows in
-  flight, not the table. A forced seek is not used: it fails where no index gives one (error
-  8622). Oracle's plans are checked on 23 Free, not yet on 19c. The check runs once
+  the row limit scans the in-flight index whole (`docs/benchmarks/inflight-check.md`). On Oracle the
+  pieces read their metadata table through the in-flight index, by a hint: the before-image
+  columns are NULL but for the rows in flight, so their indexes look empty, and 19c drives a
+  statement from the other table's data table, probing one 10,000 times. No table hint is added
+  on SQL Server: one naming the in-flight index gained nothing on stale statistics natively, and
+  a forced seek fails where no index gives one (error 8622). The check runs once
   per execution, however many of the read's tables have a row in flight. The statements with D on
   one table and B on another read the data table by the join column from the other's rows in
   flight, so the join column wants an index: without one, each costs about the read's own scan.
