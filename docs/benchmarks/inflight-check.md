@@ -359,6 +359,27 @@ pairs' pieces through the in-flight index, the pairs on; SQL Server alone, the m
   laptop; the plans were not collected (the client's `build/bench/plans`), so whether that plan
   seeks or scans the index is to be seen.
 
+### Its plans at sixteen writers, and FORCESEEK, on EC2 (run `20261024-0023`)
+
+As `20261023-2312`, the plans saved, then four and sixteen writers again with `FORCESEEK` in the
+committed rows' `NOT EXISTS` (`-Dnativejdbc.bench.seekToo=true`); two runs, reads committed/s with
+the check on, mean ms a read:
+
+| writers | kept statistics | kept statistics and `FORCESEEK` |
+|---|---|---|
+| 4 | 372-525, 3.6-5.1 ms | 184-365, 5.3-10.0 ms |
+| 16 | 13-26, 74-145 ms | **189-271**, 7.1-9.9 ms |
+
+- **The plan at sixteen still scans one index**: `o`'s in-flight index sought (estimate 1), `c`'s
+  scanned per row (estimate 4-6), in every plan compiled at sixteen writers; at four both are
+  sought. `c`'s metadata table, 10,000 rows, takes half the writers' 2,100-2,300 commits a second
+  and holds 1,260-2,200 ghost records in 8 pages; how the estimate moves with its statistics kept
+  is not known.
+- **`FORCESEEK` holds at sixteen** (p99 19-39 ms), at a cost at four: the forced runs came after
+  sixteen writers had left the most ghost records, with ScalarDB committing 639-881 a second
+  against 372-716, so part of the difference is the order. On large reads it costs 3x
+  (`seekCost`, above).
+
 ## Reads beside ScalarDB writers (stage 1, one table)
 
 `scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:
