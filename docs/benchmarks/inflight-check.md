@@ -341,6 +341,24 @@ own; without `FORCESEEK` that run gave 474 / 337 / 69.
   metadata tables' statistics on SQL Server (design section 6's setup), and the pieces read
   through the in-flight index there as on Oracle.
 
+### SQL Server with the setup's kept statistics, on EC2 (run `20261023-2312`)
+
+The driver of `sqlserver-join-plans`: the metadata tables' statistics kept by the setup, the
+pairs' pieces through the in-flight index, the pairs on; SQL Server alone, the machines and mode of
+`20261023-1850` (whose "on" is in brackets); two runs, reads committed/s, check off → on:
+
+| 1 writer | 4 writers | 16 writers | ScalarDB's commits at 4 / 16 |
+|---|---|---|---|
+| 894-917 → 947-949 (809-864) | 139-147 → **425-449** (85-253) | 0 → 13-25 (9-12) | 788-808 → 668-792 / 2,247-2,269 → 1,710-2,106 |
+
+- **Four writers, fixed**: one plan, compiled once, serves every read (1.5-2.0 ms, 914-975
+  logical reads); p99 11-17 ms against 60-188. Reads 3x the table-wide check's.
+- **Sixteen, not yet**: no recompile any more (one plan, 275-501 runs), but each read costs 69-120
+  ms and 10,000-19,600 logical reads, with `PAGELATCH_SH` 15 s in one run. The in-flight indexes
+  hold 1,380-2,250 ghost records at 2,000-2,300 ScalarDB commits a second, against 300-435 on the
+  laptop; the plans were not collected (the client's `build/bench/plans`), so whether that plan
+  seeks or scans the index is to be seen.
+
 ## Reads beside ScalarDB writers (stage 1, one table)
 
 `scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:
