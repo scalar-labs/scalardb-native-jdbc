@@ -380,6 +380,21 @@ the check on, mean ms a read:
   against 372-716, so part of the difference is the order. On large reads it costs 3x
   (`seekCost`, above).
 
+### Where SQL Server's estimate of the rows in flight comes from (laptop)
+
+`-Dnativejdbc.bench.estimateDrift=true`: the estimated plan of the committed rows of the join (both
+`NOT EXISTS` on the in-flight indexes) with the setup's kept statistics, after 0, 2 and 10
+modifications a row of both metadata tables (every row in flight and back) and with 0, 2, 5, 10
+and 50 rows in flight when it is compiled.
+
+- **The estimate is the index's rows at the moment of compiling**: 1, 2, 5, 10 and 50 rows for
+  0, 2, 5, 10 and 50 in flight, after any number of modifications; the filtered statistics show 0
+  modifications throughout, kept or not. The setup's statistics cannot hold it.
+- **So a plan compiled under heavy writing estimates rows in flight**, as EC2's at sixteen writers
+  (4-6), and nested-loop plans then scan the index per row. With the statistics kept nothing
+  recompiles it, so such a plan stays until it leaves the cache, where before a refresh could
+  replace it; at four writers EC2's plans were compiled with at most one row in flight and seek.
+
 ## Reads beside ScalarDB writers (stage 1, one table)
 
 `scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:

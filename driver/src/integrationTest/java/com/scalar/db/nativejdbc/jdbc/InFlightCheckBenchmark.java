@@ -169,6 +169,10 @@ class InFlightCheckBenchmark {
       coldPlan(e, o, cu);
       diagnostics = true;
     }
+    if (Boolean.getBoolean("nativejdbc.bench.estimateDrift") && engine == Engine.SQLSERVER) {
+      estimateDrift(e, o, cu);
+      diagnostics = true;
+    }
     if (Boolean.getBoolean("nativejdbc.bench.seekCost") && engine == Engine.SQLSERVER) {
       seekCost(e, o);
       diagnostics = true;
@@ -656,6 +660,100 @@ class InFlightCheckBenchmark {
       }
     }
     return out;
+  }
+
+  /**
+   * With {@code -Dnativejdbc.bench.estimateDrift=true} only, on SQL Server: the estimate of the
+   * rows in flight in each metadata table, and the access to its in-flight index, in the plan of
+   * the split read's committed rows of the join, as the metadata tables take modifications with
+   * their statistics kept by the setup and nothing in flight; written to {@code
+   * build/bench/inflight-drift-sqlserver.txt}.
+   */
+  private static void estimateDrift(Engines e, TableInfo o, TableInfo cu) throws Exception {
+    Engine engine = e.engine();
+    String id = engine.quote(e.storedColumn("id"));
+    String state = engine.quote("tx_state");
+    String sql =
+        "SELECT COUNT(*) FROM "
+            + data(engine, o)
+            + " t JOIN "
+            + data(engine, cu)
+            + " u ON u."
+            + id
+            + " = t."
+            + engine.quote(e.storedColumn("cid"))
+            + " WHERE t."
+            + engine.quote(e.storedColumn("region"))
+            + " = 7 AND NOT EXISTS (SELECT 1 FROM "
+            + SplitRead.meta(engine, o)
+            + " q WHERE q."
+            + id
+            + " = t."
+            + id
+            + " AND q."
+            + state
+            + " IN (1, 2)) AND NOT EXISTS (SELECT 1 FROM "
+            + SplitRead.meta(engine, cu)
+            + " q WHERE q."
+            + id
+            + " = u."
+            + id
+            + " AND q."
+            + state
+            + " IN (1, 2))";
+    StringBuilder out = new StringBuilder();
+    try (Connection c = e.open();
+        java.sql.Statement st = c.createStatement()) {
+      int done = 0;
+      for (int rounds : new int[] {0, 1, 5}) {
+        // each round: every metadata row in flight and back, two modifications a row
+        for (; done < rounds; done++) {
+          for (TableInfo t : List.of(o, cu)) {
+            e.execute(
+                c,
+                "UPDATE " + SplitRead.meta(engine, t) + " SET " + state + " = 1",
+                "UPDATE " + SplitRead.meta(engine, t) + " SET " + state + " = 3");
+          }
+        }
+        for (int count : new int[] {0, 2, 5, 10, 50}) {
+          // the rows in flight when the statement is compiled
+          inFlight(e, c, o, ROWS, count, oBefore(e));
+          inFlight(e, c, cu, CUSTOMERS, count, cBefore(e));
+          e.execute(c, "DBCC FREEPROCCACHE");
+          out.append(
+              String.format(
+                  Locale.ROOT,
+                  "%d rounds (%d modifications a row), %d rows in flight a table:%n",
+                  rounds,
+                  2 * rounds,
+                  count));
+          st.execute("SET SHOWPLAN_ALL ON");
+          try (ResultSet r = st.executeQuery(sql)) {
+            while (r.next()) {
+              String text = r.getString("StmtText");
+              if (text != null
+                  && (text.contains("inflight")
+                      || text.contains("Nested Loops")
+                      || text.contains("Hash Match")
+                      || text.contains("Merge Join"))) {
+                out.append(
+                    String.format(
+                        Locale.ROOT,
+                        "  %s est %s: %s%n",
+                        r.getString("PhysicalOp"),
+                        r.getString("EstimateRows"),
+                        text.trim().replaceAll("\\s+", " ")));
+              }
+            }
+          } finally {
+            st.execute("SET SHOWPLAN_ALL OFF");
+          }
+        }
+      }
+    }
+    Path file = Path.of("build/bench/inflight-drift-sqlserver.txt");
+    Files.createDirectories(Objects.requireNonNull(file.getParent()));
+    Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
 
   /**
