@@ -210,7 +210,8 @@ on RDS db.m5.2xlarge; two runs each), reads committed/s, check off → on:
   6 ms a read there; from four writers on, reads that never finished do. ScalarDB's commits 18%
   lower at four, 36-38% at sixteen.
 - So the check's own cost on these two is to be measured on the AWS machines (the static mode, a
-  fixed number of rows in flight, and the plans) before either takes this form.
+  fixed number of rows in flight, and the plans) before either takes this form: done below, with
+  the fixes measured in `20261023-1850`.
 
 ### Why, on the AWS machines (run `20261023-1317`)
 
@@ -268,6 +269,40 @@ check, as one UNION ALL under the row limit, and of arms 0-4 alone, by rows in f
   now adds the hint on Oracle in the in-flight pairs' pieces (`SplitRead.inFlight` and
   `afterImages` with `hinted`), and only there: the split read's before-image piece wants the
   predicate's own index. On 23 the hint costs nothing.
+
+### With the fixes, on the AWS machines (run `20261023-1850`)
+
+The same machines and mode as `20261023-1231`, the driver with Oracle's in-flight index hint and
+without SQL Server's, `-Dnativejdbc.bench.breakdown=true`; two runs each, reads committed/s, check
+off → on (`20261023-1231`'s "on" in brackets):
+
+| engine | 1 writer | 4 writers | 16 writers | ScalarDB's commits at 4 / 16 |
+|---|---|---|---|---|
+| SQL Server (EC2) | 713-759 → 809-864 (826-898) | 56-60 → 85-253 (104-136) | 0 → 9-12 (8-14) | 646-648 → 524-567 / 2,177-2,182 → 1,785-1,936 |
+| Oracle 19c (RDS) | 365-373 → 298-307 (203-210) | 0 → 177-182 (97) | 0 → 136-138 (78) | 580-585 → 483-525 / 1,921-1,938 → 1,267-1,282 |
+
+The readers' time by phase, mean ms per read with the check on (commits cost 0.1-1.5 ms
+throughout):
+
+| engine | 0 writers | 1 writer | 4 writers | 16 writers |
+|---|---|---|---|---|
+| SQL Server | 1.3 | 2.1-2.2 | 7.7-23 | 156-223 |
+| Oracle 19c | 3.7-4.0 | 6.4-6.6 | 10.8-11.1 | 14.0-14.2 |
+
+- **Oracle 19c, the hint works**: reads gain 1.8-1.9x at four writers and sixteen over the
+  unhinted driver, and the loss at one writer shrinks from 45% to 18%: a read costs 2.1 ms more
+  with the check, where it cost 6 ms. Its p99 at sixteen writers is 49 ms.
+- **SQL Server, the read's own statement, not the check**: SQL Server's account of the
+  statements (`sys.dm_exec_query_stats`, from a cleared plan cache) at four writers puts 12.5 s
+  of the readers' 40 s in the split read's join statement under one cached plan alone, 38 ms and
+  4,174 logical reads a run against 1.3 ms quiet, and 0.3 s in the check, 0.9 ms a run. At
+  sixteen the statement's cached plans show 1-2 runs each, so it is compiled again and again, at
+  144-288 ms and 29,000-272,000 logical reads a run, in parallel (`CXPACKET` 19 s): the metadata
+  tables' statistics refresh as the writers churn them (`WAIT_ON_SYNC_STATISTICS_REFRESH`), and
+  the plans made then scan. The plans themselves are yet to be captured. A split read's plan
+  under churn, which the table-wide check never reached on a join: it aborted first.
+- **Without SQL Server's hint nothing is lost**: the "on" figures are within the earlier ones'
+  noise.
 
 ## Reads beside ScalarDB writers (stage 1, one table)
 
