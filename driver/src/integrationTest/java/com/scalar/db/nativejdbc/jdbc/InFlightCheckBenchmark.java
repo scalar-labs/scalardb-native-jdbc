@@ -159,12 +159,17 @@ class InFlightCheckBenchmark {
             + " o.region = ? GROUP BY o.region",
         join(e, o, cu));
 
+    // the diagnostics, one or both, instead of the benchmark
+    boolean diagnostics = false;
     if (Boolean.getBoolean("nativejdbc.bench.arms")) {
-      arms(e, o, cu);
-      return;
+      arms(e, o, cu, join(e, o, cu));
+      diagnostics = true;
     }
     if (Boolean.getBoolean("nativejdbc.bench.coldPlan") && engine == Engine.SQLSERVER) {
       coldPlan(e, o, cu);
+      diagnostics = true;
+    }
+    if (diagnostics) {
       return;
     }
     if (Boolean.getBoolean("nativejdbc.bench.checkPlan")) {
@@ -406,10 +411,12 @@ class InFlightCheckBenchmark {
   /**
    * With {@code -Dnativejdbc.bench.arms=true} only, at 10 and 100 rows in flight per table: the
    * in-flight-pairs check as one UNION ALL with a row limit, as OR'ed EXISTS, without a limit, and
-   * as separate statements; each arm on its own with and without the limit, and its plan; written
-   * to {@code build/bench/inflight-arms-<engine>.txt}.
+   * as separate statements; each arm on its own with and without the limit, and its plan; the join
+   * read's own cost beside them; at 100 the check's plan as run, with its rows per step; written to
+   * {@code build/bench/inflight-arms-<engine>.txt}.
    */
-  private static void arms(Engines e, TableInfo o, TableInfo cu) throws Exception {
+  private static void arms(Engines e, TableInfo o, TableInfo cu, List<Form> joinForms)
+      throws Exception {
     Engine engine = e.engine();
     List<String> arms = pairArms(e, o, cu);
     String from =
@@ -432,6 +439,34 @@ class InFlightCheckBenchmark {
       for (int count : new int[] {10, 100}) {
         inFlight(e, c, o, ROWS, count, oBefore(e));
         inFlight(e, c, cu, CUSTOMERS, count, cBefore(e));
+        for (Form f : joinForms) {
+          if (f.name().startsWith("read")) {
+            long[] r = measure(c, f, new Random(42));
+            out.append(
+                String.format(Locale.ROOT, "%d in flight, %s: %d µs%n", count, f.name(), r[0]));
+          }
+        }
+        if (count == 100) {
+          // a region the check finds nothing for, the usual case, which runs every arm through
+          String check = variants.values().iterator().next();
+          int clear = -1;
+          try (PreparedStatement ps = c.prepareStatement(check)) {
+            for (int r = 0; r < REGIONS && clear < 0; r++) {
+              int marks = (int) check.chars().filter(ch -> ch == '?').count();
+              for (int p = 1; p <= marks; p++) {
+                ps.setInt(p, r);
+              }
+              try (ResultSet rs = ps.executeQuery()) {
+                clear = rs.next() ? -1 : r;
+              }
+            }
+          }
+          out.append("the check as run, 100 in flight, region ")
+              .append(clear)
+              .append(", which it finds nothing for:\n")
+              .append(actualPlan(c, engine, check.replace("?", String.valueOf(clear))))
+              .append('\n');
+        }
         for (Map.Entry<String, String> v : variants.entrySet()) {
           long[] r = measure(c, new Form("v", v.getValue(), false), new Random(42));
           out.append(
@@ -575,6 +610,84 @@ class InFlightCheckBenchmark {
     Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
 
+  /**
+   * The plan as run, of a statement with its literals bound, with what each step did: SQL Server's
+   * STATISTICS PROFILE (rows, executions per step), Oracle's DBMS_XPLAN.DISPLAY_CURSOR with the
+   * session's statistics (actual rows, time, buffers); other engines EXPLAIN ANALYZE, MySQL's and
+   * MariaDB's ANALYZE. An error is written in its place.
+   */
+  private static String actualPlan(Connection c, Engine engine, String literal) {
+    StringBuilder out = new StringBuilder();
+    try (java.sql.Statement st = c.createStatement()) {
+      switch (engine) {
+        case SQLSERVER -> {
+          st.execute("SET STATISTICS PROFILE ON");
+          try {
+            boolean rs = st.execute(literal);
+            while (rs || st.getUpdateCount() != -1) {
+              if (rs) {
+                try (ResultSet r = st.getResultSet()) {
+                  int cols = r.getMetaData().getColumnCount();
+                  boolean profile = cols > 3;
+                  while (r.next()) {
+                    if (profile) {
+                      out.append(r.getString("Rows"))
+                          .append(" rows, ")
+                          .append(r.getString("Executes"))
+                          .append(" executions: ")
+                          .append(r.getString("StmtText"))
+                          .append('\n');
+                    }
+                  }
+                }
+              }
+              rs = st.getMoreResults();
+            }
+          } finally {
+            st.execute("SET STATISTICS PROFILE OFF");
+          }
+        }
+        case ORACLE -> {
+          st.execute("ALTER SESSION SET statistics_level = ALL");
+          try (ResultSet r = st.executeQuery(literal)) {
+            while (r.next()) {
+              // the rows are read for the cursor's statistics
+            }
+          }
+          try (ResultSet r =
+              st.executeQuery(
+                  "SELECT plan_table_output FROM"
+                      + " TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL, NULL, 'ALLSTATS LAST'))")) {
+            while (r.next()) {
+              out.append(r.getString(1)).append('\n');
+            }
+          }
+          st.execute("ALTER SESSION SET statistics_level = TYPICAL");
+        }
+        case POSTGRESQL -> {
+          try (ResultSet r = st.executeQuery("EXPLAIN ANALYZE " + literal)) {
+            while (r.next()) {
+              out.append(r.getString(1)).append('\n');
+            }
+          }
+        }
+        default -> {
+          try (ResultSet r =
+              st.executeQuery(
+                  (engine == Engine.MARIADB ? "ANALYZE FORMAT=JSON " : "EXPLAIN ANALYZE ")
+                      + literal)) {
+            while (r.next()) {
+              out.append(r.getString(1)).append('\n');
+            }
+          }
+        }
+      }
+    } catch (SQLException x) {
+      out.append("no plan: ").append(x.getMessage()).append('\n');
+    }
+    return out.toString();
+  }
+
   /** The estimated plan, region 7 bound as a literal. */
   private static String plan(Connection c, Engine engine, String sql) throws SQLException {
     String literal = sql.replace("?", "7");
@@ -597,7 +710,15 @@ class InFlightCheckBenchmark {
         } finally {
           st.execute("SET SHOWPLAN_TEXT OFF");
         }
-      } else if (engine != Engine.ORACLE) {
+      } else if (engine == Engine.ORACLE) {
+        st.execute("EXPLAIN PLAN FOR " + literal);
+        try (ResultSet r =
+            st.executeQuery("SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY)")) {
+          while (r.next()) {
+            out.append(r.getString(1)).append('\n');
+          }
+        }
+      } else {
         try (ResultSet r = st.executeQuery("EXPLAIN " + literal)) {
           int cols = r.getMetaData().getColumnCount();
           while (r.next()) {
