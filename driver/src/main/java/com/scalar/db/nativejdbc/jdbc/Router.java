@@ -1262,14 +1262,14 @@ final class Router {
    * after images on one table and the data table on the rest. The data table holds the after images
    * too, so these cover every combination; a row in flight that no combination brings into the
    * statement's rows changes nothing, whichever image is true. An outer join or an anti-join, whose
-   * rows a row's absence changes, keeps the table-wide check. PostgreSQL and MariaDB only, where
-   * the statements were measured to plan well: MySQL plans them under the row limit as a full scan,
-   * SQL Server keeps a plan made with no row in flight, and Oracle's are unchecked on 19c. Null
-   * otherwise.
+   * rows a row's absence changes, keeps the table-wide check. Not on MySQL, which plans the
+   * statements under the row limit as a full scan; on SQL Server the metadata tables are read
+   * through the in-flight index, since a plan made from the filtered index's statistics, taken with
+   * no row in flight, scans. Null otherwise.
    */
   private Writes.@Nullable Step pairs(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
-    if ((engine != Engine.POSTGRESQL && engine != Engine.MARIADB)
+    if (engine == Engine.MYSQL
         || scalarDb.size() > PAIRS_TABLES
         || ast.tableRefs().size() != scalarDb.size()
         || !ast.singleSelect()) {
@@ -1391,9 +1391,9 @@ final class Router {
         pieces.put(
             cutRefs.get(i),
             a[i] == 'B'
-                ? SplitRead.inFlight(engine, t, t.dataColumns())
+                ? SplitRead.inFlight(engine, t, t.dataColumns(), true)
                 : a[i] == 'A'
-                    ? SplitRead.afterImages(engine, t, t.dataColumns())
+                    ? SplitRead.afterImages(engine, t, t.dataColumns(), true)
                     : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable()));
       }
       String arm = cut.joinTokens(pieces::get);

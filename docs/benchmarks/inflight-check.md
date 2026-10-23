@@ -50,8 +50,10 @@ nothing, whichever image is true; a dropped conjunct only widens what is checked
 4. **In-flight pairs do**: 0-3% at every writer count, about the single-table predicate check.
    Cost on PostgreSQL, MySQL, MariaDB and Oracle 0.4-2.4 ms, about one more read of the statement.
    SQL Server measured 16-18 ms with 100 rows in flight or fewer in the full run, 1.9-4.7 ms when
-   the statement is first planned with rows in flight (diagnostics below): a plan cached while no
-   row was in flight, reused after; to be solved before SQL Server takes this form.
+   the statement is first planned with rows in flight (diagnostics below): a plan made from the
+   filtered in-flight index's statistics, taken with no row in flight, scans a metadata table. The
+   driver now reads each metadata table through the in-flight index by a table hint there, which
+   bounds the cost by the rows in flight (stale statistics, below).
 5. **Design that follows**: one table, the predicate check; a join or semi-joined subquery the
    split covers, the in-flight pairs check, built from the split read's fragments; the table-wide
    check kept for the shapes the split does not cover (a scalar subquery, a CTE, past the copy
@@ -150,6 +152,47 @@ the diagnostic's `FROM DUAL` failed there, since fixed):
 - **SQL Server**: 1.9 / 4.7 ms here against 16.5 / 18.1 ms in the full run, the same statement and
   rows in flight; the full run first planned it with no row in flight. `OPTION (RECOMPILE)` makes
   each arm 8-17 ms, its compile alone.
+
+## SQL Server with stale statistics (`-Dnativejdbc.bench.coldPlan=true`)
+
+The setup builds the in-flight index filtered on `tx_state IN (1, 2)` while no row is in flight,
+and SQL Server rarely updates a filtered index's statistics. Here: statistics updated and the plan
+cache cleared with no row in flight, the check run (planned) there, then run with 100 rows in
+flight per table on that plan; then planned again after `UPDATE STATISTICS`. Median µs, the
+laptop's SQL Server under x86 emulation (`build/bench/inflight-coldplan-sqlserver.txt`):
+
+| check | no row in flight | 100 in flight, stale plan | 100 in flight, statistics updated |
+|---|---|---|---|
+| no hint | 736-1,056 | 4,801-5,392 | 2,587-3,035 |
+| `OPTION (RECOMPILE)` | 22,318-22,672 | 28,198-28,403 | 25,166-29,239 |
+| `OPTION (LOOP JOIN)` | 767-771 | 4,862-5,075 | 5,462-5,501 |
+| `WITH (FORCESEEK)` on the metadata tables | 1,694-1,986 | 1,744-1,939 | 1,527-1,529 |
+| `WITH (INDEX(<in-flight index>))`, the driver's | 743 | 5,653 | 1,875 |
+
+- **No hint**: the stale plan reads `c`'s metadata table whole for the `(o data, c before)` arm
+  and hashes `o`'s in-flight index against its `before_region` index: a cost that grows with the
+  table.
+- **`FORCESEEK`** is fastest, but fails where no index gives a seek: the join test's tables, with
+  no index on `before_region`, fail with it (error 8622), which the driver takes as an abort.
+- **The in-flight index hint**, which the driver uses: on the stale plan every arm starts from the
+  in-flight index, about 100 key lookups an arm, so the cost follows the rows in flight, never the
+  table; with updated statistics it is as good as the best. The 5.7 ms is inflated by the
+  emulation; on EC2 it is to be measured.
+
+## Joins beside ScalarDB writers on Oracle and SQL Server (laptop)
+
+`-Dnativejdbc.bench.writers=true -Dnativejdbc.bench.writersRead=join`, branch
+`pairs-oracle-sqlserver`, one run each; reads committed/s, check off → on, and ScalarDB's commits
+off → on:
+
+| engine | 1 writer | 4 writers | 16 writers | ScalarDB's commits at 4 / 16 |
+|---|---|---|---|---|
+| Oracle 23 Free | 444 → 427 | 11 → 280 | 0 → 126 | 361 → 264 / 763 → 432 |
+| SQL Server 2022 (emulated) | 260 → 366 | 51 → 309 | 0 → 54 | 168 → 173 / 394 → 251 |
+
+Retries fall to 0.08 per commit or fewer. ScalarDB's commits fall on both where reads now finish
+beside them, as with the one-table check on Oracle 23 Free (2 CPUs) and on this laptop's emulated
+SQL Server; on dedicated machines that is to be measured.
 
 ## Reads beside ScalarDB writers (stage 1, one table)
 

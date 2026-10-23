@@ -1112,7 +1112,7 @@ union as a derived table.
   second statement driven by the in-flight index. At SERIALIZABLE on MySQL, MariaDB and SQL Server
   the per-table check stays as it is: its locking read is what holds off every later prepare.
   **Stage 2, the in-flight pairs**, takes joins and semi-joins under the same setting, on
-  PostgreSQL and MariaDB. It applies to a single SELECT of two or three ScalarDB table references
+  every engine but MySQL. It applies to a single SELECT of two or three ScalarDB table references
   and no other table, each joined by an inner join in the FROM clause or semi-joined by an IN or
   EXISTS conjunct of the WHERE clause, with a pure WHERE clause and pure ON clauses on the tables'
   own columns. Each table may be the data table (D, its committed rows and the after images of
@@ -1126,9 +1126,13 @@ union as a derived table.
   whichever image is true; what the statement groups, limits or returns is made of those rows.
   An outer join, NOT EXISTS and NOT IN, whose rows a row's absence changes, keep the per-table
   check, and so do a USING join, an IN or EXISTS under an OR, and a WITH clause, which stands
-  before the FROM clause the check is cut from; so do MySQL, whose plan of the statements under the row limit scans the in-flight index
-  whole, SQL Server, which keeps a plan made while no row was in flight, and Oracle, whose plans
-  of them are not yet checked on 19c (`docs/benchmarks/inflight-check.md`). The check runs once
+  before the FROM clause the check is cut from; so does MySQL, whose plan of the statements under
+  the row limit scans the in-flight index whole (`docs/benchmarks/inflight-check.md`). On SQL
+  Server the statements read each metadata table through the in-flight index, by a table hint:
+  the filtered index's statistics are taken with no row in flight and rarely updated, and a plan
+  made from them scans a metadata table whole; through the index the cost follows the rows in
+  flight, not the table. A forced seek is not used: it fails where no index gives one (error
+  8622). Oracle's plans are checked on 23 Free, not yet on 19c. The check runs once
   per execution, however many of the read's tables have a row in flight. The statements with D on
   one table and B on another read the data table by the join column from the other's rows in
   flight, so the join column wants an index: without one, each costs about the read's own scan.

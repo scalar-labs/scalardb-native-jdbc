@@ -332,6 +332,16 @@ final class SplitRead {
    * index (joined with the data table, Oracle 19c without statistics probed it once per row).
    */
   static String inFlight(Engine engine, TableInfo t, List<String> read) {
+    return inFlight(engine, t, read, false);
+  }
+
+  /**
+   * As {@link #inFlight(Engine, TableInfo, List)}; with {@code hinted} on SQL Server, the metadata
+   * table read through the in-flight index whatever its statistics say: those of the filtered index
+   * are taken with no row in flight and rarely updated, and a plan made from them scans the table
+   * (design 4.2, the in-flight pairs). A forced seek fails where no index gives one (error 8622).
+   */
+  static String inFlight(Engine engine, TableInfo t, List<String> read, boolean hinted) {
     List<String> cols = new ArrayList<>();
     List<String> keys = t.keyColumns();
     for (String c : read) {
@@ -342,7 +352,9 @@ final class SplitRead {
         + String.join(", ", cols)
         + " FROM "
         + meta(engine, t)
-        + " m WHERE m."
+        + " m"
+        + inflightHint(engine, t, hinted)
+        + " WHERE m."
         + engine.quote("tx_state")
         + " IN (1, 2) AND (m."
         + engine.quote("before_tx_id")
@@ -353,17 +365,32 @@ final class SplitRead {
 
   /** The after image of each of the table's rows in flight, columns {@code read}. */
   static String afterImages(Engine engine, TableInfo t, List<String> read) {
+    return afterImages(engine, t, read, false);
+  }
+
+  /**
+   * As {@link #afterImages(Engine, TableInfo, List)}, with {@code hinted} as for {@link #inFlight}.
+   */
+  static String afterImages(Engine engine, TableInfo t, List<String> read, boolean hinted) {
     return "(SELECT "
         + columns(engine, read)
         + " FROM "
         + data(engine, t)
         + " t JOIN "
         + meta(engine, t)
-        + " m ON "
+        + " m"
+        + inflightHint(engine, t, hinted)
+        + " ON "
         + keyJoin(engine, t, "m")
         + " WHERE m."
         + engine.quote("tx_state")
         + " IN (1, 2))";
+  }
+
+  private static String inflightHint(Engine engine, TableInfo t, boolean hinted) {
+    return hinted && engine == Engine.SQLSERVER
+        ? " WITH (INDEX(" + engine.quote(t.inflightIndex(engine)) + "))"
+        : "";
   }
 
   private static String data(Engine engine, TableInfo t) {

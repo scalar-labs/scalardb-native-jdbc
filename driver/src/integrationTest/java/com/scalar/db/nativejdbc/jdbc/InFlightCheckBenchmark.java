@@ -163,6 +163,10 @@ class InFlightCheckBenchmark {
       arms(e, o, cu);
       return;
     }
+    if (Boolean.getBoolean("nativejdbc.bench.coldPlan") && engine == Engine.SQLSERVER) {
+      coldPlan(e, o, cu);
+      return;
+    }
     if (Boolean.getBoolean("nativejdbc.bench.checkPlan")) {
       checkPlan(e, factory, ns, vo, o);
       return;
@@ -352,6 +356,11 @@ class InFlightCheckBenchmark {
 
   /** The arms of the in-flight-pairs check: the join over every pair with a row in flight. */
   private static List<String> pairArms(Engines e, TableInfo o, TableInfo c) {
+    return pairArms(e, o, c, true);
+  }
+
+  /** As the driver's with {@code hinted} (on SQL Server, through the in-flight index). */
+  private static List<String> pairArms(Engines e, TableInfo o, TableInfo c, boolean hinted) {
     Engine engine = e.engine();
     String region = "o." + engine.quote(e.storedColumn("region"));
     String cid = "o." + engine.quote(e.storedColumn("cid"));
@@ -359,11 +368,11 @@ class InFlightCheckBenchmark {
     // per table, its pieces: the data table as it is (committed rows and the after images of rows
     // in flight), the after images alone, the before images
     String od = data(engine, o);
-    String oa = SplitRead.afterImages(engine, o, o.dataColumns());
-    String ob = SplitRead.inFlight(engine, o, o.dataColumns());
+    String oa = SplitRead.afterImages(engine, o, o.dataColumns(), hinted);
+    String ob = SplitRead.inFlight(engine, o, o.dataColumns(), hinted);
     String cd = data(engine, c);
-    String ca = SplitRead.afterImages(engine, c, c.dataColumns());
-    String cb = SplitRead.inFlight(engine, c, c.dataColumns());
+    String ca = SplitRead.afterImages(engine, c, c.dataColumns(), hinted);
+    String cb = SplitRead.inFlight(engine, c, c.dataColumns(), hinted);
     // every pair with a row in flight on either side, in either image: (A, *) (B, *) (*, A)
     // (*, B), * the data table, with (B, B), which no data table holds
     List<String> arms = new ArrayList<>();
@@ -493,6 +502,75 @@ class InFlightCheckBenchmark {
       }
     }
     Path file = Path.of("build/bench/inflight-arms-" + e.name().toLowerCase(Locale.ROOT) + ".txt");
+    Files.createDirectories(Objects.requireNonNull(file.getParent()));
+    Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
+  }
+
+  /**
+   * With {@code -Dnativejdbc.bench.coldPlan=true} only, on SQL Server: the in-flight-pairs check
+   * planned while no row is in flight, as the statistics of the filtered in-flight index have it
+   * from the setup on, then run with 100 rows in flight per table on that plan; and planned again
+   * after the statistics are updated. Without a hint and with hints, median µs; the plans without a
+   * hint and with the driver's; written to {@code build/bench/inflight-coldplan-sqlserver.txt}.
+   */
+  private static void coldPlan(Engines e, TableInfo o, TableInfo cu) throws Exception {
+    Engine engine = e.engine();
+    String check = Writes.anyRow(engine, String.join(" UNION ALL ", pairArms(e, o, cu, false)));
+    Map<String, String> variants = new LinkedHashMap<>();
+    variants.put("no hint", check);
+    variants.put("OPTION (RECOMPILE)", check + " OPTION (RECOMPILE)");
+    variants.put("OPTION (LOOP JOIN)", check + " OPTION (LOOP JOIN)");
+    variants.put(
+        "FORCESEEK on the metadata tables",
+        check
+            .replace(" m WHERE ", " m WITH (FORCESEEK) WHERE ")
+            .replace(" m ON ", " m WITH (FORCESEEK) ON "));
+    variants.put(
+        "INDEX(the in-flight index), as the driver",
+        Writes.anyRow(engine, String.join(" UNION ALL ", pairArms(e, o, cu, true))));
+    StringBuilder out = new StringBuilder();
+    try (Connection c = e.open()) {
+      for (Map.Entry<String, String> v : variants.entrySet()) {
+        Form f = new Form("v", v.getValue(), false);
+        inFlight(e, c, o, ROWS, 0, oBefore(e));
+        inFlight(e, c, cu, CUSTOMERS, 0, cBefore(e));
+        e.execute(
+            c,
+            "UPDATE STATISTICS " + SplitRead.meta(engine, o),
+            "UPDATE STATISTICS " + SplitRead.meta(engine, cu),
+            "DBCC FREEPROCCACHE");
+        long[] none = measure(c, f, new Random(42));
+        inFlight(e, c, o, ROWS, 100, oBefore(e));
+        inFlight(e, c, cu, CUSTOMERS, 100, cBefore(e));
+        long[] stale = measure(c, f, new Random(42));
+        String stalePlan = plan(c, engine, v.getValue());
+        e.execute(
+            c,
+            "UPDATE STATISTICS " + SplitRead.meta(engine, o),
+            "UPDATE STATISTICS " + SplitRead.meta(engine, cu),
+            "DBCC FREEPROCCACHE");
+        long[] fresh = measure(c, f, new Random(42));
+        out.append(
+            String.format(
+                Locale.ROOT,
+                "%s: none in flight %d µs; 100 in flight on that plan %d µs, %d%% found;"
+                    + " planned again after UPDATE STATISTICS %d µs, %d%% found%n",
+                v.getKey(),
+                none[0],
+                stale[0],
+                stale[1],
+                fresh[0],
+                fresh[1]));
+        if (!v.getKey().startsWith("OPTION") && !v.getKey().startsWith("FORCESEEK")) {
+          out.append("\nplan, statistics from no row in flight:\n")
+              .append(stalePlan)
+              .append("\nplan, statistics updated:\n")
+              .append(plan(c, engine, v.getValue()))
+              .append('\n');
+        }
+      }
+    }
+    Path file = Path.of("build/bench/inflight-coldplan-sqlserver.txt");
     Files.createDirectories(Objects.requireNonNull(file.getParent()));
     Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
