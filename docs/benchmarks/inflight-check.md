@@ -211,6 +211,36 @@ on RDS db.m5.2xlarge; two runs each), reads committed/s, check off → on:
 - So the check's own cost on these two is to be measured on the AWS machines (the static mode, a
   fixed number of rows in flight, and the plans) before either takes this form.
 
+### Why, on the AWS machines (run `20261023-1317`)
+
+`-Dnativejdbc.bench.arms=true -Dnativejdbc.bench.coldPlan=true`, the same machines, rows in
+flight held fixed, median µs:
+
+| engine, rows in flight per table | the join read | the check | its arms 0-4 alone |
+|---|---|---|---|
+| SQL Server, 10 | 2,071 | 602 | 254 / 252 / 387 / 394 / 258 |
+| SQL Server, 100 | 2,072 | 3,267 | 367 / 382 / 1,601 / 1,657 / 388 |
+| Oracle 19c, 10 | 401 | 6,078 | 748 / **4,225** / 402 / 238 / 163 |
+| Oracle 19c, 100 | 287 | 6,376 | 395 / **4,418** / 540 / 229 / 258 |
+
+The arms: 0 `(o after, c data)`, 1 `(o before, c data)`, 2 `(o data, c after)`, 3 `(o data, c
+before)`, 4 `(o before, c before)`.
+
+- **Oracle 19c: one arm's plan.** `(o before, c data)` reads `C` whole (10,000 rows) and probes
+  `o`'s metadata table by `before_CID` 10,000 times, where Oracle 23 starts from `o`'s before
+  images in the region (`before_REGION`) and probes `C` by its key. The metadata tables have no
+  optimizer statistics on RDS (the plan notes dynamic sampling): the setup creates them, and
+  19c's statistics job runs only in its maintenance window. The arm costs 4.2-4.4 ms, the check
+  6 ms, fifteen times the read: the 6 ms a read lost at one writer.
+- **SQL Server: not the check, mostly.** With 10 rows in flight, about what sixteen writers hold,
+  the check costs 0.6 ms against the read's 2.1 ms; the reads' p50 of 224-360 ms beside sixteen
+  writers comes from elsewhere, to be found with a breakdown of a read's time under writers. At
+  100 the check is 3.3 ms: arms 2 and 3 start from `c`'s rows in flight and fan out to each
+  customer's 10 orders (990 key lookups), where starting from the region's 100 orders is cheaper.
+- **SQL Server's statistics, natively**: the index hint gains nothing on EC2 (3,295 against 3,349
+  µs on the stale plan; 1,190 against 1,500 planned on updated statistics). The 16-18 ms on the
+  laptop was the emulation's; `FORCESEEK` is again the fastest, 1.0-1.1 ms, and still not usable.
+
 ## Reads beside ScalarDB writers (stage 1, one table)
 
 `scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:
