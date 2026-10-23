@@ -1112,7 +1112,7 @@ union as a derived table.
   second statement driven by the in-flight index. At SERIALIZABLE on MySQL, MariaDB and SQL Server
   the per-table check stays as it is: its locking read is what holds off every later prepare.
   **Stage 2, the in-flight pairs**, takes joins and semi-joins under the same setting, on
-  every engine but MySQL. It applies to a single SELECT of two or three ScalarDB table references
+  PostgreSQL, MariaDB and Oracle. It applies to a single SELECT of two or three ScalarDB table references
   and no other table, each joined by an inner join in the FROM clause or semi-joined by an IN or
   EXISTS conjunct of the WHERE clause, with a pure WHERE clause and pure ON clauses on the tables'
   own columns. Each table may be the data table (D, its committed rows and the after images of
@@ -1127,7 +1127,10 @@ union as a derived table.
   An outer join, NOT EXISTS and NOT IN, whose rows a row's absence changes, keep the per-table
   check, and so do a USING join, an IN or EXISTS under an OR, and a WITH clause, which stands
   before the FROM clause the check is cut from; so does MySQL, whose plan of the statements under
-  the row limit scans the in-flight index whole (`docs/benchmarks/inflight-check.md`). On Oracle the
+  the row limit scans the in-flight index whole, and SQL Server, where the split read of a join,
+  which the check now lets run beside ScalarDB writers, is compiled again as the metadata tables'
+  statistics refresh, and the plans made then scan: 38 ms a read at four writers, 144-288 ms at
+  sixteen (`docs/benchmarks/inflight-check.md`). On Oracle the
   pieces read their metadata table through the in-flight index, by a hint: the before-image
   columns are NULL but for the rows in flight, so their indexes look empty, and 19c drives a
   statement from the other table's data table, probing one 10,000 times. No table hint is added
