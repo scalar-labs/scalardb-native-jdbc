@@ -1380,15 +1380,6 @@ class InFlightCheckBenchmark {
   /** The metadata tables of o and c, for {@link #STATS_EVERY_MS}. */
   private static List<String> metaTables = List.of();
 
-  /**
-   * With {@code -Dnativejdbc.bench.seekToo=true}, on SQL Server, the writers mode runs four and
-   * sixteen writers again, the check on, with FORCESEEK in the split read's committed rows.
-   */
-  private static final boolean SEEK_TOO = Boolean.getBoolean("nativejdbc.bench.seekToo");
-
-  /** The configuration's variant, appended to its "on" and its breakdown's label. */
-  private static String variant = "";
-
   private static final boolean JOIN_READ =
       "join".equals(System.getProperty("nativejdbc.bench.writersRead"));
 
@@ -1426,20 +1417,6 @@ class InFlightCheckBenchmark {
       for (int writers : new int[] {0, 1, 4, 16}) {
         for (boolean on : new boolean[] {false, true}) {
           out.append(besideWriters(e, tm, ns, vo, vc, writers, on, BREAKDOWN ? breakdown : null));
-        }
-      }
-      if (SEEK_TOO && e.engine() == Engine.SQLSERVER) {
-        // the same with FORCESEEK in the committed rows' NOT EXISTS, the check on
-        System.setProperty("nativejdbc.bench.sqlServerSeek", "true");
-        variant = " FORCESEEK";
-        try {
-          for (int writers : new int[] {4, 16}) {
-            out.append(
-                besideWriters(e, tm, ns, vo, vc, writers, true, BREAKDOWN ? breakdown : null));
-          }
-        } finally {
-          System.clearProperty("nativejdbc.bench.sqlServerSeek");
-          variant = "";
         }
       }
     }
@@ -1603,7 +1580,7 @@ class InFlightCheckBenchmark {
                   + " each; rollbacks %.0f ms in all; readers' time %.0f ms (%d threads x %d"
                   + " ms)%n",
               writers,
-              on ? "on" + variant : "off",
+              on ? "on" : "off",
               reads.get(),
               reads.get() == 0 ? Double.NaN : readNs.get() / 1e6 / reads.get(),
               commitCalls.get(),
@@ -1613,20 +1590,14 @@ class InFlightCheckBenchmark {
               READERS,
               LIVE_MS));
       if (e.engine() == Engine.SQLSERVER) {
-        breakdown.append(
-            serverBreakdown(
-                e,
-                writers
-                    + "-"
-                    + (on ? "on" : "off")
-                    + variant.replace(' ', '-').toLowerCase(Locale.ROOT)));
+        breakdown.append(serverBreakdown(e, writers + "-" + (on ? "on" : "off")));
       }
     }
     return String.format(
         Locale.ROOT,
         "| %d | %s | %d | %.2f | %.1f | %.1f | %d |%n",
         writers,
-        on ? "on" + variant : "off",
+        on ? "on" : "off",
         n * 1000L / LIVE_MS,
         n == 0 ? Double.NaN : (double) retries.get() / n,
         n == 0 ? Double.NaN : sorted[n / 2] / 1e6,
