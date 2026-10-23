@@ -157,7 +157,7 @@ committed 90/s at 72 retries per commit. On a join, 44-53% of reads abort at one
 | Shape | Check | Status |
 |---|---|---|
 | One table, pure WHERE clause | **Predicate check**: the WHERE clause over the in-flight rows' before and after images; abort only on a match | Built (`scalardbnative.predicateChecks`, `predicate-checks` branch), measured on AWS |
-| Joins and semi-joined subqueries the split read covers | **In-flight pairs**: the statement as `SELECT 1` over every combination with at least one table's row in flight, by its before or after image, and the data tables for the rest | Built on branch `stage2-inflight-pairs` for PostgreSQL and MariaDB, two or three tables; measured through the driver on the laptop and on EC2 |
+| Joins and semi-joined subqueries the split read covers | **In-flight pairs**: the statement as `SELECT 1` over every combination with at least one table's row in flight, by its before or after image, and the data tables for the rest | Built for PostgreSQL and MariaDB (main) and for Oracle and SQL Server (branch `pairs-oracle-sqlserver`), two or three tables; measured on EC2 for PostgreSQL and MariaDB; on AWS, Oracle 19c and SQL Server gain less: Oracle 19c, with the driver's in-flight index hint, 0 → 177-182 reads/s at four writers and 18% fewer at one; SQL Server's split read of the join plans badly under churn (`inflight-check.md`) |
 | Scalar subqueries, CTEs, past the copy limit | Table-wide check, as today | - |
 
 Both narrowed checks run only when the cheap table-wide probe finds a row in flight. Then they
@@ -201,13 +201,14 @@ cost one indexed statement: 0.5-2 ms for the predicate check and 0.4-2.4 ms for 
   writer; at 1.5 GB on EC2, MySQL's fell 5% at 4 writers and 13% at 16, and SQL Server's from
   +3% to -17% at 4 and 8-33% at 16 (two runs, noisy). This is a product tradeoff, more reads that
   finish against writer throughput, likely the hosts' caps (not confirmed).
-- **SQL Server's in-flight pairs plan:** its check took 16-18 ms on the laptop because it reuses a
-  plan cached while nothing was in flight; this needs solving before SQL Server takes that form.
+- **SQL Server's in-flight pairs plan:** its check took 16-18 ms on the laptop on a plan made from
+  the filtered in-flight index's statistics, taken with nothing in flight. On branch
+  `pairs-oracle-sqlserver` the check reads each metadata table through the in-flight index by a
+  table hint, so its cost follows the rows in flight; to be measured on EC2.
 - **MySQL's in-flight pairs plan:** with `LIMIT 1` it scans the whole in-flight index for the
   `(o after, c data)` arm, 9.8 ms against 1.9 ms without the limit, because its statistics,
   taken with nothing in flight, estimate one row. An index hint or the setup's histogram is the
-  next thing to measure. Until both plan problems are solved, SQL Server and MySQL keep the
-  table-wide check for joins.
+  next thing to measure. Until then MySQL keeps the table-wide check for joins.
 - **MySQL's first configuration:** with no writers, the check-off row measures 175/s against
   2,034/s on, in both runs on EC2 and on RDS. With nothing in flight both run the same statements,
   so this is the benchmark's order of measuring, not the check.

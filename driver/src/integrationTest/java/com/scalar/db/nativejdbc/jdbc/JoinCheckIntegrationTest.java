@@ -38,11 +38,12 @@ import org.junit.jupiter.params.provider.MethodSource;
  * With {@code scalardbnative.predicateChecks}, a join or a semi-join of ScalarDB tables that takes
  * the per-table check at SNAPSHOT, and at SERIALIZABLE on PostgreSQL, aborts on a row in flight
  * only where a combination of the tables' pieces with that row, by its before image or its after
- * image, gives the statement a row (design 4.2, the in-flight pairs), on PostgreSQL and MariaDB: a
- * row in flight on either side, on both, moved out of the predicate, inserted, deleted; a
- * placeholder's value; comma and CROSS joins, a star. An outer join, an anti-join, USING, an IN
- * under an OR and a WITH clause keep the table-wide check, and so do the other engines. Orders 1 to
- * 10 are in region 'a', 11 to 20 in 'b', order i of customer i, amount i; customer i of tier i % 2.
+ * image, gives the statement a row (design 4.2, the in-flight pairs), on every engine but MySQL and
+ * SQL Server: a row in flight on either side, on both, moved out of the predicate, inserted,
+ * deleted; a placeholder's value; comma and CROSS joins, a star. An outer join, an anti-join,
+ * USING, an IN under an OR and a WITH clause keep the table-wide check, and so do MySQL and SQL
+ * Server. Orders 1 to 10 are in region 'a', 11 to 20 in 'b', order i of customer i, amount i;
+ * customer i of tier i % 2.
  */
 class JoinCheckIntegrationTest {
 
@@ -100,7 +101,7 @@ class JoinCheckIntegrationTest {
                   List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
-    boolean pairs = e.engine() == Engine.POSTGRESQL || e.engine() == Engine.MARIADB;
+    boolean pairs = e.engine() != Engine.MYSQL && e.engine() != Engine.SQLSERVER;
     try (TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
       if (pairs) {
         scenarios(e, tpc, Connection.TRANSACTION_REPEATABLE_READ, "SNAPSHOT");
@@ -108,7 +109,7 @@ class JoinCheckIntegrationTest {
           scenarios(e, tpc, Connection.TRANSACTION_SERIALIZABLE, "SERIALIZABLE");
         }
       } else {
-        // the other engines keep the table-wide check for a join: a customer elsewhere aborts it
+        // MySQL and SQL Server keep the table-wide check for a join: a customer elsewhere aborts it
         TwoPhaseCommitTransaction held = prepared(tpc, customerUpdate(15, 0));
         try (Connection d = driver(e, true)) {
           d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);

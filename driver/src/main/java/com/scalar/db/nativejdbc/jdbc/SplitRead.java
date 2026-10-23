@@ -332,6 +332,16 @@ final class SplitRead {
    * index (joined with the data table, Oracle 19c without statistics probed it once per row).
    */
   static String inFlight(Engine engine, TableInfo t, List<String> read) {
+    return inFlight(engine, t, read, false);
+  }
+
+  /**
+   * As {@link #inFlight(Engine, TableInfo, List)}; with {@code hinted} on Oracle, the metadata
+   * table read through the in-flight index. Joined with another table's data table, 19c costs
+   * probing the before image's index once per row of that table as free, the index holding next to
+   * nothing, and probes it 10,000 times (design 4.2, the in-flight pairs).
+   */
+  static String inFlight(Engine engine, TableInfo t, List<String> read, boolean hinted) {
     List<String> cols = new ArrayList<>();
     List<String> keys = t.keyColumns();
     for (String c : read) {
@@ -339,6 +349,7 @@ final class SplitRead {
       cols.add(keys.contains(c) ? "m." + q : t.beforeImage(engine, "m", c) + " AS " + q);
     }
     return "(SELECT "
+        + inflightHint(engine, t, hinted)
         + String.join(", ", cols)
         + " FROM "
         + meta(engine, t)
@@ -353,7 +364,15 @@ final class SplitRead {
 
   /** The after image of each of the table's rows in flight, columns {@code read}. */
   static String afterImages(Engine engine, TableInfo t, List<String> read) {
+    return afterImages(engine, t, read, false);
+  }
+
+  /**
+   * As {@link #afterImages(Engine, TableInfo, List)}, with {@code hinted} as for {@link #inFlight}.
+   */
+  static String afterImages(Engine engine, TableInfo t, List<String> read, boolean hinted) {
     return "(SELECT "
+        + inflightHint(engine, t, hinted)
         + columns(engine, read)
         + " FROM "
         + data(engine, t)
@@ -364,6 +383,12 @@ final class SplitRead {
         + " WHERE m."
         + engine.quote("tx_state")
         + " IN (1, 2))";
+  }
+
+  private static String inflightHint(Engine engine, TableInfo t, boolean hinted) {
+    return hinted && engine == Engine.ORACLE
+        ? "/*+ INDEX(m " + engine.quote(t.inflightIndex(engine)) + ") */ "
+        : "";
   }
 
   private static String data(Engine engine, TableInfo t) {

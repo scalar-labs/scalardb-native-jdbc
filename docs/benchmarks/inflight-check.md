@@ -50,8 +50,11 @@ nothing, whichever image is true; a dropped conjunct only widens what is checked
 4. **In-flight pairs do**: 0-3% at every writer count, about the single-table predicate check.
    Cost on PostgreSQL, MySQL, MariaDB and Oracle 0.4-2.4 ms, about one more read of the statement.
    SQL Server measured 16-18 ms with 100 rows in flight or fewer in the full run, 1.9-4.7 ms when
-   the statement is first planned with rows in flight (diagnostics below): a plan cached while no
-   row was in flight, reused after; to be solved before SQL Server takes this form.
+   the statement is first planned with rows in flight (diagnostics below): a plan made from the
+   filtered in-flight index's statistics, taken with no row in flight, scans a metadata table. A table
+   hint on the in-flight index bounded it by the rows in flight on the laptop, but gained nothing
+   on EC2, where the 16-18 ms was the emulation's (below); the driver adds none on SQL Server. On
+   Oracle 19c it adds the same index hint, for another reason (Oracle 19c's plan, below).
 5. **Design that follows**: one table, the predicate check; a join or semi-joined subquery the
    split covers, the in-flight pairs check, built from the split read's fragments; the table-wide
    check kept for the shapes the split does not cover (a scalar subquery, a CTE, past the copy
@@ -150,6 +153,156 @@ the diagnostic's `FROM DUAL` failed there, since fixed):
 - **SQL Server**: 1.9 / 4.7 ms here against 16.5 / 18.1 ms in the full run, the same statement and
   rows in flight; the full run first planned it with no row in flight. `OPTION (RECOMPILE)` makes
   each arm 8-17 ms, its compile alone.
+
+## SQL Server with stale statistics (`-Dnativejdbc.bench.coldPlan=true`)
+
+The setup builds the in-flight index filtered on `tx_state IN (1, 2)` while no row is in flight,
+and SQL Server rarely updates a filtered index's statistics. Here: statistics updated and the plan
+cache cleared with no row in flight, the check run (planned) there, then run with 100 rows in
+flight per table on that plan; then planned again after `UPDATE STATISTICS`. Median µs, the
+laptop's SQL Server under x86 emulation (`build/bench/inflight-coldplan-sqlserver.txt`):
+
+| check | no row in flight | 100 in flight, stale plan | 100 in flight, statistics updated |
+|---|---|---|---|
+| no hint | 736-1,056 | 4,801-5,392 | 2,587-3,035 |
+| `OPTION (RECOMPILE)` | 22,318-22,672 | 28,198-28,403 | 25,166-29,239 |
+| `OPTION (LOOP JOIN)` | 767-771 | 4,862-5,075 | 5,462-5,501 |
+| `WITH (FORCESEEK)` on the metadata tables | 1,694-1,986 | 1,744-1,939 | 1,527-1,529 |
+| `WITH (INDEX(<in-flight index>))`, the driver's | 743 | 5,653 | 1,875 |
+
+- **No hint**: the stale plan reads `c`'s metadata table whole for the `(o data, c before)` arm
+  and hashes `o`'s in-flight index against its `before_region` index: a cost that grows with the
+  table.
+- **`FORCESEEK`** is fastest, but fails where no index gives a seek: the join test's tables, with
+  no index on `before_region`, fail with it (error 8622), which the driver takes as an abort.
+- **The in-flight index hint**, which the driver used for a while: on the stale plan every arm starts from the
+  in-flight index, about 100 key lookups an arm, so the cost follows the rows in flight, never the
+  table; with updated statistics it is as good as the best. The 5.7 ms is inflated by the
+  emulation; on EC2 it gained nothing (run `20261023-1317`, below).
+
+## Joins beside ScalarDB writers on Oracle and SQL Server (laptop)
+
+`-Dnativejdbc.bench.writers=true -Dnativejdbc.bench.writersRead=join`, branch
+`pairs-oracle-sqlserver`, one run each; reads committed/s, check off → on, and ScalarDB's commits
+off → on:
+
+| engine | 1 writer | 4 writers | 16 writers | ScalarDB's commits at 4 / 16 |
+|---|---|---|---|---|
+| Oracle 23 Free | 444 → 427 | 11 → 280 | 0 → 126 | 361 → 264 / 763 → 432 |
+| SQL Server 2022 (emulated) | 260 → 366 | 51 → 309 | 0 → 54 | 168 → 173 / 394 → 251 |
+
+Retries fall to 0.08 per commit or fewer. ScalarDB's commits fall on both where reads now finish
+beside them, as with the one-table check on Oracle 23 Free (2 CPUs) and on this laptop's emulated
+SQL Server; on dedicated machines that is to be measured.
+
+On AWS, run `20261023-1231` (SQL Server 2022 Developer on EC2 in Docker at 1.5 GB, Oracle 19c SE2
+on RDS db.m5.2xlarge; two runs each), reads committed/s, check off → on:
+
+| engine | 1 writer | 4 writers | 16 writers | ScalarDB's commits at 4 / 16 |
+|---|---|---|---|---|
+| SQL Server (EC2) | 722-761 → 826-898 | 55-80 → 104-136 | 0 → 8-14 | 639-653 → 569-578 / 2,120-2,192 → 1,657-1,711 |
+| Oracle 19c (RDS) | 374-391 → 203-210 | 0-2 → 97 | 0 → 78 | 616-624 → 505-506 / 1,880-1,947 → 1,156-1,238 |
+
+- **Neither gains as PostgreSQL and MariaDB do** (1,514-1,575 and 427-462 at four writers on EC2).
+- **SQL Server**: reads gain 70-90% at four writers, but at sixteen p50 is 224-360 ms and p99 2-3 s;
+  ScalarDB's commits 11% lower at four, 20-24% at sixteen.
+- **Oracle 19c loses at one writer**: 45% fewer reads, p50 10 → 16 ms, so the check costs about
+  6 ms a read there; from four writers on, reads that never finished do. ScalarDB's commits 18%
+  lower at four, 36-38% at sixteen.
+- So the check's own cost on these two is to be measured on the AWS machines (the static mode, a
+  fixed number of rows in flight, and the plans) before either takes this form: done below, with
+  the fixes measured in `20261023-1850`.
+
+### Why, on the AWS machines (run `20261023-1317`)
+
+`-Dnativejdbc.bench.arms=true -Dnativejdbc.bench.coldPlan=true`, the same machines, rows in
+flight held fixed, median µs:
+
+| engine, rows in flight per table | the join read | the check | its arms 0-4 alone |
+|---|---|---|---|
+| SQL Server, 10 | 2,071 | 602 | 254 / 252 / 387 / 394 / 258 |
+| SQL Server, 100 | 2,072 | 3,267 | 367 / 382 / 1,601 / 1,657 / 388 |
+| Oracle 19c, 10 | 401 | 6,078 | 748 / **4,225** / 402 / 238 / 163 |
+| Oracle 19c, 100 | 287 | 6,376 | 395 / **4,418** / 540 / 229 / 258 |
+
+The arms: 0 `(o after, c data)`, 1 `(o before, c data)`, 2 `(o data, c after)`, 3 `(o data, c
+before)`, 4 `(o before, c before)`.
+
+- **Oracle 19c: one arm's plan.** `(o before, c data)` reads `C` whole (10,000 rows) and probes
+  `o`'s metadata table by `before_CID` 10,000 times, where Oracle 23 starts from `o`'s before
+  images in the region (`before_REGION`) and probes `C` by its key. The arm costs 4.2-4.4 ms, the
+  check 6 ms, fifteen times the read: the 6 ms a read lost at one writer. Not for want of
+  statistics, as first read from the plan's note on dynamic sampling (next section): the
+  before-image columns are NULL but for the rows in flight, their indexes hold next to nothing,
+  and 19c costs a probe of one as free.
+- **SQL Server: not the check, mostly.** With 10 rows in flight, about what sixteen writers hold,
+  the check costs 0.6 ms against the read's 2.1 ms; the reads' p50 of 224-360 ms beside sixteen
+  writers comes from elsewhere, to be found with a breakdown of a read's time under writers. At
+  100 the check is 3.3 ms: arms 2 and 3 start from `c`'s rows in flight and fan out to each
+  customer's 10 orders (990 key lookups), where starting from the region's 100 orders is cheaper.
+- **SQL Server's statistics, natively**: the index hint gains nothing on EC2 (3,295 against 3,349
+  µs on the stale plan; 1,190 against 1,500 planned on updated statistics). The 16-18 ms on the
+  laptop was the emulation's; `FORCESEEK` is again the fastest, 1.0-1.1 ms, and still not usable.
+  The driver no longer adds the hint on SQL Server.
+
+### Oracle 19c's plan on the laptop, and the driver's hint
+
+`-Dnativejdbc.bench.arms=true` on Oracle 23 Free with
+`-Dnativejdbc.bench.session="optimizer_features_enable='19.1.0' optimizer_dynamic_sampling=2"`,
+19c's optimizer and its sampling: the same plan as on RDS, arm 1 driven from `C`. Median µs of the
+check, as one UNION ALL under the row limit, and of arms 0-4 alone, by rows in flight per table:
+
+| optimizer, pieces | 10: the check | arms | 100: the check | arms |
+|---|---|---|---|---|
+| 19c, unhinted | 5,379 | 633 / **3,181** / 660 / 581 / 478 | 5,107 | 606 / **3,188** / 635 / 514 / 492 |
+| 19c, data tables' statistics gathered | 4,258 | 804 / **3,132** / 654 / 577 / 431 | 4,132 | 679 / **3,198** / 621 / 530 / 508 |
+| 19c, `NO_MERGE` in the pieces in flight | 1,584 | 684 / 429 / 873 / 830 / 448 | 1,533 | 679 / 403 / 901 / 1,601 / 424 |
+| 19c, `LEADING` the piece in flight | 4,912 | 692 / **3,028** / 635 / 537 / 410 | 5,045 | 731 / **3,151** / 630 / 532 / 510 |
+| 19c, `INDEX(m, the in-flight index)` in the pieces | **778** | 571 / 429 / 574 / 548 / 440 | **930** | 548 / 468 / 592 / 1,295 / 509 |
+| 23, unhinted | 1,145 | | 936 | |
+| 23, `INDEX(m, the in-flight index)` in the pieces | 838 | 604 / 423 / 628 / 500 / 432 | 932 | 580 / 513 / 610 / 1,047 / 470 |
+
+- **Statistics are not the cause**: gathered on both data tables (the setup's on the metadata
+  tables are locked), the plan stays.
+- **The in-flight index is**: read through it, each piece costs what its rows in flight do, and no
+  plan probes the before images' near-empty indexes once per row of the other table. The driver
+  now adds the hint on Oracle in the in-flight pairs' pieces (`SplitRead.inFlight` and
+  `afterImages` with `hinted`), and only there: the split read's before-image piece wants the
+  predicate's own index. On 23 the hint costs nothing.
+
+### With the fixes, on the AWS machines (run `20261023-1850`)
+
+The same machines and mode as `20261023-1231`, the driver with Oracle's in-flight index hint and
+without SQL Server's, `-Dnativejdbc.bench.breakdown=true`; two runs each, reads committed/s, check
+off → on (`20261023-1231`'s "on" in brackets):
+
+| engine | 1 writer | 4 writers | 16 writers | ScalarDB's commits at 4 / 16 |
+|---|---|---|---|---|
+| SQL Server (EC2) | 713-759 → 809-864 (826-898) | 56-60 → 85-253 (104-136) | 0 → 9-12 (8-14) | 646-648 → 524-567 / 2,177-2,182 → 1,785-1,936 |
+| Oracle 19c (RDS) | 365-373 → 298-307 (203-210) | 0 → 177-182 (97) | 0 → 136-138 (78) | 580-585 → 483-525 / 1,921-1,938 → 1,267-1,282 |
+
+The readers' time by phase, mean ms per read with the check on (commits cost 0.1-1.5 ms
+throughout):
+
+| engine | 0 writers | 1 writer | 4 writers | 16 writers |
+|---|---|---|---|---|
+| SQL Server | 1.3 | 2.1-2.2 | 7.7-23 | 156-223 |
+| Oracle 19c | 3.7-4.0 | 6.4-6.6 | 10.8-11.1 | 14.0-14.2 |
+
+- **Oracle 19c, the hint works**: reads gain 1.8-1.9x at four writers and sixteen over the
+  unhinted driver, and the loss at one writer shrinks from 45% to 18%: a read costs 2.1 ms more
+  with the check, where it cost 6 ms. Its p99 at sixteen writers is 49 ms.
+- **SQL Server, the read's own statement, not the check**: SQL Server's account of the
+  statements (`sys.dm_exec_query_stats`, from a cleared plan cache) at four writers puts 12.5 s
+  of the readers' 40 s in the split read's join statement under one cached plan alone, 38 ms and
+  4,174 logical reads a run against 1.3 ms quiet, and 0.3 s in the check, 0.9 ms a run. At
+  sixteen the statement's cached plans show 1-2 runs each, so it is compiled again and again, at
+  144-288 ms and 29,000-272,000 logical reads a run, in parallel (`CXPACKET` 19 s): the metadata
+  tables' statistics refresh as the writers churn them (`WAIT_ON_SYNC_STATISTICS_REFRESH`), and
+  the plans made then scan. The plans themselves are yet to be captured. A split read's plan
+  under churn, which the table-wide check never reached on a join: it aborted first.
+- **Without SQL Server's hint nothing is lost**: the "on" figures are within the earlier ones'
+  noise.
 
 ## Reads beside ScalarDB writers (stage 1, one table)
 

@@ -159,8 +159,17 @@ class InFlightCheckBenchmark {
             + " o.region = ? GROUP BY o.region",
         join(e, o, cu));
 
+    // the diagnostics, one or both, instead of the benchmark
+    boolean diagnostics = false;
     if (Boolean.getBoolean("nativejdbc.bench.arms")) {
-      arms(e, o, cu);
+      arms(e, o, cu, join(e, o, cu));
+      diagnostics = true;
+    }
+    if (Boolean.getBoolean("nativejdbc.bench.coldPlan") && engine == Engine.SQLSERVER) {
+      coldPlan(e, o, cu);
+      diagnostics = true;
+    }
+    if (diagnostics) {
       return;
     }
     if (Boolean.getBoolean("nativejdbc.bench.checkPlan")) {
@@ -350,8 +359,16 @@ class InFlightCheckBenchmark {
             false));
   }
 
-  /** The arms of the in-flight-pairs check: the join over every pair with a row in flight. */
+  /**
+   * The arms of the in-flight-pairs check, as the driver's: the join over every pair with a row in
+   * flight.
+   */
   private static List<String> pairArms(Engines e, TableInfo o, TableInfo c) {
+    return pairArms(e, o, c, true);
+  }
+
+  /** As the driver's with {@code hinted} (on Oracle, through the in-flight index). */
+  private static List<String> pairArms(Engines e, TableInfo o, TableInfo c, boolean hinted) {
     Engine engine = e.engine();
     String region = "o." + engine.quote(e.storedColumn("region"));
     String cid = "o." + engine.quote(e.storedColumn("cid"));
@@ -359,11 +376,11 @@ class InFlightCheckBenchmark {
     // per table, its pieces: the data table as it is (committed rows and the after images of rows
     // in flight), the after images alone, the before images
     String od = data(engine, o);
-    String oa = SplitRead.afterImages(engine, o, o.dataColumns());
-    String ob = SplitRead.inFlight(engine, o, o.dataColumns());
+    String oa = SplitRead.afterImages(engine, o, o.dataColumns(), hinted);
+    String ob = SplitRead.inFlight(engine, o, o.dataColumns(), hinted);
     String cd = data(engine, c);
-    String ca = SplitRead.afterImages(engine, c, c.dataColumns());
-    String cb = SplitRead.inFlight(engine, c, c.dataColumns());
+    String ca = SplitRead.afterImages(engine, c, c.dataColumns(), hinted);
+    String cb = SplitRead.inFlight(engine, c, c.dataColumns(), hinted);
     // every pair with a row in flight on either side, in either image: (A, *) (B, *) (*, A)
     // (*, B), * the data table, with (B, B), which no data table holds
     List<String> arms = new ArrayList<>();
@@ -397,12 +414,15 @@ class InFlightCheckBenchmark {
   /**
    * With {@code -Dnativejdbc.bench.arms=true} only, at 10 and 100 rows in flight per table: the
    * in-flight-pairs check as one UNION ALL with a row limit, as OR'ed EXISTS, without a limit, and
-   * as separate statements; each arm on its own with and without the limit, and its plan; written
-   * to {@code build/bench/inflight-arms-<engine>.txt}.
+   * as separate statements; each arm on its own with and without the limit, and its plan; the join
+   * read's own cost beside them; at 100 the check's plan as run, with its rows per step; written to
+   * {@code build/bench/inflight-arms-<engine>.txt}.
    */
-  private static void arms(Engines e, TableInfo o, TableInfo cu) throws Exception {
+  private static void arms(Engines e, TableInfo o, TableInfo cu, List<Form> joinForms)
+      throws Exception {
     Engine engine = e.engine();
-    List<String> arms = pairArms(e, o, cu);
+    // without the driver's hints, which the Oracle variants below add
+    List<String> arms = pairArms(e, o, cu, false);
     String from =
         engine == Engine.ORACLE
             ? " FROM dual"
@@ -420,9 +440,59 @@ class InFlightCheckBenchmark {
     variants.put("UNION ALL, no limit, first row read", String.join(" UNION ALL ", arms));
     StringBuilder out = new StringBuilder();
     try (Connection c = e.open()) {
+      // an optimizer setting to plan under, as
+      // -Dnativejdbc.bench.session="optimizer_features_enable
+      // = '19.1.0'" for Oracle 19c's plans on Oracle 23
+      String session = System.getProperty("nativejdbc.bench.session", "");
+      if (!session.isEmpty()) {
+        e.execute(c, "ALTER SESSION SET " + session);
+        out.append("ALTER SESSION SET ").append(session).append("\n\n");
+      }
+      if (engine == Engine.ORACLE && Boolean.getBoolean("nativejdbc.bench.gatherStats")) {
+        // the data tables' statistics, as the nightly job would have them; the setup's on the
+        // metadata tables are locked
+        for (TableInfo t : List.of(o, cu)) {
+          e.execute(
+              c,
+              "BEGIN DBMS_STATS.GATHER_TABLE_STATS('\""
+                  + t.namespace()
+                  + "\"', '\""
+                  + t.dataTable()
+                  + "\"'); END;");
+        }
+        out.append("statistics gathered on the data tables\n\n");
+      }
       for (int count : new int[] {10, 100}) {
         inFlight(e, c, o, ROWS, count, oBefore(e));
         inFlight(e, c, cu, CUSTOMERS, count, cBefore(e));
+        for (Form f : joinForms) {
+          if (f.name().startsWith("read")) {
+            long[] r = measure(c, f, new Random(42));
+            out.append(
+                String.format(Locale.ROOT, "%d in flight, %s: %d µs%n", count, f.name(), r[0]));
+          }
+        }
+        if (count == 100) {
+          // a region the check finds nothing for, the usual case, which runs every arm through
+          String check = variants.values().iterator().next();
+          int clear = -1;
+          try (PreparedStatement ps = c.prepareStatement(check)) {
+            for (int r = 0; r < REGIONS && clear < 0; r++) {
+              int marks = (int) check.chars().filter(ch -> ch == '?').count();
+              for (int p = 1; p <= marks; p++) {
+                ps.setInt(p, r);
+              }
+              try (ResultSet rs = ps.executeQuery()) {
+                clear = rs.next() ? -1 : r;
+              }
+            }
+          }
+          out.append("the check as run, 100 in flight, region ")
+              .append(clear)
+              .append(", which it finds nothing for:\n")
+              .append(actualPlan(c, engine, check.replace("?", String.valueOf(clear))))
+              .append('\n');
+        }
         for (Map.Entry<String, String> v : variants.entrySet()) {
           long[] r = measure(c, new Form("v", v.getValue(), false), new Random(42));
           out.append(
@@ -451,6 +521,9 @@ class InFlightCheckBenchmark {
               out.append(plan(c, engine, sql)).append('\n');
             }
           }
+        }
+        if (engine == Engine.ORACLE) {
+          oracleHints(c, e, o, cu, arms, count, out);
         }
         // the arms as separate statements, stopping at the first that finds a row
         long[] times = new long[RUNS];
@@ -497,6 +570,240 @@ class InFlightCheckBenchmark {
     Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
 
+  /**
+   * On Oracle, the check and each arm with hints the driver could add: NO_MERGE in the pieces with
+   * rows in flight, LEADING the arm's piece with rows in flight, and each piece's metadata table
+   * read through the in-flight index; median µs, and at 10 rows in flight arm 1's plans.
+   */
+  private static void oracleHints(
+      Connection c,
+      Engines e,
+      TableInfo o,
+      TableInfo cu,
+      List<String> arms,
+      int count,
+      StringBuilder out)
+      throws Exception {
+    Engine engine = e.engine();
+    Map<String, java.util.function.BiFunction<String, Integer, String>> hints =
+        new LinkedHashMap<>();
+    hints.put(
+        "NO_MERGE in the pieces", (arm, k) -> arm.replace("(SELECT ", "(SELECT /*+ NO_MERGE */ "));
+    // the arm's piece with rows in flight: o's in arms 0, 1 and 4, c's in 2 and 3
+    hints.put(
+        "LEADING(the piece in flight)",
+        (arm, k) ->
+            arm.replaceFirst(
+                "^SELECT 1 ", "SELECT /*+ LEADING(" + (k == 2 || k == 3 ? "c" : "o") + ") */ 1 "));
+    hints.put(
+        "INDEX(m, the in-flight index) in the pieces, as the driver",
+        (arm, k) -> inflightIndexHint(engine, o, cu, arm));
+    for (Map.Entry<String, java.util.function.BiFunction<String, Integer, String>> h :
+        hints.entrySet()) {
+      List<String> hinted = new ArrayList<>();
+      for (int k = 0; k < arms.size(); k++) {
+        hinted.add(h.getValue().apply(arms.get(k), k));
+      }
+      long[] all =
+          measure(
+              c,
+              new Form("v", Writes.anyRow(engine, String.join(" UNION ALL ", hinted)), false),
+              new Random(42));
+      out.append(
+          String.format(
+              Locale.ROOT,
+              "%d in flight, %s: the check %d µs, %d%% found; arms",
+              count,
+              h.getKey(),
+              all[0],
+              all[1]));
+      for (String arm : hinted) {
+        out.append(' ')
+            .append(
+                measure(c, new Form("arm", Writes.anyRow(engine, arm), false), new Random(42))[0]);
+      }
+      out.append(" µs\n");
+      if (count == 10) {
+        out.append(plan(c, engine, Writes.anyRow(engine, hinted.get(1)))).append('\n');
+      }
+    }
+  }
+
+  /** Each piece's metadata table, as {@code m}, read through the in-flight index. */
+  private static String inflightIndexHint(Engine engine, TableInfo o, TableInfo cu, String arm) {
+    String out = arm;
+    for (TableInfo t : List.of(o, cu)) {
+      String hint = "/*+ INDEX(m " + engine.quote(t.inflightIndex(engine)) + ") */ ";
+      String m = " FROM " + SplitRead.meta(engine, t) + " m";
+      // a before-image piece reads the metadata table alone; an after-image piece joins it
+      int at = 0;
+      while ((at = out.indexOf(m, at)) >= 0) {
+        int open = out.lastIndexOf("(SELECT ", at);
+        out = out.substring(0, open + 8) + hint + out.substring(open + 8);
+        at += m.length() + hint.length();
+      }
+      String joined = " JOIN " + SplitRead.meta(engine, t) + " m ON ";
+      at = 0;
+      while ((at = out.indexOf(joined, at)) >= 0) {
+        int open = out.lastIndexOf("(SELECT ", at);
+        out = out.substring(0, open + 8) + hint + out.substring(open + 8);
+        at += joined.length() + hint.length();
+      }
+    }
+    return out;
+  }
+
+  /**
+   * With {@code -Dnativejdbc.bench.coldPlan=true} only, on SQL Server: the in-flight-pairs check
+   * planned while no row is in flight, as the statistics of the filtered in-flight index have it
+   * from the setup on, then run with 100 rows in flight per table on that plan; and planned again
+   * after the statistics are updated. Without a hint and with hints, median µs; the plans without a
+   * hint and with the driver's; written to {@code build/bench/inflight-coldplan-sqlserver.txt}.
+   */
+  private static void coldPlan(Engines e, TableInfo o, TableInfo cu) throws Exception {
+    Engine engine = e.engine();
+    String check = Writes.anyRow(engine, String.join(" UNION ALL ", pairArms(e, o, cu, false)));
+    Map<String, String> variants = new LinkedHashMap<>();
+    variants.put("no hint", check);
+    variants.put("OPTION (RECOMPILE)", check + " OPTION (RECOMPILE)");
+    variants.put("OPTION (LOOP JOIN)", check + " OPTION (LOOP JOIN)");
+    variants.put(
+        "FORCESEEK on the metadata tables",
+        check
+            .replace(" m WHERE ", " m WITH (FORCESEEK) WHERE ")
+            .replace(" m ON ", " m WITH (FORCESEEK) ON "));
+    String hinted = check;
+    for (TableInfo t : List.of(o, cu)) {
+      String m = SplitRead.meta(engine, t) + " m";
+      hinted =
+          hinted.replace(m, m + " WITH (INDEX(" + engine.quote(t.inflightIndex(engine)) + "))");
+    }
+    variants.put("INDEX(the in-flight index) on the metadata tables", hinted);
+    StringBuilder out = new StringBuilder();
+    try (Connection c = e.open()) {
+      for (Map.Entry<String, String> v : variants.entrySet()) {
+        Form f = new Form("v", v.getValue(), false);
+        inFlight(e, c, o, ROWS, 0, oBefore(e));
+        inFlight(e, c, cu, CUSTOMERS, 0, cBefore(e));
+        e.execute(
+            c,
+            "UPDATE STATISTICS " + SplitRead.meta(engine, o),
+            "UPDATE STATISTICS " + SplitRead.meta(engine, cu),
+            "DBCC FREEPROCCACHE");
+        long[] none = measure(c, f, new Random(42));
+        inFlight(e, c, o, ROWS, 100, oBefore(e));
+        inFlight(e, c, cu, CUSTOMERS, 100, cBefore(e));
+        long[] stale = measure(c, f, new Random(42));
+        String stalePlan = plan(c, engine, v.getValue());
+        e.execute(
+            c,
+            "UPDATE STATISTICS " + SplitRead.meta(engine, o),
+            "UPDATE STATISTICS " + SplitRead.meta(engine, cu),
+            "DBCC FREEPROCCACHE");
+        long[] fresh = measure(c, f, new Random(42));
+        out.append(
+            String.format(
+                Locale.ROOT,
+                "%s: none in flight %d µs; 100 in flight on that plan %d µs, %d%% found;"
+                    + " planned again after UPDATE STATISTICS %d µs, %d%% found%n",
+                v.getKey(),
+                none[0],
+                stale[0],
+                stale[1],
+                fresh[0],
+                fresh[1]));
+        if (!v.getKey().startsWith("OPTION") && !v.getKey().startsWith("FORCESEEK")) {
+          out.append("\nplan, statistics from no row in flight:\n")
+              .append(stalePlan)
+              .append("\nplan, statistics updated:\n")
+              .append(plan(c, engine, v.getValue()))
+              .append('\n');
+        }
+      }
+    }
+    Path file = Path.of("build/bench/inflight-coldplan-sqlserver.txt");
+    Files.createDirectories(Objects.requireNonNull(file.getParent()));
+    Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
+  }
+
+  /**
+   * The plan as run, of a statement with its literals bound, with what each step did: SQL Server's
+   * STATISTICS PROFILE (rows, executions per step), Oracle's DBMS_XPLAN.DISPLAY_CURSOR with the
+   * session's statistics (actual rows, time, buffers); other engines EXPLAIN ANALYZE, MySQL's and
+   * MariaDB's ANALYZE. An error is written in its place.
+   */
+  private static String actualPlan(Connection c, Engine engine, String literal) {
+    StringBuilder out = new StringBuilder();
+    try (java.sql.Statement st = c.createStatement()) {
+      switch (engine) {
+        case SQLSERVER -> {
+          st.execute("SET STATISTICS PROFILE ON");
+          try {
+            boolean rs = st.execute(literal);
+            while (rs || st.getUpdateCount() != -1) {
+              if (rs) {
+                try (ResultSet r = st.getResultSet()) {
+                  int cols = r.getMetaData().getColumnCount();
+                  boolean profile = cols > 3;
+                  while (r.next()) {
+                    if (profile) {
+                      out.append(r.getString("Rows"))
+                          .append(" rows, ")
+                          .append(r.getString("Executes"))
+                          .append(" executions: ")
+                          .append(r.getString("StmtText"))
+                          .append('\n');
+                    }
+                  }
+                }
+              }
+              rs = st.getMoreResults();
+            }
+          } finally {
+            st.execute("SET STATISTICS PROFILE OFF");
+          }
+        }
+        case ORACLE -> {
+          st.execute("ALTER SESSION SET statistics_level = ALL");
+          try (ResultSet r = st.executeQuery(literal)) {
+            while (r.next()) {
+              // the rows are read for the cursor's statistics
+            }
+          }
+          try (ResultSet r =
+              st.executeQuery(
+                  "SELECT plan_table_output FROM"
+                      + " TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL, NULL, 'ALLSTATS LAST'))")) {
+            while (r.next()) {
+              out.append(r.getString(1)).append('\n');
+            }
+          }
+          st.execute("ALTER SESSION SET statistics_level = TYPICAL");
+        }
+        case POSTGRESQL -> {
+          try (ResultSet r = st.executeQuery("EXPLAIN ANALYZE " + literal)) {
+            while (r.next()) {
+              out.append(r.getString(1)).append('\n');
+            }
+          }
+        }
+        default -> {
+          try (ResultSet r =
+              st.executeQuery(
+                  (engine == Engine.MARIADB ? "ANALYZE FORMAT=JSON " : "EXPLAIN ANALYZE ")
+                      + literal)) {
+            while (r.next()) {
+              out.append(r.getString(1)).append('\n');
+            }
+          }
+        }
+      }
+    } catch (SQLException x) {
+      out.append("no plan: ").append(x.getMessage()).append('\n');
+    }
+    return out.toString();
+  }
+
   /** The estimated plan, region 7 bound as a literal. */
   private static String plan(Connection c, Engine engine, String sql) throws SQLException {
     String literal = sql.replace("?", "7");
@@ -519,7 +826,15 @@ class InFlightCheckBenchmark {
         } finally {
           st.execute("SET SHOWPLAN_TEXT OFF");
         }
-      } else if (engine != Engine.ORACLE) {
+      } else if (engine == Engine.ORACLE) {
+        st.execute("EXPLAIN PLAN FOR " + literal);
+        try (ResultSet r =
+            st.executeQuery("SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY)")) {
+          while (r.next()) {
+            out.append(r.getString(1)).append('\n');
+          }
+        }
+      } else {
         try (ResultSet r = st.executeQuery("EXPLAIN " + literal)) {
           int cols = r.getMetaData().getColumnCount();
           while (r.next()) {
@@ -851,6 +1166,72 @@ class InFlightCheckBenchmark {
   }
 
   // -Dnativejdbc.bench.writersRead=join: the writers mode reads o JOIN c, ScalarDB writing both
+  /**
+   * With {@code -Dnativejdbc.bench.breakdown=true}, the writers mode also writes where the readers'
+   * time goes, per configuration: the reads and the commits, and on SQL Server the statements' own
+   * time and the waits, to {@code build/bench/inflight-breakdown-<engine>.txt}.
+   */
+  private static final boolean BREAKDOWN = Boolean.getBoolean("nativejdbc.bench.breakdown");
+
+  /**
+   * SQL Server's account since the plan cache and the wait statistics were cleared: the statements
+   * by elapsed time, with executions, mean elapsed and CPU µs and logical reads; the waits by time.
+   */
+  private static String serverBreakdown(Engines e) throws SQLException {
+    StringBuilder out = new StringBuilder("statements by elapsed time:\n");
+    try (Connection c = e.open();
+        java.sql.Statement st = c.createStatement()) {
+      try (ResultSet r =
+          st.executeQuery(
+              "SELECT TOP 12 s.execution_count, s.total_elapsed_time / s.execution_count,"
+                  + " s.total_worker_time / s.execution_count,"
+                  + " s.total_logical_reads / s.execution_count, s.total_elapsed_time / 1000,"
+                  + " SUBSTRING(t.text, s.statement_start_offset / 2 + 1, 300)"
+                  + " FROM sys.dm_exec_query_stats s CROSS APPLY sys.dm_exec_sql_text(s.sql_handle) t"
+                  + " ORDER BY s.total_elapsed_time DESC")) {
+        while (r.next()) {
+          out.append(
+              String.format(
+                  Locale.ROOT,
+                  "  %d ms in all, %d runs, %d µs elapsed / %d µs CPU / %d reads each: %s%n",
+                  r.getLong(5),
+                  r.getLong(1),
+                  r.getLong(2),
+                  r.getLong(3),
+                  r.getLong(4),
+                  r.getString(6).replaceAll("\\s+", " ")));
+        }
+      }
+      out.append("waits by time:\n");
+      try (ResultSet r =
+          st.executeQuery(
+              "SELECT TOP 10 wait_type, wait_time_ms, waiting_tasks_count, signal_wait_time_ms"
+                  + " FROM sys.dm_os_wait_stats WHERE wait_time_ms > 0 AND wait_type NOT IN"
+                  + " ('SLEEP_TASK', 'LAZYWRITER_SLEEP', 'SQLTRACE_INCREMENTAL_FLUSH_SLEEP',"
+                  + " 'XE_TIMER_EVENT', 'XE_DISPATCHER_WAIT', 'REQUEST_FOR_DEADLOCK_SEARCH',"
+                  + " 'LOGMGR_QUEUE', 'CHECKPOINT_QUEUE', 'DIRTY_PAGE_POLL', 'HADR_FILESTREAM_IOMGR_IOCOMPLETION',"
+                  + " 'SP_SERVER_DIAGNOSTICS_SLEEP', 'BROKER_TO_FLUSH', 'SOS_WORK_DISPATCHER',"
+                  + " 'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', 'QDS_ASYNC_QUEUE', 'BROKER_EVENTHANDLER',"
+                  + " 'SLEEP_SYSTEMTASK', 'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', 'XE_LIVE_TARGET_TVF',"
+                  + " 'PVS_PREALLOCATE', 'ONDEMAND_TASK_QUEUE', 'BROKER_TRANSMITTER',"
+                  + " 'DISPATCHER_QUEUE_SEMAPHORE', 'FT_IFTS_SCHEDULER_IDLE_WAIT',"
+                  + " 'SQLTRACE_BUFFER_FLUSH', 'CXCONSUMER')"
+                  + " ORDER BY wait_time_ms DESC")) {
+        while (r.next()) {
+          out.append(
+              String.format(
+                  Locale.ROOT,
+                  "  %s: %d ms over %d waits (%d ms signal)%n",
+                  r.getString(1),
+                  r.getLong(2),
+                  r.getLong(3),
+                  r.getLong(4)));
+        }
+      }
+    }
+    return out.toString();
+  }
+
   private static final boolean JOIN_READ =
       "join".equals(System.getProperty("nativejdbc.bench.writersRead"));
 
@@ -881,16 +1262,23 @@ class InFlightCheckBenchmark {
                 System.getProperty("nativejdbc.bench.tier", "local"),
                 READERS,
                 LIVE_MS / 1000));
+    StringBuilder breakdown = new StringBuilder();
     try (DistributedTransactionManager tm = factory.getTransactionManager()) {
       // a pass not reported: the first after the setup's backfill runs slow
-      besideWriters(e, tm, ns, vo, vc, 0, true);
+      besideWriters(e, tm, ns, vo, vc, 0, true, null);
       for (int writers : new int[] {0, 1, 4, 16}) {
         for (boolean on : new boolean[] {false, true}) {
-          out.append(besideWriters(e, tm, ns, vo, vc, writers, on));
+          out.append(besideWriters(e, tm, ns, vo, vc, writers, on, BREAKDOWN ? breakdown : null));
         }
       }
     }
     System.out.println(out);
+    if (BREAKDOWN) {
+      Path file =
+          Path.of("build/bench/inflight-breakdown-" + e.name().toLowerCase(Locale.ROOT) + ".txt");
+      Files.createDirectories(Objects.requireNonNull(file.getParent()));
+      Files.writeString(file, breakdown.toString(), StandardCharsets.UTF_8);
+    }
     Path file =
         Path.of(
             "build/bench/inflight-writers-"
@@ -908,7 +1296,8 @@ class InFlightCheckBenchmark {
       String vo,
       String vc,
       int writers,
-      boolean on)
+      boolean on,
+      @Nullable StringBuilder breakdown)
       throws Exception {
     Properties props = new Properties();
     props.setProperty("scalardbnative.predicateChecks", Boolean.toString(on));
@@ -922,10 +1311,24 @@ class InFlightCheckBenchmark {
             : "SELECT region, SUM(amount) FROM ck.o WHERE region = ? GROUP BY region";
     AtomicBoolean stop = new AtomicBoolean();
     AtomicLong commits = new AtomicLong();
+    if (breakdown != null && e.engine() == Engine.SQLSERVER) {
+      try (Connection c = e.open()) {
+        e.execute(
+            c,
+            "DBCC FREEPROCCACHE",
+            "DBCC SQLPERF('sys.dm_os_wait_stats', CLEAR) WITH NO_INFOMSGS");
+      }
+    }
     List<Thread> threads = writers(tm, ns, vo, JOIN_READ ? vc : null, writers, stop, commits);
     long end = System.currentTimeMillis() + LIVE_MS;
     List<Long> latencies = Collections.synchronizedList(new ArrayList<>());
     AtomicLong retries = new AtomicLong();
+    // the readers' time by phase: the reads, executeQuery to the last row; the commits; rollbacks
+    AtomicLong readNs = new AtomicLong();
+    AtomicLong reads = new AtomicLong();
+    AtomicLong commitNs = new AtomicLong();
+    AtomicLong commitCalls = new AtomicLong();
+    AtomicLong rollbackNs = new AtomicLong();
     List<Exception> failures = Collections.synchronizedList(new ArrayList<>());
     List<Thread> readers = new ArrayList<>();
     for (int r = 0; r < READERS; r++) {
@@ -944,16 +1347,24 @@ class InFlightCheckBenchmark {
                       try {
                         for (int i = 0; i < 2; i++) {
                           ps.setInt(1, random.nextInt(REGIONS));
+                          long at = System.nanoTime();
                           try (ResultSet rs = ps.executeQuery()) {
                             while (rs.next()) {
                               rs.getLong(2);
                             }
                           }
+                          readNs.addAndGet(System.nanoTime() - at);
+                          reads.incrementAndGet();
                         }
+                        long at = System.nanoTime();
+                        commitCalls.incrementAndGet();
                         d.commit();
+                        commitNs.addAndGet(System.nanoTime() - at);
                         committed = true;
                       } catch (SQLTransactionRollbackException x) {
+                        long at = System.nanoTime();
                         d.rollback();
+                        rollbackNs.addAndGet(System.nanoTime() - at);
                         retries.incrementAndGet();
                       }
                     }
@@ -980,6 +1391,27 @@ class InFlightCheckBenchmark {
     }
     long[] sorted = latencies.stream().mapToLong(Long::longValue).sorted().toArray();
     int n = sorted.length;
+    if (breakdown != null) {
+      breakdown.append(
+          String.format(
+              Locale.ROOT,
+              "%n=== %d writers, predicateChecks %s: %d reads, %.2f ms each; %d commits, %.2f ms"
+                  + " each; rollbacks %.0f ms in all; readers' time %.0f ms (%d threads x %d"
+                  + " ms)%n",
+              writers,
+              on ? "on" : "off",
+              reads.get(),
+              reads.get() == 0 ? Double.NaN : readNs.get() / 1e6 / reads.get(),
+              commitCalls.get(),
+              commitCalls.get() == 0 ? Double.NaN : commitNs.get() / 1e6 / commitCalls.get(),
+              rollbackNs.get() / 1e6,
+              (readNs.get() + commitNs.get() + rollbackNs.get()) / 1e6,
+              READERS,
+              LIVE_MS));
+      if (e.engine() == Engine.SQLSERVER) {
+        breakdown.append(serverBreakdown(e));
+      }
+    }
     return String.format(
         Locale.ROOT,
         "| %d | %s | %d | %.2f | %.1f | %.1f | %d |%n",

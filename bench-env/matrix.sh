@@ -47,7 +47,9 @@ if [ -n "${WRITERS:-}" ]; then for rep in $(seq 1 "${REPS:-3}"); do
   ./gradlew "${wtasks[@]}" "${props[@]}" -Dnativejdbc.bench=true -Dnativejdbc.bench.writers=true \
     -Dnativejdbc.bench.dropExisting=true "-Dnativejdbc.bench.tier=$tier" \
     --continue -Pnativejdbc.parallelEngines=1 "$@" 2>&1 | grep -E 'BUILD|FAILED'
-  for f in driver/build/bench/inflight-writers-*.md driver/build/bench/inflight-plan-*.txt; do
+  for f in driver/build/bench/inflight-writers-*.md driver/build/bench/inflight-plan-*.txt \
+    driver/build/bench/inflight-arms-*.txt driver/build/bench/inflight-coldplan-*.txt \
+    driver/build/bench/inflight-breakdown-*.txt; do
     if [ -e "$f" ]; then mv "$f" "results/writers-$rep-$(basename "$f")"; fi
   done
   failures "writers-$rep"
