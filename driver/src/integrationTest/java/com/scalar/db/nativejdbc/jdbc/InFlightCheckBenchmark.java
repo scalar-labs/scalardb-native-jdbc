@@ -169,6 +169,10 @@ class InFlightCheckBenchmark {
       coldPlan(e, o, cu);
       diagnostics = true;
     }
+    if (Boolean.getBoolean("nativejdbc.bench.seekCost") && engine == Engine.SQLSERVER) {
+      seekCost(e, o);
+      diagnostics = true;
+    }
     if (diagnostics) {
       return;
     }
@@ -177,6 +181,24 @@ class InFlightCheckBenchmark {
       return;
     }
     if (Boolean.getBoolean("nativejdbc.bench.writers")) {
+      metaTables = List.of(SplitRead.meta(engine, o), SplitRead.meta(engine, cu));
+      if (engine == Engine.SQLSERVER
+          && !System.getProperty("nativejdbc.bench.inflightNoRecompute", "").isEmpty()) {
+        // the in-flight indexes' statistics as the setup left them, no row in flight, kept so
+        try (Connection c = e.open()) {
+          for (TableInfo t : List.of(o, cu)) {
+            // =all: every statistic on the metadata table, not the in-flight index's alone
+            e.execute(
+                c,
+                "UPDATE STATISTICS "
+                    + SplitRead.meta(engine, t)
+                    + (System.getProperty("nativejdbc.bench.inflightNoRecompute").equals("all")
+                        ? ""
+                        : " (" + engine.quote(t.inflightIndex(engine)) + ")")
+                    + " WITH NORECOMPUTE");
+          }
+        }
+      }
       besideWriters(e, factory, ns, vo, vc);
       return;
     }
@@ -651,6 +673,86 @@ class InFlightCheckBenchmark {
       }
     }
     return out;
+  }
+
+  /**
+   * With {@code -Dnativejdbc.bench.seekCost=true} only, on SQL Server: the split read's committed
+   * rows of o, its NOT EXISTS on the in-flight index as planned and with FORCESEEK, over a region
+   * (100 rows), ten regions (1,000) and the table (100,000), at 10 and 100 rows in flight; median
+   * µs, written to {@code build/bench/inflight-seekcost-sqlserver.txt}.
+   */
+  private static void seekCost(Engines e, TableInfo o) throws Exception {
+    Engine engine = e.engine();
+    String region = "t." + engine.quote(e.storedColumn("region"));
+    String key = engine.quote(e.storedColumn("id"));
+    String committed =
+        "SELECT COUNT(t."
+            + engine.quote(e.storedColumn("amount"))
+            + ") FROM "
+            + data(engine, o)
+            + " t WHERE NOT EXISTS (SELECT 1 FROM "
+            + SplitRead.meta(engine, o)
+            + " q%s WHERE q."
+            + key
+            + " = t."
+            + key
+            + " AND q."
+            + engine.quote("tx_state")
+            + " IN (1, 2))";
+    Map<String, Form> shapes = new LinkedHashMap<>();
+    shapes.put(
+        "a region, 100 rows", new Form("region", committed + " AND " + region + " = ?", false));
+    shapes.put(
+        "ten regions, 1,000 rows",
+        new Form("range", committed + " AND " + region + " BETWEEN ? AND ?", true));
+    shapes.put("the table, 100,000 rows", new Form("table", committed, false));
+    StringBuilder out = new StringBuilder();
+    try (Connection c = e.open()) {
+      for (int count : new int[] {10, 100}) {
+        inFlight(e, c, o, ROWS, count, oBefore(e));
+        for (Map.Entry<String, Form> s : shapes.entrySet()) {
+          Form f = s.getValue();
+          long planned =
+              measure(
+                  c,
+                  new Form(f.name(), String.format(Locale.ROOT, f.sql(), ""), f.range()),
+                  new Random(42))[0];
+          long seek =
+              measure(
+                  c,
+                  new Form(
+                      f.name(),
+                      String.format(Locale.ROOT, f.sql(), " WITH (FORCESEEK)"),
+                      f.range()),
+                  new Random(42))[0];
+          // the committed rows by a left join on the metadata table's key, as the split read's
+          // LEFT_JOIN check
+          String lj =
+              f.sql()
+                  .replace(
+                      " t WHERE NOT EXISTS (SELECT 1 FROM "
+                          + SplitRead.meta(engine, o)
+                          + " q%s WHERE q.",
+                      " t LEFT JOIN " + SplitRead.meta(engine, o) + " q ON q.")
+                  .replace(
+                      " AND q." + engine.quote("tx_state") + " IN (1, 2))",
+                      " WHERE COALESCE(q." + engine.quote("tx_state") + ", 3) = 3");
+          long left = measure(c, new Form(f.name(), lj, f.range()), new Random(42))[0];
+          out.append(
+              String.format(
+                  Locale.ROOT,
+                  "%d in flight, %s: as planned %d µs, FORCESEEK %d µs, LEFT JOIN %d µs%n",
+                  count,
+                  s.getKey(),
+                  planned,
+                  seek,
+                  left));
+        }
+      }
+    }
+    Path file = Path.of("build/bench/inflight-seekcost-sqlserver.txt");
+    Files.createDirectories(Objects.requireNonNull(file.getParent()));
+    Files.writeString(file, out.toString(), StandardCharsets.UTF_8);
   }
 
   /**
@@ -1177,10 +1279,40 @@ class InFlightCheckBenchmark {
    * SQL Server's account since the plan cache and the wait statistics were cleared: the statements
    * by elapsed time, with executions, mean elapsed and CPU µs and logical reads; the waits by time.
    */
-  private static String serverBreakdown(Engines e) throws SQLException {
+  private static String serverBreakdown(Engines e, String label) throws Exception {
     StringBuilder out = new StringBuilder("statements by elapsed time:\n");
     try (Connection c = e.open();
         java.sql.Statement st = c.createStatement()) {
+      // the split read's plans of the join, each with its generation and runs, saved as XML
+      out.append("the split read's plans:\n");
+      try (ResultSet r =
+          st.executeQuery(
+              "SELECT s.plan_generation_num, s.creation_time, s.execution_count,"
+                  + " s.total_elapsed_time / s.execution_count,"
+                  + " s.total_logical_reads / s.execution_count, s.max_dop, p.query_plan"
+                  + " FROM sys.dm_exec_query_stats s CROSS APPLY sys.dm_exec_sql_text(s.sql_handle) t"
+                  + " CROSS APPLY sys.dm_exec_query_plan(s.plan_handle) p"
+                  + " WHERE t.text LIKE '%SELECT v.g1 AS region%'"
+                  + " AND t.text NOT LIKE '%dm_exec_query_stats%' ORDER BY s.creation_time")) {
+        int i = 0;
+        while (r.next()) {
+          Path file = Path.of("build/bench/plans/sqlserver-" + label + "-" + (++i) + ".sqlplan");
+          Files.createDirectories(Objects.requireNonNull(file.getParent()));
+          String xml = r.getString(7);
+          Files.writeString(file, xml == null ? "" : xml, StandardCharsets.UTF_8);
+          out.append(
+              String.format(
+                  Locale.ROOT,
+                  "  generation %d, compiled %s: %d runs, %d µs / %d reads each, dop %d; %s%n",
+                  r.getLong(1),
+                  r.getTimestamp(2),
+                  r.getLong(3),
+                  r.getLong(4),
+                  r.getLong(5),
+                  r.getLong(6),
+                  file.getFileName()));
+        }
+      }
       try (ResultSet r =
           st.executeQuery(
               "SELECT TOP 12 s.execution_count, s.total_elapsed_time / s.execution_count,"
@@ -1200,6 +1332,28 @@ class InFlightCheckBenchmark {
                   r.getLong(3),
                   r.getLong(4),
                   r.getString(6).replaceAll("\\s+", " ")));
+        }
+      }
+      // the in-flight indexes as the churn left them: pages, rows, ghost records
+      out.append("in-flight indexes:\n");
+      try (ResultSet r =
+          st.executeQuery(
+              "SELECT OBJECT_NAME(s.object_id), i.name, s.page_count, s.record_count,"
+                  + " s.ghost_record_count, s.version_ghost_record_count"
+                  + " FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, 'DETAILED') s"
+                  + " JOIN sys.indexes i ON i.object_id = s.object_id AND i.index_id = s.index_id"
+                  + " WHERE i.has_filter = 1 AND s.index_level = 0")) {
+        while (r.next()) {
+          out.append(
+              String.format(
+                  Locale.ROOT,
+                  "  %s.%s: %d pages, %d rows, %d ghost, %d version ghost%n",
+                  r.getString(1),
+                  r.getString(2),
+                  r.getLong(3),
+                  r.getLong(4),
+                  r.getLong(5),
+                  r.getLong(6)));
         }
       }
       out.append("waits by time:\n");
@@ -1231,6 +1385,16 @@ class InFlightCheckBenchmark {
     }
     return out.toString();
   }
+
+  /**
+   * With {@code -Dnativejdbc.bench.statsEveryMs=n}, on SQL Server, UPDATE STATISTICS on both
+   * metadata tables every n ms while the writers run: the refreshes the writers' churn sets off on
+   * EC2, where they write eight times as fast as on the laptop.
+   */
+  private static final long STATS_EVERY_MS = Long.getLong("nativejdbc.bench.statsEveryMs", 0);
+
+  /** The metadata tables of o and c, for {@link #STATS_EVERY_MS}. */
+  private static List<String> metaTables = List.of();
 
   private static final boolean JOIN_READ =
       "join".equals(System.getProperty("nativejdbc.bench.writersRead"));
@@ -1320,6 +1484,39 @@ class InFlightCheckBenchmark {
       }
     }
     List<Thread> threads = writers(tm, ns, vo, JOIN_READ ? vc : null, writers, stop, commits);
+    if (STATS_EVERY_MS > 0 && e.engine() == Engine.SQLSERVER) {
+      Thread stats =
+          new Thread(
+              () -> {
+                try (Connection c = e.open()) {
+                  while (!stop.get()) {
+                    Thread.sleep(STATS_EVERY_MS);
+                    // each statistic on its own, as the automatic updates, which skip one kept
+                    // with NORECOMPUTE
+                    for (String m : metaTables) {
+                      List<String> names = new ArrayList<>();
+                      try (java.sql.Statement st = c.createStatement();
+                          ResultSet r =
+                              st.executeQuery(
+                                  "SELECT name FROM sys.stats WHERE object_id = OBJECT_ID('"
+                                      + m.replace("'", "''")
+                                      + "') AND no_recompute = 0")) {
+                        while (r.next()) {
+                          names.add(r.getString(1));
+                        }
+                      }
+                      for (String n : names) {
+                        e.execute(c, "UPDATE STATISTICS " + m + " (" + e.engine().quote(n) + ")");
+                      }
+                    }
+                  }
+                } catch (SQLException | InterruptedException x) {
+                  // the run goes on without the refreshes
+                }
+              });
+      stats.start();
+      threads.add(stats);
+    }
     long end = System.currentTimeMillis() + LIVE_MS;
     List<Long> latencies = Collections.synchronizedList(new ArrayList<>());
     AtomicLong retries = new AtomicLong();
@@ -1409,7 +1606,7 @@ class InFlightCheckBenchmark {
               READERS,
               LIVE_MS));
       if (e.engine() == Engine.SQLSERVER) {
-        breakdown.append(serverBreakdown(e));
+        breakdown.append(serverBreakdown(e, writers + "-" + (on ? "on" : "off")));
       }
     }
     return String.format(

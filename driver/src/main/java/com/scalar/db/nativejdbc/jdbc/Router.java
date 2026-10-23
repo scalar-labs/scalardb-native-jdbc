@@ -1271,7 +1271,7 @@ final class Router {
   private Writes.@Nullable Step pairs(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
     if (engine == Engine.MYSQL
-        || engine == Engine.SQLSERVER
+        || (engine == Engine.SQLSERVER && !Boolean.getBoolean("nativejdbc.bench.pairsOnSqlServer"))
         || scalarDb.size() > PAIRS_TABLES
         || ast.tableRefs().size() != scalarDb.size()
         || !ast.singleSelect()) {

@@ -260,7 +260,10 @@ final class SplitRead {
       case NOT_EXISTS:
         sql.append(" WHERE NOT EXISTS (SELECT 1 FROM ")
             .append(meta(engine, t))
-            .append(" q WHERE ")
+            .append(
+                engine == Engine.SQLSERVER && Boolean.getBoolean("nativejdbc.bench.sqlServerSeek")
+                    ? " q WITH (FORCESEEK) WHERE "
+                    : " q WHERE ")
             .append(keyJoin(engine, t, "q"))
             .append(" AND q.")
             .append(txState)
@@ -353,7 +356,9 @@ final class SplitRead {
         + String.join(", ", cols)
         + " FROM "
         + meta(engine, t)
-        + " m WHERE m."
+        + " m"
+        + tableHint(engine, t, hinted)
+        + " WHERE m."
         + engine.quote("tx_state")
         + " IN (1, 2) AND (m."
         + engine.quote("before_tx_id")
@@ -378,11 +383,22 @@ final class SplitRead {
         + data(engine, t)
         + " t JOIN "
         + meta(engine, t)
-        + " m ON "
+        + " m"
+        + tableHint(engine, t, hinted)
+        + " ON "
         + keyJoin(engine, t, "m")
         + " WHERE m."
         + engine.quote("tx_state")
         + " IN (1, 2))";
+  }
+
+  // ponytail: investigation only, SQL Server's in-flight index hint behind a benchmark flag
+  private static String tableHint(Engine engine, TableInfo t, boolean hinted) {
+    return hinted
+            && engine == Engine.SQLSERVER
+            && Boolean.getBoolean("nativejdbc.bench.sqlServerPairsHint")
+        ? " WITH (INDEX(" + engine.quote(t.inflightIndex(engine)) + "))"
+        : "";
   }
 
   private static String inflightHint(Engine engine, TableInfo t, boolean hinted) {
