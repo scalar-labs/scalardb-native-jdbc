@@ -11,6 +11,8 @@
 #                 With BENCH_BUCKET (and bench.tfvars' client_profile) it instead starts detached.sh on
 #                 the client, which runs the tiers, uploads the reports and ends the instances by
 #                 itself, and returns: the laptop can close.
+#   run.sh apply  applies terraform/bench.tfplan alone (a change while a run is going, such as the
+#                 admin address).
 #   run.sh fetch RUN   after a detached run: its reports from the bucket to bench-env/results/RUN/,
 #                 then destroys what is left (the VPC and the rest, which cost nothing).
 #
@@ -52,6 +54,10 @@ case "${1:-}" in
     # the plan file holds the variables, the password included: no placeholder (*.tfplan is ignored)
     TF_VAR_db_password=${BENCH_DB_PASSWORD:?} tf plan -input=false -var-file=${TFVARS:-bench.tfvars} -out=bench.tfplan
     exit ;;
+  apply)
+    # the plan written by `plan` alone, as for a security group's new address while `run` waits
+    tf apply -input=false bench.tfplan
+    exit ;;
   fetch)
     out="${RESULTS_DIR:-$here/results}/${2:?usage: run.sh fetch RUN}"
     mkdir -p "$out"
@@ -61,7 +67,7 @@ case "${1:-}" in
     echo "=== reports in $out"
     exit ;;
   run) shift ;;
-  *) echo "usage: run.sh plan | run [matrix.sh arguments] | fetch RUN" >&2; exit 2 ;;
+  *) echo "usage: run.sh plan | apply | run [matrix.sh arguments] | fetch RUN" >&2; exit 2 ;;
 esac
 : "${BENCH_DB_PASSWORD:?}" "${SSH_KEY:?}"
 export TF_VAR_db_password=$BENCH_DB_PASSWORD

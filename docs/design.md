@@ -631,7 +631,16 @@ tx_state`), and MySQL never regathers it by itself. On Oracle it is set, not gat
 histogram assuming 10,000 rows in flight (at most half the table), with the table's statistics then
 locked so that the nightly job does not replace it; one gathered while nothing is in flight cost up to
 1654x when a burst followed (todo 094). An inline table's statistics are the application's, so they
-are set there but not locked. Teardown unlocks the others and deletes the histogram on both. Last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
+are set there but not locked. Teardown unlocks the others and deletes the histogram on both. On
+SQL Server the metadata table's statistics are taken in full and kept with `NORECOMPUTE`: refreshed
+while ScalarDB writes, they estimate a few rows in flight, and the plans compiled then scan the
+in-flight index once per row of a read, through the ghost records its churn leaves (a join's read
+38 ms at four writers and 144-288 ms at sixteen on EC2, against 1.3 ms;
+`docs/benchmarks/inflight-check.md`). A
+`FORCESEEK` in the read instead costs a full scan 3x. An `UPDATE STATISTICS` without
+`NORECOMPUTE`, a maintenance job's, ends the keeping; running the setup again restores it, and
+should follow a large change in the table's size. Not on an inline table, the application's.
+Teardown returns them to automatic updates. Last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
 row, which carry `before_tx_id` NULL and `before_tx_version` 0, never for an in-flight insert.
 
 A table is set up when its index exists and is usable (an invalid index a failed concurrent build left
@@ -1113,7 +1122,7 @@ union as a derived table.
   second statement driven by the in-flight index. At SERIALIZABLE on MySQL, MariaDB and SQL Server
   the per-table check stays as it is: its locking read is what holds off every later prepare.
   **Stage 2, the in-flight pairs**, takes joins and semi-joins under the same setting, on
-  PostgreSQL, MariaDB and Oracle. It applies to a single SELECT of two or three ScalarDB table references
+  every engine but MySQL. It applies to a single SELECT of two or three ScalarDB table references
   and no other table, each joined by an inner join in the FROM clause or semi-joined by an IN or
   EXISTS conjunct of the WHERE clause, with a pure WHERE clause and pure ON clauses on the tables'
   own columns. Each table may be the data table (D, its committed rows and the after images of
@@ -1128,15 +1137,13 @@ union as a derived table.
   An outer join, NOT EXISTS and NOT IN, whose rows a row's absence changes, keep the per-table
   check, and so do a USING join, an IN or EXISTS under an OR, and a WITH clause, which stands
   before the FROM clause the check is cut from; so does MySQL, whose plan of the statements under
-  the row limit scans the in-flight index whole, and SQL Server, where the split read of a join,
-  which the check now lets run beside ScalarDB writers, is compiled again as the metadata tables'
-  statistics refresh, and the plans made then scan: 38 ms a read at four writers, 144-288 ms at
-  sixteen (`docs/benchmarks/inflight-check.md`). On Oracle the
-  pieces read their metadata table through the in-flight index, by a hint: the before-image
-  columns are NULL but for the rows in flight, so their indexes look empty, and 19c drives a
-  statement from the other table's data table, probing one 10,000 times. No table hint is added
-  on SQL Server: one naming the in-flight index gained nothing on stale statistics natively, and
-  a forced seek fails where no index gives one (error 8622). The check runs once
+  the row limit scans the in-flight index whole (`docs/benchmarks/inflight-check.md`). On Oracle
+  and SQL Server the pieces read their metadata table through the in-flight index, by a hint. On
+  Oracle the before-image columns are NULL but for the rows in flight, so their indexes look
+  empty, and 19c drives a statement from the other table's data table, probing one 10,000 times.
+  On SQL Server the statements plan from the metadata tables' statistics the setup keeps (section
+  6's setup), taken with few rows in flight, and without the hint scan a metadata table. A forced
+  seek is not used: it fails where no index gives one (error 8622). The check runs once
   per execution, however many of the read's tables have a row in flight. The statements with D on
   one table and B on another read the data table by the join column from the other's rows in
   flight, so the join column wants an index: without one, each costs about the read's own scan.

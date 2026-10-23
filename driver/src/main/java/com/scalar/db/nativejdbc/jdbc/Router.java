@@ -1264,15 +1264,13 @@ final class Router {
    * too, so these cover every combination; a row in flight that no combination brings into the
    * statement's rows changes nothing, whichever image is true. An outer join or an anti-join, whose
    * rows a row's absence changes, keeps the table-wide check. Not on MySQL, which plans the
-   * statements under the row limit as a full scan, nor on SQL Server, whose split read of a join
-   * then plans badly while ScalarDB writes (docs/benchmarks/inflight-check.md); on Oracle the
-   * metadata tables are read through the in-flight index, since 19c otherwise drives a pair from
-   * the other table's data table. Null otherwise.
+   * statements under the row limit as a full scan. On Oracle and SQL Server the metadata tables are
+   * read through the in-flight index: Oracle 19c otherwise drives a pair from the other table's
+   * data table, SQL Server plans from the statistics the setup keeps and scans. Null otherwise.
    */
   private Writes.@Nullable Step pairs(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
     if (engine == Engine.MYSQL
-        || engine == Engine.SQLSERVER
         || scalarDb.size() > PAIRS_TABLES
         || ast.tableRefs().size() != scalarDb.size()
         || !ast.singleSelect()) {

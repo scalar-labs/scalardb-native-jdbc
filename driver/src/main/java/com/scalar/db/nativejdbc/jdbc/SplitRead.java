@@ -336,10 +336,12 @@ final class SplitRead {
   }
 
   /**
-   * As {@link #inFlight(Engine, TableInfo, List)}; with {@code hinted} on Oracle, the metadata
-   * table read through the in-flight index. Joined with another table's data table, 19c costs
-   * probing the before image's index once per row of that table as free, the index holding next to
-   * nothing, and probes it 10,000 times (design 4.2, the in-flight pairs).
+   * As {@link #inFlight(Engine, TableInfo, List)}; with {@code hinted} on Oracle and SQL Server,
+   * the metadata table read through the in-flight index. Joined with another table's data table,
+   * Oracle 19c costs probing the before image's index once per row of that table as free, the index
+   * holding next to nothing, and probes it 10,000 times; SQL Server plans from the statistics the
+   * setup keeps, taken with few rows in flight, and scans the metadata table (design 4.2, the
+   * in-flight pairs). A forced seek fails where no index gives one (error 8622).
    */
   static String inFlight(Engine engine, TableInfo t, List<String> read, boolean hinted) {
     List<String> cols = new ArrayList<>();
@@ -353,7 +355,9 @@ final class SplitRead {
         + String.join(", ", cols)
         + " FROM "
         + meta(engine, t)
-        + " m WHERE m."
+        + " m"
+        + tableHint(engine, t, hinted)
+        + " WHERE m."
         + engine.quote("tx_state")
         + " IN (1, 2) AND (m."
         + engine.quote("before_tx_id")
@@ -378,11 +382,19 @@ final class SplitRead {
         + data(engine, t)
         + " t JOIN "
         + meta(engine, t)
-        + " m ON "
+        + " m"
+        + tableHint(engine, t, hinted)
+        + " ON "
         + keyJoin(engine, t, "m")
         + " WHERE m."
         + engine.quote("tx_state")
         + " IN (1, 2))";
+  }
+
+  private static String tableHint(Engine engine, TableInfo t, boolean hinted) {
+    return hinted && engine == Engine.SQLSERVER
+        ? " WITH (INDEX(" + engine.quote(t.inflightIndex(engine)) + "))"
+        : "";
   }
 
   private static String inflightHint(Engine engine, TableInfo t, boolean hinted) {

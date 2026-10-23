@@ -304,6 +304,82 @@ throughout):
 - **Without SQL Server's hint nothing is lost**: the "on" figures are within the earlier ones'
   noise.
 
+### SQL Server's split read of a join under churn (laptop)
+
+The writers mode over the join with `-Dnativejdbc.bench.statsEveryMs=2000`: the metadata tables'
+statistics refreshed every 2 s while the writers run, each as the automatic updates do (skipping
+one kept with `NORECOMPUTE`), as EC2's writers, eight times as fast, set off; the breakdown saves
+the split read's plans. Reads committed/s with the check on:
+
+| variant | 1 writer | 4 writers | 16 writers | the read's statement at 16 |
+|---|---|---|---|---|
+| as it was | 485 | 305 | 66 | 18.6-24.5 ms, 2,444-3,777 logical reads |
+| `FORCESEEK` in the committed rows' `NOT EXISTS`* | 461 | 299 | 150 | 1.5 ms, 1,025 |
+| the in-flight index's statistics kept (`NORECOMPUTE`) | 485 | 298 | 93 | up to 9 ms |
+| all the metadata tables' statistics kept | 504 | **46** | 186 | 1.4 ms; the check 36.8 ms at four |
+| all kept, the pairs' pieces through the in-flight index | 496 | 262 | **181** | 1.5 ms; the check 0.5-1.2 ms |
+
+\* Measured with the whole tables' statistics refreshed every 2 s, the others each statistic on its
+own; without `FORCESEEK` that run gave 474 / 337 / 69.
+
+- **The cause**: the committed rows of each table, `NOT EXISTS` on the in-flight index, seek it
+  per row with nothing in flight; a plan compiled after a refresh estimates 3-5 rows in it and
+  scans it per row instead. The index holds no row and 300-435 ghost records the churn left, which
+  each scan walks. With four writers and fewer the refreshes are rarer and the plans mostly seek.
+- **`FORCESEEK` costs large reads**: the committed rows of o, median µs (`seekCost`), 10 or 100
+  rows in flight alike:
+
+  | rows read | as planned | `FORCESEEK` | `LEFT JOIN` on the metadata key |
+  |---|---|---|---|
+  | 100 (a region) | 867-924 | 945-999 | 1,055-1,208 |
+  | 1,000 (ten regions) | 15,227-15,542 | 15,809-16,072 | 35,373-35,591 |
+  | 100,000 (the table) | 27,796-28,910 | 87,640-88,459 | 61,903-62,108 |
+
+- **Kept statistics fix the read, not the check**: planned from statistics with nothing in
+  flight, the pairs' pieces scan a metadata table (as in "SQL Server with stale statistics"
+  above); through the in-flight index they do not. The driver now does both: the setup keeps the
+  metadata tables' statistics on SQL Server (design section 6's setup), and the pieces read
+  through the in-flight index there as on Oracle.
+
+### SQL Server with the setup's kept statistics, on EC2 (run `20261023-2312`)
+
+The driver of `sqlserver-join-plans`: the metadata tables' statistics kept by the setup, the
+pairs' pieces through the in-flight index, the pairs on; SQL Server alone, the machines and mode of
+`20261023-1850` (whose "on" is in brackets); two runs, reads committed/s, check off → on:
+
+| 1 writer | 4 writers | 16 writers | ScalarDB's commits at 4 / 16 |
+|---|---|---|---|
+| 894-917 → 947-949 (809-864) | 139-147 → **425-449** (85-253) | 0 → 13-25 (9-12) | 788-808 → 668-792 / 2,247-2,269 → 1,710-2,106 |
+
+- **Four writers, fixed**: one plan, compiled once, serves every read (1.5-2.0 ms, 914-975
+  logical reads); p99 11-17 ms against 60-188. Reads 3x the table-wide check's.
+- **Sixteen, not yet**: no recompile any more (one plan, 275-501 runs), but each read costs 69-120
+  ms and 10,000-19,600 logical reads, with `PAGELATCH_SH` 15 s in one run. The in-flight indexes
+  hold 1,380-2,250 ghost records at 2,000-2,300 ScalarDB commits a second, against 300-435 on the
+  laptop; the plans were not collected (the client's `build/bench/plans`), so whether that plan
+  seeks or scans the index is to be seen.
+
+### Its plans at sixteen writers, and FORCESEEK, on EC2 (run `20261024-0023`)
+
+As `20261023-2312`, the plans saved, then four and sixteen writers again with `FORCESEEK` in the
+committed rows' `NOT EXISTS` (`-Dnativejdbc.bench.seekToo=true`); two runs, reads committed/s with
+the check on, mean ms a read:
+
+| writers | kept statistics | kept statistics and `FORCESEEK` |
+|---|---|---|
+| 4 | 372-525, 3.6-5.1 ms | 184-365, 5.3-10.0 ms |
+| 16 | 13-26, 74-145 ms | **189-271**, 7.1-9.9 ms |
+
+- **The plan at sixteen still scans one index**: `o`'s in-flight index sought (estimate 1), `c`'s
+  scanned per row (estimate 4-6), in every plan compiled at sixteen writers; at four both are
+  sought. `c`'s metadata table, 10,000 rows, takes half the writers' 2,100-2,300 commits a second
+  and holds 1,260-2,200 ghost records in 8 pages; how the estimate moves with its statistics kept
+  is not known.
+- **`FORCESEEK` holds at sixteen** (p99 19-39 ms), at a cost at four: the forced runs came after
+  sixteen writers had left the most ghost records, with ScalarDB committing 639-881 a second
+  against 372-716, so part of the difference is the order. On large reads it costs 3x
+  (`seekCost`, above).
+
 ## Reads beside ScalarDB writers (stage 1, one table)
 
 `scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:
