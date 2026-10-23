@@ -37,8 +37,10 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * Isolation with Maelstrom and Elle (testing plan T5): Maelstrom's {@code txn-list-append} workload
- * against two {@link MaelstromNode}s on one ScalarDB table, and Elle checking the history.
+ * Isolation with Maelstrom and Elle (testing plan T5): Maelstrom's {@code txn-list-append} and
+ * {@code txn-rw-register} workloads against two {@link MaelstromNode}s on one ScalarDB table, and
+ * Elle checking the history. List-append's reads show each key's whole order of writes; the
+ * register's blind writes take other paths, the driver's and ScalarDB's, and tell Elle less.
  *
  * <ul>
  *   <li>{@link Sides#MIXED}: {@code n0} runs its transactions through the driver and {@code n1}
@@ -49,18 +51,18 @@ import org.junit.jupiter.params.provider.MethodSource;
  *   <li>{@link Sides#DRIVER}: both nodes through the driver, checked against the driver's level.
  * </ul>
  *
- * <p>Two runs must fail, or the workload shows nothing: a plain vendor connection in the driver's
- * place, which runs no protocol, and SERIALIZABLE without ScalarDB's settings; these and the
- * SERIALIZABLE runs last at least {@value #ANOMALY_SECONDS} seconds.
+ * <p>Two list-append runs must fail, or the workload shows nothing: a plain vendor connection in
+ * the driver's place, which runs no protocol, and SERIALIZABLE without ScalarDB's settings; these
+ * and the SERIALIZABLE runs last at least {@value #ANOMALY_SECONDS} seconds.
  *
  * <p>{@code -Dnativejdbc.isolation=true}; {@code -Dnativejdbc.isolation.seconds} sets each run's
  * length (default 30), {@code -Dnativejdbc.isolation.rate} its requests a second (default 50).
  */
 @EnabledIfSystemProperty(named = "nativejdbc.isolation", matches = "true")
 @SuppressFBWarnings(
-    value = {"SQL_INJECTION_JDBC", "COMMAND_INJECTION"},
-    justification = "statements and commands written in the test sources")
-class ListAppendIntegrationTest {
+    value = "COMMAND_INJECTION",
+    justification = "commands written in the test sources")
+class MaelstromIntegrationTest {
 
   private static final String MAELSTROM = "v0.2.4";
   private static final String MAELSTROM_SHA256 =
@@ -88,6 +90,17 @@ class ListAppendIntegrationTest {
     }
   }
 
+  enum Workload {
+    LIST_APPEND("txn-list-append"),
+    RW_REGISTER("txn-rw-register");
+
+    final String maelstrom;
+
+    Workload(String maelstrom) {
+      this.maelstrom = maelstrom;
+    }
+  }
+
   enum Sides {
     MIXED("n0"),
     DRIVER("n0,n1");
@@ -107,9 +120,11 @@ class ListAppendIntegrationTest {
         if (level == Level.SERIALIZABLE && e.engine() == Engine.ORACLE) {
           continue;
         }
-        for (Sides sides : Sides.values()) {
-          for (boolean inline : List.of(false, true)) {
-            runs.add(Arguments.of(e, level, sides, inline));
+        for (Workload w : Workload.values()) {
+          for (Sides sides : Sides.values()) {
+            for (boolean inline : List.of(false, true)) {
+              runs.add(Arguments.of(e, w, level, sides, inline));
+            }
           }
         }
       }
@@ -121,14 +136,20 @@ class ListAppendIntegrationTest {
     return Engines.selected().stream().filter(e -> e != Engines.MYSQL_LOWER_CASE);
   }
 
-  @ParameterizedTest(name = "{0} {1} {2} inline={3}")
+  /** List-append only: the register's histories, without its version orders, showed neither. */
+  static Stream<Arguments> controls() {
+    return engines().map(e -> Arguments.of(e, Workload.LIST_APPEND));
+  }
+
+  @ParameterizedTest(name = "{0} {1} {2} {3} inline={4}")
   @MethodSource("runs")
-  void listAppend_holdsTheLevel(Engines e, Level level, Sides sides, boolean inline)
+  void history_holdsTheLevel(Engines e, Workload w, Level level, Sides sides, boolean inline)
       throws Exception {
     String model = sides == Sides.MIXED ? level.mixed : level.driver;
     String output =
         run(
             e,
+            w,
             level.name() + "-" + sides + (inline ? "-inline" : ""),
             level,
             scalarDbSettings(e, level),
@@ -141,12 +162,13 @@ class ListAppendIntegrationTest {
   }
 
   /** A vendor connection runs no protocol: not even read committed holds. */
-  @ParameterizedTest(name = "{0}")
-  @MethodSource("engines")
-  void listAppend_failsWithoutTheDriver(Engines e) throws Exception {
+  @ParameterizedTest(name = "{0} {1}")
+  @MethodSource("controls")
+  void history_failsWithoutTheDriver(Engines e, Workload w) throws Exception {
     String output =
         run(
             e,
+            w,
             "VENDOR",
             Level.READ_COMMITTED,
             new Properties(),
@@ -159,13 +181,14 @@ class ListAppendIntegrationTest {
   }
 
   /** SERIALIZABLE between the driver and ScalarDB needs ScalarDB's settings (README). */
-  @ParameterizedTest(name = "{0}")
-  @MethodSource("engines")
-  void listAppend_failsAtSerializableWithoutScalarDbsSettings(Engines e) throws Exception {
+  @ParameterizedTest(name = "{0} {1}")
+  @MethodSource("controls")
+  void history_failsAtSerializableWithoutScalarDbsSettings(Engines e, Workload w) throws Exception {
     assumeTrue(e.engine() != Engine.ORACLE, "Oracle refuses SERIALIZABLE");
     String output =
         run(
             e,
+            w,
             "SERIALIZABLE-UNSET",
             Level.SERIALIZABLE,
             new Properties(),
@@ -177,9 +200,13 @@ class ListAppendIntegrationTest {
     assertThat(output).contains(INVALID);
   }
 
-  /** One Maelstrom run, its output; the run's files in {@code build/isolation/<engine>/<name>/}. */
+  /**
+   * One Maelstrom run, its output; the run's files in {@code
+   * build/isolation/<engine>/<workload>/<name>/}.
+   */
   private static String run(
       Engines e,
+      Workload w,
       String name,
       Level level,
       Properties scalarDb,
@@ -190,7 +217,9 @@ class ListAppendIntegrationTest {
       int minimumSeconds)
       throws Exception {
     Path maelstrom = maelstrom();
-    String table = "kv_" + name.toLowerCase(Locale.ROOT).replace('-', '_');
+    String table =
+        (w == Workload.LIST_APPEND ? "la_" : "rw_")
+            + name.toLowerCase(Locale.ROOT).replace('-', '_');
     String namespace = e.storedSchema("iso");
     String kv = e.storedTable(table);
     String k = e.storedColumn("k");
@@ -220,7 +249,7 @@ class ListAppendIntegrationTest {
           .allMatch(Setup.Result::succeeded, "setup succeeded");
     }
 
-    Path run = Path.of("build", "isolation", e.name(), name);
+    Path run = Path.of("build", "isolation", e.name(), w.name(), name);
     if (Files.exists(run.resolve("store"))) {
       // a run of an earlier build: Maelstrom adds to it otherwise
       Files.move(run, run.resolveSibling(name + "-" + System.currentTimeMillis()));
@@ -236,6 +265,7 @@ class ListAppendIntegrationTest {
     node.add(prefix + "username=" + e.username());
     node.add(prefix + "password=" + e.password());
     node.add("-Diso.engine=" + e.name());
+    node.add("-Diso.workload=" + w.maelstrom);
     node.add("-Diso.table=iso." + table);
     node.add("-Diso.namespace=" + namespace);
     node.add("-Diso.kv=" + kv);
@@ -270,7 +300,7 @@ class ListAppendIntegrationTest {
             maelstrom.toAbsolutePath().toString(),
             "test",
             "-w",
-            "txn-list-append",
+            w.maelstrom,
             "--bin",
             script.toAbsolutePath().toString(),
             "--node-count",
@@ -359,7 +389,7 @@ class ListAppendIntegrationTest {
       throw new IllegalStateException(ex);
     }
     Process tar =
-        new ProcessBuilder("tar", "xjf", archive.getFileName().toString())
+        new ProcessBuilder("tar", "xjf", "maelstrom.tar.bz2")
             .directory(HOME.toFile())
             .inheritIO()
             .start();

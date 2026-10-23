@@ -35,15 +35,17 @@ import java.util.concurrent.Executors;
 import org.jspecify.annotations.Nullable;
 
 /**
- * A Maelstrom node for the {@code txn-list-append} workload (testing plan T5): node {@code n0} runs
- * each transaction through the driver, the others through ScalarDB, on one ScalarDB table {@code (k
- * INT, v TEXT)} whose {@code v} holds a key's list as {@code ,1,2,3}. Started by {@link
- * ListAppendIntegrationTest} with the test's database as the fixture's external one ({@code
+ * A Maelstrom node for the {@code txn-list-append} and {@code txn-rw-register} workloads (testing
+ * plan T5): node {@code n0} runs each transaction through the driver, the others through ScalarDB,
+ * on one ScalarDB table {@code (k INT, v TEXT)} whose {@code v} holds a key's list as {@code
+ * ,1,2,3}, or its register's value. A write is blind: neither side reads the key first. Started by
+ * {@link MaelstromIntegrationTest} with the test's database as the fixture's external one ({@code
  * -Dnativejdbc.<engine>.url}), so that {@link Engines} opens the driver and ScalarDB on it as in
  * every other test, and with:
  *
  * <ul>
  *   <li>{@code iso.engine}: the {@link Engines} constant;
+ *   <li>{@code iso.workload}: {@code txn-list-append}, the default, or {@code txn-rw-register};
  *   <li>{@code iso.table}: the table as SQL names it;
  *   <li>{@code iso.namespace}, {@code iso.kv}, {@code iso.k}, {@code iso.v}: its names as ScalarDB
  *       stores them;
@@ -59,7 +61,7 @@ import org.jspecify.annotations.Nullable;
  * ({@code abort}); a failed commit whose outcome is not known is indefinite ({@code crash}).
  */
 @SuppressFBWarnings(
-    value = "SQL_INJECTION_JDBC",
+    value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
     justification = "the table's name and the append, from the test")
 public final class MaelstromNode {
 
@@ -78,6 +80,8 @@ public final class MaelstromNode {
   private final String concat;
   private final int level;
   private final boolean vendor = Boolean.getBoolean("iso.vendor");
+  private final boolean register =
+      "txn-rw-register".equals(System.getProperty("iso.workload", "txn-list-append"));
   private final Properties scalarDb = new Properties();
   private final ExecutorService workers = Executors.newCachedThreadPool();
   private static final ThreadLocal<@Nullable Connection> CONNECTIONS = new ThreadLocal<>();
@@ -156,7 +160,10 @@ public final class MaelstromNode {
         List<?> o = (List<?>) op;
         long key = (Long) Objects.requireNonNull(o.get(1));
         if ("r".equals(o.get(0))) {
-          done.add(Arrays.asList("r", key, list(read(c, key))));
+          done.add(Arrays.asList("r", key, value(read(c, key))));
+        } else if ("w".equals(o.get(0))) {
+          write(c, key, (Long) Objects.requireNonNull(o.get(2)));
+          done.add(o);
         } else {
           append(c, key, (Long) Objects.requireNonNull(o.get(2)));
           done.add(o);
@@ -198,6 +205,22 @@ public final class MaelstromNode {
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next() ? rs.getString(1) : null;
       }
+    }
+  }
+
+  private void write(Connection c, long key, long value) throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement("UPDATE " + table + " SET v = ? WHERE k = ?")) {
+      ps.setString(1, String.valueOf(value));
+      ps.setLong(2, key);
+      if (ps.executeUpdate() == 1) {
+        return;
+      }
+    }
+    try (PreparedStatement ps =
+        c.prepareStatement("INSERT INTO " + table + " (k, v) VALUES (?, ?)")) {
+      ps.setLong(1, key);
+      ps.setString(2, String.valueOf(value));
+      ps.executeUpdate();
     }
   }
 
@@ -250,17 +273,23 @@ public final class MaelstromNode {
       return error(ABORT, "begin: " + e);
     }
     List<Object> done = new ArrayList<>();
-    // the transaction's own appends, kept here rather than relying on Get to merge them
+    // the transaction's own writes, kept here rather than relying on Get to merge them
     Map<Long, Optional<String>> written = new HashMap<>();
     try {
       for (Object op : ops) {
         List<?> o = (List<?>) op;
         long key = (Long) Objects.requireNonNull(o.get(1));
-        Optional<String> current = written.containsKey(key) ? written.get(key) : get(tx, key);
-        if ("r".equals(o.get(0))) {
-          done.add(Arrays.asList("r", key, list(current.orElse(null))));
+        String f = String.valueOf(o.get(0));
+        // a blind write reads nothing
+        Optional<String> current =
+            f.equals("w")
+                ? Optional.empty()
+                : written.containsKey(key) ? written.get(key) : get(tx, key);
+        if (f.equals("r")) {
+          done.add(Arrays.asList("r", key, value(current.orElse(null))));
         } else {
-          String next = current.orElse("") + "," + o.get(2);
+          String next =
+              f.equals("w") ? String.valueOf(o.get(2)) : current.orElse("") + "," + o.get(2);
           tx.upsert(
               Upsert.newBuilder()
                   .namespace(namespace)
@@ -309,6 +338,14 @@ public final class MaelstromNode {
   }
 
   // messages
+
+  /** What a read returns: the register's value, or the list. */
+  private @Nullable Object value(@Nullable String stored) {
+    if (register) {
+      return stored == null ? null : Long.valueOf(stored);
+    }
+    return list(stored);
+  }
 
   private static @Nullable List<Long> list(@Nullable String value) {
     if (value == null) {

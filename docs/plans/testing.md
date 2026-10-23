@@ -1,6 +1,6 @@
 # Plan: SQL coverage, isolation and performance testing
 
-Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append (see each milestone).
+Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append and rw-register (see each milestone).
 
 ## Goal
 
@@ -262,11 +262,11 @@ history with Elle. Our part is one Java node. No Clojure.
   commit, at a given rate. A long run restarts the database from outside.
 - **Matrix.** Each level design section 5 lists as built, per engine, with the ScalarDB settings the
   README requires. Each history is checked against the weaker of the two claimed levels.
-- **The checker must catch something.** Two runs must fail: the driver with passthrough on (`setClientInfo`
-  `scalardbnative.passthrough`, no protocol at all), and SERIALIZABLE without the ScalarDB settings the README requires. If they pass,
+- **The checker must catch something.** Two runs must fail: a plain vendor connection in the driver's
+  place (no protocol at all), and SERIALIZABLE without the ScalarDB settings the README requires. If they pass,
   the workload is too weak to show anything.
 
-**List-append done 2026-10-23** (`isolation/ListAppendIntegrationTest`, `-Dnativejdbc.isolation=true`;
+**List-append done 2026-10-23** (`isolation/MaelstromIntegrationTest`, `-Dnativejdbc.isolation=true`;
 Maelstrom v0.2.4 fetched and checked by its hash; the node is `isolation/MaelstromNode`, started with
 the test's database as the fixtures' external one). Per engine and level, in both layouts, two runs:
 driver and ScalarDB (`n0`, `n1`), checked against the weaker level, and the driver on both nodes,
@@ -280,7 +280,12 @@ incompatible orders on SQL Server), and SERIALIZABLE without ScalarDB's settings
 G-single-item on MariaDB and SQL Server, every cycle with driver and ScalarDB transactions in it; on
 SQL Server only at 60 seconds, which is why those runs are as long). Passthrough was the first
 control, until the discussion it started made the driver refuse it on ScalarDB tables (todo 323).
-Left: `txn-rw-register`, the bank test, the faults, and the long runs in the cloud.
+**Rw-register done 2026-10-23**, the same test, the same runs: every run valid on every engine (about
+800 transactions committed a run, 2,400 at 60 seconds). The two controls pass with the register on
+all engines but one (SERIALIZABLE without ScalarDB's settings on SQL Server, G-single-item): with blind
+writes Elle cannot order a key's versions, so it misses what list-append finds. The controls
+therefore run with list-append only, and a valid register run adds less than a list-append one.
+Left: the bank test, the faults, and the long runs in the cloud.
 
 ### Milestone T6: performance, with BenchBase
 

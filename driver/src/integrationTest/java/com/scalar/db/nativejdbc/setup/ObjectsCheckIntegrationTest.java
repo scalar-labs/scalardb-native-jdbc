@@ -7,7 +7,6 @@ import com.scalar.db.api.TableMetadata;
 import com.scalar.db.io.DataType;
 import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.testing.Engines;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -23,13 +22,10 @@ import org.junit.jupiter.params.provider.MethodSource;
  * 323): a view over it, a trigger elsewhere that writes it, a foreign key on it that cascades; and
  * not the driver's read views or ScalarDB's virtual tables.
  */
-@SuppressFBWarnings(
-    value = "SQL_INJECTION_JDBC",
-    justification = "statements written in the test sources")
 class ObjectsCheckIntegrationTest {
 
   static Stream<Engines> engines() {
-    return Engines.selected().stream().filter(e -> e != Engines.MYSQL_LOWER_CASE);
+    return Engines.selected().stream();
   }
 
   @ParameterizedTest(name = "{0}")
