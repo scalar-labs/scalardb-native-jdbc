@@ -1,6 +1,6 @@
 # Plan: SQL coverage, isolation and performance testing
 
-Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append and rw-register (see each milestone).
+Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append, rw-register and bank (see each milestone).
 
 ## Goal
 
@@ -285,7 +285,20 @@ control, until the discussion it started made the driver refuse it on ScalarDB t
 all engines but one (SERIALIZABLE without ScalarDB's settings on SQL Server, G-single-item): with blind
 writes Elle cannot order a key's versions, so it misses what list-append finds. The controls
 therefore run with list-append only, and a valid register run adds less than a list-append one.
-Left: the bank test, the faults, and the long runs in the cloud.
+**Bank done 2026-10-23** (`isolation/BankIntegrationTest`, the same property): 12 accounts in 3
+groups of 4, transfers inside a group through the driver (read then set, or `balance = balance - ?`
+in place) and, in the mixed runs, through ScalarDB, and driver reads of `SUM(balance)`, of the sums
+grouped by group and of every row, in one transaction. Per engine and level, in both layouts, mixed
+and driver only; 20 seconds a run, SERIALIZABLE 60. Result: every group's total held and no balance
+went below zero, on every engine, level and layout. The concurrent reads saw the totals at SNAPSHOT
+and SERIALIZABLE, and at READ COMMITTED with the driver alone; at READ COMMITTED with ScalarDB
+writing, a read saw half a transfer now and then (none on PostgreSQL, a fifth of the reads on SQL
+Server, a third on Oracle), as that level allows: a ScalarDB commit reaches its rows one by one. A plain
+vendor connection in the driver's place broke the totals on every engine. On SQL Server at
+SERIALIZABLE with ScalarDB writing, reads of the whole table almost never commit (todo 324). The
+first run was wrong: the test JVM's catalog, loaded before a run's table was set up, treated the
+table as plain, as design 4.4 says a table created after the load is; each run now loads its own.
+Left: the faults, and the long runs in the cloud.
 
 ### Milestone T6: performance, with BenchBase
 

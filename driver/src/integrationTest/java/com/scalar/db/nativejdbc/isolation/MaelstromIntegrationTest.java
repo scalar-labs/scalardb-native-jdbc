@@ -72,7 +72,7 @@ class MaelstromIntegrationTest {
   private static final String INVALID = "Analysis invalid!";
   // SQL Server at SERIALIZABLE commits few transactions: 20 seconds showed no anomaly there without
   // ScalarDB's settings, 60 did; the runs with them are as long, for the comparison to hold
-  private static final int ANOMALY_SECONDS = 60;
+  static final int ANOMALY_SECONDS = 60;
 
   enum Level {
     READ_COMMITTED(Connection.TRANSACTION_READ_COMMITTED, "read-committed", "read-committed"),
@@ -331,7 +331,7 @@ class MaelstromIntegrationTest {
   }
 
   /** ScalarDB's settings the README gives the level. */
-  private static Properties scalarDbSettings(Engines e, Level level) {
+  static Properties scalarDbSettings(Engines e, Level level) {
     Properties p = new Properties();
     if (level == Level.SERIALIZABLE) {
       p.setProperty("scalar.db.consensus_commit.isolation_level", "SERIALIZABLE");
