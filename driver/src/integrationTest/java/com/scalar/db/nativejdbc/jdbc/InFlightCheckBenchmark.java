@@ -182,23 +182,6 @@ class InFlightCheckBenchmark {
     }
     if (Boolean.getBoolean("nativejdbc.bench.writers")) {
       metaTables = List.of(SplitRead.meta(engine, o), SplitRead.meta(engine, cu));
-      if (engine == Engine.SQLSERVER
-          && !System.getProperty("nativejdbc.bench.inflightNoRecompute", "").isEmpty()) {
-        // the in-flight indexes' statistics as the setup left them, no row in flight, kept so
-        try (Connection c = e.open()) {
-          for (TableInfo t : List.of(o, cu)) {
-            // =all: every statistic on the metadata table, not the in-flight index's alone
-            e.execute(
-                c,
-                "UPDATE STATISTICS "
-                    + SplitRead.meta(engine, t)
-                    + (System.getProperty("nativejdbc.bench.inflightNoRecompute").equals("all")
-                        ? ""
-                        : " (" + engine.quote(t.inflightIndex(engine)) + ")")
-                    + " WITH NORECOMPUTE");
-          }
-        }
-      }
       besideWriters(e, factory, ns, vo, vc);
       return;
     }
@@ -1388,8 +1371,9 @@ class InFlightCheckBenchmark {
 
   /**
    * With {@code -Dnativejdbc.bench.statsEveryMs=n}, on SQL Server, UPDATE STATISTICS on both
-   * metadata tables every n ms while the writers run: the refreshes the writers' churn sets off on
-   * EC2, where they write eight times as fast as on the laptop.
+   * metadata tables every n ms while the writers run, each statistic not kept with NORECOMPUTE as
+   * the automatic updates do: the refreshes the writers' churn sets off on EC2, where they write
+   * eight times as fast as on the laptop.
    */
   private static final long STATS_EVERY_MS = Long.getLong("nativejdbc.bench.statsEveryMs", 0);
 

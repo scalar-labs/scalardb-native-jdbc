@@ -260,10 +260,7 @@ final class SplitRead {
       case NOT_EXISTS:
         sql.append(" WHERE NOT EXISTS (SELECT 1 FROM ")
             .append(meta(engine, t))
-            .append(
-                engine == Engine.SQLSERVER && Boolean.getBoolean("nativejdbc.bench.sqlServerSeek")
-                    ? " q WITH (FORCESEEK) WHERE "
-                    : " q WHERE ")
+            .append(" q WHERE ")
             .append(keyJoin(engine, t, "q"))
             .append(" AND q.")
             .append(txState)
@@ -339,10 +336,12 @@ final class SplitRead {
   }
 
   /**
-   * As {@link #inFlight(Engine, TableInfo, List)}; with {@code hinted} on Oracle, the metadata
-   * table read through the in-flight index. Joined with another table's data table, 19c costs
-   * probing the before image's index once per row of that table as free, the index holding next to
-   * nothing, and probes it 10,000 times (design 4.2, the in-flight pairs).
+   * As {@link #inFlight(Engine, TableInfo, List)}; with {@code hinted} on Oracle and SQL Server,
+   * the metadata table read through the in-flight index. Joined with another table's data table,
+   * Oracle 19c costs probing the before image's index once per row of that table as free, the index
+   * holding next to nothing, and probes it 10,000 times; SQL Server plans from the statistics the
+   * setup keeps, taken with few rows in flight, and scans the metadata table (design 4.2, the
+   * in-flight pairs). A forced seek fails where no index gives one (error 8622).
    */
   static String inFlight(Engine engine, TableInfo t, List<String> read, boolean hinted) {
     List<String> cols = new ArrayList<>();
@@ -392,11 +391,8 @@ final class SplitRead {
         + " IN (1, 2))";
   }
 
-  // ponytail: investigation only, SQL Server's in-flight index hint behind a benchmark flag
   private static String tableHint(Engine engine, TableInfo t, boolean hinted) {
-    return hinted
-            && engine == Engine.SQLSERVER
-            && Boolean.getBoolean("nativejdbc.bench.sqlServerPairsHint")
+    return hinted && engine == Engine.SQLSERVER
         ? " WITH (INDEX(" + engine.quote(t.inflightIndex(engine)) + "))"
         : "";
   }
