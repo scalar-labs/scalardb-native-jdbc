@@ -51,7 +51,8 @@ import picocli.CommandLine.Parameters;
     exitCodeListHeading = "Exit codes:%n",
     exitCodeList = {
       "0:all is well",
-      "1:check found a table not set up, rows stuck, or a database setting to fix",
+      "1:check found a table not set up, rows stuck, a database setting to fix, or an object that"
+          + " reaches a ScalarDB table around the driver",
       "2:an error"
     })
 public final class Main implements Callable<Integer> {
@@ -215,6 +216,10 @@ public final class Main implements Callable<Integer> {
                   dryRun
                       ? Setup.plan(catalog, c, which, grantees)
                       : Setup.run(catalog, c, which, Duration.ofSeconds(backfillWait), grantees));
+          // objects that reach a ScalarDB table around the driver (todo 323): warned, not refused
+          for (String o : Check.objects(catalog, c)) {
+            err.println("warning: " + o);
+          }
           break;
         case teardown:
           exit =
@@ -226,7 +231,7 @@ public final class Main implements Callable<Integer> {
         case check:
           exit =
               check(
-                  Check.database(engine, c),
+                  concat(Check.database(engine, c), Check.objects(catalog, c)),
                   Check.tables(catalog, c, which, Duration.ofSeconds(lifetime)));
           break;
         default:
@@ -238,6 +243,12 @@ public final class Main implements Callable<Integer> {
       }
       return exit;
     }
+  }
+
+  private static List<String> concat(List<String> a, List<String> b) {
+    List<String> out = new ArrayList<>(a);
+    out.addAll(b);
+    return out;
   }
 
   private int changes(List<Setup.Result> results) {

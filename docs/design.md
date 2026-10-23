@@ -745,7 +745,8 @@ runs a second lookup on the before image index; for other columns it uses the OR
 | A function that runs SQL given as text: PostgreSQL `query_to_xml` and the other XML exports, `dblink`, `crosstab`, `connectby`, `ts_stat`, `ts_rewrite`; Oracle `dbms_xmlgen`, `dbms_xmlquery`, `dbms_xmlstore`, `dbms_xmlsave`, `dbms_sql`, the URI types (`DBURITYPE`, `XDBURITYPE`, `HTTPURITYPE`, `URITYPE`) and `SYS_DBURIGEN`, `XMLQUERY`, `XMLTABLE`, `XMLEXISTS` (XQuery reads tables through `fn:collection("oradb:...")`); SQL Server `OPENQUERY`, `OPENROWSET`, `OPENDATASOURCE` | **refuse** (`0AN01`) wherever it appears, for the same reason; run it in passthrough mode if its SQL touches no ScalarDB table. A function the user wrote that runs SQL or changes the session cannot be recognised and is not supported on a connection that also reaches ScalarDB tables |
 | A name through a synonym, `T_data`, `T_tx_metadata` or `T_scalardb` | **refuse** (`42000`), naming the table to use (section 1, "The catalog") |
 | DDL, `TRUNCATE` | on plain tables only: passed through, and the catalog's resolutions are dropped. On a ScalarDB table **refuse** (`0AN01`), in passthrough mode too, where the driver cannot see it but the operator contract forbids it: run raw, it would leave ScalarDB's table metadata, and the read view and in-flight index the setup made (section 3) behind, and on decoupled tables ScalarDB refuses schema changes such as adding a column (`throwIfTransactionMetadataDecouplingApplied`). Change or truncate the table through ScalarDB's admin, then run the setup again and refresh the catalog (4.4) |
-| Bulk maintenance that leaves the schema alone (`ANALYZE`, `VACUUM`, statistics) | passthrough mode only, in autocommit, with the table quiesced |
+| Bulk maintenance that leaves the schema alone (`ANALYZE`, `VACUUM`, statistics) | on plain tables, passthrough mode, in autocommit; on a ScalarDB table, a connection of the database's own driver with ScalarDB's transactions on the table stopped, since passthrough refuses it (below) |
+| Any statement in passthrough mode | sent as written, unless it names a ScalarDB table, its data, metadata or virtual table, ScalarDB's catalog schema or its default coordinator namespace: then **refuse** (`0AN01`), since sent as written it would read prepared records as committed and write rows without their metadata (todo 323). The names are found by the text's words, in any case, comments left out and string literals kept, so that an unparsed statement, a function body or SQL built from a literal is checked as a parsed statement is; a plain table of the same name in another schema is refused too. A procedure, a view, a trigger or SQL built at run time reaches a table without naming it, and stays the application's (section 7) |
 
 **What "the parser can interpret" means.** The text is exactly one statement; JSQLParser parses it;
 every table node of the parser's public syntax tree is a reference the walk visited, a column qualifier
@@ -1883,6 +1884,12 @@ between `T` and plain tables are the database's own.
   make the other side stronger than it is.
 - **Anything bypassing both** (a native writer on `T` without the metadata upkeep, a trigger) is invisible
   to both sides.
+- **Database objects over a ScalarDB table**: a trigger on another table that writes it, a procedure or
+  function that reads or writes it, a foreign key on it whose `ON DELETE` or `ON UPDATE` is `CASCADE`,
+  `SET NULL` or `SET DEFAULT`, reach it without the protocol, outside passthrough too; so does a user
+  view, below. The tools' `check` reports those it finds in the database's catalog, and `setup` warns of
+  them (todo 323): a view, trigger or routine whose definition names one (on Oracle, that depends on one
+  statically), a trigger on one, such a foreign key on one. SQL built at run time is not seen.
 - **User-defined views over a ScalarDB table** are invisible to the catalog, which knows the names
   ScalarDB registered: a statement through a user view of `T` passes through as a plain-table statement
   and bypasses both sides like a native writer. This is also why the pass-through relaxation for

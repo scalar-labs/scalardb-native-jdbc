@@ -264,6 +264,15 @@ public final class Catalog implements AutoCloseable {
   }
 
   /**
+   * Returns the schema that holds ScalarDB's catalog tables.
+   *
+   * @return the schema
+   */
+  public String metadataSchema() {
+    return metadataSchema;
+  }
+
+  /**
    * Returns the engine this catalog speaks to.
    *
    * @return the engine

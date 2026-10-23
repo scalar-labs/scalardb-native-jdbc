@@ -6,6 +6,7 @@ import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.Outcome;
 import com.scalar.db.nativejdbc.sql.SqlAst;
+import com.scalar.db.nativejdbc.sql.SqlWords;
 import com.scalar.db.nativejdbc.sql.StatementShape;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
@@ -376,6 +377,9 @@ final class Router {
   /** How long an in-flight count is used before it is read again. */
   private static final long COUNT_TTL_NANOS = 1_000_000_000L;
 
+  /** ScalarDB's default namespace for its coordinator table, which passthrough must not name. */
+  private static final String COORDINATOR_NAMESPACE = "coordinator";
+
   private final Engine engine;
   private final Catalog catalog;
   private final Session session;
@@ -521,6 +525,27 @@ final class Router {
   }
 
   /**
+   * The names a passthrough statement must not contain (todo 323): every ScalarDB table's, its
+   * physical tables' among them, ScalarDB's catalog schema and its default coordinator namespace.
+   */
+  private List<String> protectedNames() throws SQLException {
+    List<String> names = new ArrayList<>();
+    names.add(catalog.metadataSchema());
+    names.add(COORDINATOR_NAMESPACE);
+    for (TableInfo t : catalog.scalarDbTables()) {
+      names.add(t.table());
+      names.add(t.dataTable());
+      if (t.metadataTable() != null) {
+        names.add(t.metadataTable());
+      }
+      if (t.virtualTable() != null) {
+        names.add(t.virtualTable());
+      }
+    }
+    return names;
+  }
+
+  /**
    * Routes a statement from its text, as {@link #route}; with {@code forcedPerRow}, the per-row
    * choices of a split read are those instead of the counts'.
    */
@@ -533,6 +558,16 @@ final class Router {
     if (passthrough) {
       if (!vendor.getAutoCommit()) {
         throw Errors.unsupported("the passthrough setting applies in autocommit mode only");
+      }
+      String named = SqlWords.find(sql, engine, protectedNames());
+      if (named != null) {
+        // sent as written, it would bypass ScalarDB's protocol on the table (todo 323)
+        throw Errors.unsupported(
+            "passthrough does not run a statement that names a ScalarDB table or ScalarDB's own"
+                + " schema ("
+                + named
+                + "); run it without passthrough, or on a connection of the database's own driver"
+                + " with ScalarDB's transactions on the table stopped");
       }
       // anything may run here, so assume it changed the session and the names
       return route(sql, sql, null, true, true, true, null, 0, 0, List.of(), true);

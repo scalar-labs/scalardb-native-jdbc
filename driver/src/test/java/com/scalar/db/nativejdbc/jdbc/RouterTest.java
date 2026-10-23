@@ -7,7 +7,11 @@ import com.scalar.db.nativejdbc.engine.Engine;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -39,15 +43,68 @@ class RouterTest {
             });
   }
 
+  /** A router on a database without ScalarDB, allowed: every table is plain. */
   private static Router router() {
     Catalog catalog =
         new Catalog(
             Engine.POSTGRESQL,
             Catalog.DEFAULT_METADATA_SCHEMA,
-            () -> {
-              throw new SQLException("no catalog here");
-            });
+            RouterTest::withoutScalarDb,
+            Duration.ofMinutes(1),
+            Clock.systemUTC(),
+            true);
     return new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+  }
+
+  /** A connection to a database without ScalarDB's schema: its catalog tables are missing. */
+  private static Connection withoutScalarDb() {
+    return (Connection)
+        Proxy.newProxyInstance(
+            RouterTest.class.getClassLoader(),
+            new Class<?>[] {Connection.class},
+            (p, m, args) ->
+                switch (m.getName()) {
+                  case "prepareStatement" -> statement((String) args[0]);
+                  case "isClosed", "isReadOnly" -> false;
+                  case "getAutoCommit" -> true;
+                  default -> {
+                    if (m.getReturnType() == void.class) {
+                      yield null; // a setting, rollback or close
+                    }
+                    throw new SQLException("not here: " + m.getName());
+                  }
+                });
+  }
+
+  private static PreparedStatement statement(String sql) {
+    return (PreparedStatement)
+        Proxy.newProxyInstance(
+            RouterTest.class.getClassLoader(),
+            new Class<?>[] {PreparedStatement.class},
+            (p, m, args) ->
+                switch (m.getName()) {
+                  case "executeQuery" -> {
+                    if (sql.contains("virtual_tables") || sql.contains("metadata")) {
+                      throw new SQLException("relation does not exist", "42P01");
+                    }
+                    yield emptyResult();
+                  }
+                  case "setString", "close" -> null;
+                  default -> throw new SQLException("not here: " + m.getName());
+                });
+  }
+
+  private static ResultSet emptyResult() {
+    return (ResultSet)
+        Proxy.newProxyInstance(
+            RouterTest.class.getClassLoader(),
+            new Class<?>[] {ResultSet.class},
+            (p, m, args) ->
+                switch (m.getName()) {
+                  case "next" -> false;
+                  case "close" -> null;
+                  default -> throw new SQLException("not here: " + m.getName());
+                });
   }
 
   @Test

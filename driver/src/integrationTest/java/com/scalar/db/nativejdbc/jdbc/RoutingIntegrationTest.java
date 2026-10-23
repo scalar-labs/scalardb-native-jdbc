@@ -223,6 +223,35 @@ class RoutingIntegrationTest {
   }
 
   @Test
+  void passthrough_refusesAStatementThatNamesAScalarDbTable_parsedOrNot() throws SQLException {
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "true");
+      // sent as written, each would bypass ScalarDB's protocol on m1.s (todo 323)
+      assertRefused(() -> st.execute("VACUUM m1.s"), "0AN01", "names a ScalarDB table");
+      assertRefused(
+          () -> st.execute("UPDATE m1.s SET x = 'y' WHERE id = 1"),
+          "0AN01",
+          "names a ScalarDB table");
+      assertRefused(
+          () -> st.execute("DO $$ BEGIN EXECUTE 'DELETE FROM m1.s'; END $$"),
+          "0AN01",
+          "names a ScalarDB table");
+      // ScalarDB's own schema, its catalog tables
+      assertRefused(
+          () -> st.execute("DELETE FROM scalardb.metadata WHERE false"),
+          "0AN01",
+          "names a ScalarDB table");
+      // a plain table of the same name in another schema too: the words are checked, not the
+      // tables they resolve to
+      assertRefused(() -> st.execute("VACUUM m1plain.s"), "0AN01", "names a ScalarDB table");
+      // a statement that names none still runs, the name in a comment counting for nothing
+      st.execute("VACUUM m1.p -- not m1.s");
+      assertThat(c.getClientInfo(NativeJdbcDriver.PASSTHROUGH)).isEqualTo("true");
+    }
+  }
+
+  @Test
   void anUnqualifiedName_resolvesTheWayTheSessionDoes_afterSetAndSetSchema() throws SQLException {
     seedDistinctRows();
     try (Connection c = connect();

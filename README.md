@@ -211,6 +211,18 @@ first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
   it are refused; a database function of your own that changes it is not detected, so don't.
 - A statement on a ScalarDB table that the driver cannot parse or rewrite is refused with `0AN01`, not
   run as written. A read-only connection cannot write ScalarDB tables (`25006`).
+- Passthrough, `setClientInfo("scalardbnative.passthrough", "true")` in autocommit, sends statements as
+  written, for what the driver refuses on tables ScalarDB does not manage. A statement that names a
+  ScalarDB table, or ScalarDB's own schema, is refused there with `0AN01`, wherever the name stands
+  but in a comment, a plain table of the same name in another schema included. DDL or maintenance
+  on a ScalarDB table goes through a connection of the database's own driver, with ScalarDB's
+  transactions on the table stopped.
+- Don't create, over a ScalarDB table: a view; a trigger, on it or on another table that writes it; a
+  procedure or function that reads or writes it; a foreign key on it with `ON DELETE` or `ON UPDATE`
+  `CASCADE`, `SET NULL` or `SET DEFAULT`. A statement through one of them, or the database itself,
+  reaches the table without ScalarDB's protocol, outside passthrough too: the driver sees only the
+  name the statement uses. The tools' `check` reports those it finds, and `setup` warns of them; SQL
+  built at run time is not seen.
 - A statement text the connection has seen costs the driver a few microseconds; a new text costs
   about 0.1 ms, and 0.6-0.8 ms on PostgreSQL, which also asks the server for its plan
   (docs/benchmarks/read-overhead.md).

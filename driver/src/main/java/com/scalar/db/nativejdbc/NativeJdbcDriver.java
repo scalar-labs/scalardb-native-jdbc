@@ -42,8 +42,8 @@ public final class NativeJdbcDriver implements Driver {
    * The client-info key that sends statements verbatim, set with {@code
    * Connection.setClientInfo(PASSTHROUGH, "true")}: in autocommit only, and turned off again by
    * {@code setAutoCommit(false)}. It turns the driver's protection off for the connection, so a
-   * pool must not hand a connection out with it on. Never read from the URL or the connect
-   * properties.
+   * pool must not hand a connection out with it on; a statement that names a ScalarDB table is
+   * refused still (todo 323). Never read from the URL or the connect properties.
    */
   public static final String PASSTHROUGH = "scalardbnative.passthrough";
 

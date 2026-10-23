@@ -4683,12 +4683,6 @@ public final class SqlAst {
   }
 
   /**
-   * The alias that gives a rewritten unaliased expression the label the engine gives the original,
-   * empty when the engine's label survives the rewrite, or null when it cannot be given: SQL Server
-   * labels no expression, PostgreSQL labels a function call by its name, and MySQL, MariaDB and
-   * Oracle by the expression's text.
-   */
-  /**
    * The expression inside {@code + x} or {@code (x)}: every engine but PostgreSQL labels such a
    * column as the column, and MySQL and MariaDB such a number as the number.
    */
@@ -4706,6 +4700,12 @@ public final class SqlAst {
     }
   }
 
+  /**
+   * The alias that gives a rewritten unaliased expression the label the engine gives the original,
+   * empty when the engine's label survives the rewrite, or null when it cannot be given: SQL Server
+   * labels no expression, PostgreSQL labels a function call by its name, and MySQL, MariaDB and
+   * Oracle by the expression's text.
+   */
   private @Nullable String expressionLabel(Expression e, Token first, Token last) {
     if (engine != Engine.SQLSERVER && engine != Engine.POSTGRESQL) {
       for (Token t = first; t != null; t = t.next) {
