@@ -1244,8 +1244,8 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
 - **After an abort decided by the driver** (a zero-row CAS, an in-flight row under SNAPSHOT or
   SERIALIZABLE, a timed-out wait): the driver marks the transaction rollback-only, throws
   `java.sql.SQLTransactionRollbackException`, the JDBC 4 subclass for SQLSTATE class 40, with SQLSTATE
-  `40001`, fails every further statement and `commit()` with the same exception, and forwards
-  `rollback()`. The driver enforces this on every engine: a driver-decided abort is not a database
+  `40001`, fails every further statement and `commit()` with the same exception, forwards
+  `rollback()`, and rolls back before `close()`, at which Oracle's driver would commit (todo 325). The driver enforces this on every engine: a driver-decided abort is not a database
   error, so even PostgreSQL, which does this natively only after a failed statement, would otherwise
   accept further statements and a commit. A query timeout or a cancel the driver raises itself during
   a write marks the transaction the same way (it throws `57014`): it can come between a key's write

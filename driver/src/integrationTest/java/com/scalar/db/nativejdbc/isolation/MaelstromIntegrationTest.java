@@ -55,8 +55,14 @@ import org.junit.jupiter.params.provider.MethodSource;
  * the driver's place, which runs no protocol, and SERIALIZABLE without ScalarDB's settings; these
  * and the SERIALIZABLE runs last at least {@value #ANOMALY_SECONDS} seconds.
  *
+ * <p>Under faults ({@link MaelstromNode}: ScalarDB transactions left after their prepare, the
+ * driver's connections dropped in a transaction and in its commit, and closed after an error), the
+ * mixed list-append runs must hold the same levels.
+ *
  * <p>{@code -Dnativejdbc.isolation=true}; {@code -Dnativejdbc.isolation.seconds} sets each run's
- * length (default 30), {@code -Dnativejdbc.isolation.rate} its requests a second (default 50).
+ * length (default 30), {@code -Dnativejdbc.isolation.rate} its requests a second (default 50), and
+ * {@code -Dnativejdbc.isolation.faults} the share of transactions that meet a fault in the runs
+ * under faults (default 0.1).
  */
 @EnabledIfSystemProperty(named = "nativejdbc.isolation", matches = "true")
 @SuppressFBWarnings(
@@ -136,6 +142,14 @@ class MaelstromIntegrationTest {
     return Engines.selected().stream().filter(e -> e != Engines.MYSQL_LOWER_CASE);
   }
 
+  /** Per engine and level, in both layouts. */
+  static Stream<Arguments> faultRuns() {
+    return runs()
+        .map(Arguments::get)
+        .filter(a -> a[1] == Workload.LIST_APPEND && a[3] == Sides.MIXED)
+        .map(a -> Arguments.of(a[0], a[2], a[4]));
+  }
+
   /** List-append only: the register's histories, without its version orders, showed neither. */
   static Stream<Arguments> controls() {
     return engines().map(e -> Arguments.of(e, Workload.LIST_APPEND));
@@ -157,7 +171,28 @@ class MaelstromIntegrationTest {
             inline,
             false,
             model,
-            level == Level.SERIALIZABLE ? ANOMALY_SECONDS : 0);
+            level == Level.SERIALIZABLE ? ANOMALY_SECONDS : 0,
+            0);
+    assertThat(output).contains(VALID);
+  }
+
+  /** The same levels when transactions on either side are left part way. */
+  @ParameterizedTest(name = "{0} {1} inline={2}")
+  @MethodSource("faultRuns")
+  void history_holdsTheLevelUnderFaults(Engines e, Level level, boolean inline) throws Exception {
+    String output =
+        run(
+            e,
+            Workload.LIST_APPEND,
+            level.name() + "-FAULTS" + (inline ? "-inline" : ""),
+            level,
+            scalarDbSettings(e, level),
+            Sides.MIXED.drivers,
+            inline,
+            false,
+            level.mixed,
+            level == Level.SERIALIZABLE ? ANOMALY_SECONDS : 0,
+            Double.parseDouble(System.getProperty("nativejdbc.isolation.faults", "0.1")));
     assertThat(output).contains(VALID);
   }
 
@@ -176,7 +211,8 @@ class MaelstromIntegrationTest {
             true,
             true,
             Level.READ_COMMITTED.mixed,
-            ANOMALY_SECONDS);
+            ANOMALY_SECONDS,
+            0);
     assertThat(output).contains(INVALID);
   }
 
@@ -196,7 +232,8 @@ class MaelstromIntegrationTest {
             false,
             false,
             Level.SERIALIZABLE.mixed,
-            ANOMALY_SECONDS);
+            ANOMALY_SECONDS,
+            0);
     assertThat(output).contains(INVALID);
   }
 
@@ -214,7 +251,8 @@ class MaelstromIntegrationTest {
       boolean inline,
       boolean vendor,
       String model,
-      int minimumSeconds)
+      int minimumSeconds,
+      double faults)
       throws Exception {
     Path maelstrom = maelstrom();
     String table =
@@ -275,6 +313,7 @@ class MaelstromIntegrationTest {
     node.add("-Diso.level=" + level.jdbc);
     node.add("-Diso.drivers=" + drivers);
     node.add("-Diso.vendor=" + vendor);
+    node.add("-Diso.faults=" + faults);
     for (String property : scalarDb.stringPropertyNames()) {
       node.add("-Diso.prop." + property + "=" + scalarDb.getProperty(property));
     }

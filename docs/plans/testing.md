@@ -1,6 +1,6 @@
 # Plan: SQL coverage, isolation and performance testing
 
-Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append, rw-register and bank (see each milestone).
+Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append, rw-register, bank and faults (see each milestone).
 
 ## Goal
 
@@ -298,7 +298,20 @@ vendor connection in the driver's place broke the totals on every engine. On SQL
 SERIALIZABLE with ScalarDB writing, reads of the whole table almost never commit (todo 324). The
 first run was wrong: the test JVM's catalog, loaded before a run's table was set up, treated the
 table as plain, as design 4.4 says a table created after the load is; each run now loads its own.
-Left: the faults, and the long runs in the cloud.
+**Faults done 2026-10-23** (`MaelstromIntegrationTest.history_holdsTheLevelUnderFaults`,
+`-Dnativejdbc.isolation.faults`, default 0.1): mixed list-append runs in which a tenth of the
+transactions meet a fault. ScalarDB's node runs two-phase transactions and leaves a faulty one after
+its prepare, undecided (lazy recovery aborts it after 15 seconds) or with its coordinator state
+COMMITTED (recovery rolls it forward), and replies indefinite. The driver's node drops its
+connection (`Connection.abort`) before a statement or the commit, a definite abort, or while the
+commit runs, indefinite, and after a failed statement closes it without a rollback. Per engine and
+level, in both layouts, 20 seconds a run, SERIALIZABLE 60: every run valid, about 100 to 1,950
+transactions committed a run, up to a tenth indefinite; fewer on SQL Server, where an undecided row
+blocks its key until recovery. Writing the last fault found that Oracle's driver commits an open
+transaction at `close()`, which committed what the driver had refused after a `40001` (todo 325,
+P1, fixed: the driver rolls back first, `jdbc/CloseIntegrationTest`). The restart of the database
+stays with the long runs.
+Left: the long runs in the cloud.
 
 ### Milestone T6: performance, with BenchBase
 

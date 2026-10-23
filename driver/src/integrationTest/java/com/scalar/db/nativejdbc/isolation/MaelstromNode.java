@@ -4,14 +4,25 @@ import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionManager;
 import com.scalar.db.api.Get;
 import com.scalar.db.api.Result;
+import com.scalar.db.api.TransactionCrudOperable;
+import com.scalar.db.api.TransactionState;
+import com.scalar.db.api.TwoPhaseCommitTransaction;
+import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.api.Upsert;
 import com.scalar.db.exception.transaction.CommitConflictException;
 import com.scalar.db.exception.transaction.CommitException;
 import com.scalar.db.exception.transaction.CrudConflictException;
+import com.scalar.db.exception.transaction.CrudException;
+import com.scalar.db.exception.transaction.PreparationConflictException;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.exception.transaction.UnknownTransactionStatusException;
+import com.scalar.db.exception.transaction.ValidationConflictException;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.testing.Engines;
+import com.scalar.db.service.StorageFactory;
+import com.scalar.db.service.TransactionFactory;
+import com.scalar.db.transaction.consensuscommit.CoordinatorException;
+import com.scalar.db.transaction.consensuscommit.CoordinatorStateAccessor;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -30,8 +41,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadLocalRandom;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -54,15 +68,27 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code iso.drivers}: the nodes that run through the driver, {@code n0} by default;
  *   <li>{@code iso.vendor}: {@code true} to run the driver's nodes on a plain vendor connection
  *       instead, which runs no protocol;
- *   <li>{@code iso.prop.*}: ScalarDB properties, without the prefix.
+ *   <li>{@code iso.prop.*}: ScalarDB properties, without the prefix;
+ *   <li>{@code iso.faults}: the share of transactions that meet a fault, 0 by default.
  * </ul>
  *
  * <p>A conflict is a definite abort ({@code txn-conflict}), any other failure before commit too
  * ({@code abort}); a failed commit whose outcome is not known is indefinite ({@code crash}).
+ *
+ * <p>Faults (testing plan T5), each kind in half the share: on ScalarDB's side, every transaction
+ * is a two-phase one, and a faulty one is left after its prepare, without a decision or with its
+ * coordinator state COMMITTED, for lazy recovery to abort or to roll forward; either is indefinite.
+ * On the driver's, the connection is dropped ({@link Connection#abort}) before a statement or the
+ * commit, a definite abort, or while the commit runs, indefinite; and after a failed statement it
+ * is closed without a rollback.
  */
 @SuppressFBWarnings(
-    value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
-    justification = "the table's name and the append, from the test")
+    value = {
+      "SQL_INJECTION_JDBC",
+      "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
+      "PREDICTABLE_RANDOM"
+    },
+    justification = "the table's name and the append, from the test; faults drawn at random")
 public final class MaelstromNode {
 
   private static final long NOT_SUPPORTED = 10;
@@ -82,11 +108,14 @@ public final class MaelstromNode {
   private final boolean vendor = Boolean.getBoolean("iso.vendor");
   private final boolean register =
       "txn-rw-register".equals(System.getProperty("iso.workload", "txn-list-append"));
+  private final double faults = Double.parseDouble(System.getProperty("iso.faults", "0"));
   private final Properties scalarDb = new Properties();
   private final ExecutorService workers = Executors.newCachedThreadPool();
   private static final ThreadLocal<@Nullable Connection> CONNECTIONS = new ThreadLocal<>();
   private volatile @Nullable String nodeId;
   private volatile @Nullable DistributedTransactionManager manager;
+  private volatile @Nullable TwoPhaseCommitTransactionManager twoPhase;
+  private volatile @Nullable CoordinatorStateAccessor coordinator;
 
   private MaelstromNode(PrintStream out) {
     this.out = out;
@@ -127,7 +156,18 @@ public final class MaelstromNode {
         String id = String.valueOf(body.get("node_id"));
         nodeId = id;
         if (!List.of(System.getProperty("iso.drivers", "n0").split(",")).contains(id)) {
-          manager = engine.scalarDb(scalarDb).getTransactionManager();
+          TransactionFactory f = engine.scalarDb(scalarDb);
+          manager = f.getTransactionManager();
+          if (faults > 0) {
+            twoPhase = f.getTwoPhaseCommitTransactionManager();
+            Properties p = new Properties();
+            p.putAll(scalarDb);
+            p.setProperty("scalar.db.storage", "jdbc");
+            p.setProperty("scalar.db.contact_points", engine.url());
+            p.setProperty("scalar.db.username", engine.username());
+            p.setProperty("scalar.db.password", engine.password());
+            coordinator = new CoordinatorStateAccessor(StorageFactory.create(p).getStorage());
+          }
         }
         reply(message, body("init_ok"));
       } else if (type.equals("txn")) {
@@ -142,7 +182,13 @@ public final class MaelstromNode {
 
   private Map<String, @Nullable Object> txn(List<?> ops) {
     DistributedTransactionManager m = manager;
-    return m == null ? driver(ops) : scalarDb(m, ops);
+    TwoPhaseCommitTransactionManager t = twoPhase;
+    return m == null ? driver(ops) : t != null ? twoPhase(t, ops) : scalarDb(m, ops);
+  }
+
+  /** Whether this transaction meets a fault of a kind that takes half the share. */
+  private boolean fault() {
+    return faults > 0 && ThreadLocalRandom.current().nextDouble() < faults / 2;
   }
 
   // the driver's side
@@ -155,8 +201,13 @@ public final class MaelstromNode {
       return error(ABORT, "connect: " + e);
     }
     List<Object> done = new ArrayList<>();
+    // the statement before which the connection is dropped, the commit at ops.size()
+    int dropBefore = fault() ? ThreadLocalRandom.current().nextInt(ops.size() + 1) : -1;
     try {
       for (Object op : ops) {
+        if (done.size() == dropBefore) {
+          return dropped(c);
+        }
         List<?> o = (List<?>) op;
         long key = (Long) Objects.requireNonNull(o.get(1));
         if ("r".equals(o.get(0))) {
@@ -170,8 +221,19 @@ public final class MaelstromNode {
         }
       }
     } catch (SQLException e) {
-      rollback(c);
+      if (fault()) {
+        // as an application's try-with-resources does when the error propagates
+        drop(c);
+      } else {
+        rollback(c);
+      }
       return error(conflict(e) ? TXN_CONFLICT : ABORT, e.getSQLState() + " " + e.getMessage());
+    }
+    if (dropBefore == ops.size()) {
+      return dropped(c);
+    }
+    if (fault()) {
+      return droppedInCommit(c, done);
     }
     try {
       c.commit();
@@ -184,6 +246,38 @@ public final class MaelstromNode {
       return error(CRASH, "commit: " + e.getSQLState() + " " + e.getMessage());
     }
     return txnOk(done);
+  }
+
+  /** The connection dropped as a crashed client's, before the commit: the database rolls back. */
+  private Map<String, @Nullable Object> dropped(Connection c) {
+    try {
+      c.abort(workers);
+    } catch (SQLException e) {
+      drop(c);
+    }
+    return error(ABORT, "fault: the connection dropped in the transaction");
+  }
+
+  /** The connection dropped while the commit runs: the outcome is not known unless it returned. */
+  private Map<String, @Nullable Object> droppedInCommit(Connection c, List<Object> done) {
+    Future<?> commit =
+        workers.submit(
+            () -> {
+              c.commit();
+              return null;
+            });
+    try {
+      Thread.sleep(ThreadLocalRandom.current().nextInt(5));
+      c.abort(workers);
+      commit.get();
+      return txnOk(done);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return error(CRASH, "fault: interrupted in the commit");
+    } catch (SQLException | ExecutionException e) {
+      drop(c);
+      return error(CRASH, "fault: the connection dropped in the commit: " + e);
+    }
   }
 
   private Connection connection() throws SQLException {
@@ -272,35 +366,9 @@ public final class MaelstromNode {
     } catch (TransactionException e) {
       return error(ABORT, "begin: " + e);
     }
-    List<Object> done = new ArrayList<>();
-    // the transaction's own writes, kept here rather than relying on Get to merge them
-    Map<Long, Optional<String>> written = new HashMap<>();
+    List<Object> done;
     try {
-      for (Object op : ops) {
-        List<?> o = (List<?>) op;
-        long key = (Long) Objects.requireNonNull(o.get(1));
-        String f = String.valueOf(o.get(0));
-        // a blind write reads nothing
-        Optional<String> current =
-            f.equals("w")
-                ? Optional.empty()
-                : written.containsKey(key) ? written.get(key) : get(tx, key);
-        if (f.equals("r")) {
-          done.add(Arrays.asList("r", key, value(current.orElse(null))));
-        } else {
-          String next =
-              f.equals("w") ? String.valueOf(o.get(2)) : current.orElse("") + "," + o.get(2);
-          tx.upsert(
-              Upsert.newBuilder()
-                  .namespace(namespace)
-                  .table(kv)
-                  .partitionKey(Key.ofInt(k, Math.toIntExact(key)))
-                  .textValue(v, next)
-                  .build());
-          written.put(key, Optional.of(next));
-          done.add(o);
-        }
-      }
+      done = apply(tx, ops);
     } catch (TransactionException e) {
       abort(tx);
       return error(e instanceof CrudConflictException ? TXN_CONFLICT : ABORT, e.toString());
@@ -318,7 +386,88 @@ public final class MaelstromNode {
     return txnOk(done);
   }
 
-  private Optional<String> get(DistributedTransaction tx, long key) throws TransactionException {
+  /** A two-phase transaction, which a fault leaves after its prepare. */
+  private Map<String, @Nullable Object> twoPhase(TwoPhaseCommitTransactionManager m, List<?> ops) {
+    TwoPhaseCommitTransaction tx;
+    try {
+      tx = m.begin();
+    } catch (TransactionException e) {
+      return error(ABORT, "begin: " + e);
+    }
+    List<Object> done;
+    try {
+      done = apply(tx, ops);
+      tx.prepare();
+      tx.validate();
+    } catch (CrudConflictException | PreparationConflictException | ValidationConflictException e) {
+      rollback(tx);
+      return error(TXN_CONFLICT, e.toString());
+    } catch (CrudException e) {
+      rollback(tx);
+      return error(ABORT, e.toString());
+    } catch (TransactionException e) {
+      // a prepare or a validation that failed otherwise: not known to have rolled back
+      rollback(tx);
+      return error(CRASH, e.toString());
+    }
+    if (fault()) {
+      return error(CRASH, "fault: left after the prepare, undecided");
+    }
+    if (fault()) {
+      try {
+        Objects.requireNonNull(coordinator)
+            .putState(
+                new CoordinatorStateAccessor.State(
+                    tx.getId(), TransactionState.COMMITTED, System.currentTimeMillis()));
+      } catch (CoordinatorException e) {
+        return error(CRASH, "fault: the decision not written: " + e);
+      }
+      return error(CRASH, "fault: left after the decision to commit");
+    }
+    try {
+      tx.commit();
+    } catch (CommitConflictException e) {
+      return error(TXN_CONFLICT, e.toString());
+    } catch (UnknownTransactionStatusException | CommitException e) {
+      return error(CRASH, e.toString());
+    }
+    return txnOk(done);
+  }
+
+  /** The transaction's operations, what they return. */
+  private List<Object> apply(TransactionCrudOperable tx, List<?> ops) throws CrudException {
+    List<Object> done = new ArrayList<>();
+    // the transaction's own writes, kept here rather than relying on Get to merge them
+    Map<Long, Optional<String>> written = new HashMap<>();
+    for (Object op : ops) {
+      List<?> o = (List<?>) op;
+      long key = (Long) Objects.requireNonNull(o.get(1));
+      String f = String.valueOf(o.get(0));
+      // a blind write reads nothing
+      Optional<String> current =
+          f.equals("w")
+              ? Optional.empty()
+              : written.containsKey(key) ? written.get(key) : get(tx, key);
+      if (f.equals("r")) {
+        done.add(Arrays.asList("r", key, value(current.orElse(null))));
+      } else {
+        String next =
+            f.equals("w") ? String.valueOf(o.get(2)) : current.orElse("") + "," + o.get(2);
+        tx.upsert(
+            Upsert.newBuilder()
+                .namespace(namespace)
+                .table(kv)
+                .partitionKey(Key.ofInt(k, Math.toIntExact(key)))
+                .textValue(v, next)
+                .build());
+        written.put(key, Optional.of(next));
+        done.add(o);
+      }
+    }
+    return done;
+  }
+
+  private Optional<String> get(TransactionCrudOperable tx, long key) throws CrudException {
     Optional<Result> r =
         tx.get(
             Get.newBuilder()
@@ -327,6 +476,14 @@ public final class MaelstromNode {
                 .partitionKey(Key.ofInt(k, Math.toIntExact(key)))
                 .build());
     return r.flatMap(x -> x.isNull(v) ? Optional.empty() : Optional.ofNullable(x.getText(v)));
+  }
+
+  private static void rollback(TwoPhaseCommitTransaction tx) {
+    try {
+      tx.rollback();
+    } catch (TransactionException ignored) {
+      // lazy recovery takes it
+    }
   }
 
   private static void abort(DistributedTransaction tx) {

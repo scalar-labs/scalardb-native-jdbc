@@ -422,6 +422,17 @@ public final class Proxies {
             return Boolean.toString(router.passthrough());
           }
           return forward(vendor, method, args);
+        case "close":
+          // Oracle's driver commits an open transaction at close: one the driver aborted would
+          // commit what it refused, a key's DML without its stamp among them (todo 325)
+          if (rollbackOnly && !vendor.isClosed()) {
+            try {
+              vendor.rollback();
+            } catch (SQLException e) {
+              // the close below ends the session, and a dead session commits nothing
+            }
+          }
+          return forward(vendor, method, args);
         default:
           return forward(vendor, method, args);
       }
