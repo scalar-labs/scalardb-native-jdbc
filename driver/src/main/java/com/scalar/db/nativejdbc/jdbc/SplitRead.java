@@ -44,6 +44,14 @@ final class SplitRead {
      */
     LEFT_JOIN,
     /**
+     * {@code NOT EXISTS} seeking the in-flight index row by row, {@code FORCESEEK}: SQL Server's
+     * committed copy of a table with rows in flight. Compiled then, a plan estimates the index's
+     * rows at that moment, whatever its statistics, and scans it per row through the ghost records
+     * the writers leave (EC2, sixteen writers: 13-26 reads a second, against 189-271 seeking);
+     * forced always, it costs a large read 3x (docs/benchmarks/inflight-check.md).
+     */
+    SEEK,
+    /**
      * The row's state read by a scalar subquery, a condition on the row itself: where a locking
      * read locks each row as it reads it, MySQL and MariaDB release the lock of a row in flight it
      * rejects, which they keep for a row a join rejects.
@@ -67,7 +75,7 @@ final class SplitRead {
    * @param scalarDb its ScalarDB table references, each with its table
    * @param views the read view of each ScalarDB reference, already quoted, for those not split
    * @param perRow the references whose committed copies exclude their rows in flight row by row, on
-   *     MySQL and MariaDB
+   *     MySQL and MariaDB by a left join on the key, on SQL Server by a forced seek
    * @param anchored the references whose rows carry their versions, which read their keys too
    * @param extras what each copy appends to the select list for each of {@code anchored}, given its
    *     piece there
@@ -192,7 +200,9 @@ final class SplitRead {
                           : lock != null
                               ? Check.SCALAR
                               : perRow.contains(ref) || rowByRowUnderLimit
-                                  ? Check.LEFT_JOIN
+                                  ? engine != Engine.SQLSERVER
+                                      ? Check.LEFT_JOIN
+                                      : inCopy == Check.LEFT_JOIN ? inCopy : Check.SEEK
                                   : inCopy,
                       lock);
               }
@@ -258,9 +268,10 @@ final class SplitRead {
     }
     switch (check) {
       case NOT_EXISTS:
+      case SEEK:
         sql.append(" WHERE NOT EXISTS (SELECT 1 FROM ")
             .append(meta(engine, t))
-            .append(" q WHERE ")
+            .append(check == Check.SEEK ? " q WITH (FORCESEEK) WHERE " : " q WHERE ")
             .append(keyJoin(engine, t, "q"))
             .append(" AND q.")
             .append(txState)

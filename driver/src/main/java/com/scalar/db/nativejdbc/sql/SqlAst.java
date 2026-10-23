@@ -1744,7 +1744,10 @@ public final class SqlAst {
   private boolean parses(String sql) {
     try {
       CCJSqlParserUtil.parse(
-          sql, PARSER, p -> p.withSquareBracketQuotation(engine == Engine.SQLSERVER));
+          // the split read's own forced seek on SQL Server, which JSQLParser 5.4 does not parse
+          engine == Engine.SQLSERVER ? sql.replace(" WITH (FORCESEEK)", "") : sql,
+          PARSER,
+          p -> p.withSquareBracketQuotation(engine == Engine.SQLSERVER));
       return true;
     } catch (Exception e) {
       return false;

@@ -371,8 +371,9 @@ class ReadIntegrationTest {
           .containsExactly("A", "b", "c");
     }
 
-    // many rows in flight: on MySQL and MariaDB a statement prepared before them is prepared again
-    // in the per-row form once its count is a second old, its parameter and settings replayed
+    // many rows in flight: on MySQL, MariaDB and SQL Server a statement prepared before them is
+    // prepared again in the per-row form once its count is a second old, its parameter and
+    // settings replayed
     String byKey = "SELECT " + mx + " FROM " + made + " WHERE " + mid + " = ?";
     try (Connection c = e.openDriver();
         PreparedStatement ps = c.prepareStatement(byKey);
@@ -396,7 +397,9 @@ class ReadIntegrationTest {
         Thread.sleep(1100);
         assertThat(rows(ps)).containsExactly("b2");
         assertThat(ps.getFetchSize()).isEqualTo(7);
-        boolean perRow = engine == Engine.MYSQL || engine == Engine.MARIADB;
+        // SQL Server takes the forced seek from the first row in flight
+        boolean perRow =
+            engine == Engine.MYSQL || engine == Engine.MARIADB || engine == Engine.SQLSERVER;
         assertThat(ps.toString().equals(before)).isEqualTo(!perRow);
         try (Connection vendor = e.open()) {
           vendor.setAutoCommit(false); // in a transaction, where anchors are recorded
@@ -404,7 +407,9 @@ class ReadIntegrationTest {
           vendor.rollback();
           // a key read anchors its row (4b)
           assertThat(sql).contains("scalardb_native_x");
-          if (engine != Engine.POSTGRESQL) {
+          if (engine == Engine.SQLSERVER) {
+            assertThat(sql).contains("FORCESEEK");
+          } else if (engine != Engine.POSTGRESQL) {
             assertThat(sql.contains("COALESCE")).isEqualTo(perRow);
           }
         }

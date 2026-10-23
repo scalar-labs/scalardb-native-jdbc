@@ -636,8 +636,8 @@ SQL Server the metadata table's statistics are taken in full and kept with `NORE
 while ScalarDB writes, they estimate a few rows in flight, and the plans compiled then scan the
 in-flight index once per row of a read, through the ghost records its churn leaves (a join's read
 38 ms at four writers and 144-288 ms at sixteen on EC2, against 1.3 ms;
-`docs/benchmarks/inflight-check.md`). A
-`FORCESEEK` in the read instead costs a full scan 3x. An `UPDATE STATISTICS` without
+`docs/benchmarks/inflight-check.md`); the plans a read compiles while rows are in flight seek the
+index by a hint instead (the split read below). An `UPDATE STATISTICS` without
 `NORECOMPUTE`, a maintenance job's, ends the keeping; running the setup again restores it, and
 should follow a large change in the table's size. Not on an inline table, the application's.
 Teardown returns them to automatic updates. Last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
@@ -906,7 +906,13 @@ union as a derived table.
     SQL Server `NOT EXISTS` in the all-committed copy of a statement over one or two ScalarDB tables
     and the DISTINCT set over three or more, and in the copies with a table in flight a left join on
     `T_meta`'s key with `COALESCE(tx_state, 3) = 3`, since SQL Server otherwise plans those copies as
-    if empty and scans the in-flight index once per row (5-10x with rows in flight).
+    if empty and scans the in-flight index once per row (5-10x with rows in flight); and a table
+    with a row in flight, by the same count, takes `NOT EXISTS` with `WITH (FORCESEEK)` in the
+    copies without one: SQL Server estimates the in-flight index's rows from the index as it is
+    when it compiles, whatever its statistics, and a plan compiled while rows are in flight scans
+    the index once per row through the ghost records ScalarDB's writes leave (EC2, a join beside
+    sixteen writers: 13-26 reads a second, 189-271 seeking). Forced always, the seek costs a
+    100,000-row read 3x, so a table with none in flight keeps SQL Server's own plan.
   - **On top of the union**: the user's ORDER BY, row limit, DISTINCT and window functions, over the
     copies as a derived table. A statement with ORDER BY and a row limit also sorts and stops each
     copy after offset + n rows, so pagination does not read every matching row (todo 089: 20 of
