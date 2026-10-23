@@ -163,16 +163,19 @@ committed 90/s at 72 retries per commit. On a join, 44-53% of reads abort at one
 Both narrowed checks run only when the cheap table-wide probe finds a row in flight. Then they
 cost one indexed statement: 0.5-2 ms for the predicate check and 0.4-2.4 ms for in-flight pairs.
 
-**Measured** (the reports are `bench-env/results/20261022-0044/*/writers-*.md` and
-`20261022-2108`; the method is in [the in-flight check benchmark](inflight-check.md) on
+**Measured** (the reports are `bench-env/results/20261022-0044/*/writers-*.md`, `20261022-2108`,
+`20261023-0132` and `20261023-0147`; the method is in [the in-flight check benchmark](inflight-check.md) on
 `predicate-checks`):
 
 - **Predicate check, reads committed/s, check off → on:**
   - RDS PostgreSQL at 4 writers: 90 → 2,098.
   - RDS Oracle 19c: 3 → about 1,200 at 4 writers, 0 → about 860 at 16.
   - PostgreSQL on EC2 and RDS, MySQL on RDS, MariaDB on EC2 and RDS: large gains.
+  - MySQL on EC2 at 1.5 GB: 449 → 1,195 at 4 writers, 0 → 843 at 16.
+  - SQL Server 2022 Developer on EC2 at 1.5 GB: 116-194 → 477-568 at 4 writers, 0 → 236-402 at
+    16, retries 0.02 per commit or fewer.
 
-  ScalarDB's own commits stay within 5-13%. Oracle 19c's check took about 300 ms until eef0e86,
+  ScalarDB's own commits stay within 5-13%, except on the capped hosts below. Oracle 19c's check took about 300 ms until eef0e86,
   because it joined the data table for the before images; it now reads them from the metadata
   table alone, 47 → 0.7 ms.
 - **In-flight pairs, joins:** aborts fall to 0-3% at 1, 4 and 16 writers on all five engines,
@@ -191,21 +194,22 @@ cost one indexed statement: 0.5-2 ms for the predicate check and 0.4-2.4 ms for 
   what holds off later prepares, and a predicate would lock the same range.
 - **Writers pay on CPU-bound hosts.** Reads that now succeed compete with ScalarDB's writers. On
   Oracle 23 Free (2 CPUs) ScalarDB's commits fell 28-35%; on MariaDB on EC2, reads fell 9% at one
-  writer. This is a product tradeoff, more reads that finish against writer throughput, and is
-  likely Free's CPU cap (not confirmed).
-- **SQL Server:** not measured on AWS. Its in-flight pairs check took 16-18 ms because it reuses a
+  writer; at 1.5 GB on EC2, MySQL's fell 5% at 4 writers and 13% at 16, and SQL Server's from
+  +3% to -17% at 4 and 8-33% at 16 (two runs, noisy). This is a product tradeoff, more reads that
+  finish against writer throughput, likely the hosts' caps (not confirmed).
+- **SQL Server's in-flight pairs plan:** its check took 16-18 ms on the laptop because it reuses a
   plan cached while nothing was in flight; this needs solving before SQL Server takes that form.
 - **MySQL's in-flight pairs plan:** with `LIMIT 1` it scans the whole in-flight index for the
   `(o after, c data)` arm, 9.8 ms against 1.9 ms without the limit, because its statistics,
   taken with nothing in flight, estimate one row. An index hint or the setup's histogram is the
   next thing to measure. Until both plan problems are solved, SQL Server and MySQL keep the
   table-wide check for joins.
-- **MySQL on tier A:** the writers runs failed there. MySQL's first configuration after the
-  warm-up also measures cold (158/s with the check off against 1,997/s on with no writers), which
-  is the benchmark, not the check.
+- **MySQL's first configuration:** with no writers, the check-off row measures 175/s against
+  2,034/s on, in both runs on EC2 and on RDS. With nothing in flight both run the same statements,
+  so this is the benchmark's order of measuring, not the check.
 
-**Default:** keep the predicate check experimental and off by default until SQL Server and tier A
-MySQL are measured, then make it the default. Build in-flight pairs next, as stage 2.
+**Default:** every engine is now measured on AWS, SQL Server on EC2 only. The predicate check can
+become the default for one-table reads; in-flight pairs, stage 2, next.
 
 **Next to measure: the plain query after a passed check.** If the check passes, no row in flight
 matches the read by either image, so the plain query on the data tables returns exactly the
