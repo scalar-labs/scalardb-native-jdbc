@@ -260,7 +260,11 @@ final class SplitRead {
       case NOT_EXISTS:
         sql.append(" WHERE NOT EXISTS (SELECT 1 FROM ")
             .append(meta(engine, t))
-            .append(" q WHERE ")
+            // ponytail: investigation only, a forced seek behind a benchmark flag
+            .append(
+                engine == Engine.SQLSERVER && Boolean.getBoolean("nativejdbc.bench.sqlServerSeek")
+                    ? " q WITH (FORCESEEK) WHERE "
+                    : " q WHERE ")
             .append(keyJoin(engine, t, "q"))
             .append(" AND q.")
             .append(txState)
