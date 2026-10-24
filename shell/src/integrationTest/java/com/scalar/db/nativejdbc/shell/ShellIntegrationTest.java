@@ -152,11 +152,29 @@ class ShellIntegrationTest {
     String metadata =
         "SELECT count(*) FROM sh." + e.engine().quote(java.util.Objects.requireNonNull(name));
 
-    Run refused = snsql(e, "-c", metadata);
-    Run passed = snsql(e, "-c", "\\passthrough on", "-c", metadata);
+    // maintenance of a plain table, which the driver cannot parse and refuses outside passthrough
+    String maintenance =
+        switch (e.engine()) {
+          case POSTGRESQL -> "VACUUM sh.plain";
+          case MYSQL, MARIADB -> "CHECK TABLE sh.plain";
+          case SQLSERVER -> "UPDATE STATISTICS sh.plain";
+          case ORACLE -> "ANALYZE TABLE sh.plain COMPUTE STATISTICS";
+        };
 
-    assertThat(refused.out).startsWith("ERROR:").contains("transaction metadata table");
-    assertThat(passed.out).startsWith("Passthrough is on").contains("(1 row)");
+    Run refused = snsql(e, "-c", metadata, "-c", maintenance);
+    Run passed = snsql(e, "-c", "\\passthrough on", "-c", maintenance, "-c", metadata);
+
+    assertThat(refused.out)
+        .startsWith("ERROR:")
+        .contains("transaction metadata table")
+        .containsPattern("(?s)transaction metadata table.*\nERROR:");
+    // passthrough runs the maintenance, but not a statement naming ScalarDB's tables, which would
+    // read
+    // prepared records as committed (todo 323)
+    assertThat(passed.out)
+        .startsWith("Passthrough is on")
+        .containsOnlyOnce("ERROR:")
+        .contains("names a ScalarDB table");
   }
 
   @ParameterizedTest

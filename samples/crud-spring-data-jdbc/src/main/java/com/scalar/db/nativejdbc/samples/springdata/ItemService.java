@@ -28,9 +28,9 @@ public class ItemService {
   }
 
   /**
-   * The total quantity, read at SERIALIZABLE: no transaction's writes are half seen. Not {@code
-   * readOnly}, which MySQL Connector/J does not allow at SERIALIZABLE through the driver (todo
-   * 301).
+   * The total quantity, read at SERIALIZABLE: no transaction's writes are half seen. A read-write
+   * transaction, as one that also writes from what it read would be; {@link #totalReadOnly} is the
+   * one to use for a read alone.
    */
   @Transactional(isolation = Isolation.SERIALIZABLE)
   public int total() {
@@ -41,7 +41,10 @@ public class ItemService {
     return total;
   }
 
-  /** As {@link #total}, in a read-only transaction: not on MySQL (todo 301). */
+  /**
+   * As {@link #total}, in a read-only transaction: declare a transaction that only reads so, and at
+   * SERIALIZABLE on MySQL, MariaDB and SQL Server it reads without the driver's locks.
+   */
   @Transactional(isolation = Isolation.SERIALIZABLE, readOnly = true)
   public int totalReadOnly() {
     return total();
