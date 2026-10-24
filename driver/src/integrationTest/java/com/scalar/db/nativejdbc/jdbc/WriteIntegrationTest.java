@@ -633,8 +633,15 @@ class WriteIntegrationTest {
       tx.prepare();
       Thread.sleep(3000); // the per-key UPDATE reads the image in flight
       tx.rollback();
-      assertThat(write.join()).isInstanceOf(SQLTransactionRollbackException.class);
-      assertThat(rows(v, "SELECT x FROM rf.imp WHERE id = 60")).containsExactly("a");
+      if (e.engine() == Engine.POSTGRESQL) {
+        // one statement there (todo 328): its UPDATE rechecks the row the rollback restored,
+        // committed and matching, and writes it, at the version the keys were read at
+        assertThat(write.join()).isEqualTo(1);
+        assertThat(rows(v, "SELECT x FROM rf.imp WHERE id = 60")).containsExactly("drv");
+      } else {
+        assertThat(write.join()).isInstanceOf(SQLTransactionRollbackException.class);
+        assertThat(rows(v, "SELECT x FROM rf.imp WHERE id = 60")).containsExactly("a");
+      }
     }
   }
 

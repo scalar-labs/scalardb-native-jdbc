@@ -429,6 +429,34 @@ final class Writes {
     if (dml == null) {
       throw refused(tables, "the statement's text cannot be rewritten");
     }
+    // the same statement over every key the first step reads, gated on its checks, for the write
+    // in one statement on PostgreSQL (todo 328): the text up to its end, a trailing comment left
+    // out, which would run on over what follows it inside the CTE
+    String everyKey =
+        "("
+            + n.columns("")
+            + ") IN (SELECT "
+            + Names.numbered("", "scalardb_native_d", n.keyColumns.size())
+            + " FROM scalardb_native_keys) AND (SELECT scalardb_native_go FROM"
+            + " scalardb_native_gate)";
+    String dmlSet =
+        engine != Engine.POSTGRESQL || t.layout() == Layout.INLINE || locks
+            ? null
+            : onDataTable(
+                engine,
+                ast,
+                t,
+                true,
+                span == null
+                    ? source.substring(0, end) + " WHERE " + everyKey
+                    : source.substring(0, span[0])
+                        + "("
+                        + source.substring(span[0], span[1])
+                        + ") AND ("
+                        + everyKey
+                        + ")"
+                        + source.substring(span[1], end),
+                from);
     // the keys read the committed images, whose rows in flight abort the write; at SNAPSHOT and
     // SERIALIZABLE a row in flight only its after image matches aborts it too
     Step afterImages =
@@ -478,17 +506,134 @@ final class Writes {
                     + ")",
                 inWhere)
             : null;
+    boolean delete = shape.kind() == StatementShape.Kind.DELETE;
+    boolean imported = t.layout() == Layout.DECOUPLED_IMPORTED;
     return new KeyedPlan(
         n,
-        shape.kind() == StatementShape.Kind.DELETE,
-        t.layout() == Layout.DECOUPLED_IMPORTED,
+        delete,
+        imported,
         t.layout() == Layout.INLINE,
         afterImages,
         locked,
         new Step(keys, inWhere),
         new Step(dml, all),
         matches,
-        where != null);
+        where != null,
+        dmlSet == null
+            ? null
+            : fusedKeyed(n, new Step(keys, inWhere), afterImages, dmlSet, all, delete, imported));
+  }
+
+  /**
+   * An UPDATE or DELETE as one statement on PostgreSQL (todo 328), its data-modifying CTEs the
+   * steps of 4.3: the keys and their metadata as the first step reads them; at SNAPSHOT and
+   * SERIALIZABLE, a row in flight only its after image matches; the gate, open when no key is in
+   * flight or without a metadata row and no such after image matches; the user's DML over the keys,
+   * under the gate; and the CAS of each key it wrote, which reads the DML's rows and so locks the
+   * metadata row after the data row, as ScalarDB's prepare does. Its one row per key, or one of
+   * NULLs without a key, is the key read, whether the DML wrote it and the CAS stamped it, the
+   * gate, and at those levels whether an after image matched. The stamp's three values are bound
+   * after the step's binds.
+   */
+  private static Step fusedKeyed(
+      Names n,
+      Step keys,
+      @Nullable Step afterImages,
+      String dml,
+      List<Integer> all,
+      boolean delete,
+      boolean imported) {
+    int width = n.keyColumns.size();
+    String d = "scalardb_native_d";
+    String keyColumns =
+        Names.numbered("", d, width)
+            + ", "
+            + Names.numbered("", "scalardb_native_m", width)
+            + ", scalardb_native_id, scalardb_native_version, scalardb_native_state";
+    List<Integer> binds = new ArrayList<>(keys.binds);
+    StringBuilder sql =
+        new StringBuilder("WITH scalardb_native_keys (")
+            .append(keyColumns)
+            .append(") AS (")
+            .append(keys.sql)
+            .append(")");
+    if (afterImages != null) {
+      sql.append(", scalardb_native_after AS (").append(afterImages.sql).append(")");
+      binds.addAll(afterImages.binds);
+    }
+    sql.append(
+            ", scalardb_native_gate (scalardb_native_go) AS (SELECT NOT EXISTS (SELECT 1 FROM"
+                + " scalardb_native_keys WHERE scalardb_native_state IN (1, 2) OR"
+                + " scalardb_native_m0 IS NULL)")
+        .append(afterImages == null ? "" : " AND NOT EXISTS (SELECT 1 FROM scalardb_native_after)")
+        .append("), scalardb_native_written AS (")
+        .append(dml)
+        .append(" RETURNING ")
+        .append(n.aliased("", "scalardb_native_w"))
+        .append(")");
+    binds.addAll(all);
+    // the CAS of 4.3 step 3 on the key's metadata row, at the version read; a row with a NULL
+    // tx_id is stamped at version 1 (4.4)
+    List<String> metaKey = new ArrayList<>();
+    for (int i = 0; i < width; i++) {
+      metaKey.add(n.engine.quote(n.keyColumns.get(i)) + " = k.scalardb_native_m" + i);
+    }
+    String cas =
+        String.join(" AND ", metaKey)
+            + " AND ("
+            + Names.numbered("k", d, width)
+            + ") IN (SELECT "
+            + Names.numbered("", "scalardb_native_w", width)
+            + " FROM scalardb_native_written) AND "
+            + n.committed()
+            + " AND "
+            + n.txId
+            + " IS NOT DISTINCT FROM k.scalardb_native_id";
+    String returning = " RETURNING " + Names.numbered("k", d, width);
+    // a DELETE of a created table removes the metadata row, but for a NULL tx_id, which is
+    // stamped and kept (4.4); an imported table's keeps a tombstone (4.5)
+    boolean remove = delete && !imported;
+    String stamp =
+        n.stamp(
+            "CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE COALESCE("
+                + n.txVersion
+                + ", 0) + 1 END");
+    sql.append(", scalardb_native_stamped AS (")
+        .append(stamp, 0, stamp.length() - "WHERE ".length())
+        .append("FROM scalardb_native_keys k WHERE ")
+        .append(cas)
+        .append(" AND (k.scalardb_native_id IS NULL OR ")
+        .append(n.txVersion)
+        .append(" IS NOT DISTINCT FROM k.scalardb_native_version)")
+        .append(remove ? " AND k.scalardb_native_id IS NULL" : "")
+        .append(returning)
+        .append(")");
+    if (remove) {
+      sql.append(", scalardb_native_removed AS (DELETE FROM ")
+          .append(n.meta)
+          .append(" USING scalardb_native_keys k WHERE ")
+          .append(cas)
+          .append(" AND k.scalardb_native_id IS NOT NULL AND ")
+          .append(n.txVersion)
+          .append(" IS NOT DISTINCT FROM k.scalardb_native_version")
+          .append(returning)
+          .append(")");
+    }
+    String written = n.keyJoinNumbered("w", "scalardb_native_w", "k", d);
+    String stamped = n.keyJoinNumbered("c", d, "k", d);
+    sql.append(" SELECT k.*, EXISTS (SELECT 1 FROM scalardb_native_written w WHERE ")
+        .append(written)
+        .append("), EXISTS (SELECT 1 FROM scalardb_native_stamped c WHERE ")
+        .append(stamped)
+        .append(")")
+        .append(
+            remove
+                ? " OR EXISTS (SELECT 1 FROM scalardb_native_removed c WHERE " + stamped + ")"
+                : "")
+        .append(", (SELECT scalardb_native_go FROM scalardb_native_gate)")
+        .append(afterImages == null ? "" : ", EXISTS (SELECT 1 FROM scalardb_native_after)")
+        .append(" FROM (SELECT 1) scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE");
+    return new Step(sql.toString(), binds);
   }
 
   private static Plan insertPlan(
@@ -551,6 +696,14 @@ final class Writes {
           "an INSERT of a ScalarDB table lists its columns and gives each key column a literal or"
               + " a placeholder, or leaves out an AUTO_INCREMENT key, on this engine");
     }
+    String returnsKeys =
+        returns && !outputs
+            ? (n.inline && "*".equals(returning)
+                    // the data columns, not the metadata ones beside them (milestone 10b)
+                    ? source.substring(0, items) + " " + n.star("")
+                    : source.substring(0, end))
+                + (returning == null ? " RETURNING " : ", ")
+            : "";
     String insert =
         onDataTable(
             engine,
@@ -563,19 +716,19 @@ final class Writes {
                     + n.readColumns("INSERTED")
                     + " "
                     + source.substring(output)
-                : returns
-                    ? (n.inline && "*".equals(returning)
-                            // the data columns, not the metadata ones beside them (milestone 10b)
-                            ? source.substring(0, items) + " " + n.star("")
-                            : source.substring(0, end))
-                        + (returning == null ? " RETURNING " : ", ")
-                        + n.readColumns("")
-                        + source.substring(end)
-                    : source,
+                : returns ? returnsKeys + n.readColumns("") + source.substring(end) : source,
             -1);
     if (insert == null) {
       throw refused(tables, "the statement's text cannot be rewritten");
     }
+    // on PostgreSQL the INSERT and its metadata rows are one statement (todo 328): the keys named
+    // apart from the statement's own items, a trailing comment left out, which would run on over
+    // what follows it inside the CTE
+    String fused =
+        engine == Engine.POSTGRESQL && !n.inline
+            ? onDataTable(
+                engine, ast, t, true, returnsKeys + n.aliased("", "scalardb_native_k"), -1)
+            : null;
     // the keys as written, when every row gives them: a duplicate is then told from a key in
     // flight (4.3); a generated one is the application's duplicate
     Step inFlight = null;
@@ -694,6 +847,7 @@ final class Writes {
     return new InsertPlan(
         n,
         new Step(insert, all),
+        fused == null ? null : new Step(fusedInsert(n, fused, inFlight != null), all),
         readBack,
         inFlight,
         committed,
@@ -701,6 +855,33 @@ final class Writes {
         returning,
         Router.exposed(ref),
         type(engine, tableColumns, t.keyColumns().get(0)).endsWith(" generated"));
+  }
+
+  /** The savepoint a duplicate is told under on PostgreSQL, set in the INSERT's own round trip. */
+  private static final String SAVEPOINT = "scalardb_native_write";
+
+  /**
+   * An INSERT as one round trip on PostgreSQL (todo 328): the user's INSERT, which returns the keys
+   * it wrote, and their metadata rows inserted from them, a key with one already skipped, as
+   * data-modifying CTEs of one statement; its rows are the INSERT's, then how many keys were
+   * stamped. Where a duplicate is told from a key in flight, it runs under a savepoint set and
+   * released in the same round trip, which pgjdbc sends with the statement. The stamp's three
+   * values are bound after the user's.
+   */
+  private static String fusedInsert(Names n, String insert, boolean savepoint) {
+    String sql =
+        "WITH scalardb_native_inserted AS ("
+            + insert
+            + "), scalardb_native_stamped AS ("
+            + n.insertStamp(
+                "SELECT "
+                    + Names.numbered("", "scalardb_native_k", n.keyColumns.size())
+                    + ", ?, 3, 1, ?, ? FROM scalardb_native_inserted")
+            + " RETURNING 1) SELECT scalardb_native_inserted.*, (SELECT COUNT(*) FROM"
+            + " scalardb_native_stamped) FROM scalardb_native_inserted";
+    return savepoint
+        ? "SAVEPOINT " + SAVEPOINT + "; " + sql + "; RELEASE SAVEPOINT " + SAVEPOINT
+        : sql;
   }
 
   /**
@@ -1312,6 +1493,9 @@ final class Writes {
     // an inline DELETE's predicate over one key, as the row is now
     final @Nullable Step matches;
     final boolean predicate;
+    // the steps as one statement, on PostgreSQL (todo 328); the steps one by one when a key has no
+    // metadata row
+    final @Nullable Step fused;
 
     KeyedPlan(
         Names n,
@@ -1323,7 +1507,8 @@ final class Writes {
         Step keys,
         Step dml,
         @Nullable Step matches,
-        boolean predicate) {
+        boolean predicate,
+        @Nullable Step fused) {
       super(n);
       this.delete = delete;
       this.imported = imported;
@@ -1334,12 +1519,13 @@ final class Writes {
       this.dml = dml;
       this.matches = matches;
       this.predicate = predicate;
+      this.fused = fused;
     }
 
     @Override
     List<String> sql() {
       List<String> out = new ArrayList<>();
-      for (Step s : Arrays.asList(afterImages, locked, keys, dml)) {
+      for (Step s : Arrays.asList(afterImages, locked, keys, dml, fused)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -1349,6 +1535,90 @@ final class Writes {
 
     @Override
     long apply(Run run) throws SQLException {
+      if (fused != null) {
+        Long written = applyFused(run, fused);
+        if (written != null) {
+          return written;
+        }
+      }
+      return applySteps(run);
+    }
+
+    /**
+     * The write as one statement, then the checks of 4.3 on what it returns: at every level each is
+     * an abort, which undoes the writes with the transaction, but for a row in flight, which the
+     * gate keeps the statement from writing, so that READ COMMITTED's bounded wait holds no lock
+     * (section 6), and a key the DML skips, which step 2's zero-row rule tells. Null, nothing
+     * written, when a key has no metadata row: the steps one by one stamp it.
+     */
+    private @Nullable Long applyFused(Run run, Step step) throws SQLException {
+      int width = n.keyColumns.size();
+      int flags = 2 * width + 4; // written, stamped, the gate, and an after image matched
+      long until = System.nanoTime() + run.context.inflightWait().toNanos();
+      while (true) {
+        List<Row> rows = new ArrayList<>();
+        List<Boolean> written = new ArrayList<>();
+        List<Boolean> stamped = new ArrayList<>();
+        boolean open = false;
+        boolean after = false;
+        boolean held = false;
+        try (PreparedStatement ps = run.prepare(step, null)) {
+          run.stamp(ps, step.binds.size() + 1);
+          try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+              open = rs.getBoolean(flags + 2);
+              after = afterImages != null && rs.getBoolean(flags + 3);
+              Object[] key = readKey(rs, 1, width);
+              if (key == null) {
+                continue; // no key: the row of NULLs
+              }
+              held |= inFlight(rs.getObject(2 * width + 3));
+              rows.add(
+                  new Row(
+                      key,
+                      readKey(rs, width + 1, width),
+                      rs.getString(2 * width + 1),
+                      rs.getObject(2 * width + 2)));
+              written.add(rs.getBoolean(flags));
+              stamped.add(rs.getBoolean(flags + 1));
+            }
+          }
+        }
+        if (after) {
+          throw new Aborted(
+              "a row the statement writes is being written by a ScalarDB transaction");
+        }
+        if (!open) {
+          if (!held) {
+            return null;
+          }
+          run.sleep(until, "a row the statement writes is being written by a ScalarDB transaction");
+          continue;
+        }
+        Anchors anchors = run.context.anchors();
+        for (Row row : rows) {
+          if (!anchors.unchanged(n.table, row.key, row.txId, row.version)) {
+            throw new Aborted("a row this transaction read was changed by another one since");
+          }
+        }
+        long total = 0;
+        for (int i = 0; i < rows.size(); i++) {
+          if (!written.get(i)) {
+            skipOrAbort(run, rows.get(i));
+            continue;
+          }
+          if (!stamped.get(i)) {
+            throw new Aborted("a row the statement writes changed after it was read");
+          }
+          anchors.wrote(run.txId);
+          total++;
+        }
+        return total;
+      }
+    }
+
+    /** The write step by step, a statement each (4.3). */
+    private long applySteps(Run run) throws SQLException {
       // the lock first: a locking read takes no snapshot, so when the write is the transaction's
       // first statement the plain reads below take it under the lock (todo 236)
       Map<List<Object>, Anchors.Version> now = locked == null ? null : lockedRows(run);
@@ -1597,6 +1867,8 @@ final class Writes {
    */
   private static final class InsertPlan extends Plan {
     final Step insert;
+    // the INSERT and its metadata rows in one round trip, on PostgreSQL (todo 328)
+    final @Nullable Step fused;
     // where there is no RETURNING, each row's key read back by its values; none for a generated
     // key (AUTO_INCREMENT, IDENTITY) the statement leaves out, which the vendor driver reports
     final List<Step> readBack;
@@ -1613,6 +1885,7 @@ final class Writes {
     InsertPlan(
         Names n,
         Step insert,
+        @Nullable Step fused,
         List<Step> readBack,
         @Nullable Step inFlight,
         @Nullable Step committed,
@@ -1623,6 +1896,7 @@ final class Writes {
       super(n);
       this.generatedKey = generatedKey;
       this.insert = insert;
+      this.fused = fused;
       this.readBack = List.copyOf(readBack);
       this.inFlight = inFlight;
       this.committed = committed;
@@ -1642,7 +1916,7 @@ final class Writes {
       for (Step s : readBack) {
         out.add(s.sql);
       }
-      for (Step s : Arrays.asList(inFlight, committed, repeats)) {
+      for (Step s : Arrays.asList(inFlight, committed, repeats, fused)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -1650,11 +1924,100 @@ final class Writes {
       return out;
     }
 
+    @Override
+    long apply(Run run) throws SQLException {
+      return fused != null ? applyFused(run, fused) : applySteps(run);
+    }
+
+    /**
+     * The INSERT and its metadata rows in one round trip; a tombstone, which the stamp skips, is
+     * taken over after it (4.5), and a duplicate told after the savepoint is rolled back to.
+     */
+    private long applyFused(Run run, Step step) throws SQLException {
+      int width = n.keyColumns.size();
+      Keys keys = new Keys();
+      PreparedStatement ps = run.prepare(step, null, returning != null);
+      try {
+        run.stamp(ps, step.binds.size() + 1);
+        ResultSet rs;
+        try {
+          // the savepoint's count first, if any
+          boolean rows = ps.execute();
+          while (!rows && ps.getUpdateCount() != -1) {
+            rows = ps.getMoreResults();
+          }
+          rs = ps.getResultSet();
+          if (rs == null) {
+            throw new SQLException("the INSERT returned no rows", "XX000");
+          }
+        } catch (SQLException e) {
+          if (!n.engine.isDuplicateKey(e) || inFlight == null) {
+            throw e;
+          }
+          // the transaction goes on, as on the engines where a failed statement does not end it
+          try (Statement s = run.v.createStatement()) {
+            s.execute("ROLLBACK TO SAVEPOINT " + SAVEPOINT + "; RELEASE SAVEPOINT " + SAVEPOINT);
+          }
+          throw duplicate(run, e);
+        }
+        long stamped = 0;
+        int from = rs.getMetaData().getColumnCount() - width;
+        while (rs.next()) {
+          keys.read(rs, from, width);
+          stamped = rs.getLong(from + width);
+        }
+        takeOver(run, keys, (int) stamped);
+        run.context.anchors().wrote(run.txId);
+        run.context.inserted(keys);
+        if (returning != null) {
+          rs.beforeFirst();
+          ps.closeOnCompletion();
+          run.context.rows(rs, width + 1);
+        } else {
+          ps.close();
+        }
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
+        throw e;
+      }
+      return keys.rows.size();
+    }
+
+    /**
+     * What a duplicate of the INSERT is (4.3), the transaction still open: the application's own,
+     * {@code e}, or a conflict with a key in flight or written after the snapshot.
+     */
+    private SQLException duplicate(Run run, SQLException e) throws SQLException {
+      if (!keyViolated(run, e)) {
+        return e; // another unique constraint: the application's duplicate (todo 178)
+      }
+      try (PreparedStatement check = run.prepare(Objects.requireNonNull(inFlight), null);
+          ResultSet r = check.executeQuery()) {
+        r.next();
+        if (r.getLong(1) > 0) {
+          Aborted a = new Aborted("a key the statement inserts is being written by ScalarDB");
+          a.addSuppressed(e);
+          return a;
+        }
+      }
+      if (committed != null && !repeatsKey(run)) {
+        try (PreparedStatement check = run.prepare(committed, null);
+            ResultSet r = check.executeQuery()) {
+          r.next();
+          if (r.getLong(1) == 0) {
+            Aborted a = new Aborted("a key the statement inserts was written after the snapshot");
+            a.addSuppressed(e);
+            return a;
+          }
+        }
+      }
+      return e; // the application's duplicate
+    }
+
     @SuppressFBWarnings(
         value = "OBL_UNSATISFIED_OBLIGATION",
         justification = "the rows are handed to the application, closed with their statement")
-    @Override
-    long apply(Run run) throws SQLException {
+    private long applySteps(Run run) throws SQLException {
       int width = n.keyColumns.size();
       Keys keys = new Keys();
       PreparedStatement ps = null;
@@ -1718,30 +2081,7 @@ final class Writes {
         }
         // the transaction goes on, as on the engines where a failed statement does not end it
         run.v.rollback(sp);
-        if (!keyViolated(run, e)) {
-          throw e; // another unique constraint: the application's duplicate (todo 178)
-        }
-        try (PreparedStatement check = run.prepare(inFlight, null);
-            ResultSet r = check.executeQuery()) {
-          r.next();
-          if (r.getLong(1) > 0) {
-            Aborted a = new Aborted("a key the statement inserts is being written by ScalarDB");
-            a.addSuppressed(e);
-            throw a;
-          }
-        }
-        if (committed != null && !repeatsKey(run)) {
-          try (PreparedStatement check = run.prepare(committed, null);
-              ResultSet r = check.executeQuery()) {
-            r.next();
-            if (r.getLong(1) == 0) {
-              Aborted a = new Aborted("a key the statement inserts was written after the snapshot");
-              a.addSuppressed(e);
-              throw a;
-            }
-          }
-        }
-        throw e; // the application's duplicate
+        throw duplicate(run, e);
       } finally {
         try {
           release(n.engine, run.v, sp);
@@ -1896,7 +2236,15 @@ final class Writes {
 
     private void stamp(Run run, Keys keys) throws SQLException {
       // an inline row is its own metadata row: stamped where it stands, below
-      int stamped = n.inline ? 0 : stampFromData(run, n, keys);
+      takeOver(run, keys, n.inline ? 0 : stampFromData(run, n, keys));
+    }
+
+    /**
+     * Stamps the keys {@code stamped} of which have their metadata rows already: a metadata row
+     * with no data row is an orphan, a tombstone, taken over in place (4.5); an inline row, where
+     * it stands.
+     */
+    private void takeOver(Run run, Keys keys, int stamped) throws SQLException {
       if (stamped == keys.rows.size()) {
         return;
       }
@@ -2074,6 +2422,9 @@ final class Writes {
     // at REPEATABLE READ on MySQL and MariaDB, the same read without the lock: a locking read there
     // returns the rows committed now, which must be the snapshot's
     final @Nullable Step snapshot;
+    // at SNAPSHOT and SERIALIZABLE on PostgreSQL, the in-flight check and the lock in one round
+    // trip (todo 328)
+    final @Nullable Step fused;
 
     LockPlan(
         Names n,
@@ -2081,13 +2432,21 @@ final class Writes {
         @Nullable Step inFlight,
         boolean noWait,
         @Nullable String relock,
-        @Nullable Step snapshot) {
+        @Nullable Step snapshot,
+        boolean fuse) {
       super(n);
       this.lock = lock;
       this.inFlight = inFlight;
       this.noWait = noWait;
       this.relock = relock;
       this.snapshot = snapshot;
+      List<Integer> binds = new ArrayList<>();
+      if (fuse && inFlight != null) {
+        binds.addAll(inFlight.binds);
+        binds.addAll(lock.binds);
+      }
+      this.fused =
+          fuse && inFlight != null ? new Step(inFlight.sql + "; " + lock.sql, binds) : null;
     }
 
     @Override
@@ -2108,7 +2467,7 @@ final class Writes {
     @Override
     List<String> sql() {
       List<String> out = new ArrayList<>();
-      for (Step s : Arrays.asList(inFlight, lock, snapshot)) {
+      for (Step s : Arrays.asList(inFlight, lock, snapshot, fused)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -2116,11 +2475,59 @@ final class Writes {
       return out;
     }
 
+    @Override
+    long apply(Run run) throws SQLException {
+      return fused != null ? applyFused(run, fused) : applySteps(run);
+    }
+
+    /**
+     * The in-flight check and the lock as two statements sent in one round trip: at REPEATABLE READ
+     * on PostgreSQL every statement of the transaction reads its one snapshot, so the check after
+     * the lock and the versions read under it would see what these two do, and a row in flight
+     * aborts at once (section 6), its locks released with the transaction. A row a ScalarDB prepare
+     * wrote after the snapshot fails the lock itself with PostgreSQL's serialization failure.
+     */
+    private long applyFused(Run run, Step step) throws SQLException {
+      int width = n.keyColumns.size();
+      PreparedStatement ps = run.prepare(step, null, true);
+      try {
+        ps.execute();
+        try (ResultSet held = ps.getResultSet()) {
+          if (held != null && held.next()) {
+            throw new Aborted(
+                "a row the statement locks is being written by a ScalarDB transaction");
+          }
+        }
+        if (!ps.getMoreResults()) {
+          throw new SQLException("the locking read returned no rows", "XX000");
+        }
+        ResultSet rs = ps.getResultSet();
+        // the key, then the two version lookups the anchored read appends
+        int from = rs.getMetaData().getColumnCount() - width - 1;
+        Keys keys = new Keys();
+        List<Anchors.Version> read = new ArrayList<>();
+        while (rs.next()) {
+          keys.read(rs, from, width);
+          read.add(new Anchors.Version(rs.getString(from + width), rs.getObject(from + width + 1)));
+        }
+        for (int i = 0; i < keys.rows.size(); i++) {
+          run.context.anchor(n.table, keys.rows.get(i), read.get(i));
+        }
+        rs.beforeFirst();
+        ps.closeOnCompletion();
+        run.context.rows(rs, width + 2);
+        return keys.rows.size();
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
+        throw e;
+      }
+    }
+
+    /** The locking read step by step, each attempt under a savepoint. */
     @SuppressFBWarnings(
         value = "OBL_UNSATISFIED_OBLIGATION",
         justification = "the rows are handed to the application, closed with their statement")
-    @Override
-    long apply(Run run) throws SQLException {
+    private long applySteps(Run run) throws SQLException {
       int width = n.keyColumns.size();
       long until = System.nanoTime() + run.context.inflightWait().toNanos();
       String held = "a row the statement locks is being written by a ScalarDB transaction";
@@ -2436,6 +2843,35 @@ final class Writes {
         out.add((q.isEmpty() ? "" : q + ".") + engine.quote(c));
       }
       return String.join(", ", out);
+    }
+
+    /**
+     * {@code q.prefix0, q.prefix1, ...}, {@code count} driver-named columns, unqualified for "".
+     */
+    static String numbered(String q, String prefix, int count) {
+      List<String> out = new ArrayList<>();
+      for (int i = 0; i < count; i++) {
+        out.add((q.isEmpty() ? "" : q + ".") + prefix + i);
+      }
+      return String.join(", ", out);
+    }
+
+    /** The key columns of {@code q} named as {@link #numbered} names them. */
+    String aliased(String q, String prefix) {
+      List<String> out = new ArrayList<>();
+      for (int i = 0; i < keyColumns.size(); i++) {
+        out.add(key(q, keyColumns.get(i)) + " AS " + prefix + i);
+      }
+      return String.join(", ", out);
+    }
+
+    /** The {@link #numbered} key columns of {@code a} equal to those of {@code b}. */
+    String keyJoinNumbered(String a, String prefixA, String b, String prefixB) {
+      List<String> terms = new ArrayList<>();
+      for (int i = 0; i < keyColumns.size(); i++) {
+        terms.add(a + "." + prefixA + i + " = " + b + "." + prefixB + i);
+      }
+      return String.join(" AND ", terms);
     }
 
     /** The key columns as a select list the driver reads keys from, as {@link #key} reads them. */

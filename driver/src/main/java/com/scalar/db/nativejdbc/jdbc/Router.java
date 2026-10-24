@@ -1228,7 +1228,8 @@ final class Router {
             // the comment the clause replaces is left as it is
             inner != null && snapshot()
                 ? new Writes.Step(text.sql(), text.parameterSources())
-                : null);
+                : null,
+            engine == Engine.POSTGRESQL && snapshot());
     return new Route(
         sql,
         sql,

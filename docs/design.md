@@ -1246,6 +1246,53 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
    rule of step 2 catches by reading the state. Under SNAPSHOT and SERIALIZABLE the anchored CAS already
    aborts if the row moved.
 
+**One round trip per write (todo 328).** The steps above are the protocol, not the order of round
+trips. Every check a write makes either aborts the transaction, which undoes whatever the write did with
+it, or, at READ COMMITTED, waits for a row in flight. So the checks need not come before the writes in
+separate statements. They can run in the same statement as the writes, with the driver deciding from
+what the statement returns, provided nothing is written while a key is in flight. On PostgreSQL an
+UPDATE or DELETE is one statement of data-modifying CTEs:
+
+1. the keys and their metadata, as step 1 reads them;
+2. at SNAPSHOT and SERIALIZABLE, whether a row in flight matches by its after image;
+3. a gate, open when no key is in flight, every key has a metadata row, and no after image matched;
+4. the user's DML over those keys, under the gate, returning the keys it wrote;
+5. the CAS of step 3 on each key the DML returned. It reads the DML's rows, so each metadata row is
+   locked after its data row, the order of step 2.
+
+The statement returns, per key, the version read, whether the DML wrote the key, and whether the CAS
+stamped it. The driver then applies the rules of steps 1 to 3 to those rows:
+
+- an after image matched, or a key the transaction read before is at another version: abort;
+- a key in flight: the gate kept everything unwritten, so the READ COMMITTED wait of section 6 holds no
+  lock, and the statement runs again after it;
+- a key the DML skipped: the zero-row rule of step 2;
+- a key written but not stamped: abort, as a zero-row CAS.
+
+A key without a metadata row, which only an imported table has, and only until the backfill completes,
+closes the gate, and the write then runs as the separate steps, which stamp it (4.4). The sub-statements
+share one snapshot, so a row changed after it reaches the CAS as PostgreSQL rechecks a waiting UPDATE:
+at READ COMMITTED against the newest version, where the anchored condition fails and the driver aborts;
+at REPEATABLE READ as PostgreSQL's own serialization failure.
+
+An INSERT on PostgreSQL is the user's INSERT, returning its keys, and their metadata rows inserted from
+those keys (`ON CONFLICT DO NOTHING`), in one statement. A tombstone the insert skips is taken over by
+the CAS afterwards (4.5), a second round trip only for those keys. Where a duplicate must be told from a
+key in flight, the statement runs under a savepoint, sent as `SAVEPOINT; statement; RELEASE` in the
+same round trip. On a duplicate the driver rolls back to the savepoint and classifies it as before.
+
+A locking read at SNAPSHOT and SERIALIZABLE on PostgreSQL is its in-flight check and the lock, two
+statements sent in one round trip. At REPEATABLE READ every statement of the transaction reads its one
+snapshot, so the check after the lock and the versions read under it would see only what these two
+see. A row in flight aborts at once at those levels (section 6), its locks released with the
+transaction, and a row a ScalarDB prepare wrote after the snapshot fails the lock itself with
+PostgreSQL's serialization failure. At READ COMMITTED each statement takes a new snapshot, and the
+locking read keeps its steps and savepoint.
+
+The other engines still run the steps one by one, each write under a savepoint of its own. They have
+no data-modifying CTEs; their single-round-trip forms are a multi-statement batch on MySQL and
+MariaDB, a T-SQL batch on SQL Server, and an anonymous PL/SQL block on Oracle (todo 328).
+
 ### 4.4 Builder notes
 
 - **Autocommit.** A write is three statements that must share one database transaction. In autocommit
@@ -1887,7 +1934,9 @@ lock wait where it waits on the driver.
 - **READ COMMITTED read**: no wait; the two-arm form or the split read of 4.2 returns the before image, a
   committed value.
 - **READ COMMITTED write**: the in-flight check is step 1 of 4.3, a plain non-locking read before any
-  DML, so a wait there holds no lock on the row. State 1 or 2 at that point: default abort with SQLSTATE
+  DML, so a wait there holds no lock on the row. On PostgreSQL step 1 is part of the write's own
+  statement, whose gate writes nothing while a key is in flight (4.3, one round trip per write), so the
+  wait holds no lock there either. State 1 or 2 at that point: default abort with SQLSTATE
   `40001`, or optionally, with `scalardbnative.inflightWaitMs` set, read the keys of step 1 again about
   every 20 ms up to that limit and the statement's query timeout, then continue with the same anchor
   for a key this transaction read, or a fresh one for a key it never read; on timeout abort. For a key already read, the wait only helps when the

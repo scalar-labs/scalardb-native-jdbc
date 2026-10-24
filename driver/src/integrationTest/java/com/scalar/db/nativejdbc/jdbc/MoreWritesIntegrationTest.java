@@ -292,7 +292,7 @@ class MoreWritesIntegrationTest {
         inFlightWait(e, tpc, t);
         lockingReads(e, tm, tpc, t);
         reviewFindings(e, tpc, t);
-        timeoutMidWrite(e, tpc, t);
+        timeoutMidWrite(e, tpc, t, e.engine() == Engine.POSTGRESQL);
         readOnlyWrite(e, t);
       }
       // the inline layout, the table its own metadata table (milestones 10b and 10c)
@@ -308,7 +308,7 @@ class MoreWritesIntegrationTest {
         inFlightWait(e, tpc, t);
         lockingReads(e, tm, tpc, t);
         reviewFindings(e, tpc, t);
-        timeoutMidWrite(e, tpc, t);
+        timeoutMidWrite(e, tpc, t, false);
         readOnlyWrite(e, t);
       }
       if (e.engine() == Engine.POSTGRESQL) {
@@ -1383,7 +1383,8 @@ class MoreWritesIntegrationTest {
    * 157: a timeout the driver raises after one key's DML, before its CAS or the next key, leaves a
    * transaction the application cannot commit.
    */
-  private static void timeoutMidWrite(Engines e, TwoPhaseCommitTransactionManager tpc, Table t)
+  private static void timeoutMidWrite(
+      Engines e, TwoPhaseCommitTransactionManager tpc, Table t, boolean oneStatement)
       throws Exception {
     Properties waits = new Properties();
     waits.setProperty("scalardbnative.inflightWaitMs", "20000");
@@ -1414,14 +1415,25 @@ class MoreWritesIntegrationTest {
               });
       d.setAutoCommit(false);
       st.setQueryTimeout(2);
-      assertThatThrownBy(
-              () -> st.executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id IN (80, 81)"))
-          .extracting("SQLState")
-          .isEqualTo("57014");
-      settle.get(5, TimeUnit.SECONDS);
-      unlock.get(5, TimeUnit.SECONDS);
-      assertThatThrownBy(d::commit).isInstanceOf(SQLTransactionRollbackException.class);
-      d.rollback();
+      if (oneStatement) {
+        // a decoupled table's write is one statement on PostgreSQL (todo 328): no point between a
+        // key's DML and its stamp, and the
+        // statement ends within the time the vendor statement was given
+        assertThat(st.executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id IN (80, 81)"))
+            .isEqualTo(2);
+        settle.get(5, TimeUnit.SECONDS);
+        unlock.get(5, TimeUnit.SECONDS);
+        d.rollback();
+      } else {
+        assertThatThrownBy(
+                () -> st.executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id IN (80, 81)"))
+            .extracting("SQLState")
+            .isEqualTo("57014");
+        settle.get(5, TimeUnit.SECONDS);
+        unlock.get(5, TimeUnit.SECONDS);
+        assertThatThrownBy(d::commit).isInstanceOf(SQLTransactionRollbackException.class);
+        d.rollback();
+      }
       d.setAutoCommit(true);
       assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id IN (80, 81) ORDER BY id"))
           .containsExactly("a", "b");
