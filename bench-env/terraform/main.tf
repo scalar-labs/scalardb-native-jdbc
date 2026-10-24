@@ -17,7 +17,7 @@ variable "region" {
 }
 
 variable "admin_cidr" {
-  description = "The address SSH to the client is allowed from, as a /32"
+  description = "The addresses SSH to the client is allowed from, CIDR blocks separated by commas"
   type        = string
 }
 
@@ -139,7 +139,7 @@ resource "aws_security_group" "client" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.admin_cidr]
+    cidr_blocks = split(",", var.admin_cidr)
   }
   egress {
     from_port   = 0
