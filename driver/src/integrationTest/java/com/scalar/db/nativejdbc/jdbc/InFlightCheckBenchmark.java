@@ -1485,9 +1485,13 @@ class InFlightCheckBenchmark {
 
   /**
    * With {@code -Dnativejdbc.bench.autoStats=true}, on SQL Server, the metadata tables' statistics
-   * back to automatic updates before the writers: whether the setup still needs to keep them.
+   * back to automatic updates before the writers: whether the setup still needs to keep them. With
+   * {@code alternate}, on the even runs of matrix.sh ({@code nativejdbc.bench.rep}) only.
    */
-  private static final boolean AUTO_STATS = Boolean.getBoolean("nativejdbc.bench.autoStats");
+  private static final boolean AUTO_STATS =
+      "true".equals(System.getProperty("nativejdbc.bench.autoStats"))
+          || ("alternate".equals(System.getProperty("nativejdbc.bench.autoStats"))
+              && Integer.getInteger("nativejdbc.bench.rep", 1) % 2 == 0);
 
   /** The metadata tables of o and c, for {@link #STATS_EVERY_MS}. */
   private static List<String> metaTables = List.of();
