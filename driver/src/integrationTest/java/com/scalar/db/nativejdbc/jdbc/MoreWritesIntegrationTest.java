@@ -808,6 +808,56 @@ class MoreWritesIntegrationTest {
           .containsExactly("11/b11", "12/b12!");
       assertThat(rows(d, "SELECT x FROM wb.plain")).containsExactly("q");
       d.createStatement().executeUpdate("DELETE FROM wb.plain");
+      // more entries than PostgreSQL sends together (todo 329), each seeing the ones before it
+      try (PreparedStatement ps =
+          d.prepareStatement("INSERT INTO " + t.sql + " (id, x) VALUES (?, ?)")) {
+        for (int id = 40; id < 60; id++) {
+          ps.setInt(1, id);
+          ps.setString(2, "t");
+          ps.addBatch();
+        }
+        assertThat(ps.executeBatch()).hasSize(20).containsOnly(1);
+      }
+      Statement chain = d.createStatement();
+      chain.addBatch("UPDATE " + t.sql + " SET x = 'u' WHERE id = 40");
+      chain.addBatch("UPDATE " + t.sql + " SET x = 'v' WHERE x = 'u'");
+      chain.addBatch("DELETE FROM " + t.sql + " WHERE id = 41");
+      // the deleted key again: its tombstone is taken over, which runs the entries one by one
+      chain.addBatch("INSERT INTO " + t.sql + " (id, x) VALUES (41, 'w')");
+      chain.addBatch("UPDATE " + t.sql + " SET x = 'z' WHERE id = 99");
+      assertThat(chain.executeBatch()).containsExactly(1, 1, 1, 1, 0);
+      assertThat(rows(d, "SELECT id, x FROM " + t.sql + " WHERE id IN (40, 41, 59) ORDER BY id"))
+          .containsExactly("40/v", "41/w", "59/t");
+      // in a transaction: a duplicate late in a batch, the counts of the entries before it
+      d.setAutoCommit(false);
+      try (PreparedStatement ps =
+          d.prepareStatement("UPDATE " + t.sql + " SET x = ? WHERE id = ?")) {
+        for (int id = 40; id < 60; id++) {
+          ps.setString(1, "s");
+          ps.setInt(2, id);
+          ps.addBatch();
+        }
+        assertThat(ps.executeBatch()).hasSize(20).containsOnly(1);
+      }
+      try (PreparedStatement ps =
+          d.prepareStatement("INSERT INTO " + t.sql + " (id, x) VALUES (?, 'd')")) {
+        for (int id = 60; id < 80; id++) {
+          ps.setInt(1, id == 78 ? 45 : id);
+          ps.addBatch();
+        }
+        assertThatThrownBy(ps::executeBatch)
+            .isInstanceOfSatisfying(
+                BatchUpdateException.class,
+                b -> {
+                  assertThat(b.getUpdateCounts()).hasSize(18).containsOnly(1);
+                  assertThat(e.engine().isDuplicateKey(b.getNextException())).isTrue();
+                });
+      }
+      d.rollback();
+      d.setAutoCommit(true);
+      assertThat(rows(d, "SELECT COUNT(*) FROM " + t.sql + " WHERE x = 's' OR x = 'd'"))
+          .containsExactly("0");
+      d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 40");
       // a failure in autocommit undoes the whole batch; the counts before it, the cause next
       try (PreparedStatement ps =
           d.prepareStatement("INSERT INTO " + t.sql + " (id, x) VALUES (?, 'f')")) {

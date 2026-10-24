@@ -1217,8 +1217,8 @@ public final class Proxies {
      * BatchUpdateException} with the counts of the entries before it, its next exception the
      * failure itself.
      */
-    // ponytail: entry by entry, a round trip per statement of each; JDBC batching of the
-    // metadata statements if a large batch of INSERTs measures slow
+    // ponytail: on PostgreSQL entries that are one statement each go together, 16 to a round trip
+    // (todo 329); otherwise entry by entry, a round trip per statement of each
     private Object runBatch(
         Object proxy,
         String name,
@@ -1248,23 +1248,57 @@ public final class Proxies {
             () -> owner.rollbackOnly = true,
             true,
             () -> {
-              for (int i = 0; i < size; i++) {
-                Router.Route route = routes.apply(i);
-                if (route.write != null) {
-                  last[0] = route.write;
-                  try {
-                    counts[i] =
-                        Writes.apply(
-                            owner.vendor,
-                            route.write,
-                            writeContext(parameters.apply(i), inserted, null));
-                  } finally {
-                    owner.ran(route); // as runWrite (todo 231)
+              boolean together = false; // whether entries sent together set their savepoint
+              for (int i = 0; i < size; ) {
+                // the next entries that are one statement each, sent in one round trip (todo 329)
+                int end = i;
+                while (end < size && end - i < Writes.TOGETHER_MAX) {
+                  Writes.Plan p = routes.apply(end).write;
+                  if (p == null || p.together() == null) {
+                    break;
+                  }
+                  end++;
+                }
+                if (end - i > 1) {
+                  List<Writes.Plan> plans = new ArrayList<>();
+                  List<Writes.Context> contexts = new ArrayList<>();
+                  for (int j = i; j < end; j++) {
+                    plans.add(Objects.requireNonNull(routes.apply(j).write));
+                    contexts.add(writeContext(parameters.apply(j), inserted, null));
+                  }
+                  long[] got = Writes.applyTogether(owner.vendor, plans, contexts, together);
+                  together = true; // undone to, it stays
+                  if (got != null) {
+                    for (int j = i; j < end; j++) {
+                      counts[j] = got[j - i];
+                      last[0] = plans.get(j - i);
+                      owner.ran(routes.apply(j));
+                      done[0]++;
+                    }
+                    i = end;
+                    continue;
                   }
                 } else {
-                  counts[i] = runPlain(route);
+                  end = i + 1;
                 }
-                done[0]++;
+                for (; i < end; i++) {
+                  Router.Route route = routes.apply(i);
+                  if (route.write != null) {
+                    last[0] = route.write;
+                    try {
+                      counts[i] =
+                          Writes.apply(
+                              owner.vendor,
+                              route.write,
+                              writeContext(parameters.apply(i), inserted, null));
+                    } finally {
+                      owner.ran(route); // as runWrite (todo 231)
+                    }
+                  } else {
+                    counts[i] = runPlain(route);
+                  }
+                  done[0]++;
+                }
               }
               if (keys != null && last[0] != null) {
                 out.rows = Writes.returned(owner.vendor, last[0], keys, inserted);

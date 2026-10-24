@@ -141,3 +141,34 @@ TPC-C: item read 17 to 10 µs, the stock lock 20 to 7 µs.
 - Added to `SnapshotIntegrationTest` on PostgreSQL: after a read, a ScalarDB commit or a prepare
   then rollback of the row aborts a DELETE, an UPDATE by key and one by predicate; a lock then an
   update succeeds.
+
+### 2026-10-24: step 2, a batch's entries in one round trip on PostgreSQL
+
+- `Writes.applyTogether`, `Plan.together`: consecutive entries whose write is one statement (a
+  keyed UPDATE or DELETE, an INSERT without RETURNING) go as one text, up to 16, after `SAVEPOINT
+  scalardb_native_batch`; the next round trip releases it, the last one stays to the transaction's
+  end. Outcomes are read before any is recorded; when one needs more than its statement (in flight,
+  a tombstone, a skipped key, an abort, an error) the entries are rolled back to the savepoint and
+  run one by one, which keeps the outcomes and `BatchUpdateException`'s counts as they were.
+- `MoreWritesIntegrationTest.batches`: 20 entries, entries that see the ones before, a tombstone
+  taken over in a batch, a duplicate as the 19th entry in a transaction. Design 4.4, Batches. The
+  PostgreSQL integration suite, SpotBugs and Spotless pass.
+- Warm-up: every chunk size is another text and every position its own server statement, so each
+  connection plans about 110 positions some 6 times before the generic plan (6,100 plans of the
+  fused stock update in a 60 s run, 2.2 s of planning). If it matters, fixed sizes (8, 4, 2) bound
+  it at the cost of a round trip.
+
+BenchBase, same session:
+
+| | (a) | (c) | (c)/(a) | before step 2 |
+|---|---|---|---|---|
+| TPC-C throughput | 745 | 573 | 0.77 | 0.59 |
+| NewOrder p50 µs | 7,629 | 9,727 | +27% | |
+| Payment p50 | 2,283 | 2,729 | +20% | |
+| OrderStatus p50 | 1,015 | 1,134 | +12% | |
+| Delivery p50 | 17,521 | 26,087 | +49% | |
+| StockLevel p50 | 1,521 | 2,740 | +80% | |
+| YCSB throughput (c) | | 3,637 | 0.93 of the earlier (a), 3,910 | 0.89 |
+
+What is left in TPC-C: the writes' execution (step 3: Delivery's multi-row UPDATE, the stamp) and
+StockLevel's per-call planning (step 5).

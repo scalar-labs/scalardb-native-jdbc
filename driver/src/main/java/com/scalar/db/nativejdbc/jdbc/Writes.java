@@ -144,6 +144,22 @@ final class Writes {
 
     abstract long apply(Run run) throws SQLException;
 
+    /**
+     * The write as one statement, which a batch sends with its other entries' (todo 329); null when
+     * it has none.
+     */
+    @Nullable Step together() {
+      return null;
+    }
+
+    /**
+     * What {@link #together()}'s statement returned, read without recording anything; null when the
+     * write needs more than that statement, and the entries are undone and run one by one.
+     */
+    @Nullable Together together(Run run, ResultSet rs) throws SQLException {
+      throw new IllegalStateException("no statement to send together");
+    }
+
     /** The texts of the statements planned ahead, for tests; the CAS is chosen per key. */
     abstract List<String> sql();
   }
@@ -1113,6 +1129,117 @@ final class Writes {
     }
   }
 
+  /** The savepoint a batch's entries sent together are undone to (todo 329). */
+  private static final String TOGETHER = "scalardb_native_batch";
+
+  /** At most this many entries of a batch are sent together, which bounds their texts. */
+  static final int TOGETHER_MAX = 16;
+
+  /** One entry's outcome of {@link #applyTogether}, recorded once all of them are known. */
+  static final class Together {
+    final Run run;
+    final long count;
+    final @Nullable Keys inserted;
+    final boolean wrote;
+
+    Together(Run run, long count, @Nullable Keys inserted, boolean wrote) {
+      this.run = run;
+      this.count = count;
+      this.inserted = inserted;
+      this.wrote = wrote;
+    }
+
+    void record() {
+      if (wrote) {
+        run.context.anchors().wrote(run.txId);
+      }
+      if (inserted != null) {
+        run.context.inserted(inserted);
+      }
+    }
+  }
+
+  /**
+   * Applies entries of a batch in one round trip on PostgreSQL (todo 329): their statements of
+   * {@link Plan#together()} as one text, under a savepoint set in it. Null when one needs more than
+   * its statement (a row in flight, a tombstone, a key the DML skipped, a conflict, an error): the
+   * entries are undone to the savepoint, nothing recorded, and the caller runs them one by one,
+   * which tells the outcome as before. {@code release} releases the savepoint of the batch's
+   * entries before first; the last one is left to the transaction's end.
+   */
+  // ponytail: in a transaction the last savepoint stays until it ends, a round trip saved
+  static long @Nullable [] applyTogether(
+      Connection vendor, List<Plan> plans, List<Context> contexts, boolean release)
+      throws SQLException {
+    List<Run> runs = new ArrayList<>();
+    StringBuilder sql =
+        new StringBuilder(release ? "RELEASE SAVEPOINT " + TOGETHER + "; " : "")
+            .append("SAVEPOINT ")
+            .append(TOGETHER);
+    for (int i = 0; i < plans.size(); i++) {
+      runs.add(new Run(vendor, contexts.get(i)));
+      sql.append("; ").append(Objects.requireNonNull(plans.get(i).together()).sql);
+    }
+    Run lead = runs.get(0);
+    List<Together> outcomes = new ArrayList<>();
+    try (PreparedStatement ps = lead.prepare(sql.toString())) {
+      int at = 1;
+      for (int i = 0; i < plans.size(); i++) {
+        Step step = Objects.requireNonNull(plans.get(i).together());
+        for (int b : step.binds) {
+          contexts.get(i).bind(ps, at++, b, step.floatKeys.contains(b));
+        }
+        at = runs.get(i).stamp(ps, at);
+      }
+      try {
+        boolean rows = ps.execute();
+        for (int i = 0; i < plans.size(); i++) {
+          while (!rows) {
+            if (ps.getUpdateCount() == -1) {
+              throw new SQLException("a batch entry returned no rows", "XX000");
+            }
+            rows = ps.getMoreResults();
+          }
+          Together t;
+          try (ResultSet rs = ps.getResultSet()) {
+            t = plans.get(i).together(runs.get(i), rs);
+          }
+          if (t == null) {
+            undoTogether(vendor, null);
+            return null;
+          }
+          outcomes.add(t);
+          rows = ps.getMoreResults();
+        }
+      } catch (SQLException e) {
+        undoTogether(vendor, e);
+        return null;
+      }
+    } finally {
+      lead.context.running(null);
+    }
+    long[] counts = new long[outcomes.size()];
+    for (int i = 0; i < counts.length; i++) {
+      outcomes.get(i).record();
+      counts[i] = outcomes.get(i).count;
+    }
+    return counts;
+  }
+
+  /** Undoes a batch's entries sent together; {@code e}, the failure that undoes them, if any. */
+  private static void undoTogether(Connection vendor, @Nullable SQLException e)
+      throws SQLException {
+    try (Statement s = vendor.createStatement()) {
+      s.execute("ROLLBACK TO SAVEPOINT " + TOGETHER);
+    } catch (SQLException r) {
+      if (e == null) {
+        throw r;
+      }
+      e.addSuppressed(r); // the connection is gone, or the savepoint with the transaction
+      throw e;
+    }
+  }
+
   /** Work run in a write's transaction. */
   interface Work {
     void run() throws SQLException;
@@ -1552,62 +1679,39 @@ final class Writes {
      * written, when a key has no metadata row: the steps one by one stamp it.
      */
     private @Nullable Long applyFused(Run run, Step step) throws SQLException {
-      int width = n.keyColumns.size();
-      int flags = 2 * width + 4; // written, stamped, the gate, and an after image matched
       long until = System.nanoTime() + run.context.inflightWait().toNanos();
       while (true) {
-        List<Row> rows = new ArrayList<>();
-        List<Boolean> written = new ArrayList<>();
-        List<Boolean> stamped = new ArrayList<>();
-        boolean open = false;
-        boolean after = false;
-        boolean held = false;
+        Fused f;
         try (PreparedStatement ps = run.prepare(step, null)) {
           run.stamp(ps, step.binds.size() + 1);
           try (ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-              open = rs.getBoolean(flags + 2);
-              after = afterImages != null && rs.getBoolean(flags + 3);
-              Object[] key = readKey(rs, 1, width);
-              if (key == null) {
-                continue; // no key: the row of NULLs
-              }
-              held |= inFlight(rs.getObject(2 * width + 3));
-              rows.add(
-                  new Row(
-                      key,
-                      readKey(rs, width + 1, width),
-                      rs.getString(2 * width + 1),
-                      rs.getObject(2 * width + 2)));
-              written.add(rs.getBoolean(flags));
-              stamped.add(rs.getBoolean(flags + 1));
-            }
+            f = fused(rs);
           }
         }
-        if (after) {
+        if (f.after) {
           throw new Aborted(
               "a row the statement writes is being written by a ScalarDB transaction");
         }
-        if (!open) {
-          if (!held) {
+        if (!f.open) {
+          if (!f.held) {
             return null;
           }
           run.sleep(until, "a row the statement writes is being written by a ScalarDB transaction");
           continue;
         }
         Anchors anchors = run.context.anchors();
-        for (Row row : rows) {
+        for (Row row : f.rows) {
           if (!anchors.unchanged(n.table, row.key, row.txId, row.version)) {
             throw new Aborted("a row this transaction read was changed by another one since");
           }
         }
         long total = 0;
-        for (int i = 0; i < rows.size(); i++) {
-          if (!written.get(i)) {
-            skipOrAbort(run, rows.get(i));
+        for (int i = 0; i < f.rows.size(); i++) {
+          if (!f.written.get(i)) {
+            skipOrAbort(run, f.rows.get(i));
             continue;
           }
-          if (!stamped.get(i)) {
+          if (!f.stamped.get(i)) {
             throw new Aborted("a row the statement writes changed after it was read");
           }
           anchors.wrote(run.txId);
@@ -1615,6 +1719,60 @@ final class Writes {
         }
         return total;
       }
+    }
+
+    @Override
+    @Nullable Step together() {
+      return fused;
+    }
+
+    /** As {@link #applyFused}, null for anything but every key written and stamped at once. */
+    @Override
+    @Nullable Together together(Run run, ResultSet rs) throws SQLException {
+      Fused f = fused(rs);
+      if (f.after || !f.open || f.written.contains(false) || f.stamped.contains(false)) {
+        return null;
+      }
+      for (Row row : f.rows) {
+        if (!run.context.anchors().unchanged(n.table, row.key, row.txId, row.version)) {
+          return null;
+        }
+      }
+      return new Together(run, f.rows.size(), null, !f.rows.isEmpty());
+    }
+
+    /** What the fused statement returned: per key its row, and whether it was written, stamped. */
+    private static final class Fused {
+      final List<Row> rows = new ArrayList<>();
+      final List<Boolean> written = new ArrayList<>();
+      final List<Boolean> stamped = new ArrayList<>();
+      boolean open;
+      boolean after;
+      boolean held;
+    }
+
+    private Fused fused(ResultSet rs) throws SQLException {
+      int width = n.keyColumns.size();
+      int flags = 2 * width + 4; // written, stamped, the gate, and an after image matched
+      Fused f = new Fused();
+      while (rs.next()) {
+        f.open = rs.getBoolean(flags + 2);
+        f.after = afterImages != null && rs.getBoolean(flags + 3);
+        Object[] key = readKey(rs, 1, width);
+        if (key == null) {
+          continue; // no key: the row of NULLs
+        }
+        f.held |= inFlight(rs.getObject(2 * width + 3));
+        f.rows.add(
+            new Row(
+                key,
+                readKey(rs, width + 1, width),
+                rs.getString(2 * width + 1),
+                rs.getObject(2 * width + 2)));
+        f.written.add(rs.getBoolean(flags));
+        f.stamped.add(rs.getBoolean(flags + 1));
+      }
+      return f;
     }
 
     /** The write step by step, a statement each (4.3). */
@@ -1960,13 +2118,7 @@ final class Writes {
           }
           throw duplicate(run, e);
         }
-        long stamped = 0;
-        int from = rs.getMetaData().getColumnCount() - width;
-        while (rs.next()) {
-          keys.read(rs, from, width);
-          stamped = rs.getLong(from + width);
-        }
-        takeOver(run, keys, (int) stamped);
+        takeOver(run, keys, (int) inserted(rs, keys));
         run.context.anchors().wrote(run.txId);
         run.context.inserted(keys);
         if (returning != null) {
@@ -1981,6 +2133,32 @@ final class Writes {
         throw e;
       }
       return keys.rows.size();
+    }
+
+    /** Reads the keys the fused INSERT wrote into {@code keys}; how many of them it stamped. */
+    private long inserted(ResultSet rs, Keys keys) throws SQLException {
+      int width = n.keyColumns.size();
+      long stamped = 0;
+      int from = rs.getMetaData().getColumnCount() - width;
+      while (rs.next()) {
+        keys.read(rs, from, width);
+        stamped = rs.getLong(from + width);
+      }
+      return stamped;
+    }
+
+    @Override
+    @Nullable Step together() {
+      return returning == null ? fused : null;
+    }
+
+    /** As {@link #applyFused}, null when a tombstone is to be taken over. */
+    @Override
+    @Nullable Together together(Run run, ResultSet rs) throws SQLException {
+      Keys keys = new Keys();
+      return inserted(rs, keys) == keys.rows.size()
+          ? new Together(run, keys.rows.size(), keys, true)
+          : null;
     }
 
     /**

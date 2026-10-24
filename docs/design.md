@@ -1396,7 +1396,13 @@ MariaDB, a T-SQL batch on SQL Server, and an anonymous PL/SQL block on Oracle (t
   by the rules of 4.3, and a statement batch's other entries in the same order, all in one transaction
   of their own in autocommit mode. A failure is a `BatchUpdateException` with the counts of the
   entries before it and the failure itself as its next exception, so a `40001` keeps its state. A
-  statement with its own `RETURNING` is not batched. Multi-key driver writes and multi-key ScalarDB prepares can
+  statement with its own `RETURNING` is not batched. On PostgreSQL consecutive entries whose write is
+  one statement go together, up to 16 per round trip (todo 329): their statements as one text after a
+  `SAVEPOINT`, each still its own statement, so each sees the ones before it. The outcomes are read
+  before any is recorded. When one needs more than its statement (a row in flight, a tombstone, a key
+  the DML skipped, an abort, an error), the entries are rolled back to the savepoint and run one by
+  one, which tells the same outcome and counts as before. The next round trip releases the savepoint;
+  the last one stays until the transaction ends. Multi-key driver writes and multi-key ScalarDB prepares can
   deadlock across keys whatever the per-key order; the database detects it and the retry contract of
   section 6 covers it.
 - **Predicate shapes for the two-arm read.** `P` must reference one table, be deterministic (it is
