@@ -78,6 +78,12 @@ class MaelstromIntegrationTest {
   private static final Path HOME = Path.of("build", "maelstrom", MAELSTROM);
   private static final String VALID = "Everything looks good!";
   private static final String INVALID = "Analysis invalid!";
+  // Elle looks for every cycle, also those the model allows; on a slow machine (GitHub's runners)
+  // its search for one may time out, and the verdict is then unknown, with nothing found
+  private static final String NOTHING_FOUND =
+      "Errors occurred during analysis, but no anomalies found.";
+  private static final Pattern ANOMALY_TYPES = Pattern.compile(":anomaly-types \\(([^)]*)\\)");
+  private static final Pattern TIMED_OUT = Pattern.compile(":anomaly-spec-type :([\\w-]+)");
   // SQL Server at SERIALIZABLE commits few transactions: 20 seconds showed no anomaly there without
   // ScalarDB's settings, 60 did; the runs with them are as long, for the comparison to hold
   static final int ANOMALY_SECONDS = 60;
@@ -180,7 +186,7 @@ class MaelstromIntegrationTest {
             level == Level.SERIALIZABLE ? ANOMALY_SECONDS : 0,
             0,
             0);
-    assertThat(output).contains(VALID);
+    assertHolds(output, model);
     if (w == Workload.LIST_APPEND && sides == Sides.MIXED) {
       assertPairsMeet(e, w, level.name() + "-" + sides + (inline ? "-inline" : ""));
     }
@@ -206,7 +212,7 @@ class MaelstromIntegrationTest {
             ANOMALY_SECONDS,
             Double.parseDouble(System.getProperty("nativejdbc.isolation.faults", "0.1")),
             0);
-    assertThat(output).contains(VALID);
+    assertHolds(output, level.mixed);
     assertPairsMeet(e, Workload.LIST_APPEND, level.name() + "-FAULTS" + (inline ? "-inline" : ""));
   }
 
@@ -232,7 +238,7 @@ class MaelstromIntegrationTest {
    * which at SERIALIZABLE reads as at SNAPSHOT, without the locking re-reads; every transaction, on
    * either side, at SERIALIZABLE. The history stays serializable.
    */
-  @ParameterizedTest(name = "{0} {1} inline={2}")
+  @ParameterizedTest(name = "{0} {1} inline={2}", allowZeroInvocations = true)
   @MethodSource("readOnlyRuns")
   void history_serializableWithReadOnlyReaders(Engines e, Sides sides, boolean inline)
       throws Exception {
@@ -262,7 +268,7 @@ class MaelstromIntegrationTest {
    * Its control: the same readers at READ COMMITTED, which returns an in-flight row's before image
    * and takes a snapshot per statement, break it.
    */
-  @ParameterizedTest(name = "{0} {1} inline={2}")
+  @ParameterizedTest(name = "{0} {1} inline={2}", allowZeroInvocations = true)
   @MethodSource("readOnlyRuns")
   void history_failsWithReadOnlyReadersAtReadCommitted(Engines e, Sides sides, boolean inline)
       throws Exception {
@@ -509,8 +515,30 @@ class MaelstromIntegrationTest {
     String output = Files.readString(log, StandardCharsets.UTF_8);
     assertThat(output)
         .as("%s %s checked as %s: Elle's verdict, in %s", e, name, model, run.resolve("store"))
-        .containsAnyOf(VALID, INVALID);
+        .containsAnyOf(VALID, INVALID, NOTHING_FOUND);
     return output;
+  }
+
+  /**
+   * Elle's verdict is valid; at READ COMMITTED it may also be unknown when all Elle could not
+   * finish is the search for a cycle that level allows (G-single, G2, G-nonadjacent), and it found
+   * nothing.
+   */
+  static void assertHolds(String output, String model) {
+    String verdict = output.substring(Math.max(0, output.lastIndexOf(":workload")));
+    if (output.contains(VALID)) {
+      return;
+    }
+    assertThat(model).as(verdict).isEqualTo(Level.READ_COMMITTED.mixed);
+    assertThat(output).as(verdict).contains(NOTHING_FOUND);
+    Matcher types = ANOMALY_TYPES.matcher(verdict);
+    assertThat(types.find()).as(verdict).isTrue();
+    assertThat(types.group(1).trim()).as(verdict).isEqualTo(":cycle-search-timeout");
+    Matcher spec = TIMED_OUT.matcher(verdict);
+    assertThat(spec.find()).as(verdict).isTrue();
+    do {
+      assertThat(spec.group(1)).as(verdict).matches("G-single.*|G2.*|G-nonadjacent.*");
+    } while (spec.find());
   }
 
   /** ScalarDB's settings the README gives the level. */

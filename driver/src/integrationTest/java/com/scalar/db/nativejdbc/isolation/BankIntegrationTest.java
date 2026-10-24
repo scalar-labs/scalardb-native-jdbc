@@ -156,7 +156,7 @@ class BankIntegrationTest {
    * SNAPSHOT, without the locking re-reads; the writers, on both sides, at SERIALIZABLE. The totals
    * hold, and the reads commit.
    */
-  @ParameterizedTest(name = "{0} mixed={1} inline={2}")
+  @ParameterizedTest(name = "{0} mixed={1} inline={2}", allowZeroInvocations = true)
   @MethodSource("readOnlyRuns")
   void totals_holdWithReadOnlyReaders(Engines e, boolean mixed, boolean inline) throws Exception {
     String name = "SERIALIZABLE-RO" + (mixed ? "-MIXED" : "-DRIVER") + (inline ? "-inline" : "");

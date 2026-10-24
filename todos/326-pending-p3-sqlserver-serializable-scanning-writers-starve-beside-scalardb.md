@@ -52,3 +52,10 @@ writers progress, close this; otherwise it stays a documented limit (Option 1).
 
 ### 2026-10-24 - split from todo 324
 - Readers fixed in todo 324 (read-only transactions read without locks); this keeps the writers.
+
+### 2026-10-24 - also with the driver's writers only, on CI
+- First daily isolation run (GitHub Actions run 40092494740, 4-vCPU runner): membership at
+  SERIALIZABLE, driver writers only, inline layout committed 2 writes and 19 reads in 15 minutes;
+  527 reads and 3 writes were deadlock victims (40001). The rules held.
+- MembershipIntegrationTest's progress floor now skips SQL Server at SERIALIZABLE for both sides;
+  restore it when this is fixed.
