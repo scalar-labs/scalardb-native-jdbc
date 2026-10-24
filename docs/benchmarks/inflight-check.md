@@ -395,6 +395,28 @@ and 50 rows in flight when it is compiled.
   recompiles it, so such a plan stays until it leaves the cache, where before a refresh could
   replace it; at four writers EC2's plans were compiled with at most one row in flight and seek.
 
+### `FORCESEEK` while rows are in flight, on EC2 (run `20261024-1049`)
+
+The driver of `sqlserver-seek-inflight`: as `20261023-2312`, and a table with rows in flight (the
+router's count, at most once a second) read with `FORCESEEK` in the committed rows' `NOT EXISTS`;
+SQL Server alone, the machines and mode of `20261024-0023` (whose two "on" columns are in
+brackets); two runs, reads committed/s with the check on, mean ms a read:
+
+| writers | on | (kept statistics) | (`FORCESEEK` always) |
+|---|---|---|---|
+| 0 | 1,066-1,084, 1.6 ms | (1,504-1,688, 1.0 ms) | |
+| 4 | 420-511, 3.6-4.4 ms | (372-525) | (184-365) |
+| 16 | **254-259**, 7.3-7.5 ms | (13-26, 74-145 ms) | (189-271, 7.1-9.9 ms) |
+
+- **Sixteen writers, fixed**: the join costs SQL Server 2.6-2.7 ms and 1,090 logical reads, against
+  69-120 ms and 10,000-19,600; p99 27-29 ms. Four writers keep their 420-511 (p99 11-16 ms), the
+  forced seek's cost there gone with the order of `20261024-0023`.
+- **No writers, slower all through, not from the change**: the split read costs SQL Server the same
+  415 µs and 431 logical reads as before (438 µs), with no rows in flight no `FORCESEEK`; the
+  commits, untouched by it, went from 0.28 to 0.50 ms and the check off fell as far (1,094-1,120
+  against 1,523-1,631), so the extra half millisecond is the round trip of these machines. The
+  router's counts ran 40 times in 10 s, 19 µs each.
+
 ## Reads beside ScalarDB writers (stage 1, one table)
 
 `scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:
