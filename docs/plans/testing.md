@@ -356,12 +356,12 @@ integration tests that every pull request runs, as ScalarDB's own are:
 - **Daily**: the whole suite, `-Dnativejdbc.isolation=true`, per engine in parallel (all but
   `mysql_lower_case`, which they skip): Elle's list-append and rw-register over every level, side and
   layout, the faults, the read-only readers, bank, membership and the controls, about 1.5 hours
-  per engine. A pull request that breaks isolation shows within a day. Wiring it is the CI owner's
-  (Ownership): a scheduled workflow over the per-engine matrix, a timeout of 2 to 2.5 hours, the
-  Maelstrom jar (`build/maelstrom/<version>/`) cached, `driver/build/isolation/**` kept as an
-  artifact on failure (the histories and Elle's reports), and `gnuplot` and `graphviz` on the
-  runner: without `gnuplot` Maelstrom's checker reports `:valid? :unknown` and every run fails,
-  measured; `graphviz` draws Elle's anomalies.
+  per engine. A pull request that breaks isolation shows within a day. Wired in
+  `.github/workflows/isolation.yml` (2026-10-24): daily at 18:00 UTC and on demand, one runner per
+  engine running the driver's isolation package, a 150-minute timeout, `gnuplot` and `graphviz`
+  installed (without `gnuplot` Maelstrom's checker reports `:valid? :unknown` and every run fails,
+  measured; `graphviz` draws Elle's anomalies), and `driver/build/isolation/**` kept 14 days on
+  failure (the histories and Elle's reports). The Maelstrom jar is fetched per run, not cached.
 - **Before a release, in the cloud**: about 24 hours for the five engines, about 5 per engine, as
   many short runs rather than few long ones: Elle's check grows faster than the history, an hour
   at the tests' rate being about 180,000 transactions, and rare timings come with repetitions, not

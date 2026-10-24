@@ -1,0 +1,72 @@
+name: Isolation
+
+# The isolation tests of testing plan T5 ("Where T5 runs"): Maelstrom and Elle's list-append and
+# rw-register over every level, side and layout, the faults, the read-only readers, bank,
+# membership and their controls. They run daily rather than per pull request, as ScalarDB's own do:
+# about 1.5 hours per engine. Pull requests run the unit and integration tests (ci.yml).
+on:
+  schedule:
+    - cron: "0 18 * * *" # 03:00 JST
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # One runner per engine, its database in a container on the runner's Docker. MysqlLowerCase is
+  # left out: the isolation tests skip it, since it changes only how names are cased.
+  isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [Postgresql, Oracle, Mysql, Mariadb, Sqlserver]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      # Maelstrom draws its plots with gnuplot, and without it reports every history as
+      # ":valid? :unknown", which fails every run; graphviz draws Elle's anomalies.
+      - name: Install gnuplot and graphviz
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gnuplot graphviz
+
+      # The tests fetch Maelstrom v0.2.4 into driver/build/maelstrom/ and check its digest.
+      - name: Isolation tests
+        run: >-
+          ./gradlew :driver:integrationTest${{ matrix.engine }}
+          --tests 'com.scalar.db.nativejdbc.isolation.*'
+          -Dnativejdbc.isolation=true
+
+      # Per run: Elle's store (history, results, anomalies), maelstrom.log, dependencies.txt and
+      # readers.txt, and the bank and membership summaries; what an invalid verdict is read from.
+      - name: Upload isolation runs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: isolation-${{ matrix.engine }}
+          path: driver/build/isolation/**
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-reports-${{ matrix.engine }}
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
