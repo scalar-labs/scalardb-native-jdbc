@@ -1115,6 +1115,29 @@ final class Router {
           chosen.add(i);
         }
       }
+    } else if (engine == Engine.SQLSERVER) {
+      // a table with rows in flight seeks its in-flight index row by row (SplitRead's SEEK); with
+      // none, the plan is SQL Server's own, which a large read needs
+      List<SqlAst.TableRef> refs = new ArrayList<>(split.places().keySet());
+      for (int i = 0; i < refs.size(); i++) {
+        TableInfo t = scalarDb.get(refs.get(i));
+        if (t == null) {
+          continue;
+        }
+        boolean seek;
+        if (forcedPerRow != null) {
+          seek = forcedPerRow.contains(i);
+        } else {
+          long[] count = inflightCount(vendor, t);
+          long due = count[1] + COUNT_TTL_NANOS;
+          recheckAt = recheckAt == 0 || due - recheckAt < 0 ? due : recheckAt;
+          seek = count[0] > 0;
+        }
+        if (seek) {
+          perRow.add(refs.get(i));
+          chosen.add(i);
+        }
+      }
     }
     List<SqlAst.TableRef> anchorable = anchorable(ast, split);
     // at SNAPSHOT and SERIALIZABLE a row in flight aborts the read: where every ScalarDB table
@@ -1944,13 +1967,21 @@ final class Router {
     try (Statement st = vendor.createStatement();
         ResultSet rs =
             st.executeQuery(
-                "SELECT COUNT(*) FROM (SELECT 1 AS one FROM "
-                    + meta
-                    + " WHERE "
-                    + engine.quote("tx_state")
-                    + " IN (1, 2) LIMIT "
-                    + (PER_ROW_ABOVE_IN_RANGES + 1)
-                    + ") x")) {
+                engine == Engine.SQLSERVER
+                    ? "SELECT COUNT(*) FROM (SELECT TOP "
+                        + (PER_ROW_ABOVE_IN_RANGES + 1)
+                        + " 1 AS one FROM "
+                        + meta
+                        + " WHERE "
+                        + engine.quote("tx_state")
+                        + " IN (1, 2)) x"
+                    : "SELECT COUNT(*) FROM (SELECT 1 AS one FROM "
+                        + meta
+                        + " WHERE "
+                        + engine.quote("tx_state")
+                        + " IN (1, 2) LIMIT "
+                        + (PER_ROW_ABOVE_IN_RANGES + 1)
+                        + ") x")) {
       rs.next();
       count = rs.getLong(1);
     } catch (SQLException e) {
