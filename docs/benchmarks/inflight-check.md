@@ -438,6 +438,25 @@ off 29-49 at four and 0 at sixteen in every run):
   loaded (load average 15). The setup's statistics were kept for EC2's four writers, before
   `FORCESEEK`, so EC2 decides.
 
+On EC2 (run `20261024-1408`, the machines of `20261024-1049`, `-Dnativejdbc.bench.autoStats=alternate`:
+kept on runs 1 and 3, automatic on 2 and 4), reads committed/s with the check on:
+
+| writers | kept | automatic | the check off, all four |
+|---|---|---|---|
+| 1 | 1,022-1,043 | 993-1,092 | 909-1,018 |
+| 4 | 51, 384 | 294, 195 | 111-174 |
+| 16 | 199, 117 | 171, 214 | 0 |
+
+- **No difference the kept statistics make**: four writers 218 kept against 245 automatic on
+  average, sixteen 158 against 193, each arm's two runs further apart than the arms.
+- **The kept statistics' bad check came again**: run 1's check at four writers took 29.6 ms (833
+  logical reads, 18.6 ms CPU), as the laptop's first kept run; the read itself 1.6-3.0 ms. With
+  automatic statistics no check is among the costly statements; run 4 had one read plan of 27 ms
+  (3,038 logical reads), 53 runs of 3,908.
+- **These machines ran faster than `20261024-1049`'s**: 1,615-1,955 reads/s without writers
+  against 1,066-1,084, ScalarDB 750-1,041 commits/s at four writers against 438-452, so four and
+  sixteen writers churn harder and read less than there, in both arms.
+
 ## Reads beside ScalarDB writers (stage 1, one table)
 
 `scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:
