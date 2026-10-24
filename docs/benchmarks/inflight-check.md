@@ -417,6 +417,27 @@ brackets); two runs, reads committed/s with the check on, mean ms a read:
   against 1,523-1,631), so the extra half millisecond is the round trip of these machines. The
   router's counts ran 40 times in 10 s, 19 µs each.
 
+### With `FORCESEEK`, do the kept statistics still pay? (laptop)
+
+The driver of main with `FORCESEEK` while rows are in flight, the writers mode over the join with
+the refreshes of `statsEveryMs=2000`, the setup's kept statistics against the same returned to
+automatic updates before the writers (`-Dnativejdbc.bench.autoStats=true`, the teardown's `UPDATE
+STATISTICS`); kept and automatic in turn, two runs each, reads committed/s with the check on (with it
+off 29-49 at four and 0 at sixteen in every run):
+
+| writers | kept | automatic |
+|---|---|---|
+| 1 | 182, 274 | **360, 404** |
+| 4 | 32, 239 | 224, 238 |
+| 16 | 124, 164 | 122, 129 |
+
+- **Automatic statistics lose nothing at one and four writers**, and the check reads less: its
+  pairs 75-80 logical reads at four against 479-1,444 kept. The kept run of 32 at four had the
+  check at 42 ms (1,444 logical reads, 31 ms CPU), a plan that came once in two.
+- **At sixteen they read 13% fewer** (125 against 144), within these runs' noise; the laptop ran
+  loaded (load average 15). The setup's statistics were kept for EC2's four writers, before
+  `FORCESEEK`, so EC2 decides.
+
 ## Reads beside ScalarDB writers (stage 1, one table)
 
 `scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:
