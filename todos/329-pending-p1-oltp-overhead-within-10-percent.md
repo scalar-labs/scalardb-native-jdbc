@@ -172,3 +172,18 @@ BenchBase, same session:
 
 What is left in TPC-C: the writes' execution (step 3: Delivery's multi-row UPDATE, the stamp) and
 StockLevel's per-call planning (step 5).
+
+### 2026-10-25: review of step 2
+
+- Fixed (data loss): in a transaction the last savepoint stayed set, and a later batch whose own
+  `SAVEPOINT` never took effect (a transaction already failed, a cancel on it) was undone to it,
+  reviving the transaction and dropping the writes since. `Writes.releaseTogether` now releases it
+  at the batch's end, also on failure: one round trip per batch in a transaction. The new test
+  (25P02 after a failed statement) passes either way, as the batch's planning reads the catalog
+  first there; the path is reached where it does not.
+- Fixed: a timeout (57014) or a failed transaction (25P02) ends the batch without the replay, which
+  gave each entry a fresh deadline.
+- Fixed (performance): an entry's stamp is the transaction's own once read, so two entries on one
+  key the transaction read no longer fall back; an undone stamp is on no row.
+- Checked fine: the recorded state, counts, read-only connections, the bounded wait, the INSERT's
+  own savepoint inside the text, parameter positions, `preferQueryMode=simple`.

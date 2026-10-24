@@ -1401,8 +1401,10 @@ MariaDB, a T-SQL batch on SQL Server, and an anonymous PL/SQL block on Oracle (t
   `SAVEPOINT`, each still its own statement, so each sees the ones before it. The outcomes are read
   before any is recorded. When one needs more than its statement (a row in flight, a tombstone, a key
   the DML skipped, an abort, an error), the entries are rolled back to the savepoint and run one by
-  one, which tells the same outcome and counts as before. The next round trip releases the savepoint;
-  the last one stays until the transaction ends. Multi-key driver writes and multi-key ScalarDB prepares can
+  one, which tells the same outcome and counts as before. The next round trip releases the savepoint,
+  and the batch's end the last one, also when it fails: left set, it would be what a later batch's
+  undo returns to when that batch's own savepoint was never set, in a transaction already failed. A
+  timeout, a cancel or a failed transaction ends the batch without the replay. Multi-key driver writes and multi-key ScalarDB prepares can
   deadlock across keys whatever the per-key order; the database detects it and the retry contract of
   section 6 covers it.
 - **Predicate shapes for the two-arm read.** `P` must reference one table, be deterministic (it is

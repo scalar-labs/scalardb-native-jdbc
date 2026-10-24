@@ -1241,6 +1241,7 @@ public final class Proxies {
       Writes.Keys inserted = new Writes.Keys();
       Writes.Plan[] last = {null};
       Out out = new Out();
+      boolean auto = owner.vendor.getAutoCommit();
       try {
         Writes.within(
             owner.vendor,
@@ -1248,57 +1249,70 @@ public final class Proxies {
             () -> owner.rollbackOnly = true,
             true,
             () -> {
-              boolean together = false; // whether entries sent together set their savepoint
-              for (int i = 0; i < size; ) {
-                // the next entries that are one statement each, sent in one round trip (todo 329)
-                int end = i;
-                while (end < size && end - i < Writes.TOGETHER_MAX) {
-                  Writes.Plan p = routes.apply(end).write;
-                  if (p == null || p.together() == null) {
-                    break;
-                  }
-                  end++;
-                }
-                if (end - i > 1) {
-                  List<Writes.Plan> plans = new ArrayList<>();
-                  List<Writes.Context> contexts = new ArrayList<>();
-                  for (int j = i; j < end; j++) {
-                    plans.add(Objects.requireNonNull(routes.apply(j).write));
-                    contexts.add(writeContext(parameters.apply(j), inserted, null));
-                  }
-                  long[] got = Writes.applyTogether(owner.vendor, plans, contexts, together);
-                  together = true; // undone to, it stays
-                  if (got != null) {
-                    for (int j = i; j < end; j++) {
-                      counts[j] = got[j - i];
-                      last[0] = plans.get(j - i);
-                      owner.ran(routes.apply(j));
-                      done[0]++;
+              boolean[] together = {false}; // whether entries sent together set their savepoint
+              try {
+                for (int i = 0; i < size; ) {
+                  // the next entries that are one statement each, sent in one round trip (todo 329)
+                  int end = i;
+                  while (end < size && end - i < Writes.TOGETHER_MAX) {
+                    Writes.Plan p = routes.apply(end).write;
+                    if (p == null || p.together() == null) {
+                      break;
                     }
-                    i = end;
-                    continue;
+                    end++;
                   }
-                } else {
-                  end = i + 1;
-                }
-                for (; i < end; i++) {
-                  Router.Route route = routes.apply(i);
-                  if (route.write != null) {
-                    last[0] = route.write;
-                    try {
-                      counts[i] =
-                          Writes.apply(
-                              owner.vendor,
-                              route.write,
-                              writeContext(parameters.apply(i), inserted, null));
-                    } finally {
-                      owner.ran(route); // as runWrite (todo 231)
+                  if (end - i > 1) {
+                    List<Writes.Plan> plans = new ArrayList<>();
+                    List<Writes.Context> contexts = new ArrayList<>();
+                    for (int j = i; j < end; j++) {
+                      plans.add(Objects.requireNonNull(routes.apply(j).write));
+                      contexts.add(writeContext(parameters.apply(j), inserted, null));
+                    }
+                    boolean release = together[0];
+                    together[0] = true; // set from here on, undone to or not; released at the end
+                    long[] got = Writes.applyTogether(owner.vendor, plans, contexts, release);
+                    if (got != null) {
+                      for (int j = i; j < end; j++) {
+                        counts[j] = got[j - i];
+                        last[0] = plans.get(j - i);
+                        owner.ran(routes.apply(j));
+                        done[0]++;
+                      }
+                      i = end;
+                      continue;
                     }
                   } else {
-                    counts[i] = runPlain(route);
+                    end = i + 1;
                   }
-                  done[0]++;
+                  for (; i < end; i++) {
+                    Router.Route route = routes.apply(i);
+                    if (route.write != null) {
+                      last[0] = route.write;
+                      try {
+                        counts[i] =
+                            Writes.apply(
+                                owner.vendor,
+                                route.write,
+                                writeContext(parameters.apply(i), inserted, null));
+                      } finally {
+                        owner.ran(route); // as runWrite (todo 231)
+                      }
+                    } else {
+                      counts[i] = runPlain(route);
+                    }
+                    done[0]++;
+                  }
                 }
+              } catch (SQLException | RuntimeException e) {
+                if (together[0] && !auto) {
+                  Writes.releaseTogether(owner.vendor, e);
+                }
+                throw e;
+              }
+              if (together[0] && !auto) {
+                // set, it would be what a later batch's undo returns to; the commit ends it
+                // otherwise
+                Writes.releaseTogether(owner.vendor, null);
               }
               if (keys != null && last[0] != null) {
                 out.rows = Writes.returned(owner.vendor, last[0], keys, inserted);

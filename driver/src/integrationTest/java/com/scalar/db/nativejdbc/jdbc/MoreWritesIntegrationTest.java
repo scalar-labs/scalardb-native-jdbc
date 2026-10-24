@@ -857,6 +857,34 @@ class MoreWritesIntegrationTest {
       d.setAutoCommit(true);
       assertThat(rows(d, "SELECT COUNT(*) FROM " + t.sql + " WHERE x = 's' OR x = 'd'"))
           .containsExactly("0");
+      if (e.engine() == Engine.POSTGRESQL) {
+        // a failed statement ends PostgreSQL's transaction: a later batch is refused, not undone
+        // to an earlier batch's savepoint and run (todo 329)
+        d.setAutoCommit(false);
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO " + t.sql + " (id, x) VALUES (?, 'k')")) {
+          for (int id = 80; id < 83; id++) {
+            ps.setInt(1, id);
+            ps.addBatch();
+          }
+          assertThat(ps.executeBatch()).containsExactly(1, 1, 1);
+          assertThatThrownBy(() -> d.createStatement().executeQuery("SELECT 1 / 0"))
+              .isInstanceOf(SQLException.class);
+          for (int id = 83; id < 86; id++) {
+            ps.setInt(1, id);
+            ps.addBatch();
+          }
+          // refused by the batch's planning here, or by its savepoint where it is planned already
+          assertThatThrownBy(ps::executeBatch)
+              .isInstanceOf(SQLException.class)
+              .extracting("SQLState")
+              .isEqualTo("25P02");
+        }
+        d.rollback();
+        d.setAutoCommit(true);
+        assertThat(rows(d, "SELECT COUNT(*) FROM " + t.sql + " WHERE id >= 80"))
+            .containsExactly("0");
+      }
       d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 40");
       // a failure in autocommit undoes the whole batch; the counts before it, the cause next
       try (PreparedStatement ps =
