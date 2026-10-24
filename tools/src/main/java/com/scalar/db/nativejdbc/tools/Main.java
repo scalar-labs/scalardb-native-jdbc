@@ -14,6 +14,10 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -45,8 +49,9 @@ import picocli.CommandLine.Parameters;
       "Sets up ScalarDB tables for ScalarDB Native JDBC, checks them, or takes the setup down.",
       "The password comes from SCALARDB_NATIVE_PASSWORD, or --property password=...; it never"
           + " prompts.",
-      "After setting up a newly added table, restart the applications that use the driver, or"
-          + " wait out their catalog TTL (60 s), before ScalarDB transactions write the table."
+      "After setting up a newly added table, setup waits out the applications' catalog TTL"
+          + " (--catalog-ttl, 60 s) so that their drivers know the table, then says ScalarDB"
+          + " transactions may write it; --no-wait prints from when instead."
     },
     exitCodeListHeading = "Exit codes:%n",
     exitCodeList = {
@@ -118,6 +123,19 @@ public final class Main implements Callable<Integer> {
   private long backfillWait = 60;
 
   @Option(
+      names = "--catalog-ttl",
+      paramLabel = "SECONDS",
+      description =
+          "setup: how long the applications' drivers trust ScalarDB's catalog, their"
+              + " scalardbnative.catalogTtlMs, to wait out after a new table (default: 60)")
+  private long catalogTtl = Catalog.DEFAULT_TTL.toSeconds();
+
+  @Option(
+      names = "--no-wait",
+      description = "setup: print from when ScalarDB may write a new table instead of waiting")
+  private boolean noWait;
+
+  @Option(
       names = "--lifetime",
       paramLabel = "SECONDS",
       description = "check: how long a row may be prepared before it is stuck (default: 15)")
@@ -142,6 +160,12 @@ public final class Main implements Callable<Integer> {
 
   private final PrintWriter out;
   private final PrintWriter err;
+  // the tables this setup set up for the first time, and from when ScalarDB may write them
+  private final List<String> newTables = new ArrayList<>();
+  private @Nullable Instant writableAt;
+
+  private static final DateTimeFormatter TIME =
+      DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT).withZone(ZoneId.systemDefault());
 
   private Main(PrintWriter out, PrintWriter err) {
     this.out = out;
@@ -241,6 +265,9 @@ public final class Main implements Callable<Integer> {
         err.println("no ScalarDB table " + String.join(", ", unmatched));
         return EXIT_ERROR;
       }
+      if (action == Action.setup && exit == EXIT_OK && !json) {
+        waitForDrivers();
+      }
       return exit;
     }
   }
@@ -253,6 +280,15 @@ public final class Main implements Callable<Integer> {
 
   private int changes(List<Setup.Result> results) {
     boolean failed = false;
+    if (action == Action.setup && !dryRun) {
+      for (Setup.Result r : results) {
+        if (r.succeeded()
+            && r.actions().stream().anyMatch(a -> a.startsWith("created read view"))) {
+          newTables.add(r.table());
+        }
+      }
+      writableAt = Instant.now().plusSeconds(catalogTtl);
+    }
     if (json) {
       List<String> items = new ArrayList<>();
       for (Setup.Result r : results) {
@@ -269,6 +305,13 @@ public final class Main implements Callable<Integer> {
                 + "}");
         failed |= !r.succeeded();
       }
+      String writable =
+          newTables.isEmpty() || writableAt == null
+              ? ""
+              : ",\"newTables\":"
+                  + Json.strings(newTables)
+                  + ",\"writableAt\":"
+                  + Json.string(writableAt.truncatedTo(ChronoUnit.SECONDS).toString());
       out.println(
           "{\"action\":"
               + Json.string(String.valueOf(action))
@@ -276,7 +319,9 @@ public final class Main implements Callable<Integer> {
               + dryRun
               + ",\"tables\":["
               + String.join(",", items)
-              + "]}");
+              + "]"
+              + writable
+              + "}");
     } else {
       for (Setup.Result r : results) {
         if (dryRun) {
@@ -291,6 +336,55 @@ public final class Main implements Callable<Integer> {
       }
     }
     return failed ? EXIT_ERROR : EXIT_OK;
+  }
+
+  /**
+   * After a new table, waits out the applications' catalog TTL, so that no driver still takes the
+   * table for a plain one when ScalarDB writes it (todo 298), and says when ScalarDB may; with
+   * {@code --no-wait}, or when interrupted, says from when.
+   */
+  private void waitForDrivers() {
+    Instant at = writableAt;
+    if (newTables.isEmpty() || at == null) {
+      return;
+    }
+    String names = String.join(", ", newTables);
+    String from =
+        "ScalarDB transactions may write "
+            + names
+            + " from "
+            + TIME.format(at)
+            + ", or after every application using the driver on this database has restarted.";
+    out.println();
+    out.println(
+        (newTables.size() == 1 ? "New ScalarDB table: " : "New ScalarDB tables: ") + names + ".");
+    if (noWait || catalogTtl <= 0) {
+      out.println(
+          catalogTtl <= 0 ? "Done: ScalarDB transactions may write " + names + " now." : from);
+      return;
+    }
+    out.println(
+        "Waiting "
+            + catalogTtl
+            + " seconds for running applications' drivers to learn about "
+            + (newTables.size() == 1 ? "it" : "them")
+            + " (their catalog TTL)...");
+    // an interrupted wait still says from when, Ctrl-C included
+    Thread hook = new Thread(() -> out.println(from));
+    Runtime.getRuntime().addShutdownHook(hook);
+    try {
+      Thread.sleep(Math.max(0, Duration.between(Instant.now(), at).toMillis()));
+      out.println("Done: ScalarDB transactions may write " + names + " now.");
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      out.println(from);
+    } finally {
+      try {
+        Runtime.getRuntime().removeShutdownHook(hook);
+      } catch (IllegalStateException shuttingDown) {
+        // the hook runs and says from when
+      }
+    }
   }
 
   private int check(List<String> database, List<Check.Result> results) {

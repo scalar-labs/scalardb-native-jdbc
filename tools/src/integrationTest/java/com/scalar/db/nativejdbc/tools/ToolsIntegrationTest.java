@@ -70,9 +70,19 @@ class ToolsIntegrationTest {
     assertThat(plan.out).contains("-- tl.t").containsIgnoringCase("CREATE");
     assertThat(tool(e, "check", both).out).contains("tl.t: not set up");
 
-    Run setup = tool(e, "setup", both);
+    // new tables: the setup waits out the applications' catalog TTL, here 1 second (todo 298)
+    Run setup = tool(e, "setup", concat(both, "--catalog-ttl", "1"));
     assertThat(setup.exit).as(setup.all()).isZero();
-    assertThat(setup.out).contains("tl.t: ", "read view");
+    assertThat(setup.out)
+        .contains("tl.t: ", "created read view")
+        .contains("New ScalarDB tables: ")
+        .contains("Waiting 1 seconds for running applications' drivers to learn about them")
+        .containsPattern(
+            "Done: ScalarDB transactions may write tl\\.\\w, tl\\.\\w, tl\\.\\w now\\.");
+    // run again, nothing is new: no wait
+    Run again = tool(e, "setup", both);
+    assertThat(again.exit).as(again.all()).isZero();
+    assertThat(again.out).contains("replaced read view").doesNotContain("New ScalarDB");
     check = tool(e, "check", both);
     assertThat(check.exit).as(check.all()).isZero();
     assertThat(check.out).contains("tl.t: set up, no rows stuck", "tl.i: set up, no rows stuck");
@@ -113,6 +123,29 @@ class ToolsIntegrationTest {
     assertThat(down.out).contains("dropped read view");
     assertThat(tool(e, "check", both).out)
         .contains("tl.t: not set up", "tl.u: not set up", "tl.i: not set up");
+
+    // --no-wait says from when; --json carries it for a script
+    Run noWait = tool(e, "setup", "--table", "tl.t", "--no-wait");
+    assertThat(noWait.exit).as(noWait.all()).isZero();
+    assertThat(noWait.out)
+        .contains("New ScalarDB table: tl.t.")
+        .containsPattern(
+            "ScalarDB transactions may write tl\\.t from \\d\\d:\\d\\d:\\d\\d, or after every"
+                + " application using the driver on this database has restarted\\.")
+        .doesNotContain("Waiting");
+    assertThat(tool(e, "teardown", "--table", "tl.t").exit).isZero();
+    Run json = tool(e, "setup", "--table", "tl.t", "--json");
+    assertThat(json.exit).as(json.all()).isZero();
+    assertThat(json.out)
+        .containsPattern("\"newTables\":\\[\"tl\\.t\"\\],\"writableAt\":\"\\d{4}-[^\"]+Z\"")
+        .doesNotContain("Waiting");
+    assertThat(tool(e, "teardown", "--table", "tl.t").exit).isZero();
+  }
+
+  private static String[] concat(String[] a, String... b) {
+    String[] out = Arrays.copyOf(a, a.length + b.length);
+    System.arraycopy(b, 0, out, a.length, b.length);
+    return out;
   }
 
   private static Run tool(Engines e, String action, String... args) throws SQLException {

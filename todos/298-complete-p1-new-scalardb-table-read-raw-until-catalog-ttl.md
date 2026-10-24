@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "298"
 tags: [catalog, correctness, operations]
@@ -28,9 +28,16 @@ table raw. The setup only helps after the TTL too: before it, the table is plain
    it is passed through, cached negatively only briefly (medium; the cost is a lookup per new name).
 3. `scalardbnative.refreshCatalog` client info, from todo 026, for an operator's tool (small).
 
+### Option 4: the setup command enforces the wait
+After setting up a table for the first time, `scalardb-native-tools setup` waits out the
+applications' catalog TTL before it says ScalarDB may write the table; `--no-wait` and `--json` give
+the time instead. No cost at run time; it covers the operator who forgets the wait, not an import
+written outside the tool (small).
+
 ## Acceptance Criteria
 
-- [ ] A table imported after the catalog loaded is never read raw, or the rule is documented
+- [x] A table imported after the catalog loaded is never read raw, or the rule is documented: the
+      setup command now enforces the rule's wait
 
 ## Work Log
 
@@ -42,3 +49,9 @@ table raw. The setup only helps after the TTL too: before it, the table is plain
 - 2026-10-20: decided with the user for the release: the operating rule (import, setup, restart the
   applications or wait the TTL, then ScalarDB writes) documented in the README and the tool's help;
   the samples' tests set the TTL to 0 in place of the restart. Option 2 or 3 after the release.
+- 2026-10-24: done with option 4, chosen over option 2, whose check would run every interval while
+  plain tables are used and still leave a window. `setup` waits `--catalog-ttl` seconds (60) after
+  a table it set up for the first time (its read view created), then prints "Done: ScalarDB
+  transactions may write ... now."; `--no-wait`, Ctrl-C and `--json` (`newTables`, `writableAt`) give
+  the time instead. `ToolsIntegrationTest` covers the wait, a rerun without one, `--no-wait` and
+  `--json` on every engine. README's rule and design 3 and 4.4 follow.

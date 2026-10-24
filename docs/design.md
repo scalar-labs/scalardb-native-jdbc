@@ -644,7 +644,12 @@ A table is set up when its index exists and is usable (an invalid index a failed
 does not count) and its view exists with exactly the table's columns, in order. Because the view comes
 last, it also says that the backfill completed. Names compare exactly, except where the database
 compares table names without regard to case. The setup does not replace a view of the same name whose
-columns differ, since it did not create it. Other drivers see a new setup after their catalog TTL.
+columns differ, since it did not create it. Other drivers see a new setup after their catalog TTL,
+and until then take a table imported or created since their load for a plain one: so after setting
+up a table for the first time, the command waits out the applications' catalog TTL (`--catalog-ttl`,
+60 seconds) before it says ScalarDB transactions may write it, and with `--no-wait` prints from when
+instead, as it does when interrupted; `--json` reports the new tables and that instant without waiting
+(todo 298).
 
 Taking the setup down drops the view and the index. On PostgreSQL the view depends on its tables, so
 ScalarDB's `dropTable` and `dropNamespace` need the teardown first; ScalarDB itself refuses the other
@@ -1351,7 +1356,10 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   connection is retried once after a connection failure. **The operator contract:** a table imported or
   created after the load is plain until the TTL expires or the catalog is refreshed; a miss cannot
   trigger a refresh, since every plain table misses. So import first, then refresh through the JDBC
-  surface or wait for the TTL, before native writers touch the table. ScalarDB refuses schema changes on
+  surface or wait for the TTL, before native writers touch the table; the setup command waits it out
+  for a table it sets up for the first time (section 3, todo 298). A check of ScalarDB's catalog per
+  plain name before passing it through, cached briefly, was weighed and left out: its window is
+  shorter but not zero, and its query runs every interval while plain tables are used. ScalarDB refuses schema changes on
   decoupled tables, but index creation and drop are not guarded, so changes come from registering,
   importing or dropping a table and from index DDL. `virtual_tables` and ScalarDB's table metadata live
   in ScalarDB's metadata schema, `scalardb` by default, given by the `scalardbnative.metadataSchema`

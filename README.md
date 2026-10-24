@@ -67,7 +67,7 @@ bin/scalardb-native-tools check jdbc:scalardb-native:postgresql://host:5432/db -
 
 | Action | What it does |
 | --- | --- |
-| `setup` | sets up every ScalarDB table, or those named with `--table ns.t`; `--grant user` grants SELECT on the read views to the application's users; `--dry-run` prints the statements instead |
+| `setup` | sets up every ScalarDB table, or those named with `--table ns.t`; `--grant user` grants SELECT on the read views to the application's users; `--dry-run` prints the statements instead. After setting up a table for the first time it waits out the applications' catalog TTL, `--catalog-ttl` seconds (60), and then says ScalarDB transactions may write it; `--no-wait` prints from when instead |
 | `check` | read-only: the database settings the driver needs (SQL Server's), whether each table is set up, and the rows ScalarDB left prepared longer ago than `--lifetime` seconds (15), which the driver cannot settle; a ScalarDB read of the rows, or ScalarDB's recovery, settles them |
 | `teardown` | drops the read view and the in-flight index, as ScalarDB's `dropTable` needs on PostgreSQL; `--dry-run` too |
 
@@ -85,10 +85,12 @@ plain one: its reads can return rows a ScalarDB transaction holds prepared, and 
 driver. So, in this order:
 
 1. import or create the table in ScalarDB;
-2. run `scalardb-native-tools setup`;
-3. restart every application instance that uses the driver on that database, or wait out the
-   catalog TTL;
-4. only then let ScalarDB transactions write the table.
+2. run `scalardb-native-tools setup`. For a new table it waits out the catalog TTL, then prints
+   `Done: ScalarDB transactions may write ... now.`; give `--catalog-ttl` the longest
+   `catalogTtlMs` your applications set. With `--no-wait`, or `--json`, it returns at once and gives
+   the time instead (`writableAt` in JSON);
+3. only then let ScalarDB transactions write the table, or once every application instance that uses
+   the driver on that database has restarted.
 
 A table applications start using with a new release is safe by step 3 when that release is deployed.
 
