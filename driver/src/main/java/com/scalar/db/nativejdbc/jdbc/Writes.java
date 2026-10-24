@@ -2485,10 +2485,10 @@ final class Writes {
      * on PostgreSQL every statement of the transaction reads its one snapshot, so the check after
      * the lock and the versions read under it would see what these two do, and a row in flight
      * aborts at once (section 6), its locks released with the transaction. A row a ScalarDB prepare
-     * wrote after the snapshot fails the lock itself with PostgreSQL's serialization failure.
+     * wrote after the snapshot fails the lock itself with PostgreSQL's serialization failure. The
+     * lock reads no versions, as no read does there (todo 329).
      */
     private long applyFused(Run run, Step step) throws SQLException {
-      int width = n.keyColumns.size();
       PreparedStatement ps = run.prepare(step, null, true);
       try {
         ps.execute();
@@ -2502,21 +2502,15 @@ final class Writes {
           throw new SQLException("the locking read returned no rows", "XX000");
         }
         ResultSet rs = ps.getResultSet();
-        // the key, then the two version lookups the anchored read appends
-        int from = rs.getMetaData().getColumnCount() - width - 1;
-        Keys keys = new Keys();
-        List<Anchors.Version> read = new ArrayList<>();
+        // nothing appended: a later write reads its version in the same snapshot (todo 329)
+        int rows = 0;
         while (rs.next()) {
-          keys.read(rs, from, width);
-          read.add(new Anchors.Version(rs.getString(from + width), rs.getObject(from + width + 1)));
-        }
-        for (int i = 0; i < keys.rows.size(); i++) {
-          run.context.anchor(n.table, keys.rows.get(i), read.get(i));
+          rows++;
         }
         rs.beforeFirst();
         ps.closeOnCompletion();
-        run.context.rows(rs, width + 2);
-        return keys.rows.size();
+        run.context.rows(rs, 0);
+        return rows;
       } catch (SQLException | RuntimeException e) {
         ps.close();
         throw e;

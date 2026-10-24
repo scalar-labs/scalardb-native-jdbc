@@ -873,6 +873,16 @@ union as a derived table.
   ```
   Every other shape, a subquery's or an expression's table, a grouped, aggregate or DISTINCT read,
   one past the copy limit, takes the **per-table check** below.
+  **On PostgreSQL no read records an anchor at these levels** (todo 329), a locking read sent with
+  its in-flight check included. Every statement of the transaction reads its one snapshot, so a
+  later write's own read of its keys (4.3) finds the version the read would have recorded, and a
+  version that moved after the snapshot fails the write with `40001`. Each table's piece then
+  appends only its state, as one hashed set of the keys in flight per statement, read from the
+  in-flight index: `CASE WHEN (<key>) IN (SELECT <key> FROM T_meta m WHERE m.tx_state IN (1, 2))
+  THEN 1 END`, NULL for a committed row. The key and the version lookups on the metadata primary key
+  cost a 100-row range read 2.8x the vendor's execution time, and YCSB's scans 1.56x; the hashed
+  state costs the scans 1.07x (measured in todo 329). MySQL and MariaDB keep the anchors: an UPDATE
+  there reads the newest committed version.
 - **Why one statement, not two.** Under READ COMMITTED every statement has its own snapshot. A row in
   flight with `x = x2` and `before_x = x1` fails the `P` arm; if its writer rolls back before a second
   statement runs, the row is committed with `x = x1` and no before image, and fails the in-flight arm

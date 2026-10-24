@@ -859,7 +859,11 @@ public final class Proxies {
         booleans = ran.size() == 1 ? ran.get(0).booleans : null;
         booleanType = owner.booleanType(booleans);
         // nothing to anchor in autocommit, nor where nothing can be written (todo 146)
-        recording = anchored != null && !owner.vendor.getAutoCommit() && !owner.router.readOnly();
+        recording =
+            anchored != null
+                && anchored.versions
+                && !owner.vendor.getAutoCommit()
+                && !owner.router.readOnly();
         epoch = owner.anchors.epoch();
         Router.Route read = ran.size() == 1 ? ran.get(0) : null;
         if (read != null
@@ -1599,7 +1603,7 @@ public final class Proxies {
           // at SNAPSHOT and SERIALIZABLE a row in flight aborts the read (design 4.2)
           for (int t = 0, at = visible() + 1; t < anchored.tables.size(); t++) {
             int keys = anchored.keys.get(t);
-            if (Writes.inFlight(rs.getObject(at + keys + 2))) {
+            if (Writes.inFlight(rs.getObject(at + keys + width - 1))) {
               aborts.run();
               throw new Writes.Aborted(
                   "a row the read returns is being written by a ScalarDB transaction");

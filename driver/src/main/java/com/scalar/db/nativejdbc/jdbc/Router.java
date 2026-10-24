@@ -330,18 +330,25 @@ final class Router {
      */
     final boolean states;
 
+    /**
+     * Whether each table's columns carry the row's version, the anchor recorded; not at SNAPSHOT
+     * and SERIALIZABLE on PostgreSQL, where only the states are read (todo 329).
+     */
+    final boolean versions;
+
     private final int hidden;
 
-    Anchored(List<String> tables, List<Integer> keys, boolean states) {
+    Anchored(List<String> tables, List<Integer> keys, boolean states, boolean versions) {
       this.tables = tables;
       this.keys = keys;
       this.states = states;
+      this.versions = versions;
       this.hidden = keys.stream().mapToInt(k -> k + width()).sum();
     }
 
     /** The columns each table appends after its key: the version, and the state with states. */
     int width() {
-      return states ? 3 : 2;
+      return (versions ? 2 : 0) + (states ? 1 : 0);
     }
 
     /** Columns the driver appended that are hidden only, not recorded: {@code hidden} of them. */
@@ -349,12 +356,13 @@ final class Router {
       this.tables = List.of(table);
       this.keys = List.of(keys);
       this.states = false;
+      this.versions = false;
       this.hidden = hidden;
     }
 
     /**
-     * The hidden trailing columns: per table its key's, then {@code tx_id} and {@code tx_version},
-     * then {@code tx_state} with {@link #states}.
+     * The hidden trailing columns: per table its key's, then {@code tx_id} and {@code tx_version}
+     * with {@link #versions}, then {@code tx_state} with {@link #states}.
      */
     int hidden() {
       return hidden;
@@ -982,6 +990,17 @@ final class Router {
   }
 
   /**
+   * Whether reads take no versions (todo 329): at SNAPSHOT and SERIALIZABLE on PostgreSQL every
+   * statement of the transaction reads its one snapshot, so a later write's own read of its keys
+   * (4.3) finds the version a read would have recorded, and a version that moved after the snapshot
+   * fails the write with PostgreSQL's serialization failure. Elsewhere an UPDATE reads the newest
+   * committed version, which the recorded anchor has to catch.
+   */
+  private boolean versionless() {
+    return engine == Engine.POSTGRESQL && snapshot();
+  }
+
+  /**
    * The route cache's key: the text, per anchoring mode, so that a text read both in and out of
    * transactions keeps a route for each.
    */
@@ -1001,13 +1020,42 @@ final class Router {
   /**
    * What each copy of an anchored read appends to its select list: the key, and the version of the
    * row it returns, read by key for those rows only; a committed copy's {@code tx_id}, an in-flight
-   * copy's before image's (design 4.2).
+   * copy's before image's (design 4.2). Without {@code versioned} only the state, with {@code
+   * states}: 1 for a row whose key is in flight, NULL otherwise, a committed row (todo 329).
    */
   private List<String> versions(
-      SqlAst.TableRef ref, Writes.Names n, SqlAst.Piece piece, boolean states) {
+      SqlAst.TableRef ref, Writes.Names n, SqlAst.Piece piece, boolean states, boolean versioned) {
     String x = exposed(ref);
     String m = engine.quote(META_ALIAS);
     List<String> out = new ArrayList<>();
+    if (!versioned) {
+      if (states) {
+        // one hashed set of the keys in flight, read once per statement from the in-flight index,
+        // rather than a lookup per row
+        // ponytail: past work_mem the set is scanned per row; the rows in flight are few
+        List<String> keys = new ArrayList<>();
+        List<String> inFlight = new ArrayList<>();
+        for (String k : n.keyColumns) {
+          keys.add(n.key(x, k));
+          inFlight.add(m + "." + engine.quote(k));
+        }
+        out.add(
+            "CASE WHEN ("
+                + String.join(", ", keys)
+                + ") IN (SELECT "
+                + String.join(", ", inFlight)
+                + " FROM "
+                + n.meta
+                + " "
+                + m
+                + " WHERE "
+                + m
+                + "."
+                + engine.quote("tx_state")
+                + " IN (1, 2)) THEN 1 END");
+      }
+      return out;
+    }
     for (String k : n.keyColumns) {
       out.add(n.key(x, k));
     }
@@ -1171,6 +1219,8 @@ final class Router {
       readDb.put(readRef, t);
     }
     SqlAst.TableRef anchoredRef = readRef;
+    // the lock sent with its in-flight check in one round trip reads no versions (LockPlan)
+    boolean versioned = !versionless() || shape.skipLocked();
     SqlAst.SplitText text =
         SplitRead.emit(
             engine,
@@ -1180,7 +1230,7 @@ final class Router {
             new IdentityHashMap<>(),
             Set.of(),
             List.of(readRef),
-            (r, piece) -> versions(anchoredRef, n, piece, false),
+            (r, piece) -> versions(anchoredRef, n, piece, false, versioned),
             true,
             false,
             inner == null ? null : LOCK_MARK);
@@ -1432,7 +1482,8 @@ final class Router {
             && !split.places().containsValue(SqlAst.Place.NULLABLE)
             && !ast.skipsRows();
     // the versions cost lookups per row, read only where they are recorded
-    List<SqlAst.TableRef> anchored = anchoring || states ? anchorable : List.of();
+    boolean versioned = !versionless();
+    List<SqlAst.TableRef> anchored = (anchoring && versioned) || states ? anchorable : List.of();
     IdentityHashMap<SqlAst.TableRef, Writes.Names> anchorNames = new IdentityHashMap<>();
     List<String> anchorTables = new ArrayList<>();
     List<Integer> keys = new ArrayList<>();
@@ -1440,7 +1491,7 @@ final class Router {
       Writes.Names n = new Writes.Names(engine, Objects.requireNonNull(scalarDb.get(r)));
       anchorNames.put(r, n);
       anchorTables.add(n.table);
-      keys.add(n.keyColumns.size());
+      keys.add(versioned ? n.keyColumns.size() : 0); // without versions, no key either
     }
     SqlAst.SplitText text =
         SplitRead.emit(
@@ -1451,7 +1502,8 @@ final class Router {
             views,
             perRow,
             anchored,
-            (r, piece) -> versions(r, Objects.requireNonNull(anchorNames.get(r)), piece, states),
+            (r, piece) ->
+                versions(r, Objects.requireNonNull(anchorNames.get(r)), piece, states, versioned),
             false,
             states,
             null);
@@ -1470,9 +1522,11 @@ final class Router {
               chosen,
               true);
       if (!anchorable.isEmpty()) {
+        // without versions the text is the same in and out of a transaction
         r =
             r.anchored(
-                anchoring || states ? new Anchored(anchorTables, keys, states) : null, anchoring);
+                anchored.isEmpty() ? null : new Anchored(anchorTables, keys, states, versioned),
+                versioned ? anchoring : null);
       }
       if (snapshot) {
         // with states, run only for a scrollable result, whose moves pass over rows unchecked
