@@ -1430,12 +1430,11 @@ class MoreWritesIntegrationTest {
     }
   }
 
-  /** 160: a read-only connection reads without anchors, so it writes nothing, enforced or not. */
+  /**
+   * 160: a read-only connection reads without anchors, so it writes nothing, enforced or not; on
+   * SQL Server, whose driver ignores read-only, the driver's own setting (todo 300).
+   */
   private static void readOnlyWrite(Engines e, Table t) throws Exception {
-    if (e.engine() == Engine.SQLSERVER) {
-      // its driver ignores read-only: the reads anchor, and the writes run as on any connection
-      return;
-    }
     Properties ignore = new Properties();
     ignore.setProperty("readOnlyMode", "ignore");
     try (Connection d = e.openDriver(ignore)) {

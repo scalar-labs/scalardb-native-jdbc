@@ -115,7 +115,7 @@ class MembershipIntegrationTest {
         new Run(e, name, level, MaelstromIntegrationTest.scalarDbSettings(e, level), mixed, false);
     run.go(inline);
     assertThat(run.finalCount).as(run.summary()).isEqualTo(MOVE_ROWS);
-    // todo 324: on SQL Server at SERIALIZABLE, scans of a group almost never commit while ScalarDB
+    // todo 326: on SQL Server at SERIALIZABLE, scans of a group almost never commit while ScalarDB
     // writes the table, and the writers that scan first with them
     if (!(e.engine() == Engine.SQLSERVER && level == Level.SERIALIZABLE && mixed)) {
       for (String kind : List.of("move", "add", "remove", "claim", "release")) {

@@ -69,7 +69,9 @@ import org.jspecify.annotations.Nullable;
  *   <li>{@code iso.vendor}: {@code true} to run the driver's nodes on a plain vendor connection
  *       instead, which runs no protocol;
  *   <li>{@code iso.prop.*}: ScalarDB properties, without the prefix;
- *   <li>{@code iso.faults}: the share of transactions that meet a fault, 0 by default.
+ *   <li>{@code iso.faults}: the share of transactions that meet a fault, 0 by default;
+ *   <li>{@code iso.readOnlyLevel}: the level of the driver's transactions that only read, run on a
+ *       read-only connection of their own; {@code iso.level} by default.
  * </ul>
  *
  * <p>A conflict is a definite abort ({@code txn-conflict}), any other failure before commit too
@@ -109,9 +111,11 @@ public final class MaelstromNode {
   private final boolean register =
       "txn-rw-register".equals(System.getProperty("iso.workload", "txn-list-append"));
   private final double faults = Double.parseDouble(System.getProperty("iso.faults", "0"));
+  private final int readOnlyLevel = Integer.getInteger("iso.readOnlyLevel", 0);
   private final Properties scalarDb = new Properties();
   private final ExecutorService workers = Executors.newCachedThreadPool();
   private static final ThreadLocal<@Nullable Connection> CONNECTIONS = new ThreadLocal<>();
+  private static final ThreadLocal<@Nullable Connection> READ_ONLY = new ThreadLocal<>();
   private volatile @Nullable String nodeId;
   private volatile @Nullable DistributedTransactionManager manager;
   private volatile @Nullable TwoPhaseCommitTransactionManager twoPhase;
@@ -202,7 +206,10 @@ public final class MaelstromNode {
   private Map<String, @Nullable Object> driver(List<?> ops) {
     Connection c;
     try {
-      c = connection();
+      c =
+          readOnlyLevel != 0 && ops.stream().allMatch(op -> "r".equals(((List<?>) op).get(0)))
+              ? readOnly()
+              : connection();
     } catch (SQLException e) {
       return error(ABORT, "connect: " + e);
     }
@@ -295,6 +302,21 @@ public final class MaelstromNode {
       c.setTransactionIsolation(level);
       c.setAutoCommit(false);
       CONNECTIONS.set(c);
+    }
+    return c;
+  }
+
+  /** The thread's connection for transactions that only read, at {@code iso.readOnlyLevel}. */
+  private Connection readOnly() throws SQLException {
+    Connection c = READ_ONLY.get();
+    if (c == null || c.isClosed()) {
+      Properties p = new Properties();
+      p.setProperty("scalardbnative.catalogTtlMs", "60000");
+      c = vendor ? engine.open() : engine.openDriver(p);
+      c.setTransactionIsolation(readOnlyLevel);
+      c.setReadOnly(true);
+      c.setAutoCommit(false);
+      READ_ONLY.set(c);
     }
     return c;
   }

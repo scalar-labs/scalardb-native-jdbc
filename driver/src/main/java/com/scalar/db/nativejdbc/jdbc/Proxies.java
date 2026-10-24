@@ -74,6 +74,8 @@ public final class Proxies {
     }
     session.schemas(vendor); // read now, outside any transaction
     Router router = new Router(engine, catalog, session, predicateChecks);
+    // a URL may open the connection read-only, as pgjdbc's readOnly does
+    router.setReadOnly(vendor.isReadOnly());
     // ScalarDbTables, reached with unwrap, is the driver's own interface (design section 1)
     return (Connection)
         Proxy.newProxyInstance(
@@ -307,6 +309,23 @@ public final class Proxies {
             router.setIsolation(level);
             return null;
           }
+        case "setReadOnly":
+          {
+            boolean on = Boolean.TRUE.equals(args[0]);
+            if (on != router.readOnly() && ranInTransaction && !vendor.getAutoCommit()) {
+              // a read-only transaction at SERIALIZABLE read without locks, which a write would
+              // need (todo 324); JDBC lets a driver refuse the change in a transaction
+              throw new SQLException(
+                  "the read-only setting cannot be changed in the middle of a transaction",
+                  "25001");
+            }
+            forward(vendor, method, args);
+            // tracked by the driver: SQL Server's driver ignores it, and reports false
+            router.setReadOnly(on);
+            return null;
+          }
+        case "isReadOnly":
+          return router.readOnly();
         case "getTransactionIsolation":
           {
             // the vendor connection's own level, unless the driver runs SERIALIZABLE at another
@@ -838,7 +857,7 @@ public final class Proxies {
         booleans = ran.size() == 1 ? ran.get(0).booleans : null;
         booleanType = owner.booleanType(booleans);
         // nothing to anchor in autocommit, nor where nothing can be written (todo 146)
-        recording = anchored != null && !owner.vendor.getAutoCommit() && !owner.vendor.isReadOnly();
+        recording = anchored != null && !owner.vendor.getAutoCommit() && !owner.router.readOnly();
         epoch = owner.anchors.epoch();
         Router.Route read = ran.size() == 1 ? ran.get(0) : null;
         if (read != null
@@ -1048,6 +1067,7 @@ public final class Proxies {
       try {
         Writes.within(
             owner.vendor,
+            owner.router.readOnly(),
             () -> owner.rollbackOnly = true,
             plan.writes(),
             () -> {
@@ -1116,7 +1136,7 @@ public final class Proxies {
       // a locking read anchors its rows as an anchored read does, in a transaction only
       boolean recording;
       try {
-        recording = !owner.vendor.getAutoCommit() && !owner.vendor.isReadOnly();
+        recording = !owner.vendor.getAutoCommit() && !owner.router.readOnly();
       } catch (SQLException e) {
         recording = false;
       }
@@ -1218,6 +1238,7 @@ public final class Proxies {
       try {
         Writes.within(
             owner.vendor,
+            owner.router.readOnly(),
             () -> owner.rollbackOnly = true,
             true,
             () -> {

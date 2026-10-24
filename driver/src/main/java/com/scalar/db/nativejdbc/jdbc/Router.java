@@ -419,6 +419,8 @@ final class Router {
   // false while nativeSQL decides a route: nothing runs on the connection (todo 127)
   private boolean probes = true;
   private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
+  // the application's Connection.setReadOnly, which SQL Server's driver ignores (todo 324)
+  private boolean readOnly;
   // the checks for rows in flight the open transaction passed, in its snapshot
   private final Set<String> passed = new HashSet<>();
   // the checks that found a row in flight in the open transaction's snapshot, which keeps it:
@@ -465,6 +467,50 @@ final class Router {
     } finally {
       lock.unlock();
     }
+  }
+
+  /** After the application's {@code setReadOnly}, which the driver tracks itself (todo 324). */
+  void setReadOnly(boolean on) {
+    lock.lock();
+    try {
+      readOnly = on;
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /** Whether the application set the connection read-only. */
+  boolean readOnly() {
+    lock.lock();
+    try {
+      return readOnly;
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * Whether the connection runs read-only transactions at SERIALIZABLE without the locking
+   * re-reads, as at SNAPSHOT (design 5, todo 324): on MySQL, MariaDB and SQL Server, where the
+   * writers' locks and ScalarDB's validation give them one serial order, of which a snapshot that
+   * refuses rows in flight is a cut. Such a transaction runs reads alone.
+   */
+  boolean readOnlySerializable() {
+    lock.lock();
+    try {
+      return readOnly && isolation == Connection.TRANSACTION_SERIALIZABLE && locksAtSerializable();
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * The level a route is decided at: the connection's, but REPEATABLE READ, the driver's SNAPSHOT,
+   * for a read-only one at SERIALIZABLE that runs as SNAPSHOT does ({@link #readOnlySerializable}),
+   * so that a statement prepared before {@code setReadOnly} is routed again.
+   */
+  private int routedLevel() {
+    return readOnlySerializable() ? Connection.TRANSACTION_REPEATABLE_READ : isolation();
   }
 
   /**
@@ -559,6 +605,10 @@ final class Router {
       if (!vendor.getAutoCommit()) {
         throw Errors.unsupported("the passthrough setting applies in autocommit mode only");
       }
+      if (readOnlySerializable()) {
+        // unparsed, it may write (todo 324)
+        throw new SQLException(READ_ONLY, "25006");
+      }
       String named = SqlWords.find(sql, engine, protectedNames());
       if (named != null) {
         // sent as written, it would bypass ScalarDB's protocol on the table (todo 323)
@@ -587,6 +637,14 @@ final class Router {
     SqlAst.Kind kind = ast.kind();
     if (controlsTransaction(kind)) {
       return route(sql, sql, kind, false, false, false, null, 0, 0, List.of(), false);
+    }
+    if (readOnlySerializable()
+        && (!(kind == SqlAst.Kind.SELECT || kind == SqlAst.Kind.SESSION)
+            || (engine == Engine.SQLSERVER && ast.hasLockingOrIntoClause()))) {
+      // its reads take no locks: a write beside them would be snapshot isolation's, which
+      // SERIALIZABLE must not give (design 5, todo 324); SQL Server's SELECT ... INTO writes a
+      // table
+      throw new SQLException(READ_ONLY, "25006");
     }
     String database = session.database();
     String target = ast.useTarget();
@@ -747,7 +805,7 @@ final class Router {
         false,
         false,
         SqlAst.Kind.DML,
-        isolation,
+        routedLevel(),
         session.generation(),
         catalog.generation(),
         catalog.trustedUntil(),
@@ -816,15 +874,15 @@ final class Router {
    * Whether a read's anchors would be recorded: in a transaction, on a connection that is not
    * read-only (todo 146); a read routed elsewhere reads no versions.
    */
-  private static boolean anchoring(Connection vendor) throws SQLException {
-    return !vendor.getAutoCommit() && !vendor.isReadOnly();
+  private boolean anchoring(Connection vendor) throws SQLException {
+    return !vendor.getAutoCommit() && !readOnly();
   }
 
   /**
    * The route cache's key: the text, per anchoring mode, so that a text read both in and out of
    * transactions keeps a route for each.
    */
-  private static String key(Connection vendor, String sql) throws SQLException {
+  private String key(Connection vendor, String sql) throws SQLException {
     return anchoring(vendor) ? sql : "\0" + sql;
   }
 
@@ -1075,7 +1133,7 @@ final class Router {
         false,
         false,
         SqlAst.Kind.SELECT,
-        isolation,
+        routedLevel(),
         session.generation(),
         catalog.generation(),
         catalog.trustedUntil(),
@@ -1689,6 +1747,10 @@ final class Router {
       "a ScalarDB table is supported in SELECT and in INSERT, UPDATE and DELETE of that one table"
           + " only, not in this statement";
 
+  private static final String READ_ONLY =
+      "a read-only transaction at SERIALIZABLE runs reads only: its reads take no locks (design 5);"
+          + " set the connection read-write for this statement";
+
   private static final String LEVELS =
       "statements on ScalarDB tables run at READ COMMITTED, REPEATABLE READ and SERIALIZABLE on"
           + " PostgreSQL, MySQL, MariaDB and SQL Server, at READ COMMITTED and REPEATABLE READ on"
@@ -1803,7 +1865,7 @@ final class Router {
   private boolean lockingSerializable() {
     lock.lock();
     try {
-      return isolation == Connection.TRANSACTION_SERIALIZABLE && locksAtSerializable();
+      return isolation == Connection.TRANSACTION_SERIALIZABLE && locksAtSerializable() && !readOnly;
     } finally {
       lock.unlock();
     }
@@ -1929,7 +1991,7 @@ final class Router {
         changesNames,
         passthrough,
         kind,
-        isolation,
+        routedLevel(),
         session.generation(),
         catalog.generation(),
         catalog.trustedUntil(),
@@ -2301,7 +2363,7 @@ final class Router {
               && prepared.catalogGeneration == catalog.generation()
               && !catalog.hasPassed(prepared.trustedUntil)
               && prepared.passthrough == passthrough
-              && prepared.isolation == isolation
+              && prepared.isolation == routedLevel()
               && (!prepared.passthrough || vendor.getAutoCommit())
               && (prepared.anchoring == null || prepared.anchoring == anchoring(vendor));
       if (unchanged && (prepared.recheckAt == 0 || System.nanoTime() - prepared.recheckAt < 0)) {

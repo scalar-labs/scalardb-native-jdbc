@@ -1,6 +1,6 @@
 # Plan: SQL coverage, isolation and performance testing
 
-Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append, rw-register, bank, faults, dependency counts and membership (see each milestone).
+Status: accepted 2026-10-20, with the decisions under "Decisions". T0 to T3 done, T4 but for random statements, T5's list-append, rw-register, bank, faults, dependency counts, membership and read-only readers (see each milestone).
 
 ## Goal
 
@@ -336,7 +336,42 @@ so the workload does produce what SERIALIZABLE must block. A plain vendor connec
 count on every engine (42 to 51 rows for 24). On SQL Server at SERIALIZABLE with ScalarDB writing,
 the scans starve the writers as well as the readers: 9 to 23 writes in 60 seconds (todo 324, with
 the evidence; the test checks no progress there).
-Left: the long runs in the cloud.
+
+**Read-only readers done 2026-10-24** (todo 324; design 5): at SERIALIZABLE on MySQL, MariaDB and
+SQL Server a read-only transaction reads without the locking re-reads. `ReadOnlyReaderIntegrationTest`
+runs Fekete's read-only anomaly against ScalarDB's two-step commit at five timings, through two
+reads by key in either order, row by row, a join, a subquery and `SUM`, with ScalarDB's or the
+driver's writer: the reader aborts while the row is in flight and otherwise sees a serial state,
+and the writers, on a short lock wait, never wait on it; a reader at READ COMMITTED shows the
+anomaly; and the refusals of design 5. The list-append runs with the driver node's read-only
+transactions on a read-only connection (`iso.readOnlyLevel`), mixed and driver only, both layouts,
+were all serializable with at least 68 committed read-only transactions of two keys or more each;
+with those readers at READ COMMITTED Elle found read skew (SQL Server in 240 seconds, the others in
+60). The bank test with its readers read-only (`totals_holdWithReadOnlyReaders`) kept its totals,
+and its reads rose from 0 to 8,506-20,200 a minute on SQL Server with ScalarDB writing, and 4 to 12
+times on MySQL and MariaDB.
+**Where T5 runs** (decided 2026-10-24). The isolation tests run apart from the unit and
+integration tests that every pull request runs, as ScalarDB's own are:
+
+- **Daily**: the whole suite, `-Dnativejdbc.isolation=true`, per engine in parallel (all but
+  `mysql_lower_case`, which they skip): Elle's list-append and rw-register over every level, side and
+  layout, the faults, the read-only readers, bank, membership and the controls, about 1.5 hours
+  per engine. A pull request that breaks isolation shows within a day. Wiring it is the CI owner's
+  (Ownership): a scheduled workflow over the per-engine matrix, a timeout of 2 to 2.5 hours, the
+  Maelstrom jar (`build/maelstrom/<version>/`) cached, `driver/build/isolation/**` kept as an
+  artifact on failure (the histories and Elle's reports), and `gnuplot` and `graphviz` on the
+  runner: without `gnuplot` Maelstrom's checker reports `:valid? :unknown` and every run fails,
+  measured; `graphviz` draws Elle's anomalies.
+- **Before a release, in the cloud**: about 24 hours for the five engines, about 5 per engine, as
+  many short runs rather than few long ones: Elle's check grows faster than the history, an hour
+  at the tests' rate being about 180,000 transactions, and rare timings come with repetitions, not
+  length. Per engine: Elle's two workloads in repeated 10-minute runs, about 2 hours; faults with
+  the database restarted from outside, which local containers do not give, about 1.5 hours; bank
+  and membership in repeated 10-minute runs, about 1 hour; one soak run of the bank test, 30 to 60
+  minutes, watching the driver's memory and connections for slow leaks. Oracle, without
+  SERIALIZABLE, takes less.
+
+Left: the cloud runs before the release.
 
 ### Milestone T6: performance, with BenchBase
 
@@ -384,8 +419,8 @@ memory of AWS on-demand prices, to be replaced by a quote at current prices befo
 |---|---|---|
 | PostgreSQL, MySQL, MariaDB, SQL Server | per engine a database VM (8 vCPU, 32 GB, gp3 SSD) and a client VM (8 vCPU) for BenchBase, self-managed; SQL Server Developer edition | about $0.75 per hour per engine |
 | Oracle | RDS for Oracle, Standard Edition 2, licence included, plus a client VM; Oracle Free's limits (2 CPUs, 2 GB) make its numbers meaningless | about $1.5-2.5 per hour |
-| Hours | T6: loading, three runs of three workloads, three repetitions, setup and failed runs, about 25 hours per engine (40 with the five runs first planned); T5's long runs, about 24 hours per engine on the same VMs | about 49 hours per engine |
-| Total | the five engines, storage and transfer, once | about $400-800 |
+| Hours | T6: loading, three runs of three workloads, three repetitions, setup and failed runs, about 25 hours per engine (40 with the five runs first planned); T5's cloud runs, about 24 hours for the five engines on the same VMs ("Where T5 runs") | about 30 hours per engine |
+| Total | the five engines, storage and transfer, once | about $200-400 |
 
 VMs are stopped between runs. A second round after optimisation work costs about the same again.
 

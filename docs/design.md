@@ -1320,8 +1320,9 @@ overwrites it, since its metadata put on an imported table is unconditional. A s
   vendor driver cannot release: the transaction's end does. Many an error ends a SQL Server
   transaction outright, a deadlock (1205, reported as a plain error) or a conversion error among
   them, with `XACT_ABORT` off too: after any error the driver reads `@@TRANCOUNT`, and a transaction
-  gone leaves the application's rollback-only. The vendor driver ignores `setReadOnly`, so reads
-  there anchor and writes run as on any connection. T-SQL's transaction statements do not parse and
+  gone leaves the application's rollback-only. The vendor driver ignores `setReadOnly`, which the
+  driver tracks itself: a read-only connection anchors nothing and writes no ScalarDB table there
+  either (todo 300). T-SQL's transaction statements do not parse and
   are refused.
 - **Return values.** `executeUpdate` of a predicate DML is the sum of the per-key counts; an INSERT
   returns 1.
@@ -1677,7 +1678,7 @@ lock wait where it waits on the driver.
 |---|---|---|---|---|---|---|
 | READ COMMITTED | READ COMMITTED | return the before image | at the state read of 4.3 step 1: abort, or bounded wait; at the CAS: always abort | identity of the version this transaction read, which for an in-flight row is its before image's `(before_tx_id, before_tx_version)`; else a read now | none | any |
 | SNAPSHOT | REPEATABLE READ, or the engine's equivalent (engine mapping below) | abort, retry | abort, retry | version the snapshot showed | none | any |
-| SERIALIZABLE | SERIALIZABLE (engine mapping below) | abort, retry | abort, retry | version the snapshot showed | none on PostgreSQL, where SSI does the work; elsewhere a read lock on every row of the first arm, held to commit: a separate locking re-read by primary key on MySQL, MariaDB and SQL Server (4.2); Oracle refuses the level | SERIALIZABLE; on PostgreSQL its storage connections at SERIALIZABLE too |
+| SERIALIZABLE | SERIALIZABLE (engine mapping below) | abort, retry | abort, retry | version the snapshot showed | none on PostgreSQL, where SSI does the work; elsewhere a read lock on every row of the first arm, held to commit: a separate locking re-read by primary key on MySQL, MariaDB and SQL Server (4.2), none in a read-only transaction there (below); Oracle refuses the level | SERIALIZABLE; on PostgreSQL its storage connections at SERIALIZABLE too |
 
 - **Why SNAPSHOT holds without the coordinator.** By fact 4, in any database snapshot a ScalarDB
   transaction's rows are either all at their pre-transaction committed version, or a mix of state 1/2 and
@@ -1746,6 +1747,47 @@ lock wait where it waits on the driver.
   validation runs after the driver's commit and sees any `s` the driver wrote. Write skew between the two
   needs both edges and the first forces the second to be caught. Between driver transactions, see the
   engine mapping below.
+- **A read-only transaction at SERIALIZABLE on MySQL, MariaDB and SQL Server reads without locks
+  (todo 324).** On a connection the application set read-only (`setReadOnly(true)`), which the
+  driver tracks itself since SQL Server's driver ignores it and reports `false`, a transaction at
+  SERIALIZABLE runs as at SNAPSHOT: the same vendor level, no locking re-read, no `HOLDLOCK`, the
+  per-table check unlocked, and a row in flight aborting the read with `40001`.
+  `getTransactionIsolation` still reports SERIALIZABLE. The locks cost readers most where ScalarDB
+  writes: a whole-table read on SQL Server met a prepared row or a deadlock with ScalarDB's prepare
+  (1205) almost every time, 0 to 4 reads of about 500 to 3,100 in a minute, and while it held the
+  in-flight index's range every prepare of the table waited. Why it stays serializable:
+  - **The writers fit one timeline.** Give each writer a point: a driver transaction its commit; a
+    ScalarDB transaction the commit of its prepare, before its validation (one with nothing to
+    validate, by one-phase commit, the commit of its one storage transaction). Every dependency
+    between writers runs from the earlier point to the later, by the bullet above: a driver read
+    lock holds a prepare off past the driver's commit; a prepare or a driver commit before a
+    ScalarDB validation fails the validation, which compares `tx_id` and scan membership (fact 7);
+    and a ww or wr edge needs the first writer settled before the second reads.
+  - **A read-only snapshot is a cut of it.** The reader's snapshot is one moment `t`, the
+    transaction's first read on SQL Server's SNAPSHOT and InnoDB's REPEATABLE READ alike. Every edge
+    into the reader is wr from a writer whose version it read settled, so that writer's point is
+    before `t`; every edge out of it is rw to a writer whose version it did not see, not even in
+    flight, since a row in flight that either image puts in the result aborts the read (4.2), so
+    that writer's prepare, or commit, and its point come after `t`. Readers share no edges. Every
+    edge then runs forward in time, and no cycle exists.
+  - **Why the abort on a row in flight is needed.** ScalarDB transaction S1 reads `x`, prepares
+    `y` and validates; S2 then writes `x` and commits; then S1 commits. S1 precedes S2, which
+    commits first. A snapshot between the two shows S2's `x` and S1's `y` still prepared: read as
+    its before image, it would be Fekete's read-only anomaly; the driver aborts the read instead.
+  - **Such a transaction runs reads alone.** A write of any table, SQL Server's `SELECT ... INTO`,
+    a statement of another kind (`CALL`, DDL) and passthrough are refused with `25006`, and the
+    setting cannot change once the transaction ran a statement (`25001`): a write beside unlocked
+    reads would be snapshot isolation's. Not on PostgreSQL, whose SSI orders writers in no timeline
+    (an rw edge may point back in commit order) and watches the reader for the cycle; its readers
+    lock nothing anyway.
+  - **Measured** (`ReadOnlyReaderIntegrationTest`, the T5 runs): the schedule above at five timings
+    through every read path aborts or reads a serial state, and at READ COMMITTED shows the anomaly;
+    Elle found every list-append history serializable with the driver's read-only transactions so
+    run, and found read skew with them at READ COMMITTED. The bank test's reads in a minute, read
+    write to read-only, with ScalarDB writing: SQL Server 0 to 8,506-20,200, MySQL 1,904-2,875 to
+    16,584-17,165, MariaDB 2,692-4,491 to 17,799-19,580; with driver writers only, SQL Server 263-313
+    to about 25,000, MySQL and MariaDB about 2,300-4,000 to 26,000-32,000. Writers gained too, no
+    longer waiting on the readers' locks.
 - Against a ScalarDB transaction running at SNAPSHOT or READ_COMMITTED, the driver gets SNAPSHOT at best,
   because that transaction never re-reads.
 
@@ -1880,6 +1922,14 @@ between `T` and plain tables are the database's own.
   reports such rows but cannot settle them.
 - **Retry rate** under the two stronger levels rises with the number of in-flight rows encountered. The
   coarse per-table check of 4.2 raises it further on busy tables.
+- **Read-write scans at SERIALIZABLE on SQL Server beside ScalarDB writers.** A read-write
+  transaction that scans a table ScalarDB writes all the time, whether or not it writes from what
+  it read, hardly progresses: its key-range locks, and the range lock on the table's in-flight index, meet
+  ScalarDB's prepares in waits and deadlocks (1205) on both sides. Measured in T5's membership test:
+  9 to 23 writes in a minute, against about 300 without ScalarDB's writers and thousands on the other
+  engines, and the bank test's read-write readers 0 to 4 reads; the data stays correct. Read-only
+  transactions do not take these locks (section 5): declare a transaction that only reads so.
+  Suited otherwise: reads and writes by key, or SNAPSHOT for the scans (todo 326).
 - **ScalarDB's own semantics are unchanged.** Its SNAPSHOT keeps its documented read skew; the driver cannot
   make the other side stronger than it is.
 - **Anything bypassing both** (a native writer on `T` without the metadata upkeep, a trigger) is invisible

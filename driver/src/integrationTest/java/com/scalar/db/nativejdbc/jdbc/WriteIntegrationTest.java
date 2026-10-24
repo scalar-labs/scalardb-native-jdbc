@@ -904,11 +904,10 @@ class WriteIntegrationTest {
         }
         scalarDbSet(tm, ch, 6, "scalardb");
         assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 6");
-        if (e.engine() != Engine.SQLSERVER) { // its driver ignores read-only, and so writes
-          d.setReadOnly(true);
-          assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
-          d.setReadOnly(false);
-        }
+        // tracked by the driver, SQL Server's ignoring it (todo 300)
+        d.setReadOnly(true);
+        assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
+        d.setReadOnly(false);
       }
       // one that cannot be prepared again, since the application unwrapped it, is refused rather
       // than read without anchors

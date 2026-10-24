@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "300"
 tags: [code-review]
@@ -20,8 +20,11 @@ read-only. Consistent with the vendor, inconsistent across engines (review of 9c
 
 ## Acceptance Criteria
 
-- [ ] Done
+- [x] Done
 
 ## Work Log
 
 - 2026-10-20: found in the review of 9c.
+- 2026-10-24: fixed with todo 324: the driver tracks `setReadOnly` itself, so a read-only
+  connection anchors nothing and writes no ScalarDB table on SQL Server either (25006);
+  `MoreWritesIntegrationTest` and `WriteIntegrationTest` now run the read-only cases there.

@@ -969,6 +969,7 @@ final class Writes {
    * rollback-only.
    *
    * @param vendor the vendor connection
+   * @param readOnly whether the application set the connection read-only
    * @param rollbackOnly marks the application's transaction rollback-only
    * @param writes whether the work writes rows, which a read-only connection refuses
    * @param work the writes
@@ -977,11 +978,10 @@ final class Writes {
    */
   // ponytail: autocommit is off on the vendor connection while the write runs; another thread
   // sharing the connection then joins its transaction, as with any JDBC transaction
-  static void within(Connection vendor, Runnable rollbackOnly, boolean writes, Work work)
+  static void within(
+      Connection vendor, boolean readOnly, Runnable rollbackOnly, boolean writes, Work work)
       throws SQLException {
-    if (vendor.isReadOnly()
-        && !writes
-        && "MySQL".equals(vendor.getMetaData().getDatabaseProductName())) {
+    if (readOnly && !writes && "MySQL".equals(vendor.getMetaData().getDatabaseProductName())) {
       // Connector/J refuses a savepoint, which every plan runs under, on a read-only connection
       // (it sends SAVEPOINT through executeUpdate); MariaDB's driver does not (todo 301)
       throw new SQLException(
@@ -990,7 +990,7 @@ final class Writes {
               + " savepoints it runs under; leave the transaction read-write",
           "25006");
     }
-    if (writes && vendor.isReadOnly()) {
+    if (writes && readOnly) {
       // a read-only transaction records no anchors, so its writes would be lost updates where the
       // vendor lets them through, as pgjdbc's readOnlyMode=ignore does (todo 160)
       throw new SQLException("a read-only connection cannot write a ScalarDB table", "25006");

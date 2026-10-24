@@ -161,10 +161,16 @@ first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
   the inline layout, the metadata columns in the row, they are kept from the application: `SELECT *`
   and `RETURNING *` give the data columns, an `INSERT` names its columns, and a statement naming a
   `tx_` or `before_` column ScalarDB keeps is refused with `0AN01`.
-- On MySQL a read at SERIALIZABLE in a read-only transaction (`setReadOnly(true)`, Spring's
-  `@Transactional(readOnly = true)`) is refused with `25006`: the driver's reads lock at that level
-  under savepoints, which MySQL Connector/J refuses on a read-only connection. Leave such a
-  transaction read-write. MariaDB, PostgreSQL and SQL Server run it.
+- Declare transactions that only read as read-only (`setReadOnly(true)`, Spring's
+  `@Transactional(readOnly = true)`). At SERIALIZABLE on MySQL, MariaDB and SQL Server such a
+  transaction reads without the locks the level otherwise takes, and stays serializable: its reads
+  neither wait on writers nor hold them off. It runs reads only: a write of any table, SQL Server's
+  `SELECT ... INTO`, another kind of statement and passthrough are refused with `25006`, and
+  `setReadOnly` fails with `25001` once the transaction has run a statement.
+- On SQL Server at SERIALIZABLE, a read-write transaction that scans a table ScalarDB keeps writing
+  hardly progresses: its range locks and ScalarDB's prepares wait on and deadlock with each other.
+  The data stays correct. Declare a transaction that only reads read-only; otherwise read and write
+  by key there, or run such transactions at SNAPSHOT.
 - A write is one `INSERT ... VALUES`, `UPDATE` or `DELETE` of one ScalarDB table, in batches too, with
   `RETURNING` and generated keys. `FOR UPDATE` and `FOR SHARE` lock a read of one ScalarDB table.
 - On MySQL an INSERT has no `RETURNING`, and gives each key column a literal or a placeholder of the
@@ -183,7 +189,6 @@ first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
   `NOLOCK` and `READUNCOMMITTED` among them, written with `WITH` or without, is refused, as is a hint
   the parser cannot read on another table of a statement that reads a ScalarDB table. T-SQL's own
   transaction statements (`BEGIN TRANSACTION`, `SAVE TRANSACTION`) are refused: use the JDBC methods.
-  The vendor driver ignores `setReadOnly`, so a read-only connection writes there as any other.
   The setup refuses an imported table keyed by a `datetime`, which ScalarDB's metadata holds as
   `datetime2(3)` and SQL Server does not compare equal for values ending in .003 or .007: use
   `datetime2(3)`.

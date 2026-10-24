@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "301"
 tags: [mysql, mariadb, serializable, read-only]
@@ -23,7 +23,7 @@ Found by the 9c Spring Data sample; documented in the README as a limitation for
 
 ## Acceptance Criteria
 
-- [ ] A read-only SERIALIZABLE read works on MySQL and MariaDB, or the refusal names the reason
+- [x] A read-only SERIALIZABLE read works on MySQL and MariaDB, or the refusal names the reason
 
 ## Work Log
 
@@ -39,3 +39,7 @@ Found by the 9c Spring Data sample; documented in the README as a limitation for
   plan runs under savepoints. The driver now refuses it on MySQL itself (25006, naming the cause);
   README says so. Open: savepoints as SQL (SAVEPOINT / ROLLBACK TO / RELEASE through execute) on
   MySQL in read-only transactions.
+- 2026-10-24: done with todo 324: a read-only transaction at SERIALIZABLE on MySQL, MariaDB and SQL
+  Server reads without the locking re-reads, so without their savepoints, and Connector/J runs it.
+  A user's own locking read (`FOR SHARE`) in a read-only transaction on MySQL is still refused
+  with 25006 for the savepoints; README's limitation is replaced by the read-only rule.

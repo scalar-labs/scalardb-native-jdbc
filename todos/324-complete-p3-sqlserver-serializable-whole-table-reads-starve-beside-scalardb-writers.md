@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p3
 issue_id: "324"
 tags: [isolation, liveness, sqlserver, serializable]
@@ -52,10 +52,15 @@ bounds every wait). **Effort:** Medium. **Risk:** stalls; needs the bounded wait
 
 ## Recommended Action
 
+For readers, a read-only transaction at SERIALIZABLE reads without locks (built 2026-10-24); for
+the scanning writers, Option 1, with todo 326 to look again after the predicate checks.
+
 ## Acceptance Criteria
 
-- [ ] The decision recorded in design section 6 or 7, or the wait built and the bank test's reads
-      at SQL Server SERIALIZABLE with ScalarDB writers above zero.
+- [x] The decision recorded in design section 6 or 7, or the wait built and the bank test's reads
+      at SQL Server SERIALIZABLE with ScalarDB writers above zero: read-only readers built (design
+      5), the bank test's reads 0 to thousands; the scanning writers documented (design 7), and
+      followed in todo 326.
 
 ## Work Log
 
@@ -65,3 +70,19 @@ bounds every wait). **Effort:** Medium. **Risk:** stalls; needs the bounded wait
 ### 2026-10-23 - the membership test too
 - The test checks no progress for this case. Worth re-triaging: a scan-then-write workload at
   SERIALIZABLE on SQL Server beside ScalarDB writers is close to stopped, which may be more than P3.
+
+### 2026-10-24 - readers fixed: a read-only transaction reads without locks
+- At SERIALIZABLE on MySQL, MariaDB and SQL Server a transaction on a read-only connection runs as
+  at SNAPSHOT, without the locking re-reads; the driver tracks `setReadOnly` (mssql-jdbc ignores
+  it) and refuses anything but reads in it. The argument is in design 5: the writers fit one
+  timeline (a driver writer at its commit, a ScalarDB one at its prepare), and a snapshot that
+  aborts on rows in flight is a cut of it. Not on PostgreSQL (SSI).
+- Checked: `ReadOnlyReaderIntegrationTest` (Fekete's read-only anomaly at five timings, every read
+  path, a READ COMMITTED control that shows it), Elle list-append with the driver's read-only
+  transactions so run (all serializable; the READ COMMITTED control invalid), and the bank test:
+  reads a minute on SQL Server with ScalarDB writing 0 to 8,506-20,200; MySQL and MariaDB 4-12x
+  (measured with the built driver; an earlier run that set the readers' level directly gave
+  8,670-22,104 on SQL Server and 3-8x elsewhere).
+- The writers that scan before they write (the membership test) still starve on SQL Server at
+  SERIALIZABLE beside ScalarDB: documented as a limit (design 7, README), and moved to todo 326,
+  to look at again once the predicate checks of another branch land.

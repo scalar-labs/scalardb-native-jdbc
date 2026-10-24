@@ -30,6 +30,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -82,6 +84,7 @@ class MaelstromIntegrationTest {
   // the least of each dependency between the driver's and ScalarDB's transactions a mixed
   // list-append run must have, of the 100 to 500 a 20-second run has
   private static final long PAIRS = 20;
+  private static final Pattern PROCESS = Pattern.compile(":process (\\d+)");
 
   enum Level {
     READ_COMMITTED(Connection.TRANSACTION_READ_COMMITTED, "read-committed", "read-committed"),
@@ -175,6 +178,7 @@ class MaelstromIntegrationTest {
             false,
             model,
             level == Level.SERIALIZABLE ? ANOMALY_SECONDS : 0,
+            0,
             0);
     assertThat(output).contains(VALID);
     if (w == Workload.LIST_APPEND && sides == Sides.MIXED) {
@@ -200,9 +204,119 @@ class MaelstromIntegrationTest {
             // a row left undecided blocks its key for recovery's 15 seconds: on SQL Server at
             // SNAPSHOT 20 seconds met each pair of sides about ten times
             ANOMALY_SECONDS,
-            Double.parseDouble(System.getProperty("nativejdbc.isolation.faults", "0.1")));
+            Double.parseDouble(System.getProperty("nativejdbc.isolation.faults", "0.1")),
+            0);
     assertThat(output).contains(VALID);
     assertPairsMeet(e, Workload.LIST_APPEND, level.name() + "-FAULTS" + (inline ? "-inline" : ""));
+  }
+
+  /** The engines whose SERIALIZABLE is the driver's locking re-reads (design 5), each layout. */
+  static Stream<Arguments> readOnlyRuns() {
+    List<Arguments> runs = new ArrayList<>();
+    for (Engines e : engines().toList()) {
+      if (e.engine() == Engine.MYSQL
+          || e.engine() == Engine.MARIADB
+          || e.engine() == Engine.SQLSERVER) {
+        for (Sides sides : Sides.values()) {
+          for (boolean inline : List.of(false, true)) {
+            runs.add(Arguments.of(e, sides, inline));
+          }
+        }
+      }
+    }
+    return runs.stream();
+  }
+
+  /**
+   * Todo 324's reader: the driver's transactions that only read run on a read-only connection,
+   * which at SERIALIZABLE reads as at SNAPSHOT, without the locking re-reads; every transaction, on
+   * either side, at SERIALIZABLE. The history stays serializable.
+   */
+  @ParameterizedTest(name = "{0} {1} inline={2}")
+  @MethodSource("readOnlyRuns")
+  void history_serializableWithReadOnlyReaders(Engines e, Sides sides, boolean inline)
+      throws Exception {
+    String name = "SERIALIZABLE-RO-" + sides + (inline ? "-inline" : "");
+    String output =
+        run(
+            e,
+            Workload.LIST_APPEND,
+            name,
+            Level.SERIALIZABLE,
+            scalarDbSettings(e, Level.SERIALIZABLE),
+            sides.drivers,
+            inline,
+            false,
+            Level.SERIALIZABLE.mixed,
+            ANOMALY_SECONDS,
+            0,
+            Level.SERIALIZABLE.jdbc);
+    assertThat(output).contains(VALID);
+    assertReadersRan(e, name);
+    if (sides == Sides.MIXED) {
+      assertPairsMeet(e, Workload.LIST_APPEND, name);
+    }
+  }
+
+  /**
+   * Its control: the same readers at READ COMMITTED, which returns an in-flight row's before image
+   * and takes a snapshot per statement, break it.
+   */
+  @ParameterizedTest(name = "{0} {1} inline={2}")
+  @MethodSource("readOnlyRuns")
+  void history_failsWithReadOnlyReadersAtReadCommitted(Engines e, Sides sides, boolean inline)
+      throws Exception {
+    assumeTrue(sides == Sides.MIXED && !inline, "one run per engine");
+    String name = "SERIALIZABLE-RO-READ_COMMITTED";
+    String output =
+        run(
+            e,
+            Workload.LIST_APPEND,
+            name,
+            Level.SERIALIZABLE,
+            scalarDbSettings(e, Level.SERIALIZABLE),
+            sides.drivers,
+            inline,
+            false,
+            Level.SERIALIZABLE.mixed,
+            // SQL Server commits about a third as many: 60 seconds showed no read skew there, 240
+            // did
+            e.engine() == Engine.SQLSERVER ? 4 * ANOMALY_SECONDS : ANOMALY_SECONDS,
+            0,
+            Level.READ_COMMITTED.jdbc);
+    assertThat(output).contains(INVALID);
+  }
+
+  /**
+   * The driver's committed transactions that only read and read more than one key, the ones a
+   * snapshot that is not serializable could show: at least {@link #PAIRS}.
+   */
+  private static void assertReadersRan(Engines e, String name) throws IOException {
+    Path store =
+        Path.of("build", "isolation", e.name(), Workload.LIST_APPEND.name(), name, "store");
+    long readers;
+    try (var files = Files.walk(store)) {
+      Path history =
+          files
+              .filter(f -> f.toString().endsWith("history.edn"))
+              .findFirst()
+              .orElseThrow(() -> new IOException("no history.edn under " + store));
+      readers =
+          Files.readAllLines(history, StandardCharsets.UTF_8).stream()
+              .filter(l -> l.contains(":type :ok") && l.contains(":f :txn"))
+              .filter(l -> !l.contains(":append"))
+              .filter(l -> l.split("\\[:r ", -1).length > 2)
+              .filter(
+                  l -> {
+                    Matcher m = PROCESS.matcher(l);
+                    return m.find() && Long.parseLong(m.group(1)) % 2 == 0;
+                  })
+              .count();
+    }
+    Files.writeString(store.resolveSibling("readers.txt"), readers + "\n", StandardCharsets.UTF_8);
+    assertThat(readers)
+        .as("%s %s: the driver's read-only transactions of two keys or more", e, name)
+        .isGreaterThanOrEqualTo(PAIRS);
   }
 
   /**
@@ -236,6 +350,7 @@ class MaelstromIntegrationTest {
             true,
             Level.READ_COMMITTED.mixed,
             ANOMALY_SECONDS,
+            0,
             0);
     assertThat(output).contains(INVALID);
   }
@@ -257,6 +372,7 @@ class MaelstromIntegrationTest {
             false,
             Level.SERIALIZABLE.mixed,
             ANOMALY_SECONDS,
+            0,
             0);
     assertThat(output).contains(INVALID);
   }
@@ -276,7 +392,8 @@ class MaelstromIntegrationTest {
       boolean vendor,
       String model,
       int minimumSeconds,
-      double faults)
+      double faults,
+      int readOnlyLevel)
       throws Exception {
     Path maelstrom = maelstrom();
     String table =
@@ -338,6 +455,9 @@ class MaelstromIntegrationTest {
     node.add("-Diso.drivers=" + drivers);
     node.add("-Diso.vendor=" + vendor);
     node.add("-Diso.faults=" + faults);
+    if (readOnlyLevel != 0) {
+      node.add("-Diso.readOnlyLevel=" + readOnlyLevel);
+    }
     for (String property : scalarDb.stringPropertyNames()) {
       node.add("-Diso.prop." + property + "=" + scalarDb.getProperty(property));
     }

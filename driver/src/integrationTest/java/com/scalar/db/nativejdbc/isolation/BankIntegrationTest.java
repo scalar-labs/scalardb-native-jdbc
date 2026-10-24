@@ -124,14 +124,50 @@ class BankIntegrationTest {
     if (mixed) {
       assertThat(run.scalarDbTransfers.get()).as(run.summary()).isPositive();
     }
-    // todo 324: on SQL Server at SERIALIZABLE, reads of the whole table almost never commit while
-    // ScalarDB writes it
+    // todo 326: on SQL Server at SERIALIZABLE, read-write reads of the whole table almost never
+    // commit while ScalarDB writes it (read-only ones do: totals_holdWithReadOnlyReaders)
     if (!(e.engine() == Engine.SQLSERVER && level == Level.SERIALIZABLE && mixed)) {
       assertThat(run.reads.get()).as(run.summary()).isPositive();
     }
     if (level != Level.READ_COMMITTED || !mixed) {
       assertThat(run.readViolations).as(run.summary()).isEmpty();
     }
+  }
+
+  /** The engines whose SERIALIZABLE is the driver's locking re-reads, each side and layout. */
+  static Stream<Arguments> readOnlyRuns() {
+    List<Arguments> runs = new ArrayList<>();
+    for (Engines e : engines().toList()) {
+      if (e.engine() == Engine.MYSQL
+          || e.engine() == Engine.MARIADB
+          || e.engine() == Engine.SQLSERVER) {
+        for (boolean mixed : List.of(true, false)) {
+          for (boolean inline : List.of(false, true)) {
+            runs.add(Arguments.of(e, mixed, inline));
+          }
+        }
+      }
+    }
+    return runs.stream();
+  }
+
+  /**
+   * Todo 324's reader: the readers on read-only connections, which at SERIALIZABLE read as at
+   * SNAPSHOT, without the locking re-reads; the writers, on both sides, at SERIALIZABLE. The totals
+   * hold, and the reads commit.
+   */
+  @ParameterizedTest(name = "{0} mixed={1} inline={2}")
+  @MethodSource("readOnlyRuns")
+  void totals_holdWithReadOnlyReaders(Engines e, boolean mixed, boolean inline) throws Exception {
+    String name = "SERIALIZABLE-RO" + (mixed ? "-MIXED" : "-DRIVER") + (inline ? "-inline" : "");
+    Level level = Level.SERIALIZABLE;
+    Run run =
+        new Run(e, name, level, MaelstromIntegrationTest.scalarDbSettings(e, level), mixed, false);
+    run.readOnlyReaders = true;
+    run.go(inline);
+    assertThat(run.finalViolations).as(run.summary()).isEmpty();
+    assertThat(run.reads.get()).as(run.summary()).isPositive();
+    assertThat(run.readViolations).as(run.summary()).isEmpty();
   }
 
   /** A vendor connection runs no protocol: the totals break. */
@@ -164,6 +200,8 @@ class BankIntegrationTest {
     final List<String> readViolations = Collections.synchronizedList(new ArrayList<>());
     final AtomicLong readViolationCount = new AtomicLong();
     List<String> finalViolations = List.of();
+    // the readers on read-only connections (todo 324)
+    boolean readOnlyReaders;
 
     Run(Engines e, String name, Level level, Properties scalarDb, boolean mixed, boolean vendor) {
       this.e = e;
@@ -389,8 +427,16 @@ class BankIntegrationTest {
       return true;
     }
 
-    private void reader(long end) throws SQLException {
+    private Connection readerConnection() throws SQLException {
       Connection c = connection();
+      if (readOnlyReaders) {
+        c.setReadOnly(true);
+      }
+      return c;
+    }
+
+    private void reader(long end) throws SQLException {
+      Connection c = readerConnection();
       try {
         while (System.nanoTime() < end) {
           try {
@@ -403,7 +449,7 @@ class BankIntegrationTest {
               c.rollback();
             } catch (SQLException closed) {
               c.close();
-              c = connection();
+              c = readerConnection();
             }
           }
         }
