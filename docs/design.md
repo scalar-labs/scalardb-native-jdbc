@@ -632,15 +632,12 @@ histogram assuming 10,000 rows in flight (at most half the table), with the tabl
 locked so that the nightly job does not replace it; one gathered while nothing is in flight cost up to
 1654x when a burst followed (todo 094). An inline table's statistics are the application's, so they
 are set there but not locked. Teardown unlocks the others and deletes the histogram on both. On
-SQL Server the metadata table's statistics are taken in full and kept with `NORECOMPUTE`: refreshed
-while ScalarDB writes, they estimate a few rows in flight, and the plans compiled then scan the
-in-flight index once per row of a read, through the ghost records its churn leaves (a join's read
-38 ms at four writers and 144-288 ms at sixteen on EC2, against 1.3 ms;
-`docs/benchmarks/inflight-check.md`); the plans a read compiles while rows are in flight seek the
-index by a hint instead (the split read below). An `UPDATE STATISTICS` without
-`NORECOMPUTE`, a maintenance job's, ends the keeping; running the setup again restores it, and
-should follow a large change in the table's size. Not on an inline table, the application's.
-Teardown returns them to automatic updates. Last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
+SQL Server the metadata table's statistics are left to the automatic updates: refreshed while
+ScalarDB writes, they estimate a few rows in flight, and a plan compiled then would scan the in-flight
+index once per row of a read, through the ghost records its churn leaves; the plans a read compiles
+while rows are in flight seek the index by a hint instead (the split read below). Keeping the
+statistics as the setup took them (`NORECOMPUTE`) did no better beside that hint, and twice in four
+runs left the in-flight check a plan 30-40x slower (`docs/benchmarks/inflight-check.md`). Last a grant of `SELECT` on the view to each application user given. Last a grant of `SELECT` on the view to each application user given. The backfill waits only for rows ScalarDB has in flight over a deemed-committed
 row, which carry `before_tx_id` NULL and `before_tx_version` 0, never for an in-flight insert.
 
 A table is set up when its index exists and is usable (an invalid index a failed concurrent build left
@@ -1147,8 +1144,8 @@ union as a derived table.
   and SQL Server the pieces read their metadata table through the in-flight index, by a hint. On
   Oracle the before-image columns are NULL but for the rows in flight, so their indexes look
   empty, and 19c drives a statement from the other table's data table, probing one 10,000 times.
-  On SQL Server the statements plan from the metadata tables' statistics the setup keeps (section
-  6's setup), taken with few rows in flight, and without the hint scan a metadata table. A forced
+  On SQL Server the statements, planned from statistics taken with few rows in flight, scan a
+  metadata table without the hint. A forced
   seek is not used: it fails where no index gives one (error 8622). The check runs once
   per execution, however many of the read's tables have a row in flight. The statements with D on
   one table and B on another read the data table by the join column from the other's rows in

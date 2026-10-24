@@ -346,14 +346,6 @@ public final class Setup {
                     ? "set fixed statistics on " + meta + ".tx_state"
                     : "set and locked fixed statistics on " + meta + ".tx_state");
       }
-      if (engine == Engine.SQLSERVER && t.layout() != Layout.INLINE) {
-        // kept as taken now, few rows in flight: refreshed while ScalarDB writes, they estimate
-        // some, and the plans then made scan the in-flight index once per row, its ghost records
-        // too (docs/benchmarks/inflight-check.md, 2026-10-23); an UPDATE STATISTICS without
-        // NORECOMPUTE ends it. Not on an inline table, the application's own
-        execute("UPDATE STATISTICS " + name(ns, meta) + " WITH FULLSCAN, NORECOMPUTE");
-        done(actions, "kept the statistics of " + meta + " with NORECOMPUTE");
-      }
       for (String g : grantees) {
         execute("GRANT SELECT ON " + name(ns, view) + " TO " + grantee(g));
         done(actions, "granted SELECT on " + view + " to " + g);
@@ -383,11 +375,6 @@ public final class Setup {
       } else if (found.hasIndex(ns, metadataTable(t), index)) {
         execute(dropIndex(t, index));
         done(actions, "dropped in-flight index " + index);
-      }
-      if (engine == Engine.SQLSERVER && t.layout() != Layout.INLINE) {
-        // without NORECOMPUTE the automatic updates resume
-        execute("UPDATE STATISTICS " + name(ns, metadataTable(t)));
-        done(actions, "returned the statistics of " + metadataTable(t) + " to automatic updates");
       }
       if (engine == Engine.ORACLE) {
         // the fixed histogram goes too: it would mislead the optimizer once nothing keeps it true

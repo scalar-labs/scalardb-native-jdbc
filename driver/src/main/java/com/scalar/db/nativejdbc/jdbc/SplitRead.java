@@ -350,9 +350,9 @@ final class SplitRead {
    * As {@link #inFlight(Engine, TableInfo, List)}; with {@code hinted} on Oracle and SQL Server,
    * the metadata table read through the in-flight index. Joined with another table's data table,
    * Oracle 19c costs probing the before image's index once per row of that table as free, the index
-   * holding next to nothing, and probes it 10,000 times; SQL Server plans from the statistics the
-   * setup keeps, taken with few rows in flight, and scans the metadata table (design 4.2, the
-   * in-flight pairs). A forced seek fails where no index gives one (error 8622).
+   * holding next to nothing, and probes it 10,000 times; SQL Server plans from statistics taken
+   * with few rows in flight and scans the metadata table (design 4.2, the in-flight pairs). A
+   * forced seek fails where no index gives one (error 8622).
    */
   static String inFlight(Engine engine, TableInfo t, List<String> read, boolean hinted) {
     List<String> cols = new ArrayList<>();
