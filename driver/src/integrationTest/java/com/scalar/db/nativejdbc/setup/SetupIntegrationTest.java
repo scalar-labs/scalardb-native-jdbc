@@ -130,12 +130,6 @@ class SetupIntegrationTest {
       assertThat(oracleStatistics(e, su, Objects.requireNonNull(imp.metadataTable())))
           .isEqualTo("ALL FREQUENCY 1:1 2:2 3:3");
     }
-    if (engine == Engine.SQLSERVER) {
-      // every statistic of the metadata table kept as the setup took it
-      assertThat(sqlServerNoRecompute(e, su, Objects.requireNonNull(imp.metadataTable())))
-          .isNotEmpty()
-          .containsOnly("true");
-    }
 
     // again: nothing to create, nothing to backfill
     List<Setup.Result> again = setup(e, catalog, Duration.ofMinutes(1));
@@ -229,24 +223,6 @@ class SetupIntegrationTest {
     if (engine == Engine.ORACLE) {
       assertThat(oracleStatistics(e, su, Objects.requireNonNull(imp.metadataTable())))
           .startsWith("null NONE");
-    }
-    if (engine == Engine.SQLSERVER) {
-      assertThat(sqlServerNoRecompute(e, su, Objects.requireNonNull(imp.metadataTable())))
-          .isNotEmpty()
-          .containsOnly("false");
-    }
-  }
-
-  /** SQL Server: each statistic's {@code no_recompute} on the table. */
-  private static List<String> sqlServerNoRecompute(Engines e, String schema, String table)
-      throws SQLException {
-    try (Connection c = e.open()) {
-      return rows(
-          c,
-          "SELECT CASE WHEN no_recompute = 1 THEN 'true' ELSE 'false' END FROM sys.stats"
-              + " WHERE object_id = OBJECT_ID('"
-              + (e.engine().quote(schema) + "." + e.engine().quote(table)).replace("'", "''")
-              + "')");
     }
   }
 

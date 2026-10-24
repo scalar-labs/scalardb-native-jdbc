@@ -186,6 +186,14 @@ class InFlightCheckBenchmark {
     }
     if (Boolean.getBoolean("nativejdbc.bench.writers")) {
       metaTables = List.of(SplitRead.meta(engine, o), SplitRead.meta(engine, cu));
+      if (AUTO_STATS && engine == Engine.SQLSERVER) {
+        // as the teardown: the statistics the setup kept with NORECOMPUTE back to automatic updates
+        try (Connection c = e.open()) {
+          for (String m : metaTables) {
+            e.execute(c, "UPDATE STATISTICS " + m);
+          }
+        }
+      }
       besideWriters(e, factory, ns, vo, vc);
       return;
     }
@@ -1475,6 +1483,16 @@ class InFlightCheckBenchmark {
    */
   private static final long STATS_EVERY_MS = Long.getLong("nativejdbc.bench.statsEveryMs", 0);
 
+  /**
+   * With {@code -Dnativejdbc.bench.autoStats=true}, on SQL Server, the metadata tables' statistics
+   * back to automatic updates before the writers: whether the setup still needs to keep them. With
+   * {@code alternate}, on the even runs of matrix.sh ({@code nativejdbc.bench.rep}) only.
+   */
+  private static final boolean AUTO_STATS =
+      "true".equals(System.getProperty("nativejdbc.bench.autoStats"))
+          || ("alternate".equals(System.getProperty("nativejdbc.bench.autoStats"))
+              && Integer.getInteger("nativejdbc.bench.rep", 1) % 2 == 0);
+
   /** The metadata tables of o and c, for {@link #STATS_EVERY_MS}. */
   private static List<String> metaTables = List.of();
 
@@ -1501,6 +1519,9 @@ class InFlightCheckBenchmark {
                     + (JOIN_READ
                         ? " writers updating random rows of o and c"
                         : " writers updating random rows of o")
+                    + (AUTO_STATS && e.engine() == Engine.SQLSERVER
+                        ? ", the metadata tables' statistics updated automatically"
+                        : "")
                     + "%n%n| writers | predicateChecks |"
                     + " committed/s | retries per commit | p50 ms | p99 ms | ScalarDB commits/s"
                     + " |%n|---|---|---|---|---|---|---|%n",

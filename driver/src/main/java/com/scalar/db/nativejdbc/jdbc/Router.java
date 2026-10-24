@@ -1289,7 +1289,8 @@ final class Router {
    * rows a row's absence changes, keeps the table-wide check. Not on MySQL, which plans the
    * statements under the row limit as a full scan. On Oracle and SQL Server the metadata tables are
    * read through the in-flight index: Oracle 19c otherwise drives a pair from the other table's
-   * data table, SQL Server plans from the statistics the setup keeps and scans. Null otherwise.
+   * data table, SQL Server, planning from statistics taken with few rows in flight, scans. Null
+   * otherwise.
    */
   private Writes.@Nullable Step pairs(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
