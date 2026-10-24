@@ -187,3 +187,41 @@ StockLevel's per-call planning (step 5).
   key the transaction read no longer fall back; an undone stamp is on no row.
 - Checked fine: the recorded state, counts, read-only connections, the bounded wait, the INSERT's
   own savepoint inside the text, parameter positions, `preferQueryMode=simple`.
+
+### 2026-10-25: step 3, measurements (nothing changed in the driver)
+
+TPC-C after step 2 and its review, same session: (a) 737/s, (c) 548/s, 0.74x (runs vary by about
+10% between sessions: (a) 617 to 752).
+
+Where a transaction's extra time goes, per committed transaction (`pg_stat_database`):
+
+| | (a) | (c) | difference |
+|---|---|---|---|
+| server active | 0.79 ms | 1.39 ms | +0.60 ms |
+| idle in transaction (round trips, client) | 4.12 ms | 4.66 ms | +0.54 ms |
+
+- Server side: execution of the rewritten statements, and 0.1 ms of planning: the batch texts'
+  warm-up (the fused stock update, 13 µs of planning per call on average) and StockLevel's join,
+  622 µs of planning per call. Largest by cost per transaction: the fused stock update +218 µs,
+  the fused order_line insert +68 µs, Delivery's order_line update +55 µs, the stock lock's
+  in-flight check +40 µs, StockLevel +28 µs.
+- Client side: JFR puts the driver's CPU at about 0.17 ms per transaction (reflection in
+  `Proxies`, `HashMap`, pgjdbc's `CompositeQuery` work per execute of a multi-statement text,
+  `SecureRandom` behind `UUID.randomUUID` per write); the batch's RELEASE about 0.1 ms.
+- WAL is 4x per transaction (26 KB against 6.6 KB) but costs no time: about one sync per commit
+  either way.
+
+Write execution, pgbench, prepared, 4 clients:
+- Delivery's 10-row order_line update: the stamp costs 112 µs of the fused statement's extra 190;
+  `tx_prepared_at` and `tx_committed_at` cost nothing; the after-image CTE 23 µs.
+- fillfactor 80 on the metadata tables: the stamp becomes HOT (14% to 85–100% in TPC-C) and costs
+  47 µs instead of 112 in pgbench, but TPC-C does not move (511/s against 530/s, within the noise)
+  nor does any statement's mean time. Not pursued.
+- The stock update, one row by its full key: plain 23.6 µs, fused 63.1 µs; without the after-image
+  CTE and with the keys read by one join of the data and metadata tables, 56.8 µs. The rest is the
+  metadata row written and the executor's work for a plan of several data-modifying CTEs.
+
+Conclusion: within the protocol, a write costs at least one more row written per key, about the
+plain write again; for TPC-C on this laptop that floor and the driver's CPU are each a few percent of
+a transaction. The rest, roughly: planning 0.1 ms, client CPU 0.17 ms, the RELEASE 0.1 ms, the
+keys and after-image CTEs about 0.03 ms.
