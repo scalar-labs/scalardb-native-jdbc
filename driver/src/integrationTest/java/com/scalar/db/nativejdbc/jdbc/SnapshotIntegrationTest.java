@@ -665,6 +665,33 @@ class SnapshotIntegrationTest {
               .isEqualTo("40001");
           d.rollback();
         }
+        if (pg) {
+          // reads record no versions here (todo 329): a write's own read of its keys, in the same
+          // snapshot, and PostgreSQL's conflict on the row stand in for them
+          rows(d, "SELECT x FROM " + SN + ".t WHERE id = 4");
+          scalarDbSet(tm, 4, "d");
+          assertConflict(d, "DELETE FROM " + SN + ".t WHERE id = 4", at + ": a delete");
+          assertThat(rows(d, "SELECT x FROM " + SN + ".t WHERE id = 4")).containsExactly("d");
+          scalarDbSet(tm, 4, "p");
+          assertConflict(
+              d, "UPDATE " + SN + ".t SET v = 1 WHERE x = 'd'", at + ": an update by predicate");
+          // a ScalarDB prepare rolled back after the snapshot: the row's version is the one read,
+          // but its tuple moved
+          rows(d, "SELECT x FROM " + SN + ".t WHERE id = 4");
+          prepared(tpc, "t", 4, "r").rollback();
+          assertConflict(
+              d,
+              "UPDATE " + SN + ".t SET v = 1 WHERE id = 4",
+              at + ": after a rolled-back prepare");
+          // a row locked, which carries no version now, then written in the same transaction
+          assertThat(rows(d, "SELECT x FROM " + SN + ".t WHERE id = 5 FOR UPDATE")).hasSize(1);
+          try (Statement st = d.createStatement()) {
+            assertThat(st.executeUpdate("UPDATE " + SN + ".t SET v = 1 WHERE id = 5"))
+                .as("%s: a write of a row the transaction locked", at)
+                .isEqualTo(1);
+          }
+          d.rollback();
+        }
       }
 
       if (mysqlLike) {
@@ -1260,6 +1287,18 @@ class SnapshotIntegrationTest {
             })
         .as(what)
         .isInstanceOf(SQLTransactionRollbackException.class);
+  }
+
+  /** {@code sql} fails with PostgreSQL's serialization failure; the transaction rolled back. */
+  private static void assertConflict(Connection d, String sql, String what) throws SQLException {
+    try (Statement st = d.createStatement()) {
+      assertThatThrownBy(() -> st.executeUpdate(sql))
+          .as(what)
+          .isInstanceOf(SQLException.class)
+          .extracting(ex -> ((SQLException) ex).getSQLState())
+          .isEqualTo("40001");
+    }
+    d.rollback();
   }
 
   private static TwoPhaseCommitTransaction prepared(

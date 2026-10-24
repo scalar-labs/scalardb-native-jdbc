@@ -1522,11 +1522,12 @@ final class Router {
               chosen,
               true);
       if (!anchorable.isEmpty()) {
-        // without versions the text is the same in and out of a transaction
+        // the mode is kept without versions too: it is what lets the statement be prepared again
+        // for another level, whose text may read them (Proxies.preparedWith)
         r =
             r.anchored(
                 anchored.isEmpty() ? null : new Anchored(anchorTables, keys, states, versioned),
-                versioned ? anchoring : null);
+                anchoring);
       }
       if (snapshot) {
         // with states, run only for a scrollable result, whose moves pass over rows unchecked

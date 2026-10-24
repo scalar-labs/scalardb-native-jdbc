@@ -195,6 +195,28 @@ class RoutingIntegrationTest {
       c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
       assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
     }
+    // prepared at a snapshot level, where its rows carry their states alone (todo 329), then run
+    // at READ COMMITTED, where they carry their versions, in and out of a transaction
+    try (Connection c = connect()) {
+      c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      try (PreparedStatement ps = c.prepareStatement("SELECT x FROM m1.s")) {
+        assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
+        c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
+        c.setAutoCommit(false);
+        assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
+        c.rollback();
+      }
+      c.setAutoCommit(false);
+      c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      try (PreparedStatement ps = c.prepareStatement("SELECT x FROM m1.s")) {
+        assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
+        c.rollback();
+        c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        assertThat(outcome(ps::executeQuery)).isEqualTo("read scalardb");
+        c.rollback();
+      }
+    }
   }
 
   @Test

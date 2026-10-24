@@ -129,3 +129,15 @@ BenchBase run (c), against the run (a) of the same session (YCSB 3,910/s, TPC-C 
 p50 against (a) after step 1: Read +9%, Scan +14%, Update +14%, Insert +10%, read-modify-write
 +15%; TPC-C unchanged, its gap round trips (batches, step 2) and writes (step 3). Per statement in
 TPC-C: item read 17 to 10 µs, the stock lock 20 to 7 µs.
+
+### 2026-10-24: review of step 1
+
+- No lost update: only `KeyedPlan` consults `anchors.unchanged`, and at PostgreSQL's REPEATABLE
+  READ the anchor it compared always equalled its own keys step's version; the SKIP LOCKED read
+  keeps its versions; the other engines are unchanged.
+- Fixed: a read without versions dropped its anchoring mode, so a statement prepared at REPEATABLE
+  READ and run at READ COMMITTED was refused instead of prepared again (`Proxies.preparedWith`).
+  `RoutingIntegrationTest` covers it, in autocommit and in a transaction; it fails without the fix.
+- Added to `SnapshotIntegrationTest` on PostgreSQL: after a read, a ScalarDB commit or a prepare
+  then rollback of the row aborts a DELETE, an UPDATE by key and one by predicate; a lock then an
+  update succeeds.
