@@ -232,18 +232,26 @@ BenchBase (CMU) is JDBC-based and speaks all five engines. Its configuration tak
 - **Loading.** BenchBase creates and loads its tables. They are then imported into ScalarDB and Setup
   runs, before `--execute`.
 - **Targets.** Against run (a), throughput and p95 latency within **10% for simple statements**
-  (YCSB, and TPC-C's transactions) and **20% for complex ones** (TPC-H), for runs (b), (c) and (d).
+  (YCSB, and TPC-C's transactions) and **20% for complex ones** (TPC-H), for runs (b) and (c).
   TPC-C is measured per transaction type and TPC-H per query, not as a geometric mean, which would
-  hide one query at 10x. Run (e) is reported without a target: with rows in flight, waiting and
-  `40001` are what design section 6 prescribes. These targets are well below what the
+  hide one query at 10x. These targets are well below what the
   per-statement benchmark measured locally (`read-overhead.md`: one-table shapes 1.0-1.7x, joins of
   two tables 0.4-2.6x). A workload adds network and commit time to every statement, so its overhead
   is lower, but a miss is likely, and then T6 becomes optimisation work, one todo per shape.
 - **Runs, per workload and engine.** (a) the vendor URL; (b) the driver with every table plain, which
-  is the cost of routing; (c) the driver with every table on ScalarDB; (d) half the tables on
-  ScalarDB; (e) (c) with ScalarDB's own load on the same tables, so rows are in flight. For each run:
-  throughput, p50/p95/p99 latency, abort rate. In (e) also ScalarDB's own throughput against a run
-  without the driver: the driver's locks must not starve ScalarDB.
+  is the cost of routing; (c) the driver with every table on ScalarDB, which is the cost of the
+  rewrite. For each run: throughput, p50/p95/p99 latency, abort rate. No ScalarDB transactions run in
+  T6: what it measures is the rewrite. The driver's own transactions still leave rows in flight for
+  each other, which TPC-C's contention shows in (c). Decided 2026-10-24: half the tables on ScalarDB,
+  and (c) with ScalarDB's own load on the same tables, are left out. How driver and ScalarDB traffic
+  share rows is in `inflight-check.md` and T5.
+- **Isolation.** BenchBase's `<isolation>`, which it passes to `setTransactionIsolation`. Run (a) takes
+  the vendor's matching level, not the same constant: for SNAPSHOT (`TRANSACTION_REPEATABLE_READ`
+  through the driver) Oracle's `TRANSACTION_SERIALIZABLE` and SQL Server's `TRANSACTION_SNAPSHOT`.
+  Oracle refuses SERIALIZABLE through the driver, BenchBase's default for TPC-C. SNAPSHOT on every
+  engine and workload; TPC-C also at SERIALIZABLE on PostgreSQL, MySQL and MariaDB; YCSB once at READ
+  COMMITTED. Without ScalarDB transactions the ScalarDB settings of the README's table do not apply,
+  but for PostgreSQL's `scalar.db.jdbc.isolation_level=SERIALIZABLE` at import.
 - **Where.** Local containers for smoke runs only; SQL Server runs under x86 emulation there. The
   numbers come from a cloud environment (see "Cost" and `benchmark-environment.md`), one database
   per engine, and go to `docs/benchmarks/` with their configuration, as `read-overhead.md` does.
@@ -257,9 +265,9 @@ memory of AWS on-demand prices, to be replaced by a quote at current prices befo
 
 | Item | Assumption | Estimate |
 |---|---|---|
-| PostgreSQL, MySQL, MariaDB, SQL Server | per engine a database VM (8 vCPU, 32 GB, gp3 SSD) and a client VM (8 vCPU) for BenchBase and ScalarDB's load, self-managed; SQL Server Developer edition | about $0.75 per hour per engine |
+| PostgreSQL, MySQL, MariaDB, SQL Server | per engine a database VM (8 vCPU, 32 GB, gp3 SSD) and a client VM (8 vCPU) for BenchBase, self-managed; SQL Server Developer edition | about $0.75 per hour per engine |
 | Oracle | RDS for Oracle, Standard Edition 2, licence included, plus a client VM; Oracle Free's limits (2 CPUs, 2 GB) make its numbers meaningless | about $1.5-2.5 per hour |
-| Hours | T6: loading, five runs of three workloads, three repetitions, setup and failed runs, about 40 hours per engine; T5's long runs, about 24 hours per engine on the same VMs | about 64 hours per engine |
+| Hours | T6: loading, three runs of three workloads, three repetitions, setup and failed runs, about 25 hours per engine (40 with the five runs first planned); T5's long runs, about 24 hours per engine on the same VMs | about 49 hours per engine |
 | Total | the five engines, storage and transfer, once | about $400-800 |
 
 VMs are stopped between runs. A second round after optimisation work costs about the same again.
@@ -271,6 +279,7 @@ VMs are stopped between runs. A second round after optimisation work costs about
 3. **A cloud environment** for T5's long runs and T6, budget not fixed, the cost agreed in advance
    ("Cost").
 4. **Engine order:** PostgreSQL, Oracle, MySQL, MariaDB, SQL Server.
+5. **T6 measures the rewrite only** (2026-10-24): runs (a), (b) and (c), no ScalarDB transactions.
 
 Open: which cloud and account.
 
