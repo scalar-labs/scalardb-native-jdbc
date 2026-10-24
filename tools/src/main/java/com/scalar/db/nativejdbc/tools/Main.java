@@ -28,6 +28,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import org.jspecify.annotations.Nullable;
 import picocli.CommandLine;
@@ -51,7 +52,8 @@ import picocli.CommandLine.Parameters;
           + " prompts.",
       "After setting up a newly added table, setup waits out the applications' catalog TTL"
           + " (--catalog-ttl, 60 s) so that their drivers know the table, then says ScalarDB"
-          + " transactions may write it; --no-wait prints from when instead."
+          + " transactions may write it; --no-wait and --json give from when instead. If setup is"
+          + " interrupted while it runs, wait out the TTL before ScalarDB writes the tables."
     },
     exitCodeListHeading = "Exit codes:%n",
     exitCodeList = {
@@ -127,7 +129,8 @@ public final class Main implements Callable<Integer> {
       paramLabel = "SECONDS",
       description =
           "setup: how long the applications' drivers trust ScalarDB's catalog, their"
-              + " scalardbnative.catalogTtlMs, to wait out after a new table (default: 60)")
+              + " scalardbnative.catalogTtlMs in seconds, rounded up, to wait out after a new table;"
+              + " 0 to 3600 (default: 60)")
   private long catalogTtl = Catalog.DEFAULT_TTL.toSeconds();
 
   @Option(
@@ -165,7 +168,8 @@ public final class Main implements Callable<Integer> {
   private @Nullable Instant writableAt;
 
   private static final DateTimeFormatter TIME =
-      DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT).withZone(ZoneId.systemDefault());
+      DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z", Locale.ROOT)
+          .withZone(ZoneId.systemDefault());
 
   private Main(PrintWriter out, PrintWriter err) {
     this.out = out;
@@ -198,10 +202,25 @@ public final class Main implements Callable<Integer> {
   }
 
   @Override
+  public Integer call() throws SQLException {
+    if (catalogTtl < 0 || catalogTtl > Catalog.MAX_TTL.toSeconds()) {
+      throw new IllegalArgumentException(
+          "--catalog-ttl is between 0 and "
+              + Catalog.MAX_TTL.toSeconds()
+              + " seconds, as the driver's catalogTtlMs is");
+    }
+    int exit = connectAndRun();
+    // after the connections closed: the wait holds none (todo 298)
+    if (action == Action.setup && !json) {
+      waitForDrivers();
+    }
+    return exit;
+  }
+
   @SuppressFBWarnings(
       value = "HARD_CODE_PASSWORD",
       justification = "the password comes from the environment or the caller, never the code")
-  public Integer call() throws SQLException {
+  private int connectAndRun() throws SQLException {
     NativeJdbcUrl parsed = parse(Objects.requireNonNull(url, "URL"));
     Engine engine = parsed.engine();
     String schema =
@@ -265,9 +284,6 @@ public final class Main implements Callable<Integer> {
         err.println("no ScalarDB table " + String.join(", ", unmatched));
         return EXIT_ERROR;
       }
-      if (action == Action.setup && exit == EXIT_OK && !json) {
-        waitForDrivers();
-      }
       return exit;
     }
   }
@@ -282,8 +298,9 @@ public final class Main implements Callable<Integer> {
     boolean failed = false;
     if (action == Action.setup && !dryRun) {
       for (Setup.Result r : results) {
-        if (r.succeeded()
-            && r.actions().stream().anyMatch(a -> a.startsWith("created read view"))) {
+        // a failure after the view still leaves a table new to the drivers, which a rerun no
+        // longer sees as new
+        if (r.createdReadView()) {
           newTables.add(r.table());
         }
       }
@@ -369,15 +386,26 @@ public final class Main implements Callable<Integer> {
             + " seconds for running applications' drivers to learn about "
             + (newTables.size() == 1 ? "it" : "them")
             + " (their catalog TTL)...");
-    // an interrupted wait still says from when, Ctrl-C included
-    Thread hook = new Thread(() -> out.println(from));
+    // an interrupted wait still says from when, Ctrl-C included; one of the two lines, never both
+    AtomicBoolean said = new AtomicBoolean();
+    Thread hook =
+        new Thread(
+            () -> {
+              if (!said.getAndSet(true)) {
+                out.println(from);
+              }
+            });
     Runtime.getRuntime().addShutdownHook(hook);
     try {
       Thread.sleep(Math.max(0, Duration.between(Instant.now(), at).toMillis()));
-      out.println("Done: ScalarDB transactions may write " + names + " now.");
+      if (!said.getAndSet(true)) {
+        out.println("Done: ScalarDB transactions may write " + names + " now.");
+      }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-      out.println(from);
+      if (!said.getAndSet(true)) {
+        out.println(from);
+      }
     } finally {
       try {
         Runtime.getRuntime().removeShutdownHook(hook);

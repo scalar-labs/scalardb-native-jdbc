@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc;
 
+import com.scalar.db.nativejdbc.catalog.Catalog;
 import java.sql.DriverPropertyInfo;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -31,7 +32,7 @@ final class DriverProperties {
       Set.of(METADATA_SCHEMA, CATALOG_TTL_MS, ALLOW_NO_CATALOG, INFLIGHT_WAIT_MS, PREDICATE_CHECKS);
 
   /** A table registered with ScalarDB is protected after at most this long, whatever is set. */
-  static final Duration MAX_CATALOG_TTL = Duration.ofHours(1);
+  static final Duration MAX_CATALOG_TTL = Catalog.MAX_TTL;
 
   /** What the metadata schema may look like: a plain SQL identifier, as the catalog requires. */
   private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");

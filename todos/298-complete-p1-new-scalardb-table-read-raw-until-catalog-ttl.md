@@ -55,3 +55,12 @@ written outside the tool (small).
   transactions may write ... now."; `--no-wait`, Ctrl-C and `--json` (`newTables`, `writableAt`) give
   the time instead. `ToolsIntegrationTest` covers the wait, a rerun without one, `--no-wait` and
   `--json` on every engine. README's rule and design 3 and 4.4 follow.
+- 2026-10-24: review of f16d817 (10 findings), fixed: a table whose read view the run created is new
+  even when a later step, another table or an unknown `--table` fails, and the run still waits
+  (a rerun only sees "replaced"); `Setup.Result.createdReadView()` replaces matching the action's
+  text; `--catalog-ttl` is checked against the driver's bounds (`Catalog.MAX_TTL`, 0 to 3600 s);
+  the wait runs after the connections close; one of "Done" and "from" is printed, never both, Ctrl-C
+  at the end included; the time carries its date and zone; README says seconds, rounded up, and help
+  says `--json` does not wait either. Left: Ctrl-C during the setup's own DDL, before it knows the
+  new tables, says nothing; help and README tell the operator to wait out the TTL then. Not tested
+  by hand: the Ctrl-C path.

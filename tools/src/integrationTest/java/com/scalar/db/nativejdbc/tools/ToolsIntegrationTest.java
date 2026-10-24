@@ -130,8 +130,8 @@ class ToolsIntegrationTest {
     assertThat(noWait.out)
         .contains("New ScalarDB table: tl.t.")
         .containsPattern(
-            "ScalarDB transactions may write tl\\.t from \\d\\d:\\d\\d:\\d\\d, or after every"
-                + " application using the driver on this database has restarted\\.")
+            "ScalarDB transactions may write tl\\.t from \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d \\S+,"
+                + " or after every application using the driver on this database has restarted\\.")
         .doesNotContain("Waiting");
     assertThat(tool(e, "teardown", "--table", "tl.t").exit).isZero();
     Run json = tool(e, "setup", "--table", "tl.t", "--json");
@@ -140,6 +140,19 @@ class ToolsIntegrationTest {
         .containsPattern("\"newTables\":\\[\"tl\\.t\"\\],\"writableAt\":\"\\d{4}-[^\"]+Z\"")
         .doesNotContain("Waiting");
     assertThat(tool(e, "teardown", "--table", "tl.t").exit).isZero();
+
+    // a run that fails still waits for the table it set up first: a rerun no longer sees it new
+    Run partly = tool(e, "setup", "--table", "tl.t", "--table", "tl.nope", "--catalog-ttl", "1");
+    assertThat(partly.exit).as(partly.all()).isEqualTo(Main.EXIT_ERROR);
+    assertThat(partly.out)
+        .contains("New ScalarDB table: tl.t.", "Done: ScalarDB transactions may write tl.t now.");
+    assertThat(tool(e, "teardown", "--table", "tl.t").exit).isZero();
+
+    // a TTL the driver would refuse
+    Run badTtl = tool(e, "setup", "--table", "tl.t", "--catalog-ttl", "-1");
+    assertThat(badTtl.exit).as(badTtl.all()).isEqualTo(Main.EXIT_ERROR);
+    assertThat(badTtl.err).contains("--catalog-ttl is between 0 and 3600");
+    assertThat(tool(e, "check", "--table", "tl.t").out).contains("tl.t: not set up");
   }
 
   private static String[] concat(String[] a, String... b) {

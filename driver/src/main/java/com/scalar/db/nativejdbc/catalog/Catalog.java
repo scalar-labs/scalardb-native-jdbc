@@ -83,6 +83,9 @@ public final class Catalog implements AutoCloseable {
   /** How long a loaded catalog and the names resolved against it are trusted. */
   public static final Duration DEFAULT_TTL = Duration.ofSeconds(60);
 
+  /** The longest TTL a driver accepts ({@code scalardbnative.catalogTtlMs}). */
+  public static final Duration MAX_TTL = Duration.ofHours(1);
+
   private static final Logger LOG = LoggerFactory.getLogger(Catalog.class);
 
   private static final int RESOLUTION_CACHE_SIZE = 4096;

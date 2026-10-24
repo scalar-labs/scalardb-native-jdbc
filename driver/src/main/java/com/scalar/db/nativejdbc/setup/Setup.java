@@ -56,12 +56,30 @@ public final class Setup {
     private final List<String> actions;
     private final long rowsStamped;
     private final @Nullable SQLException error;
+    private final boolean createdReadView;
 
-    Result(String table, List<String> actions, long rowsStamped, @Nullable SQLException error) {
+    Result(
+        String table,
+        List<String> actions,
+        long rowsStamped,
+        @Nullable SQLException error,
+        boolean createdReadView) {
       this.table = table;
       this.actions = List.copyOf(actions);
       this.rowsStamped = rowsStamped;
       this.error = error;
+      this.createdReadView = createdReadView;
+    }
+
+    /**
+     * Returns whether this run created the table's read view, where none was: the table is set up
+     * for the first time, even when a later step failed, and running drivers learn of it only after
+     * their catalog TTL (todo 298).
+     *
+     * @return whether the read view was created
+     */
+    public boolean createdReadView() {
+      return createdReadView;
     }
 
     /**
@@ -301,6 +319,7 @@ public final class Setup {
     List<String> actions = planned != null ? planned : new ArrayList<>();
     actions.clear();
     long stamped = 0;
+    boolean created = false;
     try {
       String ns = t.namespace();
       String view = t.readView(engine);
@@ -341,6 +360,7 @@ public final class Setup {
         execute("DROP VIEW " + name(ns, view)); // CREATE OR REPLACE cannot reorder columns
       }
       execute(viewDdl(t, view));
+      created = planned == null && !found.hasView(ns, view);
       done(actions, (found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);
       if (gatherHistogram(t)) {
         done(
@@ -355,9 +375,9 @@ public final class Setup {
         execute("GRANT SELECT ON " + name(ns, view) + " TO " + grantee(g));
         done(actions, "granted SELECT on " + view + " to " + g);
       }
-      return new Result(name, actions, stamped, null);
+      return new Result(name, actions, stamped, null, created);
     } catch (SQLException e) {
-      return new Result(name, actions, stamped, e);
+      return new Result(name, actions, stamped, e, created);
     }
   }
 
@@ -401,9 +421,9 @@ public final class Setup {
                 + meta
                 + ".tx_state");
       }
-      return new Result(name, actions, 0, null);
+      return new Result(name, actions, 0, null, false);
     } catch (SQLException e) {
-      return new Result(name, actions, 0, e);
+      return new Result(name, actions, 0, e, false);
     }
   }
 

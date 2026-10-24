@@ -87,8 +87,10 @@ driver. So, in this order:
 1. import or create the table in ScalarDB;
 2. run `scalardb-native-tools setup`. For a new table it waits out the catalog TTL, then prints
    `Done: ScalarDB transactions may write ... now.`; give `--catalog-ttl` the longest
-   `catalogTtlMs` your applications set. With `--no-wait`, or `--json`, it returns at once and gives
-   the time instead (`writableAt` in JSON);
+   `catalogTtlMs` your applications set, in seconds, rounded up. With `--no-wait`, or `--json`, it
+   returns at once and gives the time instead (`writableAt` in JSON). It waits after a run that
+   failed too, for the tables it did set up; if it is interrupted while it runs, wait out the TTL
+   yourself;
 3. only then let ScalarDB transactions write the table, or once every application instance that uses
    the driver on that database has restarted.
 
