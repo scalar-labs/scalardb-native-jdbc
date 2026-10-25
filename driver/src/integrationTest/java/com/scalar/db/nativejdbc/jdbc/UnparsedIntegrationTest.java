@@ -112,6 +112,12 @@ class UnparsedIntegrationTest {
     try (Connection d = e.openDriver();
         Statement st = d.createStatement()) {
       assertThat(st.executeUpdate("INSERT INTO up.s (id, x) VALUES (1, 1)")).isEqualTo(1);
+      if (e.engine() == Engine.SQLSERVER) {
+        // T-SQL needs no ; between statements: nothing unparsed is sent there
+        assertRefused(() -> st.executeQuery(read(e, "upp.p")), "0AN01", "without a ;");
+        assertRefused(() -> st.executeUpdate(write(e, "upp.p", 10)), "0AN01", "without a ;");
+        return;
+      }
       // in autocommit
       assertThat(count(st, read(e, "upp.p"))).isEqualTo(2);
       // in a transaction, with a write of a ScalarDB table: rolled back, then committed, together
@@ -130,6 +136,13 @@ class UnparsedIntegrationTest {
       // its words name a ScalarDB table
       assertRefused(() -> st.executeQuery(read(e, "up.s")), "0AN01", "which ScalarDB manages");
       assertRefused(() -> st.executeUpdate(write(e, "up.s", 10)), "0AN01", "ScalarDB manages");
+      // nor its namespace, nor the setup's read view of it
+      assertRefused(
+          () -> st.execute(read(e, "upp.p") + " -- " + N("up")), "0AN01", "ScalarDB manages");
+      assertRefused(
+          () -> st.execute(read(e, "upp.p") + " -- " + e.engine().readViewName(N("s"))),
+          "0AN01",
+          "ScalarDB manages");
       // transaction control the parser cannot read is not sent
       if (e.engine() == Engine.POSTGRESQL) {
         assertRefused(() -> st.execute("COMMIT AND CHAIN"), "0AN01", "only a query, DML or DDL");

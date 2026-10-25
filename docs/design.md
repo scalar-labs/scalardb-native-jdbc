@@ -742,7 +742,7 @@ runs a second lookup on the before image index; for other columns it uses the OR
 | Statement | Route |
 |---|---|
 | Touches plain tables only | pass through unchanged |
-| A statement the parser cannot read | sent as written when its words name no ScalarDB table and it is a query, DML or DDL; otherwise **refuse** (`0AN01`). See 4.7, "Unparsed vendor syntax" (todo 314) |
+| A statement the parser cannot read | sent as written when its words name no ScalarDB table and it is a query, DML or DDL of a table, index, view, schema, sequence or domain, except on SQL Server; otherwise **refuse** (`0AN01`). See 4.7, "Unparsed vendor syntax" (todo 314) |
 | SELECT over plain and/or ScalarDB tables | each ScalarDB table name replaced by the level's read surface (4.2); one native statement, except the coarse-check path of 4.2, which sends the check first, and the SERIALIZABLE locking re-read of 4.2 on MySQL, MariaDB and SQL Server |
 | INSERT / UPDATE / DELETE on exactly one ScalarDB table | 4.3 |
 | DML on several tables, INSERT ... SELECT, MERGE, DML mixing plain and ScalarDB tables, UPDATE of a key column, anything the parser cannot interpret on a ScalarDB table | **refuse** with a clear error; never guess. 4.7 lists the vendor syntax the parser does not interpret and the hints refused on a ScalarDB table |
@@ -1566,22 +1566,31 @@ When the parser cannot tell (it fails, or the driver cannot find every table ref
 the statement's words answer instead (todo 314), and it is **sent as written**, in a transaction too,
 when all of these hold, erring toward refusing:
 
+- **Not on SQL Server**, where T-SQL needs no `;` between statements: a second one, `EXEC` of SQL
+  built from strings or `COMMIT` among them, could follow the first unseen. There every unparsed
+  statement stays refused.
+
 - **None of the names a passthrough statement must not contain** (4.1's table, "Any statement in
   passthrough mode"), found in the text's words in any case, comments and literals included; on Oracle
   also each synonym a parsed statement could not use: one of a ScalarDB table or one of its tables, of
   another synonym, of what is not a table or view, or over a database link, read once per load of the
-  catalog. A plain table of the same name in another schema is refused too.
+  catalog; and what DDL could reach a ScalarDB table by: its namespace, and the setup's read view
+  and in-flight index (section 3). A plain table of the same name in another schema is refused too.
 - **A query, DML or DDL by its first word**: `SELECT`, `WITH`, `VALUES`, `TABLE`, `INSERT`, `UPDATE`,
   `DELETE`, `MERGE`, `CREATE`, `ALTER`, `DROP`, `COMMENT`; `REPLACE` on MySQL and MariaDB;
-  PostgreSQL's cursor statements `DECLARE`, `FETCH`, `MOVE` and `CLOSE`. Transaction and session
-  control (`END`, `COMMIT AND CHAIN`, `RELEASE SAVEPOINT`, `SET TRANSACTION`, `USE`) would change what
-  the driver tracks; procedural code (`DO`, `CALL`, `EXECUTE`, a T-SQL or PL/SQL block) and a `CREATE`
-  or `ALTER` of a function, procedure, trigger, rule, package or event reach tables without naming
-  them, and `ALTER SESSION` and `ALTER SYSTEM` change the session.
+  PostgreSQL's cursor statements `DECLARE`, `FETCH`, `MOVE` and `CLOSE`, the first word read past
+  comments as the engine reads them (PostgreSQL nests `/* */`). Transaction and session control
+  (`END`, `COMMIT AND CHAIN`, `RELEASE SAVEPOINT`, `SET TRANSACTION`, `USE`) would change what the
+  driver tracks, and procedural code (`DO`, `CALL`, `EXECUTE`, a PL/SQL block) reaches tables without
+  naming them. A `CREATE`, `ALTER` or `DROP` only of a table, index, view, schema, sequence or
+  domain, the kind read past `OR REPLACE`, `TEMPORARY`, `UNIQUE` and the like; anything else (a
+  function, trigger, rule, extension, role, `ALTER SESSION`, `DROP OWNED`, `DROP DATABASE`) is
+  refused, and so is one whose words name a function, trigger, rule or the session.
 - **One statement**: no `;` but at its end, in a literal too.
 - **No name spelled other than by its letters**: no PostgreSQL Unicode escape (`U&`), no invisible
   formatting character, no comment MySQL and MariaDB run (`/*! ... */`); and no function that runs SQL
-  given as text, as a parsed statement may not call ("Errors"), nor PostgreSQL's `set_config`.
+  given as text, as a parsed statement may not call ("Errors"), nor PostgreSQL's `set_config`, nor
+  the word `EXECUTE` (`CREATE TABLE ... AS EXECUTE` runs a prepared statement).
 - **Not where every read is locked**: at SERIALIZABLE on MySQL, MariaDB and SQL Server the driver
   locks every table a statement reads (4.2), which needs the parsed statement; there it is refused, and
   in a read-only transaction there with `25006`, as passthrough (todo 324).
@@ -1989,7 +1998,7 @@ between `T` and plain tables are the database's own.
   Oracle; table and schema names beyond ASCII are folded by Oracle itself.
 - **Unparsed vendor syntax is refused on ScalarDB tables**, and on plain tables where its words cannot
   show it is safe to send (4.7): one that names a ScalarDB table, transaction or session control,
-  procedural code, several statements, and any at SERIALIZABLE on MySQL, MariaDB and SQL Server. The
+  procedural code, several statements, any on SQL Server, and any at SERIALIZABLE on MySQL and MariaDB. The
   parser's coverage of an engine's syntax is part of that engine's certification.
 
 ---

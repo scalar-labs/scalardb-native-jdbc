@@ -609,7 +609,14 @@ final class Router {
               + "; at SERIALIZABLE on MySQL, MariaDB and SQL Server the driver locks every read,"
               + " which it cannot do in a statement it cannot parse");
     }
-    String why = SqlWords.whyNotAsWritten(sql, engine, protectedNames());
+    // and what DDL could reach a ScalarDB table by: its namespace, and the setup's view and index
+    List<String> names = protectedNames();
+    for (TableInfo t : catalog.scalarDbTables()) {
+      names.add(t.namespace());
+      names.add(engine.readViewName(t.table()));
+      names.add(engine.inflightIndexName(t.table()));
+    }
+    String why = SqlWords.whyNotAsWritten(sql, engine, names);
     if (why != null) {
       throw Errors.unsupported(reason + "; it is not sent as written since " + why);
     }

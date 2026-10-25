@@ -71,6 +71,11 @@ class SqlWordsTest {
     assertThat(why("FETCH 2 FROM c", Engine.POSTGRESQL)).isNull();
     assertThat(why("REPLACE INTO plain VALUES (1)", Engine.MYSQL)).isNull();
     assertThat(why("UPDATE plain SET x = 1 RETURNING x INTO :x", Engine.ORACLE)).isNull();
+    assertThat(why("CREATE UNIQUE INDEX i ON plain (x)", Engine.POSTGRESQL)).isNull();
+    assertThat(why("CREATE OR REPLACE VIEW v AS SELECT 1", Engine.POSTGRESQL)).isNull();
+    assertThat(why("CREATE MATERIALIZED VIEW v AS SELECT 1", Engine.POSTGRESQL)).isNull();
+    assertThat(why("CREATE GLOBAL TEMPORARY TABLE g (i int)", Engine.ORACLE)).isNull();
+    assertThat(why("ALTER TABLE plain ADD COLUMN y int", Engine.POSTGRESQL)).isNull();
     // a semicolon in a literal reads as two statements: refused, which errs the safe way
     assertThat(why("SELECT 'a;b' FROM plain", Engine.POSTGRESQL)).isNotNull();
   }
@@ -103,15 +108,57 @@ class SqlWordsTest {
             "-- only a comment")) {
       assertThat(why(sql, Engine.POSTGRESQL)).as(sql).startsWith("only a query, DML or DDL");
     }
-    assertThat(why("DECLARE @x int", Engine.SQLSERVER)).startsWith("only a query, DML or DDL");
+    assertThat(why("DECLARE x NUMBER; BEGIN NULL; END;", Engine.ORACLE))
+        .startsWith("only a query, DML or DDL");
     assertThat(why("CREATE OR REPLACE FUNCTION f() RETURNS int", Engine.POSTGRESQL))
         .contains("FUNCTION");
     assertThat(why("CREATE RULE r AS ON INSERT TO plain DO ALSO NOTIFY x", Engine.POSTGRESQL))
         .contains("RULE");
     assertThat(why("CREATE DEFINER = u TRIGGER t BEFORE INSERT ON plain", Engine.MYSQL))
-        .contains("TRIGGER");
+        .contains("DEFINER");
+    // the kind is a table, and a word still says the statement makes a trigger
+    assertThat(why("ALTER TABLE plain ENABLE TRIGGER t", Engine.POSTGRESQL)).contains("TRIGGER");
     assertThat(why("ALTER SESSION SET x = 1", Engine.ORACLE)).contains("SESSION");
     assertThat(why("SELECT 1; COMMIT", Engine.POSTGRESQL)).contains("more than one statement");
+    // only the kinds of object listed, whatever else CREATE or ALTER can make
+    assertThat(why("CREATE EXTENSION dblink", Engine.POSTGRESQL)).contains("EXTENSION");
+    assertThat(why("ALTER ROLE r SET search_path = x", Engine.POSTGRESQL)).contains("ROLE");
+    assertThat(why("CREATE DEFINER = u VIEW v AS SELECT 1", Engine.MYSQL)).contains("DEFINER");
+    // a comment does not stand for the kind
+    assertThat(why("CREATE /* TABLE */ AGGREGATE a (int) (sfunc = f)", Engine.POSTGRESQL))
+        .contains("AGGREGATE");
+  }
+
+  @Test
+  void whyNotAsWritten_ddlByWhatItDrops_andWhatRunsAPreparedStatement() {
+    assertThat(why("DROP TABLE plain", Engine.POSTGRESQL)).isNull();
+    // drops what the user owns, ScalarDB's tables among them, without naming them
+    assertThat(why("DROP OWNED BY app", Engine.POSTGRESQL)).contains("drops OWNED");
+    assertThat(why("DROP DATABASE shop", Engine.MYSQL)).contains("drops DATABASE");
+    assertThat(why("DROP USER shop CASCADE", Engine.ORACLE)).contains("drops USER");
+    assertThat(why("CREATE TABLE t AS EXECUTE s1", Engine.POSTGRESQL)).contains("execute");
+  }
+
+  @Test
+  void whyNotAsWritten_onSqlServer_nothingIsSent() {
+    // T-SQL needs no ; between statements, so a second one would follow unseen
+    assertThat(why("SELECT x FROM plain TABLESAMPLE (100 PERCENT)", Engine.SQLSERVER))
+        .contains("without a ;");
+    assertThat(
+            why(
+                "SELECT 1 FROM plain TABLESAMPLE (1 PERCENT) EXEC('UPDATE ' + 'ord' + 'ers SET x = 1')",
+                Engine.SQLSERVER))
+        .contains("without a ;");
+  }
+
+  @Test
+  void whyNotAsWritten_aNestedCommentOnPostgresql_isReadAsPostgresqlReadsIt() {
+    // all of /* a /* b */ SELECT */ is one comment there: the statement is COMMIT
+    assertThat(why("/* a /* b */ SELECT */ COMMIT", Engine.POSTGRESQL))
+        .contains("starts with COMMIT");
+    // on MySQL the first */ ends it
+    assertThat(SqlWords.find("/* a /* b */ orders */", Engine.MYSQL, NAMES)).isEqualTo("orders");
+    assertThat(SqlWords.find("/* a /* b */ orders */", Engine.POSTGRESQL, NAMES)).isNull();
   }
 
   @Test

@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc.sql;
 
 import com.scalar.db.nativejdbc.engine.Engine;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
@@ -44,6 +45,26 @@ public final class SqlWords {
    */
   private static final Set<String> POSTGRESQL_CURSORS = Set.of("declare", "fetch", "move", "close");
 
+  /** What a {@code CREATE} or {@code ALTER} sent as written may make or change. */
+  private static final Set<String> DDL_KINDS =
+      Set.of("table", "index", "view", "schema", "sequence", "domain");
+
+  /** Words between {@code CREATE} or {@code ALTER} and the kind of object. */
+  private static final Set<String> DDL_MODIFIERS =
+      Set.of(
+          "or",
+          "replace",
+          "temp",
+          "temporary",
+          "unlogged",
+          "global",
+          "local",
+          "unique",
+          "materialized",
+          "if",
+          "not",
+          "exists");
+
   /** Words of a {@code CREATE} or {@code ALTER} that stores code or changes the session. */
   private static final Set<String> CODE_OR_SESSION =
       Set.of(
@@ -69,10 +90,12 @@ public final class SqlWords {
    * so the checks err toward refusing:
    *
    * <ul>
+   *   <li>not on SQL Server, where a statement may follow another without a {@code ;};
    *   <li>one statement, with no {@code ;} but at its end;
    *   <li>a query, DML or DDL, by its first word: transaction and session control change what the
-   *       driver tracks, and procedural code reaches tables without naming them, as does a {@code
-   *       CREATE} or {@code ALTER} of a function, trigger or rule;
+   *       driver tracks, and procedural code reaches tables without naming them; a {@code CREATE}
+   *       or {@code ALTER} only of a table, index, view, schema, sequence or domain, and with no
+   *       word of a function, trigger, rule or the session;
    *   <li>no function that runs SQL given as text, nor PostgreSQL's {@code set_config};
    *   <li>no name spelled other than by its letters: PostgreSQL's Unicode escapes, an invisible
    *       formatting character, a comment MySQL or MariaDB runs;
@@ -86,6 +109,11 @@ public final class SqlWords {
    */
   public static @Nullable String whyNotAsWritten(
       String sql, Engine engine, Collection<String> names) {
+    if (engine == Engine.SQLSERVER) {
+      // T-SQL needs no ; between statements: a second one, EXEC of built SQL or COMMIT among them,
+      // would follow unseen
+      return "on SQL Server a statement may follow another without a ;";
+    }
     if (sql.codePoints().anyMatch(c -> Character.getType(c) == Character.FORMAT)) {
       return "it holds an invisible formatting character";
     }
@@ -112,7 +140,15 @@ public final class SqlWords {
     if (body.indexOf(';') >= 0) {
       return "it may hold more than one statement";
     }
-    if (head.equals("create") || head.equals("alter")) {
+    if (head.equals("create") || head.equals("alter") || head.equals("drop")) {
+      String kind = ddlKind(withoutComments(sql, engine).toLowerCase(Locale.ROOT));
+      if (!DDL_KINDS.contains(kind)) {
+        return "only a table, index, view, schema, sequence or domain is created, altered or"
+            + " dropped as written, and it "
+            + head
+            + "s "
+            + (kind.isEmpty() ? "something else" : kind.toUpperCase(Locale.ROOT));
+      }
       for (String w : words) {
         if (CODE_OR_SESSION.contains(w)) {
           return "it may store code or change the session (" + w.toUpperCase(Locale.ROOT) + ")";
@@ -120,8 +156,10 @@ public final class SqlWords {
       }
     }
     for (String w : words) {
-      if (engine.runsSqlText(List.of(w)) || w.equals("set_config")) {
-        return "it calls " + w + ", which runs SQL given as text or changes the session";
+      if (engine.runsSqlText(List.of(w)) || w.equals("set_config") || w.equals("execute")) {
+        return "it calls "
+            + w
+            + ", which runs SQL given as text or a prepared statement, or changes the session";
       }
     }
     String named = first(text, names);
@@ -139,6 +177,29 @@ public final class SqlWords {
   public static boolean startsDdl(String sql, Engine engine) {
     return Set.of("create", "alter", "drop", "comment")
         .contains(firstWord(withoutComments(sql, engine).toLowerCase(Locale.ROOT)));
+  }
+
+  /** The first word after a statement's first, past {@link #DDL_MODIFIERS}, or empty. */
+  private static String ddlKind(String text) {
+    List<String> seq = new ArrayList<>();
+    int i = 0;
+    while (i < text.length() && seq.size() < 12) {
+      if (!isWordChar(text.charAt(i))) {
+        i++;
+        continue;
+      }
+      int start = i;
+      while (i < text.length() && isWordChar(text.charAt(i))) {
+        i++;
+      }
+      seq.add(text.substring(start, i));
+    }
+    for (int k = 1; k < seq.size(); k++) {
+      if (!DDL_MODIFIERS.contains(seq.get(k))) {
+        return seq.get(k);
+      }
+    }
+    return "";
   }
 
   /** The first word of a text, lower case already, or empty. */
@@ -200,9 +261,9 @@ public final class SqlWords {
   }
 
   /**
-   * The text with its comments blanked: {@code --} to the end of the line, {@code /* ... * /}, and
-   * on MySQL and MariaDB {@code #} to the end of the line; string literals and quoted identifiers,
-   * where those do not start a comment, kept as they stand.
+   * The text with its comments blanked: {@code --} to the end of the line, {@code /* ... * /}
+   * (nested on PostgreSQL), and on MySQL and MariaDB {@code #} to the end of the line; string
+   * literals and quoted identifiers, where those do not start a comment, kept as they stand.
    */
   static String withoutComments(String sql, Engine engine) {
     boolean hash = engine == Engine.MYSQL || engine == Engine.MARIADB;
@@ -226,8 +287,7 @@ public final class SqlWords {
         out.append(" ".repeat(end - i));
         i = end;
       } else if (c == '/' && sql.startsWith("/*", i)) {
-        int end = sql.indexOf("*/", i + 2);
-        end = end < 0 ? sql.length() : end + 2;
+        int end = blockCommentEnd(sql, i, engine == Engine.POSTGRESQL);
         out.append(" ".repeat(end - i));
         i = end;
       } else {
@@ -236,6 +296,30 @@ public final class SqlWords {
       }
     }
     return out.toString();
+  }
+
+  /**
+   * The end of a block comment that starts at {@code start}, its {@code * /} included; nested ones
+   * inside it, as PostgreSQL reads them, with {@code nests}.
+   */
+  private static int blockCommentEnd(String sql, int start, boolean nests) {
+    int depth = 0;
+    int i = start;
+    while (i < sql.length()) {
+      if (sql.startsWith("/*", i) && (depth == 0 || nests)) {
+        depth++;
+        i += 2;
+      } else if (sql.startsWith("*/", i)) {
+        depth--;
+        i += 2;
+        if (depth == 0) {
+          return i;
+        }
+      } else {
+        i++;
+      }
+    }
+    return sql.length();
   }
 
   /** The end of a quoted run that starts at {@code start}, its closing quote included. */
