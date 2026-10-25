@@ -381,3 +381,15 @@ checked:
   count from 2 to 64, twice (with and without the release), so pgjdbc's cache of 256 statements
   per connection can fill for an application with many batched statements. Fixed sizes, padded,
   would bound it.
+
+### 2026-10-25: stamping at commit, weighed and set aside
+
+Run `20261025-1806`'s statements per TPC-C commit, slim build: 882 µs of statement time against the
+vendor's 360. The single-row writes cost about +16 to +33 µs over the vendor's now (pgbench: slim
+update +32, a fused INSERT +21 and +33 under its savepoint, of which the metadata row alone is about
+16), so a stamp moved to the commit would still write every metadata row and save only what is
+left around it, which the merged and slim forms already removed. The decoupled layout's floor is the
+second row per write, about 17 per TPC-C transaction; ScalarDB's inline layout has none, and its
+one-statement forms (todo 328's, the merged and slim writes) are the lever left for tables that can
+use it. Smaller items left: the INSERT's savepoint at SNAPSHOT (about 12 µs), the read path (5-10 µs
+a read), the slim write by a prefix of the key (about 1% of TPC-C), StockLevel.
