@@ -23,14 +23,18 @@ driver's SNAPSHOT), TPC-C scale 4, YCSB weights 50,5,15,10,0,20. Seventh run, `2
 | TPC-C server statement time per commit (vendor 0.76 ms) | 1.73 ms | 1.51 ms |
 | TPC-C WAL per commit (vendor 7.3-8.2 KB) | 18.6 KB | 16.2 KB |
 | TPC-C p95 vs vendor: Delivery, NewOrder, OrderStatus, Payment, StockLevel | 1.46, 1.17, 1.21, 1.17, 1.94 | 1.41, 1.14, 1.16, 1.17, 2.03 |
-| YCSB throughput vs vendor | 0.93 | void (see below) |
+| YCSB throughput vs vendor (eighth run, `20261026-0017`) | 0.94 | 0.96 |
+| YCSB time added per operation (eighth run) | +69 µs | +39 µs |
 
-- The inline YCSB result is void: its InsertRecord (`INSERT ... VALUES` with no column list) was
-  refused on inline tables. Fixed in `4ff1c99`. The eighth run, `20261026-0017` (YCSB only, both
-  layouts), was running when this was written; its result goes into
-  [benchbase-postgresql-aws.md](benchbase-postgresql-aws.md).
-- **Ratios depend on the round trip.** The seventh run's was 364 µs, the sixth's 105 µs on the same
-  instance types (no placement group). The vendor's rate falls as the round trip grows, so the
+- The seventh run's inline YCSB was void: its InsertRecord (`INSERT ... VALUES` with no column
+  list) was refused on inline tables. Fixed in `4ff1c99`; the eighth run measured YCSB again, at
+  the same round trip. Inline YCSB p50 added per operation: Insert +37 µs, Update +42,
+  read-modify-write +70, Read +16, Scan +69.
+- **Ratios depend on the round trip; do not read 0.82 as progress.** The seventh and eighth runs'
+  round trip was about 360 µs, the sixth's 105 µs, on the same instance types in one subnet (no
+  placement group, so EC2 may place the two anywhere in the zone). The decoupled code hardly changed
+  between them, yet TPC-C went from 0.69 to 0.82 while the time it adds per transaction grew from
+  1.23 to 1.75 ms. The vendor's rate falls as the round trip grows, so the
   ratio rises. Compare layouts or builds only within one run, and read "time added per transaction"
   (4 terminals: 4/tp(c) − 4/tp(a)) beside the ratio. At the sixth run's 105 µs, TPC-C was 0.69 and
   YCSB 0.86 (decoupled).

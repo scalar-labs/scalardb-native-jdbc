@@ -234,6 +234,29 @@ refusals as unexpected errors, so its (c) throughput is not the workload's. Its 
 p95 against (a), decoupled then inline: Read 1.06 then 1.46 (p50 776 then 761 µs), Update 1.10
 then 1.09, read-modify-write 1.11 then 1.10, Scan 1.10 then 0.97.
 
+## Eighth run: YCSB on both layouts, an inline INSERT without a column list (2026-10-26)
+
+Run `20261026-0017` (`BENCHBASE=1 READS=0 REPS=2 BB_WORKLOADS=ycsb BB_RUNS=a,c
+BB_LAYOUTS="decoupled inline"`): HEAD `4ff1c99`, whose inline tables take an INSERT without a column
+list, the seventh run's void YCSB again. Round trip 354-365 µs, as the seventh run's.
+
+| | decoupled | inline |
+|---|---|---|
+| YCSB (a) | 3,974.8/s | 3,904.5/s |
+| YCSB (c) | 3,720.8 (0.94) | **3,763.1 (0.96)** |
+| YCSB added per operation | +69 µs | +39 µs |
+| server CPU per commit, (a) then (c) | 0.187, 0.235 ms | 0.194, 0.211 ms |
+
+p50 added against (a), decoupled then inline: Insert +53 then +37 µs, Update +61 then +42,
+read-modify-write +90 then +70, Read +18 then +16, Scan +202 then +69. p95 against (a), inline:
+Insert 1.05, Update 1.05, read-modify-write 1.06, Read 1.05, Scan 1.03; decoupled 1.08, 1.10, 1.10,
+1.03, 1.12. Every inline InsertRecord completed (46,037, none unexpected).
+
+At the sixth run's 105 µs round trip the same code gave TPC-C 0.69 and YCSB 0.86 decoupled; the
+seventh and eighth runs' 0.82 and 0.94 come from the longer round trip, which the vendor pays as
+well (time added per TPC-C transaction 1.23 ms then 1.75 ms). Both runs had both instances in one
+subnet (us-east-1a) and no placement group.
+
 ## Reports
 
 ### HEAD 93f5217
