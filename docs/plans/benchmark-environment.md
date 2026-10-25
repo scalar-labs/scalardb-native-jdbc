@@ -224,7 +224,10 @@ runs the same after it (reports prefixed `base-`), for what a change is worth wi
 between. Each run also measures the round trip from the client before it executes (2,000 prepared
 `SELECT 1`, median and p99), since the ratio to (a) depends on it: the driver adds a roughly fixed
 time a transaction, and placements in one zone gave the vendor 528 to 1,786 TPC-C transactions a
-second. With `profiling = true`, tier A's database hosts get perf, and `perf-tier-a.sh OUT RUN...`,
+second (round trips of 105 to 364 µs). `placement_strategy = "cluster"` in `bench.tfvars` puts the
+client and tier A's hosts in one placement group, for a short round trip that stays the same from
+run to run; the default, `""`, leaves the placement to EC2. The role needs `iam-policy.json`'s
+placement-group actions (re-run `setup-account.sh` once). With `profiling = true`, tier A's database hosts get perf, and `perf-tier-a.sh OUT RUN...`,
 run from the laptop beside a run, records 45 s of each named BenchBase run on the host (through the
 client, which alone reaches it) and fetches the backends' profiles, by function and with what each
 calls. About 4 minutes a run with loading: TPC-C and YCSB, (a) and (c), 3 repetitions, about

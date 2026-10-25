@@ -18,3 +18,6 @@ db_memory_mb = 0
 pg_stat_statements = false
 # tier A: perf on the database hosts, for perf-tier-a.sh
 profiling = false
+# "cluster": the client and tier A hosts in one placement group, the round trip short and the same
+# from run to run; "" (the default) leaves the placement to EC2, anywhere in the zone
+placement_strategy = ""

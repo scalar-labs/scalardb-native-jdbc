@@ -86,6 +86,16 @@ variable "profiling" {
   default     = false
 }
 
+variable "placement_strategy" {
+  description = "An EC2 placement group for the client and the tier A hosts: \"cluster\" keeps their round trip short and the same from run to run; \"\" leaves the placement to EC2, anywhere in the zone"
+  type        = string
+  default     = ""
+  validation {
+    condition     = contains(["", "cluster", "partition", "spread"], var.placement_strategy)
+    error_message = "placement_strategy is \"\", \"cluster\", \"partition\" or \"spread\"."
+  }
+}
+
 variable "lifetime_minutes" {
   description = "Each EC2 instance terminates itself this long after boot"
   type        = number
@@ -183,7 +193,8 @@ resource "aws_key_pair" "bench" {
 }
 
 locals {
-  subnet = aws_subnet.bench[0].id
+  subnet    = aws_subnet.bench[0].id
+  placement = var.placement_strategy == "" ? null : aws_placement_group.bench[0].name
   rds = {
     postgresql = { engine = "postgres", version = "16", license = null }
     oracle     = { engine = "oracle-se2", version = "19", license = "license-included" }
@@ -192,10 +203,17 @@ locals {
   }
 }
 
+resource "aws_placement_group" "bench" {
+  count    = var.placement_strategy == "" ? 0 : 1
+  name     = "scalardb-native-jdbc-bench"
+  strategy = var.placement_strategy
+}
+
 resource "aws_instance" "client" {
   ami                                  = data.aws_ami.ubuntu.id
   instance_type                        = "m6i.4xlarge" # both tiers' JVMs side by side
   subnet_id                            = local.subnet
+  placement_group                      = local.placement
   vpc_security_group_ids               = [aws_security_group.client.id]
   key_name                             = aws_key_pair.bench.key_name
   iam_instance_profile                 = var.client_profile == "" ? null : var.client_profile
@@ -216,6 +234,7 @@ resource "aws_instance" "db" {
   ami                                  = data.aws_ami.ubuntu.id
   instance_type                        = "m6id.2xlarge"
   subnet_id                            = local.subnet
+  placement_group                      = local.placement
   vpc_security_group_ids               = [aws_security_group.db.id]
   key_name                             = aws_key_pair.bench.key_name
   instance_initiated_shutdown_behavior = "terminate"
