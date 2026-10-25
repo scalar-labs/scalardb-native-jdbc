@@ -166,6 +166,13 @@ public final class Proxies {
     final Duration inflightWait;
     // what the vendor reports for a BOOLEAN column of a ScalarDB table read as it is (todo 304)
     volatile @Nullable BooleanType booleanType;
+    // a batch's entries sent together left their savepoint set, which the next such text releases
+    // first; anything that may set, release or roll back a savepoint forgets it, and it stays,
+    // below theirs, to the transaction's end, never undone to (todo 329)
+    volatile boolean together;
+    // pgjdbc's getAutosave, or null where there is none
+    private @Nullable Method autosave;
+    private boolean autosaveRead;
 
     ConnectionHandler(Connection vendor, Router router, Session session, Duration inflightWait) {
       super(vendor);
@@ -207,6 +214,11 @@ public final class Proxies {
     }
 
     void ran(Router.Route route) {
+      if (route.kind != SqlAst.Kind.SELECT
+          && route.kind != SqlAst.Kind.DML
+          && route.kind != SqlAst.Kind.SESSION) {
+        together = false; // transaction control, or what may be
+      }
       if (route.kind == SqlAst.Kind.ROLLBACK) {
         rollbackOnly = false; // as Connection.rollback()
       }
@@ -223,6 +235,33 @@ public final class Proxies {
       router.ran(vendor, route);
     }
 
+    /**
+     * Whether a batch's entries may go together: not under pgjdbc's autosave, whose savepoint
+     * before each statement the text's release of the batch's would release too, so that its
+     * rollback after an error would undo statements before the text. Read at each batch, as the
+     * application may change it through {@code unwrap}.
+     */
+    boolean sendsTogether() {
+      if (router.engine() != Engine.POSTGRESQL) {
+        return false;
+      }
+      try {
+        if (!autosaveRead) {
+          Class<?> pg =
+              Class.forName(
+                  "org.postgresql.PGConnection", false, vendor.getClass().getClassLoader());
+          autosave = pg.getMethod("getAutosave");
+          autosaveRead = true;
+        }
+        Method m = autosave;
+        return m != null
+            && "NEVER".equals(String.valueOf(m.invoke(vendor.unwrap(m.getDeclaringClass()))));
+      } catch (ReflectiveOperationException | SQLException | LinkageError e) {
+        autosaveRead = true; // unknown: one at a time
+        return false;
+      }
+    }
+
     void requireNotRollbackOnly() throws SQLException {
       if (rollbackOnly) {
         throw new Writes.Aborted("the transaction was aborted by an earlier statement");
@@ -234,6 +273,17 @@ public final class Proxies {
       Connection me = (Connection) proxy;
       if (method.getDeclaringClass() == ScalarDbTables.class) {
         return router.kind(vendor, (String) args[0], (String) args[1]);
+      }
+      switch (method.getName()) {
+        case "commit":
+        case "rollback":
+        case "setAutoCommit":
+        case "setSavepoint":
+        case "releaseSavepoint":
+          together = false; // ends the savepoint, or sets one above it (todo 329)
+          break;
+        default:
+          break;
       }
       switch (method.getName()) {
         case "createStatement":
@@ -1242,6 +1292,7 @@ public final class Proxies {
       Writes.Plan[] last = {null};
       Out out = new Out();
       boolean auto = owner.vendor.getAutoCommit();
+      boolean sendsTogether = owner.sendsTogether();
       try {
         Writes.within(
             owner.vendor,
@@ -1249,70 +1300,57 @@ public final class Proxies {
             () -> owner.rollbackOnly = true,
             true,
             () -> {
-              boolean[] together = {false}; // whether entries sent together set their savepoint
-              try {
-                for (int i = 0; i < size; ) {
-                  // the next entries that are one statement each, sent in one round trip (todo 329)
-                  int end = i;
-                  while (end < size && end - i < Writes.TOGETHER_MAX) {
-                    Writes.Plan p = routes.apply(end).write;
-                    if (p == null || p.together() == null) {
-                      break;
-                    }
-                    end++;
+              for (int i = 0; i < size; ) {
+                // the next entries that are one statement each, sent in one round trip (todo 329)
+                int end = i;
+                while (sendsTogether && end < size && end - i < Writes.TOGETHER_MAX) {
+                  Writes.Plan p = routes.apply(end).write;
+                  if (p == null || p.together() == null) {
+                    break;
                   }
-                  if (end - i > 1) {
-                    List<Writes.Plan> plans = new ArrayList<>();
-                    List<Writes.Context> contexts = new ArrayList<>();
+                  end++;
+                }
+                if (end - i > 1) {
+                  List<Writes.Plan> plans = new ArrayList<>();
+                  List<Writes.Context> contexts = new ArrayList<>();
+                  for (int j = i; j < end; j++) {
+                    plans.add(Objects.requireNonNull(routes.apply(j).write));
+                    contexts.add(writeContext(parameters.apply(j), inserted, null));
+                  }
+                  boolean release = owner.together;
+                  owner.together = true; // set from here on, undone to or not
+                  long[] got = Writes.applyTogether(owner.vendor, plans, contexts, release);
+                  if (got != null) {
                     for (int j = i; j < end; j++) {
-                      plans.add(Objects.requireNonNull(routes.apply(j).write));
-                      contexts.add(writeContext(parameters.apply(j), inserted, null));
+                      counts[j] = got[j - i];
+                      last[0] = plans.get(j - i);
+                      owner.ran(routes.apply(j));
+                      done[0]++;
                     }
-                    boolean release = together[0];
-                    together[0] = true; // set from here on, undone to or not; released at the end
-                    long[] got = Writes.applyTogether(owner.vendor, plans, contexts, release);
-                    if (got != null) {
-                      for (int j = i; j < end; j++) {
-                        counts[j] = got[j - i];
-                        last[0] = plans.get(j - i);
-                        owner.ran(routes.apply(j));
-                        done[0]++;
-                      }
-                      i = end;
-                      continue;
+                    i = end;
+                    continue;
+                  }
+                } else {
+                  end = i + 1;
+                }
+                for (; i < end; i++) {
+                  Router.Route route = routes.apply(i);
+                  if (route.write != null) {
+                    last[0] = route.write;
+                    try {
+                      counts[i] =
+                          Writes.apply(
+                              owner.vendor,
+                              route.write,
+                              writeContext(parameters.apply(i), inserted, null));
+                    } finally {
+                      owner.ran(route); // as runWrite (todo 231)
                     }
                   } else {
-                    end = i + 1;
+                    counts[i] = runPlain(route);
                   }
-                  for (; i < end; i++) {
-                    Router.Route route = routes.apply(i);
-                    if (route.write != null) {
-                      last[0] = route.write;
-                      try {
-                        counts[i] =
-                            Writes.apply(
-                                owner.vendor,
-                                route.write,
-                                writeContext(parameters.apply(i), inserted, null));
-                      } finally {
-                        owner.ran(route); // as runWrite (todo 231)
-                      }
-                    } else {
-                      counts[i] = runPlain(route);
-                    }
-                    done[0]++;
-                  }
+                  done[0]++;
                 }
-              } catch (SQLException | RuntimeException e) {
-                if (together[0] && !auto) {
-                  Writes.releaseTogether(owner.vendor, e);
-                }
-                throw e;
-              }
-              if (together[0] && !auto) {
-                // set, it would be what a later batch's undo returns to; the commit ends it
-                // otherwise
-                Writes.releaseTogether(owner.vendor, null);
               }
               if (keys != null && last[0] != null) {
                 out.rows = Writes.returned(owner.vendor, last[0], keys, inserted);
@@ -1331,6 +1369,10 @@ public final class Proxies {
                 e);
         b.setNextException(e);
         throw b;
+      } finally {
+        if (auto) {
+          owner.together = false; // the batch's own transaction ended it
+        }
       }
       writeCount = -1L; // no update count of its own, as after a vendor batch
       writeReturns = false;

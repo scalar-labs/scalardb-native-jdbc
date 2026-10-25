@@ -225,3 +225,44 @@ Conclusion: within the protocol, a write costs at least one more row written per
 plain write again; for TPC-C on this laptop that floor and the driver's CPU are each a few percent of
 a transaction. The rest, roughly: planning 0.1 ms, client CPU 0.17 ms, the RELEASE 0.1 ms, the
 keys and after-image CTEs about 0.03 ms.
+
+### 2026-10-25: cheap wins, first set: the batch's release, autosave, the coarse check
+
+- The savepoint of a batch's entries sent together stays set to the next such text, which releases
+  it first in the same round trip, instead of a `RELEASE` of its own at each batch's end (review fix
+  1 of step 2). A commit, a rollback, an application's savepoint set, released or rolled back to, or
+  a statement of a kind other than SELECT, DML or SESSION makes the connection forget it: it stays
+  below theirs, never undone to, since only a failure one of the text's statements raises (classes
+  22, 23, 40, 42, P0) is undone to the savepoint and replayed; any other may have come before the
+  text's own savepoint was set, and ends the batch. Without the forgetting, the next batch's release
+  released the application's savepoint (the new test fails at `rollback(mine)` then).
+- Under pgjdbc's `autosave` (read with `PGConnection.getAutosave` by reflection before each batch),
+  entries run one by one: the release would release pgjdbc's savepoint of the statement too, so its
+  rollback after an error would undo statements before the text. This held for step 2's texts after
+  the first already.
+- The coarse in-flight check runs as a prepared statement: planned 2,661 and 1,362 times a run
+  before (188 ms), 24 times now (2 ms).
+- The driver does not take SQL `RELEASE SAVEPOINT` (it cannot parse it); `Connection.releaseSavepoint`
+  is the way, as before.
+
+BenchBase, same session, 60 s: TPC-C (a) 703.7, (c) 541.5, **0.77** (0.74 before); 180 s: (a) 711.8,
+(c) 555.4, **0.78**. YCSB (a) 3,818, (c) 3,434, 0.90. Per committed transaction in the 180 s run:
+server active +0.42 ms, idle in transaction +0.13 ms (+0.54 before).
+
+- The batch texts' planning is warm-up: 5,280 plans of the fused stock update in 60 s, 6,601 in
+  180 s (pgjdbc's 4 unnamed executions, then PostgreSQL's 5 custom plans, per position and
+  connection). StockLevel's join is planned at every call by the vendor too (custom plans); the
+  driver's four arms take 3x its planning, about 18 µs a transaction.
+- Not the driver's CPU: JFR's samples put the workers' Java time at about 1% of a run in both runs,
+  the rest waiting on the socket; the parser's waits (`CCJSqlParserUtil` on its executor) come only
+  at warm-up and when the catalog's 60 s TTL expires, about 450 ms a run.
+- Round trips are equal: 19.8 (a) and 20.3 (c) packets from the server per transaction (the
+  container's `/proc/net/dev`).
+- The server's CPU per transaction doubles: the container's cgroup counts 1.35 ms (a) and 2.84 ms
+  (c), of which pg_stat_database's active time shows 0.79 and 1.23; the rest is the protocol, the
+  WAL writer and autovacuum of the second row per write. Sampling `pg_stat_activity` every
+  millisecond: idle after COMMIT 4.0% (a) and 3.3% (c) of the benchmark's backends' time, so the
+  driver adds no time between transactions (a difference computed from pg_stat_database's totals
+  said +0.9 ms, counting other sessions).
+- The laptop's noise (the vendor's run alone from 655 to 737/s in this session) is as large as what
+  is left to measure: further steps are measured on AWS (`docs/plans/benchmark-environment.md`).

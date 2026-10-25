@@ -37,6 +37,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLTransactionRollbackException;
+import java.sql.Savepoint;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
@@ -884,6 +885,47 @@ class MoreWritesIntegrationTest {
         d.setAutoCommit(true);
         assertThat(rows(d, "SELECT COUNT(*) FROM " + t.sql + " WHERE id >= 80"))
             .containsExactly("0");
+        // the savepoint a batch leaves set to the next one stays below the application's, which
+        // the next batch's release would release too (todo 329)
+        d.setAutoCommit(false);
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO " + t.sql + " (id, x) VALUES (?, 'k')")) {
+          twoEntries(ps, 80);
+          Savepoint mine = d.setSavepoint();
+          twoEntries(ps, 82); // undone
+          d.rollback(mine);
+          Statement sql = d.createStatement();
+          sql.execute("SAVEPOINT mine");
+          twoEntries(ps, 84); // undone
+          sql.execute("ROLLBACK TO SAVEPOINT mine");
+          Savepoint again = d.setSavepoint();
+          twoEntries(ps, 86);
+          d.releaseSavepoint(again);
+          twoEntries(ps, 88);
+          d.commit();
+        }
+        d.setAutoCommit(true);
+        assertThat(rows(d, "SELECT id FROM " + t.sql + " WHERE id >= 80 ORDER BY id"))
+            .containsExactly("80", "81", "86", "87", "88", "89");
+        d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 80");
+        // pgjdbc's autosave: entries one at a time, a savepoint of its own before each
+        Properties autosave = new Properties();
+        autosave.setProperty("autosave", "always");
+        try (Connection a = e.openDriver(autosave)) {
+          a.setAutoCommit(false);
+          try (PreparedStatement ps =
+              a.prepareStatement("INSERT INTO " + t.sql + " (id, x) VALUES (?, 'a')")) {
+            for (int id = 80; id < 83; id++) {
+              ps.setInt(1, id);
+              ps.addBatch();
+            }
+            assertThat(ps.executeBatch()).containsExactly(1, 1, 1);
+          }
+          a.commit();
+        }
+        assertThat(rows(d, "SELECT COUNT(*) FROM " + t.sql + " WHERE id >= 80 AND x = 'a'"))
+            .containsExactly("3");
+        d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 80");
       }
       d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 40");
       // a failure in autocommit undoes the whole batch; the counts before it, the cause next
@@ -952,6 +994,15 @@ class MoreWritesIntegrationTest {
     assertThat(scalarDbX(tm, t, 12)).contains("b12!");
     assertThat(scalarDbX(tm, t, 10)).isEmpty();
     assertThat(scalarDbX(tm, t, 1)).contains("a");
+  }
+
+  /** Inserts {@code from} and the key after it as one batch of {@code ps}. */
+  private static void twoEntries(PreparedStatement ps, int from) throws SQLException {
+    for (int id = from; id < from + 2; id++) {
+      ps.setInt(1, id);
+      ps.addBatch();
+    }
+    assertThat(ps.executeBatch()).containsExactly(1, 1);
   }
 
   /** Whether the engine has RETURNING the driver takes: not MySQL, SQL Server nor Oracle. */

@@ -2076,9 +2076,10 @@ final class Router {
         lock.unlock();
       }
       if (!inFlight) {
-        try (Statement st = vendor.createStatement()) {
+        // prepared, so the vendor's statement cache keeps its plan (todo 329)
+        try (PreparedStatement st = vendor.prepareStatement(check)) {
           st.setQueryTimeout(timeout);
-          try (ResultSet rs = st.executeQuery(check)) {
+          try (ResultSet rs = st.executeQuery()) {
             inFlight = rs.next();
           }
         }

@@ -1166,8 +1166,8 @@ final class Writes {
    * {@link Plan#together()} as one text, under a savepoint set in it. Null when one needs more than
    * its statement (a row in flight, a tombstone, a key the DML skipped, a conflict, an error): the
    * entries are undone to the savepoint, nothing recorded, and the caller runs them one by one,
-   * which tells the outcome as before. {@code release} releases the savepoint of the batch's
-   * entries before first; {@link #releaseTogether} the last one.
+   * which tells the outcome as before. {@code release} releases first the savepoint an earlier text
+   * left set, which otherwise stays to the next such text or the transaction's end.
    */
   static long @Nullable [] applyTogether(
       Connection vendor, List<Plan> plans, List<Context> contexts, boolean release)
@@ -1213,9 +1213,7 @@ final class Writes {
           rows = ps.getMoreResults();
         }
       } catch (SQLException e) {
-        if ("57014".equals(e.getSQLState()) || "25P02".equals(e.getSQLState())) {
-          // a timeout or a cancel ends the batch as it would an entry; in a transaction already
-          // failed, the savepoint was never set
+        if (!undoable(e)) {
           throw e;
         }
         undoTogether(vendor, e);
@@ -1233,19 +1231,20 @@ final class Writes {
   }
 
   /**
-   * Releases the savepoint of a batch's entries sent together, at the batch's end: one left set
-   * would be what a later batch's undo returns to, when that batch's own savepoint was never set.
-   * {@code e}, the batch's failure, if any, which a failure to release is added to.
+   * Whether a failure of entries sent together is one of their statements', after the text's
+   * savepoint was set, and so undone to it: a data error, a constraint, a conflict, a name. Any
+   * other may have come before it (a transaction already failed, a timeout or a cancel, a lost
+   * connection, the server's resources, the driver's own), where the savepoint undone to would be
+   * the one an earlier text left set: the batch ends as it would at an entry, without the replay.
    */
-  static void releaseTogether(Connection vendor, @Nullable Throwable e) throws SQLException {
-    try (Statement s = vendor.createStatement()) {
-      s.execute("RELEASE SAVEPOINT " + TOGETHER);
-    } catch (SQLException r) {
-      if (e == null) {
-        throw r;
-      }
-      e.addSuppressed(r); // a transaction the failure ended
-    }
+  private static boolean undoable(SQLException e) {
+    String state = e.getSQLState();
+    return state != null
+        && (state.startsWith("22")
+            || state.startsWith("23")
+            || state.startsWith("40")
+            || state.startsWith("42")
+            || state.startsWith("P0"));
   }
 
   /** Undoes a batch's entries sent together; {@code e}, the failure that undoes them, if any. */
