@@ -20,7 +20,8 @@
 # the role scalardb-bench (setup-account.sh), assumed anew on every refresh.
 # Environment: BENCH_DB_PASSWORD, SSH_KEY (the private key of bench.tfvars' public one), BENCH_BUCKET,
 # MAX_RUN_MINUTES (default 480, below a login session of 12 hours, with room for the destroy);
-# matrix.sh's REPS, INFLIGHT, CHANGED, WRITERS, READS, BENCHBASE, BB_WORKLOADS and BB_TIME; BASELINE,
+# matrix.sh's REPS, INFLIGHT, CHANGED, WRITERS, READS, BENCHBASE, BB_WORKLOADS, BB_TIME, BB_RUNS and
+# BB_JVM_ARGS; BASELINE,
 # a commit whose tree BENCHBASE runs too.
 # Arguments after `run` go to matrix.sh (and from there to Gradle).
 set -euo pipefail
@@ -125,7 +126,7 @@ for key, url in urls.items():
   if [ -n "${BASELINE:-}" ]; then
     (cd "$repo" && git archive "$BASELINE") | ssh_ "rm -rf $tier-base && mkdir $tier-base && tar -x -C $tier-base"
   fi
-  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-1}' BENCHBASE='${BENCHBASE:-}' BB_WORKLOADS='${BB_WORKLOADS:-}' BB_TIME='${BB_TIME:-}' BASE_DIR='${BASELINE:+../$tier-base}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
+  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-1}' BENCHBASE='${BENCHBASE:-}' BB_WORKLOADS='${BB_WORKLOADS:-}' BB_TIME='${BB_TIME:-}' BB_RUNS='${BB_RUNS:-}' BB_JVM_ARGS='${BB_JVM_ARGS:-}' BASE_DIR='${BASELINE:+../$tier-base}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
   if [ -n "${BENCH_BUCKET:-}" ]; then cmds+=("$cmd"); continue; fi
   (
     ssh_ "$cmd" > "$out/$tier.log" 2>&1 || echo "tier $tier failed, see $out/$tier.log"

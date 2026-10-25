@@ -401,11 +401,12 @@ class BenchBaseBenchmark {
     writeConfig(e, workload, run, config);
     List<String> command = new ArrayList<>();
     command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
-    // -Dnativejdbc.benchbase.jvmArgs=-XX:StartFlightRecording=...: for the execute phase only
+    // -Dnativejdbc.benchbase.jvmArgs=-XX:StartFlightRecording=...: for the execute phase only;
+    // {dir} is the run's directory, as for a recording per run: filename={dir}/execute.jfr
     if (phase.equals("execute")) {
       for (String arg : System.getProperty("nativejdbc.benchbase.jvmArgs", "").split(" ", -1)) {
         if (!arg.isEmpty()) {
-          command.add(arg);
+          command.add(arg.replace("{dir}", dir.toAbsolutePath().toString()));
         }
       }
     }

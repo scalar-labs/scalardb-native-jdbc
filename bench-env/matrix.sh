@@ -9,7 +9,9 @@
 # share the client's CPU (with -Dnativejdbc.bench.checkPlan=true, Oracle's plan of the predicate's
 # check instead); READS=0 leaves out the read benchmark. BENCHBASE=1 adds BenchBase's workloads
 # (BenchBaseBenchmark, milestone T6), one engine at a time; BASE_DIR, a second tree (run.sh's
-# BASELINE), runs them after, its reports prefixed base-.
+# BASELINE), runs them after, its reports prefixed base-. BB_RUNS picks the runs (a,c by default;
+# b is the driver with every table plain), BB_JVM_ARGS the execute phase's JVM options ({dir}, the
+# run's directory: -XX:StartFlightRecording:...,filename={dir}/execute.jfr).
 set -uo pipefail
 tier=$1; shift
 tasks=(); wtasks=(); btasks=(); props=()
@@ -65,7 +67,8 @@ if [ -n "${BENCHBASE:-}" ]; then
     echo "=== $tier $prefix $(date +%T)"
     (cd "$tree" && ./gradlew "${btasks[@]}" "${props[@]}" -Dnativejdbc.bench=true \
       "-Dnativejdbc.benchbase=$bb" "-Dnativejdbc.benchbase.workloads=${BB_WORKLOADS:-tpcc,ycsb}" \
-      -Dnativejdbc.benchbase.runs=a,c "-Dnativejdbc.benchbase.reps=${REPS:-3}" \
+      "-Dnativejdbc.benchbase.runs=${BB_RUNS:-a,c}" "-Dnativejdbc.benchbase.reps=${REPS:-3}" \
+      ${BB_JVM_ARGS:+"-Dnativejdbc.benchbase.jvmArgs=$BB_JVM_ARGS"} \
       "-Dnativejdbc.benchbase.time=${BB_TIME:-120}" -Dnativejdbc.benchbase.scale.tpcc=4 \
       -Dnativejdbc.benchbase.weights.ycsb=50,5,15,10,0,20 -Dnativejdbc.benchbase.serverStats=true \
       "-Dnativejdbc.bench.tier=$tier" --continue -Pnativejdbc.parallelEngines=1 "$@" 2>&1 | grep -E 'BUILD|FAILED'
