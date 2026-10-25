@@ -393,3 +393,30 @@ second row per write, about 17 per TPC-C transaction; ScalarDB's inline layout h
 one-statement forms (todo 328's, the merged and slim writes) are the lever left for tables that can
 use it. Smaller items left: the INSERT's savepoint at SNAPSHOT (about 12 µs), the read path (5-10 µs
 a read), the slim write by a prefix of the key (about 1% of TPC-C), StockLevel.
+
+### 2026-10-25: the inline layout's one-statement forms
+
+With the metadata in the data row, pgbench measured the vendor at 102 µs of server CPU for a keyed
+update, the decoupled layout at 132 and the inline one at 112 (an INSERT 103 / 137 / 107, a read
+75 / 92 / 87). Two CTEs cannot modify the same row in one PostgreSQL statement, so the inline
+table needs its own forms, which `Writes` now builds on PostgreSQL when no locking clause is used:
+
+- by the full key (slim): the user's UPDATE with the stamp's SET items appended, its CAS on
+  `tx_id` and `tx_version` in the WHERE; a DELETE takes the row and its metadata at once;
+- a batch by the key (merged): the entries' VALUES, each key looked up by itself, the gate on
+  state and duplicates, one UPDATE stamping as it writes;
+- an INSERT carries its metadata columns, and a merged batch of them reads one stamp bound first
+  (`Step.stampFirst`, `Merge.stampFirst`);
+- beyond the key (fused): the stamp bound first, the keys and gate as the decoupled form, and the
+  CAS folded into the version, -1 where the anchor moved, which the statement returns as
+  `scalardb_native_ok = false` and the driver treats as the decoupled form's unstamped row.
+
+A local TPC-C before the fused form ran Delivery's prefix writes one key at a time (4.46x); the
+fused form is for that. `timeoutMidWrite` now expects one statement for the inline tables on
+PostgreSQL as for the decoupled ones. The CAS of neither inline form had a test: mutated away, the suite
+passed, as the anchor is read in the statement that writes and moves only while it waits on the
+row's lock. `committedWhileItWaits` makes that happen (the row read first, another writer committing
+it while the write waits) and fails with either CAS removed; every layout and path aborts. Not read
+first, the inline slim write misses the moved row and the fused statement writes on the committed
+one, as the vendor's would, while the decoupled slim write aborts. Next, the cloud: both layouts on the same machines
+(`BB_LAYOUTS="decoupled inline"`).

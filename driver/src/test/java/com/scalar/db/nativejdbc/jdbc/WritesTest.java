@@ -172,6 +172,104 @@ class WritesTest {
         .noneMatch(q -> q.contains("scalardb_native_gate (scalardb_native_go) AS (SELECT EXISTS"));
   }
 
+  private static TableInfo inline() throws Exception {
+    Constructor<TableInfo> c =
+        TableInfo.class.getDeclaredConstructor(
+            String.class,
+            String.class,
+            Layout.class,
+            String.class,
+            String.class,
+            String.class,
+            List.class,
+            List.class,
+            List.class,
+            List.class,
+            boolean.class);
+    c.setAccessible(true);
+    return c.newInstance(
+        "ns",
+        "t",
+        Layout.INLINE,
+        "t",
+        "t",
+        null,
+        List.of("id"),
+        List.of(),
+        List.of("id", "x"),
+        List.of(),
+        true);
+  }
+
+  @Test
+  void anInlineTablesWrite_stampsItsOwnRow_inTheSameStatement() throws Exception {
+    String stamp =
+        "\"tx_id\" = ?, \"tx_prepared_at\" = ?, \"tx_committed_at\" = ?, \"tx_state\" = 3,"
+            + " \"tx_version\" = CASE WHEN \"tx_id\" IS NULL THEN 1 ELSE"
+            + " COALESCE(\"tx_version\", 0) + 1 END";
+    // by the key: the user's SET with the stamp, the CAS in its WHERE, no metadata table
+    List<String> slim = plan(inline(), "UPDATE t SET x = x || ? WHERE id = ?");
+    assertThat(slim.get(slim.size() - 1))
+        .startsWith(
+            "WITH scalardb_native_keys (scalardb_native_m0, scalardb_native_id,"
+                + " scalardb_native_version, scalardb_native_state) AS (SELECT t.\"id\","
+                + " t.\"tx_id\", t.\"tx_version\", t.\"tx_state\" FROM \"ns\".\"t\" t WHERE id ="
+                + " ?), scalardb_native_written AS (UPDATE t SET x = x || ?, "
+                + stamp
+                + " WHERE (\"id\") IN (SELECT scalardb_native_m0 FROM scalardb_native_keys) AND"
+                + " COALESCE(\"tx_state\", 3) = 3 AND \"tx_id\" IS NOT DISTINCT FROM (SELECT"
+                + " scalardb_native_id FROM scalardb_native_keys) AND \"tx_version\" IS NOT"
+                + " DISTINCT FROM (SELECT scalardb_native_version FROM scalardb_native_keys)")
+        .doesNotContain("scalardb_native_stamped");
+    // a DELETE by the key takes the row and its metadata at once; the stamp's binds go unused
+    List<String> delete = plan(inline(), "DELETE FROM t WHERE id = ?");
+    assertThat(delete.get(delete.size() - 1))
+        .contains("scalardb_native_written AS (DELETE FROM t WHERE (\"id\") IN")
+        .endsWith(
+            "FROM (SELECT CAST(? AS text), CAST(? AS bigint), CAST(? AS bigint))"
+                + " scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE");
+    // a batch by the key: each entry's key looked up by itself, the stamp after the entries
+    assertThat(merge(inline(), "UPDATE t SET x = x || ? WHERE id = ?").sql(2))
+        .startsWith(
+            "WITH scalardb_native_e (scalardb_native_n, scalardb_native_p1, scalardb_native_p2)"
+                + " AS (VALUES (1, ?, ?), (2, ?, ?))")
+        .contains("CROSS JOIN LATERAL (SELECT t.\"id\"")
+        .contains("GROUP BY scalardb_native_d0 HAVING count(*) > 1")
+        .contains("UPDATE t SET x = x || scalardb_native_e.scalardb_native_p1, " + stamp + " FROM")
+        .contains(
+            "AND \"tx_id\" IS NOT DISTINCT FROM k.scalardb_native_id AND \"tx_version\" IS NOT"
+                + " DISTINCT FROM k.scalardb_native_version RETURNING");
+    // an INSERT carries its metadata columns; a batch of them reads one stamp bound first
+    List<String> insert = plan(inline(), "INSERT INTO t (id, x) VALUES (?, ?)");
+    assertThat(insert.get(insert.size() - 1))
+        .contains(
+            "INSERT INTO t (id, x, \"tx_id\", \"tx_state\", \"tx_version\","
+                + " \"tx_prepared_at\", \"tx_committed_at\") VALUES (?, ?, ?, 3, 1, ?, ?)");
+    assertThat(merge(inline(), "INSERT INTO t (id, x) VALUES (?, ?)").sql(2))
+        .startsWith(
+            "WITH scalardb_native_s (scalardb_native_i, scalardb_native_p, scalardb_native_c) AS"
+                + " (SELECT CAST(? AS text), CAST(? AS bigint), CAST(? AS bigint)),"
+                + " scalardb_native_inserted AS (INSERT INTO t (id, x, \"tx_id\", \"tx_state\","
+                + " \"tx_version\", \"tx_prepared_at\", \"tx_committed_at\") VALUES (?, ?,"
+                + " (SELECT scalardb_native_i FROM scalardb_native_s), 3, 1,");
+    // beyond the key: one statement still, its stamp first and its CAS folded into the version
+    List<String> fused = plan(inline(), "UPDATE t SET x = ? WHERE x = ?");
+    assertThat(fused.get(fused.size() - 1))
+        .startsWith(
+            "WITH scalardb_native_s (scalardb_native_i, scalardb_native_p, scalardb_native_c) AS"
+                + " (SELECT CAST(? AS text), CAST(? AS bigint), CAST(? AS bigint)),")
+        .contains(
+            "\"tx_version\" = CASE WHEN \"tx_id\" IS NOT DISTINCT FROM k.scalardb_native_id"
+                + " AND \"tx_version\" IS NOT DISTINCT FROM k.scalardb_native_version THEN")
+        .contains("FROM scalardb_native_keys k WHERE (x = ?) AND (\"id\") = (k.scalardb_native_d0)")
+        .contains(
+            "RETURNING \"id\" AS scalardb_native_w0, \"tx_version\" <> -1 AS scalardb_native_ok");
+    List<String> fusedDelete = plan(inline(), "DELETE FROM t WHERE x = ?");
+    assertThat(fusedDelete.get(fusedDelete.size() - 1))
+        .contains("DELETE FROM t USING scalardb_native_keys k WHERE (x = ?)")
+        .contains("RETURNING \"id\" AS scalardb_native_w0, true AS scalardb_native_ok");
+  }
+
   @Test
   void delete_withoutAPredicate_getsTheKeyBeforeATrailingComment() throws Exception {
     assertThat(plan("DELETE FROM t AS a -- all").get(1))

@@ -294,6 +294,7 @@ class MoreWritesIntegrationTest {
         lockingReads(e, tm, tpc, t);
         reviewFindings(e, tpc, t);
         timeoutMidWrite(e, tpc, t, e.engine() == Engine.POSTGRESQL);
+        committedWhileItWaits(e, t);
         readOnlyWrite(e, t);
       }
       // the inline layout, the table its own metadata table (milestones 10b and 10c)
@@ -309,7 +310,8 @@ class MoreWritesIntegrationTest {
         inFlightWait(e, tpc, t);
         lockingReads(e, tm, tpc, t);
         reviewFindings(e, tpc, t);
-        timeoutMidWrite(e, tpc, t, false);
+        timeoutMidWrite(e, tpc, t, e.engine() == Engine.POSTGRESQL);
+        committedWhileItWaits(e, t);
         readOnlyWrite(e, t);
       }
       if (e.engine() == Engine.POSTGRESQL) {
@@ -1666,6 +1668,63 @@ class MoreWritesIntegrationTest {
   }
 
   /**
+   * A write waiting on a row's lock while another writer commits it, the row read before:
+   * PostgreSQL re-checks the row as it is now, and the CAS on the anchor the statement read before
+   * the wait tells the change apart; an abort, by the key and beyond it, decoupled or inline. (Not
+   * read before, the inline slim write leaves the row to the fused statement, which writes on the
+   * committed row, as the vendor's would; the decoupled one aborts.)
+   */
+  private static void committedWhileItWaits(Engines e, Table t) throws Exception {
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection a = e.openDriver(new Properties());
+        Connection b = e.openDriver(new Properties())) {
+      a.createStatement().executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (300, 'a')");
+      String after = "a";
+      // by the key, bound (the slim statement), and beyond it (the fused one)
+      for (String where : List.of("id = ?", "x LIKE ?")) {
+        a.setAutoCommit(false);
+        a.createStatement()
+            .executeUpdate("UPDATE " + t.sql + " SET x = CONCAT(x, 'A') WHERE id = 300");
+        after += "A";
+        b.setAutoCommit(false);
+        // the row as it was, read before the other writer commits: the anchor its write must keep
+        assertThat(rows(b, "SELECT x FROM " + t.sql + " WHERE id = 300"))
+            .containsExactly(after.substring(0, after.length() - 1));
+        Future<Integer> write =
+            pool.submit(
+                () -> {
+                  try (PreparedStatement ps =
+                      b.prepareStatement(
+                          "UPDATE " + t.sql + " SET x = CONCAT(x, 'B') WHERE " + where)) {
+                    if (where.startsWith("id")) {
+                      ps.setInt(1, 300);
+                    } else {
+                      ps.setString(1, "a%");
+                    }
+                    return ps.executeUpdate();
+                  }
+                });
+        Thread.sleep(500);
+        assertThat(write.isDone()).isFalse();
+        a.commit();
+        assertThatThrownBy(() -> write.get(20, TimeUnit.SECONDS))
+            .cause()
+            .isInstanceOf(SQLTransactionRollbackException.class)
+            .extracting("SQLState")
+            .isEqualTo("40001");
+        assertThatThrownBy(b::commit).isInstanceOf(SQLTransactionRollbackException.class);
+        b.rollback();
+        a.setAutoCommit(true);
+        b.setAutoCommit(true);
+        assertThat(rows(a, "SELECT x FROM " + t.sql + " WHERE id = 300")).containsExactly(after);
+      }
+      a.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id = 300");
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
    * 157: a timeout the driver raises after one key's DML, before its CAS or the next key, leaves a
    * transaction the application cannot commit.
    */
@@ -1702,9 +1761,9 @@ class MoreWritesIntegrationTest {
       d.setAutoCommit(false);
       st.setQueryTimeout(2);
       if (oneStatement) {
-        // a decoupled table's write is one statement on PostgreSQL (todo 328): no point between a
-        // key's DML and its stamp, and the
-        // statement ends within the time the vendor statement was given
+        // a write is one statement on PostgreSQL, decoupled (todo 328) or inline (todo 329): no
+        // point between a key's DML and its stamp, and the statement ends within the time the
+        // vendor statement was given
         assertThat(st.executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id IN (80, 81)"))
             .isEqualTo(2);
         settle.get(5, TimeUnit.SECONDS);

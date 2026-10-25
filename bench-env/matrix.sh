@@ -11,7 +11,9 @@
 # (BenchBaseBenchmark, milestone T6), one engine at a time; BASE_DIR, a second tree (run.sh's
 # BASELINE), runs them after, its reports prefixed base-. BB_RUNS picks the runs (a,c by default;
 # b is the driver with every table plain), BB_JVM_ARGS the execute phase's JVM options ({dir}, the
-# run's directory: -XX:StartFlightRecording:...,filename={dir}/execute.jfr).
+# run's directory: -XX:StartFlightRecording:...,filename={dir}/execute.jfr), BB_LAYOUTS the layouts of
+# run (c)'s tables (decoupled by default; "decoupled inline" runs both, inline's reports prefixed
+# with -inline).
 set -uo pipefail
 tier=$1; shift
 tasks=(); wtasks=(); btasks=(); props=()
@@ -62,14 +64,16 @@ if [ -n "${BENCHBASE:-}" ]; then
       echo "=== $tier BenchBase build FAILED"
   fi
   results=$PWD/results
-  for tree in . ${BASE_DIR:-}; do
+  for tree in . ${BASE_DIR:-}; do for layout in ${BB_LAYOUTS:-decoupled}; do
     prefix=bb; [ "$tree" = . ] || prefix=base
+    [ "$layout" = decoupled ] || prefix=$prefix-$layout
     echo "=== $tier $prefix $(date +%T)"
     (cd "$tree" && ./gradlew "${btasks[@]}" "${props[@]}" -Dnativejdbc.bench=true \
       "-Dnativejdbc.benchbase=$bb" "-Dnativejdbc.benchbase.workloads=${BB_WORKLOADS:-tpcc,ycsb}" \
       "-Dnativejdbc.benchbase.runs=${BB_RUNS:-a,c}" "-Dnativejdbc.benchbase.reps=${REPS:-3}" \
       ${BB_JVM_ARGS:+"-Dnativejdbc.benchbase.jvmArgs=$BB_JVM_ARGS"} \
       "-Dnativejdbc.benchbase.time=${BB_TIME:-120}" -Dnativejdbc.benchbase.scale.tpcc=4 \
+      "-Dnativejdbc.benchbase.layout=$layout" \
       -Dnativejdbc.benchbase.weights.ycsb=50,5,15,10,0,20 -Dnativejdbc.benchbase.serverStats=true \
       "-Dnativejdbc.bench.tier=$tier" --continue -Pnativejdbc.parallelEngines=1 "$@" 2>&1 | grep -E 'BUILD|FAILED'
     for f in driver/build/bench/benchbase-*.md; do
@@ -81,7 +85,7 @@ if [ -n "${BENCHBASE:-}" ]; then
     for f in $(grep -l '<failure' driver/build/test-results/*/*.xml 2>/dev/null); do
       cp "$f" "$results/$prefix-$(basename "$f")"
     done)
-  done
+  done; done
 fi
 if [ -n "${WRITERS:-}" ]; then for rep in $(seq 1 "${REPS:-3}"); do
   echo "=== $tier writers-$rep $(date +%T)"

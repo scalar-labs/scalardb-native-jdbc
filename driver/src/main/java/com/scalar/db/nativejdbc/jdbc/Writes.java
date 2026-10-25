@@ -115,15 +115,23 @@ final class Writes {
     final List<Integer> binds;
     // the placeholders that give a FLOAT key alone, matched by the driver against stored keys
     final Set<Integer> floatKeys;
+    // the stamp's three values bound before the binds, not after: a statement on a table in the
+    // inline layout whose stamp is in its SET list, ahead of its predicate's placeholders
+    final boolean stampFirst;
 
     Step(String sql, List<Integer> binds) {
       this(sql, binds, Set.of());
     }
 
     Step(String sql, List<Integer> binds, Set<Integer> floatKeys) {
+      this(sql, binds, floatKeys, false);
+    }
+
+    Step(String sql, List<Integer> binds, Set<Integer> floatKeys, boolean stampFirst) {
       this.sql = sql;
       this.binds = List.copyOf(binds);
       this.floatKeys = Set.copyOf(floatKeys);
+      this.stampFirst = stampFirst;
     }
   }
 
@@ -197,11 +205,19 @@ final class Writes {
   static final class Merge {
     private final IntFunction<String> text;
     final int placeholders;
+    // the stamp's three values bound before the entries', not after: the inline layout's INSERT,
+    // whose rows each name them
+    final boolean stampFirst;
     private final Map<Integer, String> texts = new ConcurrentHashMap<>();
 
     Merge(IntFunction<String> text, int placeholders) {
+      this(text, placeholders, false);
+    }
+
+    Merge(IntFunction<String> text, int placeholders, boolean stampFirst) {
       this.text = text;
       this.placeholders = placeholders;
+      this.stampFirst = stampFirst;
     }
 
     /** The statement for {@code entries} entries. */
@@ -573,14 +589,26 @@ final class Writes {
             : null;
     boolean delete = shape.kind() == StatementShape.Kind.DELETE;
     boolean imported = t.layout() == Layout.DECOUPLED_IMPORTED;
+    boolean byKey =
+        span != null && from >= 0 && ast.tableRefs().size() == 1 && fullKey(engine, where, t);
+    // on PostgreSQL the inline layout's write by key is the DML with the stamp in it (todo 329)
+    boolean inlineByKey =
+        byKey && engine == Engine.POSTGRESQL && t.layout() == Layout.INLINE && !locks;
     Merge merge =
-        dmlSet == null || span == null || ast.tableRefs().size() != 1 || !fullKey(engine, where, t)
+        span == null || !byKey
             ? null
-            : mergedKeyed(n, ast, t, exposed, span, picked, snapshot, delete, imported, from, end);
+            : dmlSet != null
+                ? mergedKeyed(
+                    n, ast, t, exposed, span, picked, snapshot, delete, imported, from, end)
+                : inlineByKey
+                    ? mergedKeyedInline(n, ast, t, exposed, span, delete, from, end, snapshot)
+                    : null;
     Step slim =
         merge == null || span == null
             ? null
-            : slimKeyed(n, ast, t, exposed, span, inWhere, all, delete, imported, from, end);
+            : inlineByKey
+                ? slimKeyedInline(n, ast, t, exposed, span, inWhere, delete, from, end)
+                : slimKeyed(n, ast, t, exposed, span, inWhere, all, delete, imported, from, end);
     return new KeyedPlan(
         n,
         delete,
@@ -592,9 +620,12 @@ final class Writes {
         new Step(dml, all),
         matches,
         where != null,
-        dmlSet == null
-            ? null
-            : fusedKeyed(n, new Step(keys, inWhere), afterImages, dmlSet, all, delete, imported),
+        dmlSet != null
+            ? fusedKeyed(n, new Step(keys, inWhere), afterImages, dmlSet, all, delete, imported)
+            : engine == Engine.POSTGRESQL && t.layout() == Layout.INLINE && !locks
+                ? fusedKeyedInline(
+                    n, ast, t, new Step(keys, inWhere), afterImages, span, all, delete, from, end)
+                : null,
         merge,
         slim);
   }
@@ -920,6 +951,501 @@ final class Writes {
           return out.append(rest).toString();
         },
         holes.size());
+  }
+
+  /**
+   * The fused write of {@link #fusedKeyed} on a table in the inline layout (todo 329), its metadata
+   * in the row, so its own metadata table: the keys, the after images and the gate as there, and
+   * the user's DML over the keys with the stamp in its SET list, the predicate applied again, so
+   * that at READ COMMITTED a row that stopped matching is skipped. A row that still matches but
+   * moved since the keys were read is written with version -1, its stamp missed, for the driver to
+   * abort on, which undoes it; a DELETE is the conditional delete, its CAS in its WHERE. The same
+   * rows as {@link #fusedKeyed}'s. The stamp's three values come first, from a CTE, as they precede
+   * the predicate's placeholders. Null when the text cannot be rewritten.
+   */
+  private static @Nullable Step fusedKeyedInline(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      Step keys,
+      @Nullable Step afterImages,
+      int @Nullable [] span,
+      List<Integer> all,
+      boolean delete,
+      int from,
+      int end) {
+    String source = ast.source();
+    int width = n.keyColumns.size();
+    String d = "scalardb_native_d";
+    String w = "scalardb_native_w";
+    String anchored =
+        n.txId
+            + " IS NOT DISTINCT FROM k.scalardb_native_id AND "
+            + n.txVersion
+            + " IS NOT DISTINCT FROM k.scalardb_native_version";
+    String matched =
+        (span == null ? "" : "(" + source.substring(span[0], span[1]) + ") AND ")
+            + "("
+            + n.columns("")
+            + ") = ("
+            + Names.numbered("k", d, width)
+            + ") AND (SELECT scalardb_native_go FROM scalardb_native_gate) AND "
+            + n.committed();
+    String head = source.substring(0, from).stripTrailing();
+    String rest = span == null ? source.substring(from, end) : source.substring(span[1], end);
+    String text =
+        delete
+            ? head + " USING scalardb_native_keys k WHERE " + matched + " AND " + anchored + rest
+            : head
+                + ", "
+                + n.txId
+                + " = (SELECT scalardb_native_i FROM scalardb_native_s), "
+                + n.preparedAt
+                + " = (SELECT scalardb_native_p FROM scalardb_native_s), "
+                + n.committedAt
+                + " = (SELECT scalardb_native_c FROM scalardb_native_s), "
+                + n.txState
+                + " = 3, "
+                + n.txVersion
+                + " = CASE WHEN "
+                + anchored
+                + " THEN CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE COALESCE("
+                + n.txVersion
+                + ", 0) + 1 END ELSE -1 END FROM scalardb_native_keys k WHERE "
+                + matched
+                + rest;
+    String dml = onDataTable(n.engine, ast, t, true, text, from);
+    if (dml == null) {
+      return null;
+    }
+    String keyColumns =
+        Names.numbered("", d, width)
+            + ", "
+            + Names.numbered("", "scalardb_native_m", width)
+            + ", scalardb_native_id, scalardb_native_version, scalardb_native_state";
+    List<Integer> binds = new ArrayList<>(keys.binds);
+    StringBuilder sql =
+        new StringBuilder(
+                "WITH scalardb_native_s (scalardb_native_i, scalardb_native_p, scalardb_native_c)"
+                    + " AS (SELECT CAST(? AS text), CAST(? AS bigint), CAST(? AS bigint)),"
+                    + " scalardb_native_keys (")
+            .append(keyColumns)
+            .append(") AS (")
+            .append(keys.sql)
+            .append(")");
+    if (afterImages != null) {
+      sql.append(", scalardb_native_after AS (").append(afterImages.sql).append(")");
+      binds.addAll(afterImages.binds);
+    }
+    binds.addAll(all);
+    String written = n.keyJoinNumbered("w", w, "k", d);
+    sql.append(
+            ", scalardb_native_gate (scalardb_native_go) AS (SELECT NOT EXISTS (SELECT 1 FROM"
+                + " scalardb_native_keys WHERE scalardb_native_state IN (1, 2) OR"
+                + " scalardb_native_m0 IS NULL)")
+        .append(afterImages == null ? "" : " AND NOT EXISTS (SELECT 1 FROM scalardb_native_after)")
+        .append("), scalardb_native_written AS (")
+        .append(dml)
+        .append(" RETURNING ")
+        .append(n.aliased("", w))
+        .append(", ")
+        .append(delete ? "true" : n.txVersion + " <> -1")
+        .append(
+            " AS scalardb_native_ok) SELECT k.*, EXISTS (SELECT 1 FROM scalardb_native_written w")
+        .append(" WHERE ")
+        .append(written)
+        .append("), EXISTS (SELECT 1 FROM scalardb_native_written w WHERE ")
+        .append(written)
+        .append(" AND w.scalardb_native_ok), (SELECT scalardb_native_go FROM scalardb_native_gate)")
+        .append(afterImages == null ? "" : ", EXISTS (SELECT 1 FROM scalardb_native_after)")
+        .append(" FROM (SELECT 1) scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE");
+    return new Step(sql.toString(), binds, Set.of(), true);
+  }
+
+  /** The stamp of I5 as SET items of the row itself, its three values bound in order (inline). */
+  private static String inlineStampSets(Names n) {
+    return n.txId
+        + " = ?, "
+        + n.preparedAt
+        + " = ?, "
+        + n.committedAt
+        + " = ?, "
+        + n.txState
+        + " = 3, "
+        + n.txVersion
+        + " = CASE WHEN "
+        + n.txId
+        + " IS NULL THEN 1 ELSE COALESCE("
+        + n.txVersion
+        + ", 0) + 1 END";
+  }
+
+  /**
+   * The slim write of {@link #slimKeyed} on a table in the inline layout (todo 329), its metadata
+   * in the row: the key's row read by the key, then the user's DML on it with the stamp in its SET
+   * list, matched by the key read, committed and at the tx_id and version read, the CAS of 4.3 step
+   * 3 in the DML itself; a DELETE is the conditional delete alone. The same one row as {@link
+   * #slimKeyed}'s, written and stamped counted alike; a DELETE binds the stamp's values unused.
+   * Null when the text cannot be rewritten.
+   */
+  private static @Nullable Step slimKeyedInline(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      List<Integer> inWhere,
+      boolean delete,
+      int from,
+      int end) {
+    String source = ast.source();
+    int width = n.keyColumns.size();
+    String m = "scalardb_native_m";
+    String w = "scalardb_native_w";
+    List<Integer> set = ast.placeholdersIn(0, from);
+    if (set == null) {
+      return null;
+    }
+    String head = source.substring(0, from).stripTrailing();
+    String dml =
+        onDataTable(
+            n.engine,
+            ast,
+            t,
+            true,
+            (delete ? head : head + ", " + inlineStampSets(n))
+                + " WHERE ("
+                + n.columns("")
+                + ") IN (SELECT "
+                + Names.numbered("", m, width)
+                + " FROM scalardb_native_keys) AND "
+                + n.committed()
+                + " AND "
+                + n.txId
+                + " IS NOT DISTINCT FROM (SELECT scalardb_native_id FROM scalardb_native_keys) AND "
+                + n.txVersion
+                + " IS NOT DISTINCT FROM (SELECT scalardb_native_version FROM"
+                + " scalardb_native_keys)"
+                + source.substring(span[1], end),
+            from);
+    if (dml == null) {
+      return null;
+    }
+    StringBuilder sql =
+        new StringBuilder("WITH scalardb_native_keys (")
+            .append(Names.numbered("", m, width))
+            .append(
+                ", scalardb_native_id, scalardb_native_version, scalardb_native_state) AS (SELECT ")
+            .append(n.readColumns(exposed))
+            .append(", ")
+            .append(exposed)
+            .append(".")
+            .append(n.txId)
+            .append(", ")
+            .append(exposed)
+            .append(".")
+            .append(n.txVersion)
+            .append(", ")
+            .append(exposed)
+            .append(".")
+            .append(n.txState)
+            .append(" FROM ")
+            .append(n.data)
+            .append(" ")
+            .append(exposed)
+            .append(" WHERE ")
+            .append(source, span[0], span[1])
+            .append("), scalardb_native_written AS (")
+            .append(dml)
+            .append(" RETURNING ")
+            .append(n.aliased("", w))
+            .append(") SELECT ")
+            .append(Names.numbered("k", m, width))
+            .append(", k.scalardb_native_id, k.scalardb_native_version, k.scalardb_native_state,")
+            .append(" (SELECT count(*) FROM scalardb_native_written), (SELECT count(*) FROM")
+            .append(" scalardb_native_written)");
+    for (int i = 0; i < width; i++) {
+      sql.append(", (SELECT ").append(w).append(i).append(" FROM scalardb_native_written)");
+    }
+    sql.append(" FROM ")
+        .append(
+            delete
+                ? "(SELECT CAST(? AS text), CAST(? AS bigint), CAST(? AS bigint))"
+                : "(SELECT 1)")
+        .append(" scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE");
+    List<Integer> binds = new ArrayList<>(inWhere);
+    binds.addAll(set);
+    return new Step(sql.toString(), binds);
+  }
+
+  /**
+   * The merged write of {@link #mergedKeyed} on a table in the inline layout (todo 329): each
+   * entry's row read by its key, the gate closed on a row not committed or two entries on one key,
+   * and the user's DML joined to the entries and their rows with the stamp in its SET list, matched
+   * committed and at the tx_id and version read; per entry the row {@link KeyedPlan#merged} reads,
+   * {@code after} a false after-image column where the plan has that check. A DELETE binds the
+   * stamp's values unused. Null when the text cannot be rewritten.
+   */
+  private static @Nullable Merge mergedKeyedInline(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      boolean delete,
+      int from,
+      int end,
+      boolean after) {
+    List<int[]> holes = ast.placeholderSpans();
+    if (holes == null || holes.isEmpty()) {
+      return null;
+    }
+    String source = ast.source();
+    String e = "scalardb_native_e";
+    IntFunction<String> p = j -> e + ".scalardb_native_p" + j;
+    String predicate = filled(source, span[0], span[1], holes, p);
+    int width = n.keyColumns.size();
+    String d = "scalardb_native_d";
+    String w = "scalardb_native_w";
+    String keys =
+        "SELECT "
+            + e
+            + ".scalardb_native_n, "
+            + n.readColumns("x")
+            + ", "
+            + n.readColumns("x")
+            + ", x."
+            + n.txId
+            + ", x."
+            + n.txVersion
+            + ", x."
+            + n.txState
+            + " FROM "
+            + e
+            + " CROSS JOIN LATERAL (SELECT "
+            + n.readColumns(exposed)
+            + ", "
+            + exposed
+            + "."
+            + n.txId
+            + ", "
+            + exposed
+            + "."
+            + n.txVersion
+            + ", "
+            + exposed
+            + "."
+            + n.txState
+            + " FROM "
+            + n.data
+            + " "
+            + exposed
+            + " WHERE "
+            + predicate
+            + " OFFSET 0) x";
+    String head = filled(source, 0, from, holes, p).stripTrailing();
+    String joined =
+        e
+            + " JOIN scalardb_native_keys k ON k.scalardb_native_n = "
+            + e
+            + ".scalardb_native_n WHERE ("
+            + n.columns("")
+            + ") = ("
+            + Names.numbered("k", d, width)
+            + ") AND (SELECT scalardb_native_go FROM scalardb_native_gate) AND "
+            + n.committed()
+            + " AND "
+            + n.txId
+            + " IS NOT DISTINCT FROM k.scalardb_native_id AND "
+            + n.txVersion
+            + " IS NOT DISTINCT FROM k.scalardb_native_version";
+    String dml =
+        onDataTable(
+            n.engine,
+            ast,
+            t,
+            true,
+            (delete ? head + " USING " : head + ", " + inlineStampSets(n) + " FROM ")
+                + joined
+                + filled(source, span[1], end, holes, p),
+            from);
+    if (dml == null) {
+      return null;
+    }
+    StringBuilder top = new StringBuilder("WITH ").append(e).append(" (scalardb_native_n");
+    for (int j = 1; j <= holes.size(); j++) {
+      top.append(", scalardb_native_p").append(j);
+    }
+    top.append(") AS (VALUES ");
+    String rest =
+        "), scalardb_native_keys (scalardb_native_n, "
+            + Names.numbered("", d, width)
+            + ", "
+            + Names.numbered("", "scalardb_native_m", width)
+            + ", scalardb_native_id, scalardb_native_version, scalardb_native_state) AS ("
+            + keys
+            + "), scalardb_native_gate (scalardb_native_go) AS (SELECT NOT EXISTS (SELECT 1 FROM"
+            + " scalardb_native_keys WHERE COALESCE(scalardb_native_state, 3) <> 3) AND NOT EXISTS"
+            + " (SELECT 1 FROM scalardb_native_keys GROUP BY "
+            + Names.numbered("", d, width)
+            + " HAVING count(*) > 1)), scalardb_native_written AS ("
+            + dml
+            + " RETURNING "
+            + e
+            + ".scalardb_native_n AS scalardb_native_wn, "
+            + n.aliased("", w)
+            + ") SELECT "
+            + e
+            + ".scalardb_native_n, "
+            + Names.numbered("k", d, width)
+            + ", "
+            + Names.numbered("k", "scalardb_native_m", width)
+            + ", k.scalardb_native_id, k.scalardb_native_version, k.scalardb_native_state, EXISTS"
+            + " (SELECT 1 FROM scalardb_native_written w WHERE w.scalardb_native_wn = "
+            + e
+            + ".scalardb_native_n), EXISTS (SELECT 1 FROM scalardb_native_written w WHERE"
+            + " w.scalardb_native_wn = "
+            + e
+            + ".scalardb_native_n), (SELECT scalardb_native_go FROM scalardb_native_gate)"
+            + (after ? ", false" : "")
+            + " FROM "
+            + e
+            + " LEFT JOIN scalardb_native_keys k ON k.scalardb_native_n = "
+            + e
+            + ".scalardb_native_n"
+            + (delete
+                ? " CROSS JOIN (SELECT CAST(? AS text), CAST(? AS bigint), CAST(? AS bigint))"
+                    + " scalardb_native_s"
+                : "")
+            + " ORDER BY 1";
+    String row = ", ?".repeat(holes.size());
+    return new Merge(
+        k -> {
+          StringBuilder out = new StringBuilder(top);
+          for (int i = 1; i <= k; i++) {
+            out.append(i == 1 ? "(" : ", (").append(i).append(row).append(')');
+          }
+          return out.append(rest).toString();
+        },
+        holes.size());
+  }
+
+  /**
+   * The INSERT of one row on a table in the inline layout as one statement (todo 329): the stamp's
+   * columns added to the statement's column list and their values to its row, the three bound last,
+   * after the row's own; and the same INSERT over a batch's entries, the stamp's values bound first
+   * from a CTE each row reads. Null for any other INSERT, or text that cannot be rewritten.
+   */
+  private static @Nullable InlineInsert inlineInsert(
+      Names n, SqlAst ast, TableInfo t, @Nullable Expression row, int end, boolean savepoint) {
+    if (!(row instanceof ParenthesedExpressionList)
+        || ((ParenthesedExpressionList<?>) row).isEmpty()) {
+      return null;
+    }
+    ParenthesedExpressionList<?> items = (ParenthesedExpressionList<?>) row;
+    int[] first = ast.span((Expression) items.get(0));
+    int[] last = ast.span((Expression) items.get(items.size() - 1));
+    String source = ast.source();
+    if (first == null || last == null) {
+      return null;
+    }
+    int open = first[0] - 1;
+    while (open >= 0 && Character.isWhitespace(source.charAt(open))) {
+      open--;
+    }
+    int close = last[1];
+    while (close < source.length() && Character.isWhitespace(source.charAt(close))) {
+      close++;
+    }
+    int values = open < 0 ? -1 : ast.startOfLastBefore("VALUES", open);
+    int columns = values - 1;
+    while (columns >= 0 && Character.isWhitespace(source.charAt(columns))) {
+      columns--;
+    }
+    List<Integer> inside =
+        open < 0 || close >= source.length() ? null : ast.placeholdersIn(open, close + 1);
+    if (open < 0
+        || close >= source.length()
+        || source.charAt(open) != '('
+        || source.charAt(close) != ')'
+        || columns < 0
+        || source.charAt(columns) != ')'
+        || inside == null
+        || inside.size() != ast.parameterCount()
+        || !source.substring(close + 1, end).isBlank()) {
+      return null;
+    }
+    String metadata =
+        ", "
+            + n.txId
+            + ", "
+            + n.txState
+            + ", "
+            + n.txVersion
+            + ", "
+            + n.preparedAt
+            + ", "
+            + n.committedAt;
+    String returned = " RETURNING " + n.aliased("", "scalardb_native_k");
+    String one =
+        onDataTable(
+            n.engine,
+            ast,
+            t,
+            true,
+            source.substring(0, columns)
+                + metadata
+                + source.substring(columns, close)
+                + ", ?, 3, 1, ?, ?"
+                + source.substring(close, end)
+                + returned,
+            -1);
+    // each row reads the stamp from the CTE before it, so that the rows bind only their own
+    String upToRows = source.substring(0, columns) + metadata + source.substring(columns, open);
+    String stampedRow =
+        source.substring(open, close)
+            + ", (SELECT scalardb_native_i FROM scalardb_native_s), 3, 1, (SELECT scalardb_native_p"
+            + " FROM scalardb_native_s), (SELECT scalardb_native_c FROM scalardb_native_s))";
+    IntFunction<@Nullable String> many =
+        k ->
+            onDataTable(
+                n.engine,
+                ast,
+                t,
+                true,
+                upToRows + stampedRow + (", " + stampedRow).repeat(k - 1) + returned,
+                -1);
+    if (one == null || many.apply(2) == null) {
+      return null;
+    }
+    String counted =
+        ") SELECT scalardb_native_inserted.*, (SELECT COUNT(*) FROM scalardb_native_inserted) FROM"
+            + " scalardb_native_inserted";
+    String single = "WITH scalardb_native_inserted AS (" + one + counted;
+    return new InlineInsert(
+        savepoint
+            ? "SAVEPOINT " + SAVEPOINT + "; " + single + "; RELEASE SAVEPOINT " + SAVEPOINT
+            : single,
+        new Merge(
+            k ->
+                "WITH scalardb_native_s (scalardb_native_i, scalardb_native_p, scalardb_native_c) AS"
+                    + " (SELECT CAST(? AS text), CAST(? AS bigint), CAST(? AS bigint)),"
+                    + " scalardb_native_inserted AS ("
+                    + Objects.requireNonNull(many.apply(k))
+                    + counted,
+            inside.size(),
+            true));
+  }
+
+  /** {@link #inlineInsert}'s statement for one entry, and for a batch's entries. */
+  private static final class InlineInsert {
+    final String one;
+    final Merge merge;
+
+    InlineInsert(String one, Merge merge) {
+      this.one = one;
+      this.merge = merge;
+    }
   }
 
   /**
@@ -1319,11 +1845,18 @@ final class Writes {
         fused == null || returning != null
             ? null
             : mergedInsert(n, ast, t, shape.insertRow(), end, n.aliased("", "scalardb_native_k"));
+    // on PostgreSQL the inline layout's INSERT of one row carries its own stamp (todo 329)
+    InlineInsert inline =
+        engine == Engine.POSTGRESQL && n.inline && returning == null
+            ? inlineInsert(n, ast, t, shape.insertRow(), end, inFlight != null)
+            : null;
     return new InsertPlan(
         n,
-        merge,
+        inline != null ? inline.merge : merge,
         new Step(insert, all),
-        fused == null ? null : new Step(fusedInsert(n, fused, inFlight != null), all),
+        inline != null
+            ? new Step(inline.one, all)
+            : fused == null ? null : new Step(fusedInsert(n, fused, inFlight != null), all),
         readBack,
         inFlight,
         committed,
@@ -1648,10 +2181,15 @@ final class Writes {
       int at = 1;
       for (int i = 0; i < plans.size(); i++) {
         Step step = Objects.requireNonNull(plans.get(i).together());
+        if (step.stampFirst) {
+          at = runs.get(i).stamp(ps, at);
+        }
         for (int b : step.binds) {
           contexts.get(i).bind(ps, at++, b, step.floatKeys.contains(b));
         }
-        at = runs.get(i).stamp(ps, at);
+        if (!step.stampFirst) {
+          at = runs.get(i).stamp(ps, at);
+        }
       }
       try {
         sent.run(); // the savepoint is set from here on, whatever follows
@@ -1711,13 +2249,15 @@ final class Writes {
             + "; "
             + m.sql(contexts.size());
     try (PreparedStatement ps = run.prepare(sql)) {
-      int at = 1;
+      int at = m.stampFirst ? run.stamp(ps, 1) : 1;
       for (Context c : contexts) {
         for (int j = 1; j <= m.placeholders; j++) {
           c.bind(ps, at++, j, false);
         }
       }
-      run.stamp(ps, at);
+      if (!m.stampFirst) {
+        run.stamp(ps, at);
+      }
       try {
         sent.run(); // the savepoint is set from here on, whatever follows
         boolean rows = ps.execute();
@@ -1977,7 +2517,7 @@ final class Writes {
         throws SQLException {
       PreparedStatement ps = prepare(step.sql, scrollable, generated);
       try {
-        int i = 1;
+        int i = step.stampFirst ? stamp(ps, 1) : 1;
         for (int b : step.binds) {
           context.bind(ps, i++, b, step.floatKeys.contains(b));
         }
@@ -2211,7 +2751,9 @@ final class Writes {
       if (slim != null) {
         Long written;
         try (PreparedStatement ps = run.prepare(slim, null)) {
-          run.stamp(ps, slim.binds.size() + 1);
+          if (!slim.stampFirst) {
+            run.stamp(ps, slim.binds.size() + 1);
+          }
           try (ResultSet rs = ps.executeQuery()) {
             written = slim(run, rs, true);
           }
@@ -2241,7 +2783,9 @@ final class Writes {
       while (true) {
         Fused f;
         try (PreparedStatement ps = run.prepare(step, null)) {
-          run.stamp(ps, step.binds.size() + 1);
+          if (!step.stampFirst) {
+            run.stamp(ps, step.binds.size() + 1);
+          }
           try (ResultSet rs = ps.executeQuery()) {
             f = fused(rs);
           }
@@ -2742,7 +3286,9 @@ final class Writes {
       Keys keys = new Keys();
       PreparedStatement ps = run.prepare(step, null, returning != null);
       try {
-        run.stamp(ps, step.binds.size() + 1);
+        if (!step.stampFirst) {
+          run.stamp(ps, step.binds.size() + 1);
+        }
         ResultSet rs;
         try {
           // the savepoint's count first, if any
