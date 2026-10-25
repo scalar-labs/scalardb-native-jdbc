@@ -429,3 +429,85 @@ Run `20261025-2251`, the layouts side by side (benchbase-postgresql-aws.md): TPC
 table's first columns in its own order, as many as a row has values, when they are all the user's,
 and is planned as if it listed them; a row reaching a metadata column is still refused.
 `InlineIntegrationTest` covers both on the five engines. Next: YCSB again on both layouts.
+
+### 2026-10-26: the vendor's statements on a table the transaction found clear
+
+The user's framing: at a long round trip the driver is within 20% of the vendor, at a short one
+over 30%, and the target is 10%. What the driver adds is per statement, not per round trip, so
+it shows most where the round trip is short. Local baseline (laptop Docker, round trip 183 µs,
+inline layout, 60 s): TPC-C (c)/(a) 0.83, +1.19 ms a transaction; server CPU +0.93 ms a commit,
+client CPU +0.28 ms; the stock lock's in-flight check 15.7 µs ten times a NewOrder, the item read
+13.0 against 7.1, the merged stock update 225 µs against ten plain updates' 81, Delivery's
+`order_line` update 145 against 44, StockLevel 1.12 + 0.65 ms of planning against 0.82 + 0.12.
+
+The observation behind the change: at SNAPSHOT and SERIALIZABLE on PostgreSQL every statement of a
+transaction reads one snapshot, so a table with no row in flight in it at one statement has none
+at any later one, and on such a table every check the driver adds is vacuous. A transaction now
+remembers each table it found clear (`Router.passed`, cleared at the transaction's end, nothing in
+autocommit), and runs on it the vendor's statements (design 4.2 "A table found clear", 4.3 "The
+vendor's statement with the stamp"):
+
+1. A plain read's state column probes the in-flight index once per statement before the per-row
+   set: `CASE WHEN NOT EXISTS (in flight) THEN 0 WHEN key IN (in flight) THEN 1 END`; a 0 marks
+   the table clear as the rows are read (`AnchoredHandler`). The hashed set is never built when
+   the probe finds nothing.
+2. A write by any predicate, once the table is clear, is the user's UPDATE or DELETE with the
+   stamp: inline, the stamp in its SET list (a DELETE needs none); decoupled, the DML returning
+   its keys and a second CTE stamping their metadata rows (an UPDATE on a created table, a DELETE
+   there, an upsert on an imported one, which also writes a missing row and a tombstone). Before
+   the table is known clear the same statement carries the gate `AND NOT EXISTS (in flight)`;
+   nothing written asks the coarse check, and the slim and fused statements take over when it
+   finds a row. `KeyedPlan.applyFast`, `Writes.fastKeyed`, `metaStamp`.
+3. A batch's entries of such a write, merged: the same statement joined to a VALUES list of the
+   entries, returning each entry's number (`fastMerged`, `mergedFast`); an entry without its
+   number, or a stamp short, undoes the batch's savepoint and runs the entries as before.
+4. A locking read on a clear table is the statement as written on the data table (marked with a
+   leading comment, since a text equal to the application's own prepared statement makes
+   pgjdbc's statement cache drop the server-side plan at every call, which cost 21.6 µs of
+   planning per lock in the first measurement); on a table not yet clear, after the coarse check
+   in one round trip, which marks it (`LockPlan.applyPlain`).
+5. A read on clear tables, any shape, is the statement as written on the data tables
+   (`Route.plainSql`, `withPlain`), run on a second vendor statement the handler keeps beside the
+   rewritten one, settings and parameters replayed as it becomes the target
+   (`StatementHandler.switchTo`); not for an inline table read whole. A read's pending per-table
+   checks run as one statement (`Router.check`).
+6. The write's `tx_id` comes from a per-thread `SecureRandom` DRBG, seeded once from the system's
+   source (`Writes.freshTxId`): `UUID.randomUUID` shares one generator that reads that source
+   under a lock on every call. (A `SplittableRandom` was tried first; the id needs uniqueness,
+   not secrecy, but a DRBG costs the same and leaves no question.)
+
+Local TPC-C, inline, 60 s, the same session's (a) each time:
+
+| build | (c)/(a) | added per transaction | server CPU per commit (a → c) | notes |
+|---|---|---|---|---|
+| baseline `49900d5` | 0.83 | +1.19 ms | 1.26 → 2.19 ms | |
+| 1, 2, 4, 6 | 0.88 | +0.82 ms | 1.28 → 2.05 ms | the lock's plan dropped per call (fixed in 4) |
+| + 3 | 0.91 | +0.60 ms | 1.27 → 1.69 ms | merged stock update 87 µs against 81 |
+| + 5, 6 | 0.86 | +0.97 ms | 1.25 → 1.63 ms | a `SET` of the workers each way at every switch, 1.5 a transaction |
+| + 5 without the SET | **0.96** | **+0.26 ms** | 1.31 → 1.53 ms | packets per commit equal (19.7 against 19.6) |
+
+p95 against (a) at the last row: Delivery 1.01, NewOrder 1.04, Payment 1.08, StockLevel 1.19,
+OrderStatus 1.23; p50 added: NewOrder +412 µs, Payment +164, OrderStatus +148, StockLevel +385,
+Delivery +943. Per statement, (c) against (a): the stock lock 15.4 against 12.9 µs, the item read
+as written 9.3 against 7.1, the merged stock update 87 against ten updates' 81, StockLevel's join
+as written 881 + 102 of planning against 818 + 124, Delivery's `order_line` update 56 against 44,
+the customer updates 47 and 30 against 36 and 23, the district update 31 against 15, the oorder
+insert 51 against 36, the new_order insert 35 against 25, the customer read by last name 69
+against 42 (first touch, the rewritten text). Client CPU 0.68 ms a commit against 0.48.
+
+What the first-touch statements still cost is the probe and the rewritten shape (the item read
+10.2 against 7.1 rewritten, 9.3 as written); what the writes cost is the inline row's width
+(before images beside the columns, WAL 16 KB a commit against 9) and the stamp's five columns.
+
+The same build on the other workloads, locally, 60 s: YCSB inline (c)/(a) **0.98**, p95 against
+(a) Insert 1.04, Update 1.01, read-modify-write 1.02, Read 1.05, Scan 0.99, +9 µs an operation;
+TPC-C decoupled **0.92**, +0.53 ms a transaction, p95 Delivery 1.21, NewOrder 1.08, OrderStatus
+1.24, Payment 1.11, StockLevel 1.02: the decoupled layout's second row per write, about 17 a
+transaction, is what is left there. Integration suite (PostgreSQL), unit tests, SpotBugs and
+Spotless pass; `WritesTest` covers the fast texts.
+
+Left: the first-touch reads' rewritten shape (OrderStatus +23% at p95, three reads of three
+tables each touched once); the inline INSERT's CTE and savepoint (about 15 µs); the merged
+INSERT (about 90 µs a NewOrder over ten plain inserts); the inline row's width. On AWS the
+ratios will be lower than here at a shorter round trip and higher at a longer one, as before;
+the time added per transaction is the number to read.

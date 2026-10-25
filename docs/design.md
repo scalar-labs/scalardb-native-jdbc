@@ -878,12 +878,33 @@ union as a derived table.
   its in-flight check included. Every statement of the transaction reads its one snapshot, so a
   later write's own read of its keys (4.3) finds the version the read would have recorded, and a
   version that moved after the snapshot fails the write with `40001`. Each table's piece then
-  appends only its state, as one hashed set of the keys in flight per statement, read from the
-  in-flight index: `CASE WHEN (<key>) IN (SELECT <key> FROM T_meta m WHERE m.tx_state IN (1, 2))
-  THEN 1 END`, NULL for a committed row. The key and the version lookups on the metadata primary key
-  cost a 100-row range read 2.8x the vendor's execution time, and YCSB's scans 1.56x; the hashed
-  state costs the scans 1.07x (measured in todo 329). MySQL and MariaDB keep the anchors: an UPDATE
-  there reads the newest committed version.
+  appends only its state: `CASE WHEN NOT EXISTS (SELECT 1 FROM T_meta m WHERE m.tx_state IN (1,
+  2)) THEN 0 WHEN (<key>) IN (SELECT <key> FROM T_meta m WHERE m.tx_state IN (1, 2)) THEN 1 END`,
+  one probe of the in-flight index per statement, then, only where it found a row, one hashed set
+  of the keys in flight rather than a lookup per row; 0 for a row of a table with none in flight,
+  NULL for a committed row of a table with some. The key and the version lookups on the metadata
+  primary key cost a 100-row range read 2.8x the vendor's execution time, and YCSB's scans 1.56x;
+  the hashed state costs the scans 1.07x (measured in todo 329). MySQL and MariaDB keep the
+  anchors: an UPDATE there reads the newest committed version.
+
+  **A table found clear** (todo 329). The snapshot is the transaction's: a table that has no row in
+  flight in it at one statement has none at any later statement either, since only the
+  transaction's own writes, stamped committed, change what it sees. So a transaction remembers,
+  until it ends, each table it found clear: by a state of 0 as above, by the per-table check
+  below, by a write's gate (4.3) or by the coarse check sent before a locking read. On such a
+  table every later statement of the transaction runs as the vendor's: a read of any shape is the
+  statement as written over the data tables, a locking read likewise, and a write is the
+  statement as written with its stamp (4.3). A prepared read keeps a second vendor statement for
+  that text beside the rewritten one, prepared when first needed, its settings and parameters
+  replayed as it becomes the one executed; a read of an inline table whole (`*`) keeps the
+  rewritten text, which leaves the metadata columns out. A locking read on a table not yet found
+  clear is sent after the table's coarse check, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2)
+  LIMIT 1`, in one round trip: a row found leaves the rows locked and asks the predicate's
+  in-flight check, which aborts for a row in flight the statement matches by either image; none
+  found marks the table clear. A plain read on a table not yet found clear runs through the state
+  column above, whose probe is what marks the table, or through the per-table checks, the pending
+  ones as one statement. In autocommit nothing is remembered: each statement's snapshot is its
+  own.
 - **Why one statement, not two.** Under READ COMMITTED every statement has its own snapshot. A row in
   flight with `x = x2` and `before_x = x1` fails the `P` arm; if its writer rolls back before a second
   statement runs, the row is committed with `x = x1` and no before image, and fails the in-flight arm
@@ -1285,6 +1306,33 @@ closes the gate, and the write then runs as the separate steps, which stamp it (
 share one snapshot, so a row changed after it reaches the CAS as PostgreSQL rechecks a waiting UPDATE:
 at READ COMMITTED against the newest version, where the anchored condition fails and the driver aborts;
 at REPEATABLE READ as PostgreSQL's own serialization failure.
+
+**The vendor's statement with the stamp, at SNAPSHOT and SERIALIZABLE on PostgreSQL (todo 329).**
+There the steps above reduce to the stamp once the table has no row in flight in the transaction's
+snapshot (4.2, a table found clear): step 1 finds every key committed, at the version the statement
+itself reads, which is the anchor, since no read of these levels records one (4.2) and a key a
+`SKIP LOCKED` read recorded keeps the statements above; a row changed after the snapshot fails the
+DML with PostgreSQL's `40001` before any CAS could; and the after-image arm matches nothing. So the
+driver runs, before the statements above and only when the transaction recorded no anchor of the
+table, the user's UPDATE or DELETE as written:
+
+- on an inline table, with the stamp of step 3 in its SET list, `tx_id = :new_id, tx_prepared_at =
+  :now, tx_committed_at = :now, tx_state = 3, tx_version = CASE WHEN tx_id IS NULL THEN 1 ELSE
+  COALESCE(tx_version, 0) + 1 END`, ahead of the user's items; a DELETE takes the row and its
+  metadata at once;
+- on a decoupled table, as a data-modifying CTE returning the keys it wrote, from which a second CTE
+  stamps their metadata rows: a created table's by `UPDATE T_meta ... FROM <keys> WHERE COALESCE(tx_state,
+  3) = 3`, which a DELETE removes instead; an imported table's by an upsert, `INSERT ... ON CONFLICT
+  (k) DO UPDATE ... WHERE COALESCE(tx_state, 3) = 3`, which also writes the row a key had none of
+  yet (4.4) and a DELETE's tombstone (4.5). The statement returns how many rows the DML wrote and how
+  many were stamped; fewer stamped than written is an abort, as a zero-row CAS is.
+
+For a table the transaction has not found clear yet, the same statement carries the gate, `AND NOT
+EXISTS (SELECT 1 FROM T_meta WHERE tx_state IN (1, 2))`, one probe of the in-flight index: a row
+written proves the table clear, and the transaction remembers it; nothing written is either the
+predicate matching nothing or the gate closed, which the table's coarse check then tells, the
+statements above running in the latter case and telling which key is in flight. Nothing is
+written while a key is in flight, as before. A batch's entries keep the forms of 4.4.
 
 An INSERT on PostgreSQL is the user's INSERT, returning its keys, and their metadata rows inserted from
 those keys (`ON CONFLICT DO NOTHING`), in one statement. A tombstone the insert skips is taken over by

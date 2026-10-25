@@ -90,6 +90,12 @@ final class Anchors {
     ownStamps.add(txId);
   }
 
+  /** Whether the transaction recorded a version of any key of {@code table}. */
+  synchronized boolean recorded(String table) {
+    Map<List<Object>, Version> r = read.get(table);
+    return r != null && !r.isEmpty();
+  }
+
   /** At commit or rollback. */
   synchronized void transactionEnded() {
     read.clear();

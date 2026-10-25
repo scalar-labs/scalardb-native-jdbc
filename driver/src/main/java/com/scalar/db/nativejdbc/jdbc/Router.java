@@ -2,6 +2,7 @@ package com.scalar.db.nativejdbc.jdbc;
 
 import com.scalar.db.nativejdbc.ScalarDbTables;
 import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.catalog.Layout;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.Outcome;
@@ -138,6 +139,16 @@ final class Router {
     /** The returned columns that are BOOLEAN columns of ScalarDB tables, or null (todo 304). */
     final @Nullable Booleans booleans;
 
+    /**
+     * At SNAPSHOT and SERIALIZABLE on PostgreSQL, the statement as written over the data tables,
+     * which a transaction that found every table of {@link #clearedBy} clear runs instead of {@link
+     * #sql} (design 4.2, todo 329); null otherwise.
+     */
+    final @Nullable String plainSql;
+
+    /** The coarse checks of the ScalarDB tables {@link #plainSql} reads, each to have passed. */
+    final List<String> clearedBy;
+
     private Route(
         String source,
         String sql,
@@ -161,7 +172,11 @@ final class Router {
         @Nullable Boolean anchoring,
         List<String> checks,
         Writes.@Nullable Step fallback,
-        @Nullable Booleans booleans) {
+        @Nullable Booleans booleans,
+        @Nullable String plainSql,
+        List<String> clearedBy) {
+      this.plainSql = plainSql;
+      this.clearedBy = List.copyOf(clearedBy);
       this.booleans = booleans;
       this.anchoring = anchoring;
       this.checks = List.copyOf(checks);
@@ -258,6 +273,36 @@ final class Router {
           b);
     }
 
+    /** This route, with the statement a transaction runs once it found the tables clear. */
+    Route plain(@Nullable String plainSql, List<String> clearedBy) {
+      return new Route(
+          source,
+          sql,
+          changesSession,
+          changesNames,
+          passthrough,
+          kind,
+          isolation,
+          sessionGeneration,
+          catalogGeneration,
+          trustedUntil,
+          parameterSources,
+          parameters,
+          recheckAt,
+          countsOnly,
+          perRow,
+          parallel,
+          plansParallel,
+          write,
+          anchored,
+          anchoring,
+          checks,
+          fallback,
+          booleans,
+          plainSql,
+          clearedBy);
+    }
+
     private Route copy(
         String sql,
         @Nullable List<Integer> parameterSources,
@@ -292,7 +337,9 @@ final class Router {
           anchoring,
           checks,
           fallback,
-          booleans);
+          booleans,
+          plainSql,
+          clearedBy);
     }
   }
 
@@ -336,13 +383,25 @@ final class Router {
      */
     final boolean versions;
 
+    /**
+     * Per table, the coarse check of {@link #inFlightCheck} its state column stands for: a state of
+     * 0 says the check would find no row in the transaction's snapshot (todo 329).
+     */
+    final List<String> checks;
+
     private final int hidden;
 
-    Anchored(List<String> tables, List<Integer> keys, boolean states, boolean versions) {
+    Anchored(
+        List<String> tables,
+        List<Integer> keys,
+        boolean states,
+        boolean versions,
+        List<String> checks) {
       this.tables = tables;
       this.keys = keys;
       this.states = states;
       this.versions = versions;
+      this.checks = List.copyOf(checks);
       this.hidden = keys.stream().mapToInt(k -> k + width()).sum();
     }
 
@@ -357,6 +416,7 @@ final class Router {
       this.keys = List.of(keys);
       this.states = false;
       this.versions = false;
+      this.checks = List.of("");
       this.hidden = hidden;
     }
 
@@ -932,7 +992,9 @@ final class Router {
         null,
         List.of(),
         null,
-        null);
+        null,
+        null,
+        List.of());
   }
 
   /**
@@ -1030,8 +1092,10 @@ final class Router {
     List<String> out = new ArrayList<>();
     if (!versioned) {
       if (states) {
-        // one hashed set of the keys in flight, read once per statement from the in-flight index,
-        // rather than a lookup per row
+        // 0 when the table has no row in flight at all, which one probe of the in-flight index
+        // decides once per statement, and which later statements of the transaction build on
+        // (passed); else one hashed set of the keys in flight, read once per statement from
+        // that index rather than a lookup per row, 1 for a row in it
         // ponytail: past work_mem the set is scanned per row; the rows in flight are few
         List<String> keys = new ArrayList<>();
         List<String> inFlight = new ArrayList<>();
@@ -1039,8 +1103,15 @@ final class Router {
           keys.add(n.key(x, k));
           inFlight.add(m + "." + engine.quote(k));
         }
+        String held = m + "." + engine.quote("tx_state") + " IN (1, 2)";
         out.add(
-            "CASE WHEN ("
+            "CASE WHEN NOT EXISTS (SELECT 1 FROM "
+                + n.meta
+                + " "
+                + m
+                + " WHERE "
+                + held
+                + ") THEN 0 WHEN ("
                 + String.join(", ", keys)
                 + ") IN (SELECT "
                 + String.join(", ", inFlight)
@@ -1049,10 +1120,8 @@ final class Router {
                 + " "
                 + m
                 + " WHERE "
-                + m
-                + "."
-                + engine.quote("tx_state")
-                + " IN (1, 2)) THEN 1 END");
+                + held
+                + ") THEN 1 END");
       }
       return out;
     }
@@ -1266,6 +1335,23 @@ final class Router {
         shape.skipLocked()
             ? null // a row in flight is a locked row, skipped
             : inFlightStep(t, ref, ast, span, inWhere);
+    // at SNAPSHOT and SERIALIZABLE on PostgreSQL the statement as written, on the data table: the
+    // rows it locks are the committed rows where the table has none in flight (todo 329); not for
+    // an inline table whose rows it reads whole, which would show the metadata columns. Marked,
+    // so that its text differs from the application's own prepared statement of the same text:
+    // pgjdbc's statement cache holds one entry per text, and two statements borrowing it in turn
+    // would drop each other's server-side plan at every call
+    List<Integer> all = ast.placeholdersIn(0, ast.source().length());
+    String plainSql =
+        engine == Engine.POSTGRESQL
+                && snapshot()
+                && all != null
+                && (!n.inline || ast.columnsReadFrom(readRef) != null)
+            ? Writes.onDataTable(engine, ast, t, true, ast.source(), -1)
+            : null;
+    if (plainSql != null) {
+      plainSql = "/* scalardb_native_lock */ " + plainSql;
+    }
     // at SNAPSHOT and SERIALIZABLE a row in flight aborts the transaction (section 6), NOWAIT or
     // not
     Writes.Plan plan =
@@ -1279,7 +1365,8 @@ final class Router {
             inner != null && snapshot()
                 ? new Writes.Step(text.sql(), text.parameterSources())
                 : null,
-            engine == Engine.POSTGRESQL && snapshot());
+            engine == Engine.POSTGRESQL && snapshot(),
+            plainSql == null || all == null ? null : new Writes.Step(plainSql, all));
     return new Route(
         sql,
         sql,
@@ -1303,7 +1390,9 @@ final class Router {
         null,
         List.of(),
         null,
-        null);
+        null,
+        null,
+        List.of());
   }
 
   /**
@@ -1487,11 +1576,13 @@ final class Router {
     IdentityHashMap<SqlAst.TableRef, Writes.Names> anchorNames = new IdentityHashMap<>();
     List<String> anchorTables = new ArrayList<>();
     List<Integer> keys = new ArrayList<>();
+    List<String> anchorChecks = new ArrayList<>();
     for (SqlAst.TableRef r : anchored) {
       Writes.Names n = new Writes.Names(engine, Objects.requireNonNull(scalarDb.get(r)));
       anchorNames.put(r, n);
       anchorTables.add(n.table);
       keys.add(versioned ? n.keyColumns.size() : 0); // without versions, no key either
+      anchorChecks.add(inFlightCheck(engine, n.meta));
     }
     SqlAst.SplitText text =
         SplitRead.emit(
@@ -1526,16 +1617,20 @@ final class Router {
         // for another level, whose text may read them (Proxies.preparedWith)
         r =
             r.anchored(
-                anchored.isEmpty() ? null : new Anchored(anchorTables, keys, states, versioned),
+                anchored.isEmpty()
+                    ? null
+                    : new Anchored(anchorTables, keys, states, versioned, anchorChecks),
                 anchoring);
       }
       if (snapshot) {
         // with states, run only for a scrollable result, whose moves pass over rows unchecked
         r = r.checked(checks(scalarDb), fallback(ast, scalarDb));
       }
-      return engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
-          ? r.with(r.sql, r.parameterSources, r.perRow, false, true)
-          : r;
+      r =
+          engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
+              ? r.with(r.sql, r.parameterSources, r.perRow, false, true)
+              : r;
+      return withPlain(r, ast, scalarDb);
     }
     String rewritten = ast.joinTokens(views::get);
     if (rewritten == null) {
@@ -1554,7 +1649,9 @@ final class Router {
             0,
             List.of(),
             true);
-    return snapshot ? r.checked(checks(scalarDb), fallback(ast, scalarDb)) : r;
+    return snapshot
+        ? withPlain(r.checked(checks(scalarDb), fallback(ast, scalarDb)), ast, scalarDb)
+        : r;
   }
 
   /**
@@ -1798,21 +1895,62 @@ final class Router {
     for (TableInfo t : scalarDb.values()) {
       boolean hint = locked && engine == Engine.SQLSERVER;
       out.add(
-          Writes.anyRow(
-                  engine,
-                  "SELECT 1 FROM "
-                      + SplitRead.meta(engine, t)
-                      + (hint
-                          ? " WITH (HOLDLOCK, INDEX(" + engine.quote(t.inflightIndex(engine)) + "))"
-                          : "")
-                      + " WHERE "
-                      + engine.quote("tx_state")
-                      + " IN (1, 2)")
-              // a database's forced parameterization would make the literal a parameter, which
-              // the filtered index then does not match (Msg 8622); RECOMPILE keeps it (todo 271)
-              + (hint ? " OPTION (RECOMPILE)" : locked ? " LOCK IN SHARE MODE" : ""));
+          locked
+              ? Writes.anyRow(
+                      engine,
+                      "SELECT 1 FROM "
+                          + SplitRead.meta(engine, t)
+                          + (hint
+                              ? " WITH (HOLDLOCK, INDEX("
+                                  + engine.quote(t.inflightIndex(engine))
+                                  + "))"
+                              : "")
+                          + " WHERE "
+                          + engine.quote("tx_state")
+                          + " IN (1, 2)")
+                  // a database's forced parameterization would make the literal a parameter,
+                  // which the filtered index then does not match (Msg 8622); RECOMPILE keeps it
+                  // (todo 271)
+                  + (hint ? " OPTION (RECOMPILE)" : " LOCK IN SHARE MODE")
+              : inFlightCheck(engine, SplitRead.meta(engine, t)));
     }
     return List.copyOf(out);
+  }
+
+  /**
+   * The coarse check of a table for rows in flight, one probe of the in-flight index of its
+   * metadata table {@code meta}: a row means the transaction's snapshot holds a row in flight of
+   * the table. Its text is the key under which a transaction remembers that it found none (design
+   * 4.2, todo 329).
+   */
+  static String inFlightCheck(Engine engine, String meta) {
+    return Writes.inFlightCheck(engine, meta);
+  }
+
+  /**
+   * Whether the open transaction found, in its snapshot, no row in flight of the table whose coarse
+   * check {@code check} is (todo 329): every statement of the transaction reads that snapshot at
+   * SNAPSHOT and SERIALIZABLE, so none can meet one, and the table's reads, locking reads and
+   * writes run as the vendor's, the writes with their stamp. Only in a transaction: the callers
+   * check that, as the snapshot of an autocommit statement is its own.
+   */
+  boolean passed(String check) {
+    lock.lock();
+    try {
+      return passed.contains(check);
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /** Records that the open transaction found no row in flight by {@code check}. */
+  void pass(String check) {
+    lock.lock();
+    try {
+      passed.add(check);
+    } finally {
+      lock.unlock();
+    }
   }
 
   /**
@@ -2059,9 +2197,39 @@ final class Router {
    *     (a stream): no fallback then
    * @throws SQLException {@code 40001} when a table has a row in flight
    */
-  @SuppressFBWarnings(value = "SQL_INJECTION_JDBC", justification = "the driver's own statements")
+  @SuppressFBWarnings(
+      value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
+      justification = "the driver's own statements, built from the catalog's quoted names")
   void check(Connection vendor, Route route, int timeout, @Nullable Binder binder)
       throws SQLException {
+    // the checks still to run, in one round trip on PostgreSQL as one statement (todo 329)
+    List<String> pending = new ArrayList<>();
+    lock.lock();
+    try {
+      for (String check : route.checks) {
+        if (!passed.contains(check) && !found.contains(check)) {
+          pending.add(check);
+        }
+      }
+    } finally {
+      lock.unlock();
+    }
+    Map<String, Boolean> results = new HashMap<>();
+    if (engine == Engine.POSTGRESQL && pending.size() > 1) {
+      List<String> columns = new ArrayList<>();
+      for (String check : pending) {
+        columns.add("EXISTS (" + check + ")");
+      }
+      try (PreparedStatement st = vendor.prepareStatement("SELECT " + String.join(", ", columns))) {
+        st.setQueryTimeout(timeout);
+        try (ResultSet rs = st.executeQuery()) {
+          rs.next();
+          for (int i = 0; i < pending.size(); i++) {
+            results.put(pending.get(i), rs.getBoolean(i + 1));
+          }
+        }
+      }
+    }
     // the fallback covers every table of the read: once it found none, the rest need no check
     boolean cleared = false;
     for (String check : route.checks) {
@@ -2075,7 +2243,9 @@ final class Router {
       } finally {
         lock.unlock();
       }
-      if (!inFlight) {
+      if (!inFlight && results.containsKey(check)) {
+        inFlight = Boolean.TRUE.equals(results.get(check));
+      } else if (!inFlight) {
         // prepared on PostgreSQL, so that pgjdbc's statement cache keeps its plan (todo 329); a
         // prepare and close a call costs other drivers round trips
         try (Statement st =
@@ -2174,7 +2344,50 @@ final class Router {
         null,
         List.of(),
         null,
-        null);
+        null,
+        null,
+        List.of());
+  }
+
+  /**
+   * The statement as written over the data tables, which a transaction at SNAPSHOT or SERIALIZABLE
+   * on PostgreSQL runs once it found every ScalarDB table of the read clear (design 4.2, todo 329):
+   * no row of those tables is in flight in its snapshot, so the rows the data tables show are the
+   * committed ones, as the rewritten read would return them. Null where it cannot be: an inline
+   * table read whole, whose metadata columns would show, or a text the names cannot be replaced in.
+   */
+  private Route withPlain(
+      Route r, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+    if (engine != Engine.POSTGRESQL || !snapshot() || ast.hasLockingOrIntoClause()) {
+      return r;
+    }
+    Set<String> cleared = new TreeSet<>();
+    for (Map.Entry<SqlAst.TableRef, TableInfo> e : scalarDb.entrySet()) {
+      TableInfo t = e.getValue();
+      if (t.layout() == Layout.INLINE && ast.columnsReadFrom(e.getKey()) == null) {
+        return r;
+      }
+      cleared.add(inFlightCheck(engine, SplitRead.meta(engine, t)));
+    }
+    String plain =
+        ast.joinTokens(
+            ref -> {
+              TableInfo t = scalarDb.get(ref);
+              return t == null
+                  ? null
+                  : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
+            });
+    return plain == null ? r : r.plain(plain, List.copyOf(cleared));
+  }
+
+  /** Whether the open transaction found every table of {@code checks} clear (todo 329). */
+  boolean allPassed(List<String> checks) {
+    lock.lock();
+    try {
+      return !checks.isEmpty() && passed.containsAll(checks);
+    } finally {
+      lock.unlock();
+    }
   }
 
   /**

@@ -6,6 +6,8 @@ import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.SqlAst;
 import com.scalar.db.nativejdbc.sql.StatementShape;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -93,6 +95,15 @@ final class Writes {
 
     /** Records the version a locking read found under its lock, as a read in the transaction. */
     void anchor(String table, Object[] key, Anchors.Version version);
+
+    /**
+     * Whether the open transaction found no row in flight by the coarse check {@code check} of a
+     * table, in its snapshot (todo 329); false outside a transaction.
+     */
+    boolean passed(String check);
+
+    /** Records that the open transaction found none by {@code check}; nothing outside one. */
+    void pass(String check);
 
     /** Records the keys an INSERT wrote, for {@link #returned}. */
     void inserted(Keys keys);
@@ -189,6 +200,29 @@ final class Writes {
     }
 
     /**
+     * The entries as the vendor's statement with the stamp, at SNAPSHOT and SERIALIZABLE on
+     * PostgreSQL (4.3, todo 329), gated or not as the transaction found the table; null where
+     * {@link #merge()} is the form to send.
+     */
+    @Nullable Merge fastMerge(Context context) {
+      return null;
+    }
+
+    /** That form, gated or not, for tests. */
+    @Nullable Merge fastMerge(boolean gated) {
+      return null;
+    }
+
+    /**
+     * What {@link #fastMerge}'s statement {@code m} returned for {@code entries} entries: each
+     * one's count, recorded; null when an entry wrote nothing, which the entries one by one tell
+     * apart (a key without a row, two entries on one key, the gate closed).
+     */
+    long @Nullable [] mergedFast(Run run, ResultSet rs, int entries, Merge m) throws SQLException {
+      throw new IllegalStateException("no fast merged statement");
+    }
+
+    /**
      * What {@link #merge()}'s statement returned for {@code entries} entries: each one's count,
      * recorded; null when one needs more than that statement, and the entries are undone and run
      * one by one.
@@ -212,6 +246,8 @@ final class Writes {
     // the stamp's three values bound before the entries', not after: the inline layout's INSERT,
     // whose rows each name them
     final boolean stampFirst;
+    // whether the text binds a stamp at all: an inline DELETE, and a created table's, stamp none
+    final boolean stamps;
     private final Map<Integer, String> texts = new ConcurrentHashMap<>();
 
     Merge(IntFunction<String> text, int placeholders) {
@@ -219,9 +255,14 @@ final class Writes {
     }
 
     Merge(IntFunction<String> text, int placeholders, boolean stampFirst) {
+      this(text, placeholders, stampFirst, true);
+    }
+
+    Merge(IntFunction<String> text, int placeholders, boolean stampFirst, boolean stamps) {
       this.text = text;
       this.placeholders = placeholders;
       this.stampFirst = stampFirst;
+      this.stamps = stamps;
     }
 
     /** The statement for {@code entries} entries. */
@@ -659,6 +700,24 @@ final class Writes {
             : inlineByKey
                 ? slimKeyedInline(n, ast, t, exposed, span, inWhere, delete, from, end)
                 : slimKeyed(n, ast, t, exposed, span, inWhere, all, delete, imported, from, end);
+    // at SNAPSHOT and SERIALIZABLE on PostgreSQL, the vendor's statement with the stamp, for a
+    // table the snapshot holds no row in flight of (todo 329)
+    boolean plain =
+        engine == Engine.POSTGRESQL
+            && snapshot
+            && !locks
+            && from >= 0
+            && ast.tableRefs().size() == 1
+            && !shape.returning();
+    Step fast = plain ? fastKeyed(n, ast, t, span, all, delete, imported, from, end, true) : null;
+    Step fastClear =
+        fast == null ? null : fastKeyed(n, ast, t, span, all, delete, imported, from, end, false);
+    Merge fastMerge =
+        fast != null && merge != null && span != null
+            ? fastMerged(n, ast, t, span, delete, imported, from, end, true)
+            : null;
+    Merge fastMergeClear =
+        fastMerge == null ? null : fastMerged(n, ast, t, span, delete, imported, from, end, false);
     return new KeyedPlan(
         n,
         delete,
@@ -677,7 +736,277 @@ final class Writes {
                     n, ast, t, new Step(keys, inWhere), afterImages, span, all, delete, from, end)
                 : null,
         merge,
-        slim);
+        slim,
+        fast,
+        fastClear,
+        fastMerge,
+        fastMergeClear);
+  }
+
+  /**
+   * The gate of {@link #fastKeyed}: no row of the table is in flight, one probe of the in-flight
+   * index.
+   */
+  private static String clearGate(Names n) {
+    return "NOT EXISTS (SELECT 1 FROM " + n.meta + " WHERE " + n.txState + " IN (1, 2))";
+  }
+
+  /**
+   * The metadata rows of the keys {@code w} returns, stamped as {@link #fastKeyed} says: a created
+   * table's by an UPDATE, which a DELETE removes; an imported table's by an upsert. The stamp's
+   * three values, where the text has them, are its only placeholders.
+   */
+  private static String metaStamp(Names n, String w, boolean delete, boolean imported) {
+    Engine engine = n.engine;
+    int width = n.keyColumns.size();
+    List<String> join = new ArrayList<>();
+    for (int i = 0; i < width; i++) {
+      join.add("m." + engine.quote(n.keyColumns.get(i)) + " = w." + w + i);
+    }
+    if (imported) {
+      // the metadata row written or stamped: a key without one, before the backfill completes
+      // (4.4), a DELETE's tombstone (4.5), or the committed row at the next version
+      List<String> conflict = new ArrayList<>();
+      for (String k : n.keyColumns) {
+        conflict.add(engine.quote(k));
+      }
+      return "INSERT INTO "
+          + n.meta
+          + " AS m ("
+          + n.columns("")
+          + ", "
+          + n.txId
+          + ", "
+          + n.txState
+          + ", "
+          + n.txVersion
+          + ", "
+          + n.preparedAt
+          + ", "
+          + n.committedAt
+          + ") SELECT "
+          + Names.numbered("w", w, width)
+          + ", ?, 3, 1, ?, ? FROM "
+          + w
+          + " w ON CONFLICT ("
+          + String.join(", ", conflict)
+          + ") DO UPDATE SET "
+          + n.txId
+          + " = EXCLUDED."
+          + n.txId
+          + ", "
+          + n.preparedAt
+          + " = EXCLUDED."
+          + n.preparedAt
+          + ", "
+          + n.committedAt
+          + " = EXCLUDED."
+          + n.committedAt
+          + ", "
+          + n.txState
+          + " = 3, "
+          + n.txVersion
+          + " = CASE WHEN m."
+          + n.txId
+          + " IS NULL THEN 1 ELSE COALESCE(m."
+          + n.txVersion
+          + ", 0) + 1 END WHERE COALESCE(m."
+          + n.txState
+          + ", 3) = 3";
+    }
+    if (delete) {
+      return "DELETE FROM "
+          + n.meta
+          + " m USING "
+          + w
+          + " w WHERE "
+          + String.join(" AND ", join)
+          + " AND COALESCE(m."
+          + n.txState
+          + ", 3) = 3";
+    }
+    return "UPDATE "
+        + n.meta
+        + " m SET "
+        + inlineStampSets(n)
+        + " FROM "
+        + w
+        + " w WHERE "
+        + String.join(" AND ", join)
+        + " AND COALESCE(m."
+        + n.txState
+        + ", 3) = 3";
+  }
+
+  /**
+   * {@link #fastKeyed} over the entries of a batch (todo 329), each a row of {@code
+   * scalardb_native_e}, which the DML is joined to, each placeholder its entry's column, and whose
+   * number it returns for each row it wrote: an entry whose number is not returned wrote nothing,
+   * or shares its key with another, which the entries one by one tell apart. Null when the text
+   * cannot be rewritten.
+   */
+  private static @Nullable Merge fastMerged(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      int[] span,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end,
+      boolean gated) {
+    List<int[]> holes = ast.placeholderSpans();
+    if (holes == null || holes.isEmpty()) {
+      return null;
+    }
+    String source = ast.source();
+    String e = "scalardb_native_e";
+    String w = "scalardb_native_w";
+    IntFunction<String> p = j -> e + ".scalardb_native_p" + j;
+    boolean inline = t.layout() == Layout.INLINE;
+    String where =
+        " WHERE ("
+            + filled(source, span[0], span[1], holes, p)
+            + ")"
+            + (gated ? " AND " + clearGate(n) : "")
+            + filled(source, span[1], end, holes, p);
+    String joined = (delete ? " USING " : " FROM ") + e + where;
+    String text;
+    if (!delete && inline) {
+      int set = ast.afterFirst("SET");
+      if (set < 0 || set > from) {
+        return null;
+      }
+      text =
+          filled(source, 0, set, holes, p)
+              + " "
+              + inlineStampSets(n)
+              + ","
+              + filled(source, set, from, holes, p).stripTrailing()
+              + joined;
+    } else {
+      text = filled(source, 0, from, holes, p).stripTrailing() + joined;
+    }
+    String returning =
+        " RETURNING "
+            + e
+            + ".scalardb_native_n"
+            + (inline ? "" : " AS scalardb_native_n, " + n.aliased("", w));
+    String dml = onDataTable(n.engine, ast, t, true, text + returning, from);
+    if (dml == null) {
+      return null;
+    }
+    StringBuilder head = new StringBuilder("WITH ").append(e).append(" (scalardb_native_n");
+    for (int j = 1; j <= holes.size(); j++) {
+      head.append(", scalardb_native_p").append(j);
+    }
+    head.append(") AS (VALUES ");
+    String row = ", ?".repeat(holes.size()) + ")";
+    String rest =
+        inline
+            ? ") " + dml
+            : "), "
+                + w
+                + " AS ("
+                + dml
+                + "), scalardb_native_s AS ("
+                + metaStamp(n, w, delete, imported)
+                + " RETURNING 1) SELECT w.scalardb_native_n, (SELECT count(*) FROM"
+                + " scalardb_native_s) FROM "
+                + w
+                + " w";
+    IntFunction<String> sql =
+        k -> {
+          StringBuilder out = new StringBuilder(head);
+          for (int i = 1; i <= k; i++) {
+            out.append(i == 1 ? "(" : ", (").append(i).append(row);
+          }
+          return out.append(rest).toString();
+        };
+    return new Merge(sql, holes.size(), false, inline ? !delete : imported || !delete);
+  }
+
+  /**
+   * A write at SNAPSHOT and SERIALIZABLE on PostgreSQL as the vendor's statement with its stamp
+   * (todo 329): every statement of the transaction reads its one snapshot, so where the snapshot
+   * holds no row in flight of the table at all, every row the predicate matches is committed, a row
+   * changed after the snapshot fails the write with PostgreSQL's 40001, and the anchor read in the
+   * statement is the row's own version, which the stamp raises. With {@code gated}, the predicate
+   * also requires that no row of the table is in flight, one probe of the in-flight index, for a
+   * transaction that has not found the table clear yet; a closed gate writes nothing, which the
+   * fused statement then tells apart from a predicate matching nothing.
+   *
+   * <p>In the inline layout the stamp is in the SET list, ahead of the user's items, so its values
+   * bind first; a DELETE takes the row and its metadata at once and binds no stamp. In the
+   * decoupled layout the user's DML returns the keys it wrote and the metadata rows are stamped
+   * from them after it, the stamp's values bound last: an UPDATE of the committed row on a created
+   * table, which a DELETE removes; on an imported table an upsert, which also writes the row a key
+   * had none of yet (4.4), the tombstone of a DELETE among them (4.5). The statement returns how
+   * many rows the DML wrote and how many were stamped. Null when the text cannot be rewritten.
+   */
+  private static @Nullable Step fastKeyed(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      int @Nullable [] span,
+      List<Integer> all,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end,
+      boolean gated) {
+    Engine engine = n.engine;
+    String source = ast.source();
+    String gate = clearGate(n);
+    // the predicate, gated: in place of the user's WHERE clause, or appended before the end
+    String where =
+        span == null
+            ? gated ? " WHERE " + gate : ""
+            : " WHERE ("
+                + source.substring(span[0], span[1])
+                + ")"
+                + (gated ? " AND " + gate : "")
+                + source.substring(span[1], end);
+    String head = source.substring(0, from).stripTrailing();
+    boolean inline = t.layout() == Layout.INLINE;
+    String text;
+    if (!delete && inline) {
+      int set = ast.afterFirst("SET");
+      if (set < 0 || set > from) {
+        return null;
+      }
+      text =
+          source.substring(0, set)
+              + " "
+              + inlineStampSets(n)
+              + ","
+              + source.substring(set, from).stripTrailing()
+              + where
+              + source.substring(end);
+    } else {
+      text = head + where + source.substring(end);
+    }
+    String dml = onDataTable(engine, ast, t, true, text, from);
+    if (dml == null) {
+      return null;
+    }
+    if (inline) {
+      return new Step(dml, all, Set.of(), !delete);
+    }
+    String w = "scalardb_native_w";
+    String sql =
+        "WITH "
+            + w
+            + " AS ("
+            + dml
+            + " RETURNING "
+            + n.aliased("", w)
+            + "), scalardb_native_s AS ("
+            + metaStamp(n, w, delete, imported)
+            + " RETURNING 1) SELECT (SELECT count(*) FROM "
+            + w
+            + "), (SELECT count(*) FROM scalardb_native_s)";
+    return new Step(sql, all);
   }
 
   /**
@@ -2013,7 +2342,7 @@ final class Writes {
    *
    * @return the text, or {@code null} when the name cannot be placed in it
    */
-  private static @Nullable String onDataTable(
+  static @Nullable String onDataTable(
       Engine engine, SqlAst ast, TableInfo t, boolean alias, String text, int where) {
     if (t.dataTable().equals(t.table())) {
       return text;
@@ -2290,7 +2619,8 @@ final class Writes {
   static long @Nullable [] applyMerged(
       Connection vendor, Plan plan, List<Context> contexts, boolean release, Runnable sent)
       throws SQLException {
-    Merge m = Objects.requireNonNull(plan.merge());
+    Merge fast = plan.fastMerge(contexts.get(0));
+    Merge m = fast != null ? fast : Objects.requireNonNull(plan.merge());
     Run run = new Run(vendor, contexts.get(0));
     String sql =
         (release ? "RELEASE SAVEPOINT " + TOGETHER + "; " : "")
@@ -2305,7 +2635,7 @@ final class Writes {
           c.bind(ps, at++, j, false);
         }
       }
-      if (!m.stampFirst) {
+      if (!m.stampFirst && m.stamps) {
         run.stamp(ps, at);
       }
       try {
@@ -2319,7 +2649,10 @@ final class Writes {
         }
         long[] counts;
         try (ResultSet rs = ps.getResultSet()) {
-          counts = plan.merged(run, rs, contexts.size());
+          counts =
+              fast != null
+                  ? plan.mergedFast(run, rs, contexts.size(), fast)
+                  : plan.merged(run, rs, contexts.size());
         }
         if (counts == null) {
           undoTogether(vendor, null);
@@ -2471,7 +2804,7 @@ final class Writes {
   static final class Run {
     final Connection v;
     final Context context;
-    final String txId = UUID.randomUUID().toString();
+    final String txId = freshTxId();
     final long now = System.currentTimeMillis();
     final long deadline; // System.nanoTime(), or 0 without a timeout
 
@@ -2611,6 +2944,44 @@ final class Writes {
       i = bind(ps, i, key);
     }
     return i;
+  }
+
+  // a generator per thread: UUID.randomUUID shares one, which reads the system's random source
+  // on every call, a system call under a lock; a DRBG is seeded from it once and runs in Java
+  private static final ThreadLocal<SecureRandom> RANDOM =
+      ThreadLocal.withInitial(
+          () -> {
+            try {
+              return SecureRandom.getInstance("DRBG");
+            } catch (NoSuchAlgorithmException e) {
+              return new SecureRandom();
+            }
+          });
+
+  /** A fresh transaction id for a write's stamp (I5): a random UUID, as ScalarDB's own are. */
+  static String freshTxId() {
+    byte[] bytes = new byte[16];
+    RANDOM.get().nextBytes(bytes);
+    bytes[6] = (byte) ((bytes[6] & 0x0f) | 0x40); // version 4
+    bytes[8] = (byte) ((bytes[8] & 0x3f) | 0x80); // IETF variant
+    long msb = 0;
+    long lsb = 0;
+    for (int i = 0; i < 8; i++) {
+      msb = (msb << 8) | (bytes[i] & 0xff);
+      lsb = (lsb << 8) | (bytes[8 + i] & 0xff);
+    }
+    return new UUID(msb, lsb).toString();
+  }
+
+  /**
+   * The coarse check of a table for rows in flight, one probe of the in-flight index of its
+   * metadata table {@code meta}: a row means the transaction's snapshot holds a row in flight of
+   * the table. Its text is the key under which a transaction remembers that it found none (design
+   * 4.2, todo 329).
+   */
+  static String inFlightCheck(Engine engine, String meta) {
+    return anyRow(
+        engine, "SELECT 1 FROM " + meta + " WHERE " + engine.quote("tx_state") + " IN (1, 2)");
   }
 
   /** At most this many keys are bound in one statement, under PostgreSQL's 65,535 parameters. */
@@ -2755,6 +3126,16 @@ final class Writes {
     final @Nullable Merge merge;
     // the write as a slimmer statement for such a predicate, tried before the fused one (todo 329)
     final @Nullable Step slim;
+    // at SNAPSHOT and SERIALIZABLE on PostgreSQL, the vendor's statement with the stamp, gated on
+    // the table having no row in flight, and the same for a table the transaction found clear
+    // (todo 329)
+    final @Nullable Step fast;
+    final @Nullable Step fastClear;
+    // the same over a batch's entries
+    final @Nullable Merge fastMerge;
+    final @Nullable Merge fastMergeClear;
+    // the coarse check the gate stands for, under which the transaction remembers a clear table
+    final String check;
 
     KeyedPlan(
         Names n,
@@ -2769,7 +3150,11 @@ final class Writes {
         boolean predicate,
         @Nullable Step fused,
         @Nullable Merge merge,
-        @Nullable Step slim) {
+        @Nullable Step slim,
+        @Nullable Step fast,
+        @Nullable Step fastClear,
+        @Nullable Merge fastMerge,
+        @Nullable Merge fastMergeClear) {
       super(n);
       this.delete = delete;
       this.imported = imported;
@@ -2783,12 +3168,17 @@ final class Writes {
       this.fused = fused;
       this.merge = merge;
       this.slim = slim;
+      this.fast = fast;
+      this.fastClear = fastClear;
+      this.fastMerge = fastMerge;
+      this.fastMergeClear = fastMergeClear;
+      this.check = inFlightCheck(n.engine, n.meta);
     }
 
     @Override
     List<String> sql() {
       List<String> out = new ArrayList<>();
-      for (Step s : Arrays.asList(afterImages, locked, keys, dml, fused, slim)) {
+      for (Step s : Arrays.asList(afterImages, locked, keys, dml, fused, slim, fast, fastClear)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -2798,6 +3188,15 @@ final class Writes {
 
     @Override
     long apply(Run run) throws SQLException {
+      // a key this transaction read at a version, by a read that records them, is checked
+      // against it by the statements below
+      if (fast != null && fastClear != null && !run.context.anchors().recorded(n.table)) {
+        boolean passed = run.context.passed(check);
+        Long written = applyFast(run, passed ? fastClear : fast, passed);
+        if (written != null) {
+          return written;
+        }
+      }
       if (slim != null) {
         Long written;
         try (PreparedStatement ps = run.prepare(slim, null)) {
@@ -2873,6 +3272,54 @@ final class Writes {
       }
     }
 
+    /**
+     * The vendor's statement with the stamp (todo 329): what it wrote, or null when it wrote
+     * nothing and the table has a row in flight in the snapshot, which closed the gate, or may
+     * have: the statements below then tell which row, and wait or abort. A write that stamped fewer
+     * rows than it wrote met a metadata row that is not committed, or none where a created table
+     * must have one: an abort, as a zero-row CAS is (4.3).
+     */
+    private @Nullable Long applyFast(Run run, Step step, boolean passed) throws SQLException {
+      long written;
+      long stamped;
+      try (PreparedStatement ps = run.prepare(step, null)) {
+        if (inline) {
+          written = ps.executeUpdate();
+          stamped = written;
+        } else {
+          if (imported || !delete) {
+            run.stamp(ps, step.binds.size() + 1); // a created table's DELETE stamps nothing
+          }
+          try (ResultSet rs = ps.executeQuery()) {
+            rs.next();
+            written = rs.getLong(1);
+            stamped = rs.getLong(2);
+          }
+        }
+      }
+      if (written == 0) {
+        if (passed) {
+          return 0L; // nothing matched, as the vendor's statement would find
+        }
+        try (PreparedStatement ps = run.prepare(check);
+            ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            return null; // the gate was closed
+          }
+        }
+        run.context.pass(check);
+        return 0L;
+      }
+      if (stamped != written) {
+        throw new Aborted("a row the statement writes changed after it was read");
+      }
+      if (!passed) {
+        run.context.pass(check); // the gate was open: no row of the table is in flight
+      }
+      run.context.anchors().wrote(run.txId);
+      return written;
+    }
+
     @Override
     @Nullable Step together() {
       return slim != null ? slim : fused;
@@ -2939,6 +3386,46 @@ final class Writes {
     @Override
     @Nullable Merge merge() {
       return merge;
+    }
+
+    @Override
+    @Nullable Merge fastMerge(Context context) {
+      if (fastMerge == null || fastMergeClear == null || context.anchors().recorded(n.table)) {
+        return null;
+      }
+      return context.passed(check) ? fastMergeClear : fastMerge;
+    }
+
+    @Override
+    @Nullable Merge fastMerge(boolean gated) {
+      return gated ? fastMerge : fastMergeClear;
+    }
+
+    @Override
+    long @Nullable [] mergedFast(Run run, ResultSet rs, int entries, Merge m) throws SQLException {
+      long[] counts = new long[entries];
+      long stamped = -1;
+      int rows = 0;
+      while (rs.next()) {
+        int i = rs.getInt(1) - 1;
+        if (i < 0 || i >= entries || counts[i] != 0) {
+          return null;
+        }
+        counts[i] = 1;
+        rows++;
+        if (!inline) {
+          stamped = rs.getLong(2);
+        }
+      }
+      // every entry wrote its row and had it stamped; otherwise one by one tells which did not
+      if (rows != entries || (!inline && stamped != rows)) {
+        return null;
+      }
+      if (m == fastMerge) {
+        run.context.pass(check); // the gate was open
+      }
+      run.context.anchors().wrote(run.txId);
+      return counts;
     }
 
     /**
@@ -3864,6 +4351,12 @@ final class Writes {
     // at SNAPSHOT and SERIALIZABLE on PostgreSQL, the in-flight check and the lock in one round
     // trip (todo 328)
     final @Nullable Step fused;
+    // there too, the statement as written: alone for a table the transaction found to have no
+    // row in flight in its snapshot, else after the coarse check of the table, in one round trip
+    // (todo 329)
+    final @Nullable Step plain;
+    final @Nullable Step checked;
+    final String check;
 
     LockPlan(
         Names n,
@@ -3872,7 +4365,8 @@ final class Writes {
         boolean noWait,
         @Nullable String relock,
         @Nullable Step snapshot,
-        boolean fuse) {
+        boolean fuse,
+        @Nullable Step plain) {
       super(n);
       this.lock = lock;
       this.inFlight = inFlight;
@@ -3886,6 +4380,10 @@ final class Writes {
       }
       this.fused =
           fuse && inFlight != null ? new Step(inFlight.sql + "; " + lock.sql, binds) : null;
+      this.check = inFlightCheck(n.engine, n.meta);
+      Step p = fuse && inFlight != null ? plain : null;
+      this.plain = p;
+      this.checked = p == null ? null : new Step(check + "; " + p.sql, p.binds);
     }
 
     @Override
@@ -3906,7 +4404,7 @@ final class Writes {
     @Override
     List<String> sql() {
       List<String> out = new ArrayList<>();
-      for (Step s : Arrays.asList(inFlight, lock, snapshot, fused)) {
+      for (Step s : Arrays.asList(inFlight, lock, snapshot, fused, plain)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -3916,7 +4414,60 @@ final class Writes {
 
     @Override
     long apply(Run run) throws SQLException {
+      if (plain != null && checked != null) {
+        return run.context.passed(check)
+            ? applyPlain(run, plain, false)
+            : applyPlain(run, checked, true);
+      }
       return fused != null ? applyFused(run, fused) : applySteps(run);
+    }
+
+    /**
+     * The locking read as written, at SNAPSHOT and SERIALIZABLE on PostgreSQL (todo 329): every
+     * statement of the transaction reads its one snapshot, so for a table it holds no row in flight
+     * of, which the coarse check sent before the lock decides for a transaction that does not know
+     * yet, the rows locked are the committed rows the statement matches, as {@link #applyFused}'s
+     * are. A row the check finds leaves the rows locked and asks the in-flight check of the
+     * predicate, which aborts at once for a row in flight the statement matches by either image
+     * (section 6), the locks released with the transaction.
+     */
+    private long applyPlain(Run run, Step step, boolean checks) throws SQLException {
+      PreparedStatement ps = run.prepare(step, null, true);
+      try {
+        ps.execute();
+        boolean held = false;
+        if (checks) {
+          try (ResultSet found = ps.getResultSet()) {
+            held = found != null && found.next();
+          }
+          if (!ps.getMoreResults()) {
+            throw new SQLException("the locking read returned no rows", "XX000");
+          }
+        }
+        ResultSet rs = ps.getResultSet();
+        if (rs == null) {
+          throw new SQLException("the locking read returned no rows", "XX000");
+        }
+        if (held) {
+          if (matchesInFlight(run)) {
+            throw new Aborted(
+                "a row the statement locks is being written by a ScalarDB transaction");
+          }
+        } else if (checks) {
+          run.context.pass(check);
+        }
+        int rows = 0;
+        while (rs.next()) {
+          rows++;
+        }
+        rs.beforeFirst();
+        ps.closeOnCompletion();
+        run.context.rows(rs, 0);
+        return rows;
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
+        throw e;
+      }
     }
 
     /**

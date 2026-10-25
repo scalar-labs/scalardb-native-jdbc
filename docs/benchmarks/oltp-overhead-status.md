@@ -1,4 +1,27 @@
-# OLTP overhead: where it stands (2026-10-26)
+# OLTP overhead: where it stands (2026-10-26, evening)
+
+**Update, 2026-10-26 (evening).** A transaction at SNAPSHOT or SERIALIZABLE on PostgreSQL now
+remembers each table it found to have no row in flight in its snapshot, and runs the vendor's own
+statements on such a table: reads and locking reads as written, writes as written with the stamp,
+a batch's entries as one such statement over a VALUES list (design 4.2 "A table found clear", 4.3
+"The vendor's statement with the stamp"; todo 329, "the vendor's statements on a table the
+transaction found clear"). Local laptop, round trip about 185 µs, 60 s, inline layout:
+
+| | before | after |
+|---|---|---|
+| TPC-C (c)/(a) | 0.83 | **0.96** |
+| TPC-C time added per transaction | +1.19 ms | **+0.26 ms** |
+| TPC-C server CPU per commit, (a) → (c) | 1.26 → 2.19 ms | 1.31 → 1.53 ms |
+| TPC-C p95 vs (a): Delivery, NewOrder, OrderStatus, Payment, StockLevel | 1.49, 1.18, 1.25, 1.19, 1.89 | 1.01, 1.04, 1.23, 1.08, 1.19 |
+| YCSB (c)/(a), inline | 0.97 | **0.98** |
+| YCSB p95 vs (a): Insert, Update, read-modify-write, Read, Scan | | 1.04, 1.01, 1.02, 1.05, 0.99 |
+| TPC-C (c)/(a), decoupled | | 0.92, +0.53 ms a transaction |
+
+The rest of this page is the state before that change; its "Where the remaining cost goes" and
+"Open ideas" are superseded by the todo's entry, which lists what is left: the first-touch reads'
+rewritten shape, the INSERT's CTE and savepoint, the merged INSERT, the inline row's width, and
+the decoupled layout's second row per write. Next: the same on AWS (`bench-env/run.sh`), both
+layouts, with the time added per transaction as the number to compare.
 
 A briefing for whoever looks for the next improvements (todo 329). The detail is in the files linked
 below; this page says what is known, what was tried, and what is open.

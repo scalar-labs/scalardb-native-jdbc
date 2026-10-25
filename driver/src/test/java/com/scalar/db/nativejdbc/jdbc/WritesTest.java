@@ -60,9 +60,138 @@ class WritesTest {
   }
 
   private static List<String> plan(TableInfo t, String sql) throws Exception {
+    return plan(t, sql, false);
+  }
+
+  private static List<String> plan(TableInfo t, String sql, boolean snapshot) throws Exception {
     StatementShape shape =
         StatementShape.of(SqlAst.parse(sql, Engine.POSTGRESQL).orElseThrow()).orElseThrow();
-    return Writes.plan(Engine.POSTGRESQL, shape, t, "", false, false, null).sql();
+    return Writes.plan(Engine.POSTGRESQL, shape, t, "", snapshot, false, null).sql();
+  }
+
+  /** The last two texts of a plan at SNAPSHOT: the fast statement gated, and for a clear table. */
+  private static List<String> fast(TableInfo t, String sql) throws Exception {
+    List<String> all = plan(t, sql, true);
+    return all.subList(all.size() - 2, all.size());
+  }
+
+  @Test
+  void atSnapshot_aWriteIsTheVendorsStatementWithTheStamp_gatedOnRowsInFlight() throws Exception {
+    String stamp =
+        "\"tx_id\" = ?, \"tx_prepared_at\" = ?, \"tx_committed_at\" = ?, \"tx_state\" = 3,"
+            + " \"tx_version\" = CASE WHEN \"tx_id\" IS NULL THEN 1 ELSE"
+            + " COALESCE(\"tx_version\", 0) + 1 END";
+    // an inline table: the stamp in the SET list, ahead of the user's items, the gate one probe of
+    // the in-flight index; nothing more for a table the transaction found clear
+    String gate = " AND NOT EXISTS (SELECT 1 FROM \"ns\".\"t\" WHERE \"tx_state\" IN (1, 2))";
+    assertThat(fast(inline(), "UPDATE t SET x = x || ? WHERE id = ? -- note"))
+        .containsExactly(
+            "UPDATE t SET " + stamp + ", x = x || ? WHERE (id = ?)" + gate + " -- note",
+            "UPDATE t SET " + stamp + ", x = x || ? WHERE (id = ?) -- note");
+    assertThat(fast(inline(), "DELETE FROM t WHERE x = ?"))
+        .containsExactly("DELETE FROM t WHERE (x = ?)" + gate, "DELETE FROM t WHERE (x = ?)");
+    assertThat(fast(inline(), "UPDATE t SET x = 1"))
+        .containsExactly(
+            "UPDATE t SET " + stamp + ", x = 1 WHERE" + gate.substring(" AND".length()),
+            "UPDATE t SET " + stamp + ", x = 1");
+    // a decoupled table: the user's DML returns the keys it wrote, whose metadata rows are
+    // stamped from them; a created table's by an UPDATE, which its DELETE removes
+    String counts =
+        " RETURNING 1) SELECT (SELECT count(*) FROM scalardb_native_w), (SELECT count(*) FROM"
+            + " scalardb_native_s)";
+    assertThat(fast(created(), "UPDATE t SET x = ? WHERE id = ?").get(1))
+        .isEqualTo(
+            "WITH scalardb_native_w AS (UPDATE \"ns\".\"t_data\" AS t SET x = ? WHERE (id = ?)"
+                + " RETURNING \"id\" AS scalardb_native_w0), scalardb_native_s AS (UPDATE"
+                + " \"ns\".\"t_meta\" m SET "
+                + stamp
+                + " FROM scalardb_native_w w WHERE m.\"id\" = w.scalardb_native_w0 AND"
+                + " COALESCE(m.\"tx_state\", 3) = 3"
+                + counts);
+    assertThat(fast(created(), "DELETE FROM t WHERE id = ?").get(0))
+        .isEqualTo(
+            "WITH scalardb_native_w AS (DELETE FROM \"ns\".\"t_data\" AS t WHERE (id = ?) AND NOT"
+                + " EXISTS (SELECT 1 FROM \"ns\".\"t_meta\" WHERE \"tx_state\" IN (1, 2))"
+                + " RETURNING \"id\" AS scalardb_native_w0), scalardb_native_s AS (DELETE FROM"
+                + " \"ns\".\"t_meta\" m USING scalardb_native_w w WHERE m.\"id\" ="
+                + " w.scalardb_native_w0 AND COALESCE(m.\"tx_state\", 3) = 3"
+                + counts);
+    // an imported table's by an upsert: a key without a metadata row gets one, a DELETE's as a
+    // tombstone, and a committed row is stamped at the next version
+    assertThat(fast(table(), "DELETE FROM t WHERE id = ?").get(1))
+        .isEqualTo(
+            "WITH scalardb_native_w AS (DELETE FROM t WHERE (id = ?) RETURNING \"id\" AS"
+                + " scalardb_native_w0), scalardb_native_s AS (INSERT INTO \"ns\".\"t_meta\" AS m"
+                + " (\"id\", \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+                + " \"tx_committed_at\") SELECT w.scalardb_native_w0, ?, 3, 1, ?, ? FROM"
+                + " scalardb_native_w w ON CONFLICT (\"id\") DO UPDATE SET \"tx_id\" ="
+                + " EXCLUDED.\"tx_id\", \"tx_prepared_at\" = EXCLUDED.\"tx_prepared_at\","
+                + " \"tx_committed_at\" = EXCLUDED.\"tx_committed_at\", \"tx_state\" = 3,"
+                + " \"tx_version\" = CASE WHEN m.\"tx_id\" IS NULL THEN 1 ELSE"
+                + " COALESCE(m.\"tx_version\", 0) + 1 END WHERE COALESCE(m.\"tx_state\", 3) = 3"
+                + counts);
+    // not at READ COMMITTED, where each statement has its own snapshot
+    assertThat(plan(inline(), "UPDATE t SET x = ? WHERE id = ?"))
+        .noneMatch(s -> s.startsWith("UPDATE t SET \"tx_id\""));
+    // a batch's entries by the key: the same statement joined to the entries, which returns the
+    // number of each entry it wrote; a gated one once per table and transaction
+    Writes.Merge merged = fastMerge(inline(), "UPDATE t SET x = x || ? WHERE id = ?", false);
+    assertThat(merged).isNotNull();
+    assertThat(merged.sql(2))
+        .isEqualTo(
+            "WITH scalardb_native_e (scalardb_native_n, scalardb_native_p1, scalardb_native_p2)"
+                + " AS (VALUES (1, ?, ?), (2, ?, ?)) UPDATE t SET "
+                + stamp
+                + ", x = x || scalardb_native_e.scalardb_native_p1 FROM scalardb_native_e WHERE"
+                + " (id = scalardb_native_e.scalardb_native_p2) RETURNING"
+                + " scalardb_native_e.scalardb_native_n");
+    assertThat(merged.stamps).isTrue();
+    Writes.Merge deletes = fastMerge(inline(), "DELETE FROM t WHERE id = ?", true);
+    assertThat(deletes).isNotNull();
+    assertThat(deletes.sql(1))
+        .isEqualTo(
+            "WITH scalardb_native_e (scalardb_native_n, scalardb_native_p1) AS (VALUES (1, ?))"
+                + " DELETE FROM t USING scalardb_native_e WHERE (id ="
+                + " scalardb_native_e.scalardb_native_p1)"
+                + gate
+                + " RETURNING scalardb_native_e.scalardb_native_n");
+    assertThat(deletes.stamps).isFalse();
+    Writes.Merge decoupled = fastMerge(created(), "UPDATE t SET x = ? WHERE id = ?", false);
+    assertThat(decoupled).isNotNull();
+    assertThat(decoupled.sql(2))
+        .isEqualTo(
+            "WITH scalardb_native_e (scalardb_native_n, scalardb_native_p1, scalardb_native_p2)"
+                + " AS (VALUES (1, ?, ?), (2, ?, ?)), scalardb_native_w AS (UPDATE"
+                + " \"ns\".\"t_data\" AS t SET x = scalardb_native_e.scalardb_native_p1 FROM"
+                + " scalardb_native_e WHERE (id = scalardb_native_e.scalardb_native_p2) RETURNING"
+                + " scalardb_native_e.scalardb_native_n AS scalardb_native_n, \"id\" AS"
+                + " scalardb_native_w0), scalardb_native_s AS (UPDATE \"ns\".\"t_meta\" m SET "
+                + stamp
+                + " FROM scalardb_native_w w WHERE m.\"id\" = w.scalardb_native_w0 AND"
+                + " COALESCE(m.\"tx_state\", 3) = 3 RETURNING 1) SELECT w.scalardb_native_n,"
+                + " (SELECT count(*) FROM scalardb_native_s) FROM scalardb_native_w w");
+    // beyond the key, no merged form at all
+    assertThat(fastMerge(inline(), "UPDATE t SET x = ? WHERE x = ?", false)).isNull();
+  }
+
+  @Test
+  void aWritesTransactionId_isARandomVersion4Uuid() {
+    String a = Writes.freshTxId();
+    String b = Writes.freshTxId();
+    assertThat(a).isNotEqualTo(b);
+    for (String id : List.of(a, b)) {
+      java.util.UUID u = java.util.UUID.fromString(id);
+      assertThat(u.version()).isEqualTo(4);
+      assertThat(u.variant()).isEqualTo(2);
+      assertThat(id).hasSize(36);
+    }
+  }
+
+  private static Writes.@Nullable Merge fastMerge(TableInfo t, String sql, boolean gated)
+      throws Exception {
+    StatementShape shape =
+        StatementShape.of(SqlAst.parse(sql, Engine.POSTGRESQL).orElseThrow()).orElseThrow();
+    return Writes.plan(Engine.POSTGRESQL, shape, t, "", true, false, null).fastMerge(gated);
   }
 
   @Test

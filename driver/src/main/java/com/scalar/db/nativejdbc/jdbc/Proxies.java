@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.function.Consumer;
 import java.util.function.IntFunction;
 import java.util.function.UnaryOperator;
 import org.jspecify.annotations.Nullable;
@@ -308,10 +309,12 @@ public final class Proxies {
             h.keysAsked = keys;
             // only a route that depends on the in-flight counts, or on whether its anchors are
             // recorded, or a plain read, whose text a level locks on MySQL and MariaDB (todo 242),
-            // is ever prepared again
+            // or a read with a statement for tables found clear (todo 329), is ever prepared
+            // again
             if (method.getName().equals("prepareStatement")
                 && (route.recheckAt != 0
                     || route.anchoring != null
+                    || route.plainSql != null
                     || (route.kind == SqlAst.Kind.SELECT
                         && StatementHandler.plain(route)
                         && router.locksAtSerializable()))) {
@@ -627,6 +630,11 @@ public final class Proxies {
     long epoch;
     // whether the last execute ran in a transaction
     boolean inTransaction;
+    // a prepared read's other vendor statement: the one over the data tables as written, run once
+    // the transaction found the tables clear, or the rewritten one while the plain one is the
+    // target (todo 329); its settings and parameters are replayed as it becomes the target
+    volatile @Nullable Statement alternate;
+    volatile boolean plainNow;
 
     @Override
     void handedOut() {
@@ -682,6 +690,11 @@ public final class Proxies {
       }
       if (name.equals("getGeneratedKeys") && writeKeys != null) {
         return writeKeys;
+      }
+      if (name.equals("close") && alternate != null) {
+        Statement other = alternate;
+        alternate = null;
+        other.close();
       }
       if (name.equals("cancel")) {
         cancelled = true;
@@ -927,7 +940,10 @@ public final class Proxies {
                   + " UPDATE");
         }
       }
-      if (name.equals("getMetaData") && prepared != null && prepared.anchored != null) {
+      if (name.equals("getMetaData")
+          && prepared != null
+          && prepared.anchored != null
+          && !plainNow) {
         Object md = forward(vendor(), method, args);
         return md == null
             ? null
@@ -995,7 +1011,39 @@ public final class Proxies {
             throw e;
           }
         }
-        owner.router.beforeRun(owner.vendor, ran);
+        // the statement as written over the data tables, once the transaction found every table
+        // of the read clear, in place of the rewritten one (design 4.2, todo 329)
+        Router.Route one = ran.size() == 1 && !name.endsWith("Batch") ? ran.get(0) : null;
+        boolean plain =
+            one != null
+                && one.plainSql != null
+                && one.write == null
+                && marks
+                && !unwrapped
+                && (takesSql || !streamBound())
+                && owner.router.allPassed(one.clearedBy);
+        if (plain) {
+          if (takesSql) {
+            routed = routed.clone();
+            routed[0] = one.plainSql;
+          } else {
+            switchTo(true, one);
+          }
+          anchored = null;
+          recording = false;
+        } else if (!takesSql && plainNow && one != null) {
+          if (streamBound()) {
+            throw Errors.unsupported(
+                "a stream cannot be bound to this read of ScalarDB tables, whose text changes"
+                    + " between transactions; bind the value itself");
+          }
+          switchTo(false, one);
+        }
+        // the workers stay as they are for the plain statement, unless its own plan is parallel,
+        // where the rewritten one would have kept them too: a SET each way would cost a round
+        // trip at every switch
+        owner.router.beforeRun(
+            owner.vendor, plain && !Objects.requireNonNull(one).parallel ? List.of() : ran);
         try {
           result = forward(vendor(), method, routed);
         } finally {
@@ -1062,6 +1110,13 @@ public final class Proxies {
                           owner.rollbackOnly = true;
                         }
                       },
+                      marks
+                          ? check -> {
+                            if (owner.anchors.epoch() == at) {
+                              owner.router.pass(check);
+                            }
+                          }
+                          : null,
                       failed));
       return itsOwn ? withBooleans(rows, booleans, booleanType) : rows;
     }
@@ -1178,6 +1233,7 @@ public final class Proxies {
               null,
               0,
               () -> {},
+              null,
               UnaryOperator.identity());
       h.closesStatement = vendor().isCloseOnCompletion();
       return (ResultSet) proxy(ResultSet.class, h);
@@ -1191,12 +1247,16 @@ public final class Proxies {
         @Nullable Map<Integer, Call> parameters, Writes.Keys inserted, @Nullable Out out) {
       // a locking read anchors its rows as an anchored read does, in a transaction only
       boolean recording;
+      boolean open;
       try {
-        recording = !owner.vendor.getAutoCommit() && !owner.router.readOnly();
+        open = !owner.vendor.getAutoCommit();
+        recording = open && !owner.router.readOnly();
       } catch (SQLException e) {
+        open = false;
         recording = false;
       }
       boolean records = recording;
+      boolean inTransaction = open;
       long epoch = owner.anchors.epoch();
       return new Writes.Context() {
         @Override
@@ -1242,6 +1302,18 @@ public final class Proxies {
         public void anchor(String table, Object[] key, Anchors.Version version) {
           if (records) {
             owner.anchors.read(epoch, table, key, version);
+          }
+        }
+
+        @Override
+        public boolean passed(String check) {
+          return inTransaction && owner.router.passed(check);
+        }
+
+        @Override
+        public void pass(String check) {
+          if (inTransaction && owner.anchors.epoch() == epoch) {
+            owner.router.pass(check);
           }
         }
 
@@ -1535,13 +1607,7 @@ public final class Proxies {
           forward(fresh, c.method, c.args);
         }
         target = fresh;
-        for (Call c : parameters.values()) {
-          if (route.parameterSources == null) {
-            forward(fresh, c.method, c.args);
-          } else {
-            bind(route, c.method, c.args);
-          }
-        }
+        replay(route, false);
       } catch (Throwable t) {
         target = old;
         try {
@@ -1552,6 +1618,60 @@ public final class Proxies {
         throw t;
       }
       old.close();
+      Statement other = alternate;
+      alternate = null;
+      plainNow = false;
+      if (other != null) {
+        other.close(); // prepared for a text that no longer is the route's
+      }
+    }
+
+    /**
+     * Makes the vendor statement of the route's statement as written over the data tables the
+     * target, or the rewritten one again (todo 329): prepared once, its settings replayed then; its
+     * parameters replayed as it becomes the target, the other's cleared.
+     */
+    private void switchTo(boolean plain, Router.Route route) throws Throwable {
+      if (plainNow == plain) {
+        return;
+      }
+      Statement other = alternate;
+      if (other == null) {
+        Object[] args = Objects.requireNonNull(preparedArgs).clone();
+        args[0] = plain ? Objects.requireNonNull(route.plainSql) : route.sql;
+        other = (Statement) created(owner.vendor, Objects.requireNonNull(preparedWith), args);
+        try {
+          for (Call c : settings.values()) {
+            forward(other, c.method, c.args);
+          }
+        } catch (Throwable t) {
+          try {
+            other.close();
+          } catch (SQLException e) {
+            t.addSuppressed(e);
+          }
+          throw t;
+        }
+      }
+      Statement was = vendor();
+      target = other;
+      alternate = was;
+      plainNow = plain;
+      if (other instanceof PreparedStatement) {
+        ((PreparedStatement) other).clearParameters();
+      }
+      replay(route, plain);
+    }
+
+    /** Binds the parameters set so far onto the target: as written, or as the split read takes. */
+    private void replay(Router.Route route, boolean plain) throws Throwable {
+      for (Call c : parameters.values()) {
+        if (plain || route.parameterSources == null) {
+          forward(vendor(), c.method, c.args);
+        } else {
+          bind(route, c.method, c.args);
+        }
+      }
     }
 
     /** Binds a value to every placeholder of a split read that takes it. */
@@ -1630,11 +1750,16 @@ public final class Proxies {
     final long epoch;
     // marks the transaction rollback-only when a row in flight aborts the read
     final Runnable aborts;
+    // records that a table's coarse check would find no row in the transaction's snapshot, which
+    // a state of 0 says (todo 329); null outside a transaction
+    final @Nullable Consumer<String> passes;
     // what a vendor error the rows bring means for the transaction
     final UnaryOperator<SQLException> failed;
     int visible = -1;
     // closing the rows closes the statement: a driver's rows under closeOnCompletion (todo 155)
     boolean closesStatement;
+    // per table, whether its state column said so already
+    final boolean[] passed;
 
     AnchoredHandler(
         Object vendor,
@@ -1644,6 +1769,7 @@ public final class Proxies {
         @Nullable Anchors anchors,
         long epoch,
         Runnable aborts,
+        @Nullable Consumer<String> passes,
         UnaryOperator<SQLException> failed) {
       super(vendor);
       this.connection = connection;
@@ -1652,7 +1778,9 @@ public final class Proxies {
       this.anchors = anchors;
       this.epoch = epoch;
       this.aborts = aborts;
+      this.passes = passes;
       this.failed = failed;
+      this.passed = new boolean[anchored.tables.size()];
     }
 
     @Override
@@ -1738,10 +1866,19 @@ public final class Proxies {
           // at SNAPSHOT and SERIALIZABLE a row in flight aborts the read (design 4.2)
           for (int t = 0, at = visible() + 1; t < anchored.tables.size(); t++) {
             int keys = anchored.keys.get(t);
-            if (Writes.inFlight(rs.getObject(at + keys + width - 1))) {
+            Object state = rs.getObject(at + keys + width - 1);
+            if (Writes.inFlight(state)) {
               aborts.run();
               throw new Writes.Aborted(
                   "a row the read returns is being written by a ScalarDB transaction");
+            }
+            if (passes != null
+                && !passed[t]
+                && state != null
+                && ((Number) state).intValue() == 0
+                && !anchored.checks.get(t).isEmpty()) {
+              passed[t] = true; // the table has no row in flight in the snapshot (todo 329)
+              passes.accept(anchored.checks.get(t));
             }
             at += keys + width;
           }
