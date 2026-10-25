@@ -1571,8 +1571,9 @@ when all of these hold, erring toward refusing:
   statement stays refused.
 
 - **None of the names a passthrough statement must not contain** (4.1's table, "Any statement in
-  passthrough mode"), found in the text's words in any case, comments and literals included; on Oracle
-  also each synonym a parsed statement could not use: one of a ScalarDB table or one of its tables, of
+  passthrough mode"), found in the text's words in any case, comments and literals included, a word
+  split at `#`, `@` and `$` too (`orders#` ends at a MySQL comment, `orders@link` names a table over a
+  database link); on Oracle also each synonym a parsed statement could not use: one of a ScalarDB table or one of its tables, of
   another synonym, of what is not a table or view, or over a database link, read once per load of the
   catalog; and what DDL could reach a ScalarDB table by: its namespace, and the setup's read view
   and in-flight index (section 3). A plain table of the same name in another schema is refused too.

@@ -162,7 +162,11 @@ public final class SqlWords {
             + ", which runs SQL given as text or a prepared statement, or changes the session";
       }
     }
+    // a name may end where the engine starts a comment (#) or a link (@), or meet a $
     String named = first(text, names);
+    if (named == null) {
+      named = first(text.replace('#', ' ').replace('@', ' ').replace('$', ' '), names);
+    }
     return named == null ? null : "it names " + named + ", which ScalarDB manages";
   }
 

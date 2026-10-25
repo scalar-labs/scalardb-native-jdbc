@@ -171,6 +171,15 @@ class SqlWordsTest {
         .contains("query_to_xml");
     assertThat(why("SELECT set_config('a', 'b', true) USING <", Engine.POSTGRESQL))
         .contains("set_config");
+    // a name glued to a comment, a database link or a $
+    assertThat(why("SELECT x FROM orders#\nFORCE INDEX FOR ORDER BY (PRIMARY)", Engine.MYSQL))
+        .contains("names orders");
+    assertThat(why("SELECT x FROM orders#\nFORCE INDEX (PRIMARY)", Engine.MARIADB))
+        .contains("names orders");
+    assertThat(why("SELECT x FROM orders@loop MODEL DIMENSION BY (id) RULES ()", Engine.ORACLE))
+        .contains("names orders");
+    assertThat(why("SELECT x FROM $$a$$orders USING <", Engine.POSTGRESQL))
+        .contains("names orders");
   }
 
   @Test
