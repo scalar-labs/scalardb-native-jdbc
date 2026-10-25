@@ -480,6 +480,20 @@ public final class StatementShape {
   }
 
   /**
+   * Returns the one row of an INSERT's VALUES, parenthesized, or null for an INSERT of several rows
+   * or another statement.
+   *
+   * @return the row
+   */
+  public @Nullable Expression insertRow() {
+    if (kind != Kind.INSERT) {
+      return null;
+    }
+    ExpressionList<?> top = ((Values) ((Insert) ast.statement()).getSelect()).getExpressions();
+    return top instanceof ParenthesedExpressionList<?> ? (Expression) top : null;
+  }
+
+  /**
    * Returns, per {@code VALUES} row of an {@code INSERT}, the values of the given key columns in
    * their order, when every row gives each of them as a placeholder or a literal.
    *

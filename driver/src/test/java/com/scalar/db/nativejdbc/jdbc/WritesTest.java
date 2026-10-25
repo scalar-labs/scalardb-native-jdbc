@@ -80,6 +80,62 @@ class WritesTest {
         .isEqualTo("UPDATE t SET x = ? WHERE (x = ? OR id > 3) AND (\"id\" = ?) -- note");
   }
 
+  private static Writes.@Nullable Merge merge(TableInfo t, String sql) throws Exception {
+    StatementShape shape =
+        StatementShape.of(SqlAst.parse(sql, Engine.POSTGRESQL).orElseThrow()).orElseThrow();
+    return Writes.plan(Engine.POSTGRESQL, shape, t, "", false, false, null).merge();
+  }
+
+  @Test
+  void aWriteByItsKey_mergesABatchsEntries_intoOneStatement() throws Exception {
+    Writes.Merge update = merge(table(), "UPDATE t SET x = x || ? WHERE id = ?");
+    assertThat(update).isNotNull();
+    String sql = update.sql(2);
+    // the entries, numbered, a column per placeholder; the stamp's three after them
+    assertThat(sql)
+        .startsWith(
+            "WITH scalardb_native_e (scalardb_native_n, scalardb_native_p1, scalardb_native_p2)"
+                + " AS (VALUES (1, ?, ?), (2, ?, ?)), scalardb_native_keys")
+        .containsOnlyOnce("\"tx_id\" = ?, \"tx_prepared_at\" = ?, \"tx_committed_at\" = ?");
+    assertThat(sql.chars().filter(c -> c == '?').count()).isEqualTo(7);
+    // each entry's key read on its own, the DML joined to the entries
+    assertThat(sql)
+        .contains(
+            "FROM scalardb_native_e CROSS JOIN LATERAL (SELECT t.\"id\" AS \"id\" FROM"
+                + " \"ns\".\"rc_t\" t WHERE id = scalardb_native_e.scalardb_native_p2 OFFSET 0) d")
+        .contains(
+            "UPDATE t SET x = x || scalardb_native_e.scalardb_native_p1 FROM scalardb_native_e"
+                + " WHERE (id = scalardb_native_e.scalardb_native_p2) AND")
+        // two entries on one key close the gate: one by one, the second sees the first's write
+        .contains("GROUP BY scalardb_native_d0 HAVING count(*) > 1")
+        .endsWith(
+            "FROM scalardb_native_e LEFT JOIN scalardb_native_keys k ON k.scalardb_native_n ="
+                + " scalardb_native_e.scalardb_native_n ORDER BY 1");
+    assertThat(merge(created(), "DELETE FROM t WHERE ? = id").sql(1))
+        .contains("DELETE FROM \"ns\".\"t_data\" AS t USING scalardb_native_e WHERE")
+        .contains("scalardb_native_removed AS (DELETE FROM");
+    // an INSERT of one row: the row once per entry, in the fused INSERT
+    Writes.Merge insert = merge(table(), "INSERT INTO t (x, id) VALUES (lower(?), ?)");
+    assertThat(insert).isNotNull();
+    assertThat(insert.sql(3))
+        .startsWith(
+            "WITH scalardb_native_inserted AS (INSERT INTO t (x, id) VALUES (lower(?), ?),"
+                + " (lower(?), ?), (lower(?), ?) RETURNING \"id\" AS scalardb_native_k0),"
+                + " scalardb_native_stamped AS (INSERT INTO \"ns\".\"t_meta\"");
+    assertThat(merge(table(), "INSERT INTO t (x, id) VALUES (?, ?), (?, ?)")).isNull();
+    assertThat(merge(table(), "INSERT INTO t (x, id) VALUES ('a', 1)")).isNull();
+    assertThat(merge(table(), "INSERT INTO t (x, id) VALUES (?, ?) RETURNING x")).isNull();
+    // the key as the engine resolves its name, unquoted upper case among them
+    assertThat(merge(table(), "UPDATE t SET x = ? WHERE ID = ?")).isNotNull();
+    assertThat(merge(table(), "UPDATE t SET x = ? WHERE \"ID\" = ?")).isNull();
+    // more than the key, or not all of it: no merged form
+    assertThat(merge(table(), "UPDATE t SET x = ? WHERE id = ? AND x = ?")).isNull();
+    assertThat(merge(table(), "UPDATE t SET x = ? WHERE id > ?")).isNull();
+    assertThat(merge(table(), "UPDATE t SET x = ? WHERE t.id = ?")).isNull();
+    assertThat(merge(table(), "UPDATE t SET x = ? WHERE x = ?")).isNull();
+    assertThat(merge(table(), "UPDATE t SET x = 'a' WHERE id = 1")).isNull();
+  }
+
   @Test
   void delete_withoutAPredicate_getsTheKeyBeforeATrailingComment() throws Exception {
     assertThat(plan("DELETE FROM t AS a -- all").get(1))

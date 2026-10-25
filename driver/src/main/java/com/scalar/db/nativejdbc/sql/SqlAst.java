@@ -1497,6 +1497,26 @@ public final class SqlAst {
     return n == parameterCount ? out : null;
   }
 
+  /**
+   * Returns where each {@code ?} placeholder stands in {@link #source}, in order.
+   *
+   * @return the spans, or {@code null} when the statement has a placeholder other than {@code ?} or
+   *     one that cannot be placed in the text
+   */
+  public @Nullable List<int[]> placeholderSpans() {
+    List<int[]> out = new ArrayList<>();
+    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
+      if (t.image.equals("?")) {
+        int[] s = span(t, t);
+        if (s == null) {
+          return null;
+        }
+        out.add(s);
+      }
+    }
+    return out.size() == parameterCount ? out : null;
+  }
+
   /** The characters of {@code first} to {@code last}, checked against their images. */
   private int @Nullable [] span(Token first, Token last) {
     List<Integer> starts = lineStarts();

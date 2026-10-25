@@ -1301,9 +1301,41 @@ public final class Proxies {
             true,
             () -> {
               for (int i = 0; i < size; ) {
-                // the next entries that are one statement each, sent in one round trip (todo 329)
+                // the next entries of one plan with a merged form, as one statement (todo 329)
+                Writes.Plan first = routes.apply(i).write;
+                Writes.Plan merging =
+                    sendsTogether && first != null && first.merge() != null ? first : null;
+                int same = i;
+                while (merging != null
+                    && same < size
+                    && same - i < Writes.MERGE_MAX
+                    && Objects.equals(routes.apply(same).write, merging)) {
+                  same++;
+                }
                 int end = i;
-                while (sendsTogether && end < size && end - i < Writes.TOGETHER_MAX) {
+                if (merging != null && same - i > 1) {
+                  List<Writes.Context> contexts = new ArrayList<>();
+                  for (int j = i; j < same; j++) {
+                    contexts.add(writeContext(parameters.apply(j), inserted, null));
+                  }
+                  boolean release = owner.together;
+                  owner.together = true; // set from here on, undone to or not
+                  long[] got = Writes.applyMerged(owner.vendor, merging, contexts, release);
+                  if (got != null) {
+                    for (int j = i; j < same; j++) {
+                      counts[j] = got[j - i];
+                      owner.ran(routes.apply(j));
+                      done[0]++;
+                    }
+                    last[0] = merging;
+                    i = same;
+                    continue;
+                  }
+                  // sent together instead, where each entry sees the ones before it, as for two
+                  // on one key; one by one if that needs more
+                  end = Math.min(same, i + Writes.TOGETHER_MAX);
+                }
+                while (end == i && sendsTogether && end < size && end - i < Writes.TOGETHER_MAX) {
                   Writes.Plan p = routes.apply(end).write;
                   if (p == null || p.together() == null) {
                     break;

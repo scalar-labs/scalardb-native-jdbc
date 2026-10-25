@@ -1409,7 +1409,18 @@ MariaDB, a T-SQL batch on SQL Server, and an anonymous PL/SQL block on Oracle (t
   to the savepoint and replayed: any other, a timeout, a cancel or a failed transaction among them,
   may have come before the text's savepoint was set, where the undo would return to an earlier
   text's, and ends the batch. Under pgjdbc's `autosave`, whose own savepoint before each statement
-  the release would release too, entries run one by one. Multi-key driver writes and multi-key ScalarDB prepares can
+  the release would release too, entries run one by one. Consecutive entries of one prepared
+  statement go further, as one statement of up to 64 (todo 329): an UPDATE or DELETE whose
+  predicate is the table's key alone, each key column equal to a placeholder or a literal, runs as
+  the fused statement over the entries as rows of a numbered VALUES list, each placeholder its
+  entry's column, each entry's key read on the key's index; its gate also closes when two entries
+  reach one key. An INSERT of one row whose placeholders are all in it runs as one INSERT of the
+  row once per entry, its metadata stamped from the keys it returns. The statement returns each
+  entry's outcome; when one needs more than it (a row in flight, a missing metadata row, two
+  entries on one key, a tombstone, a key the DML skipped, a duplicate), the entries are undone and
+  sent together as above, or one by one. They share one stamp, as one statement's keys do; what a
+  statement costs the server around its execution (binding, locking, the executor's setup for a
+  plan of several data-modifying CTEs) is paid once. Multi-key driver writes and multi-key ScalarDB prepares can
   deadlock across keys whatever the per-key order; the database detects it and the retry contract of
   section 6 covers it.
 - **Predicate shapes for the two-arm read.** `P` must reference one table, be deterministic (it is

@@ -926,6 +926,7 @@ class MoreWritesIntegrationTest {
         assertThat(rows(d, "SELECT COUNT(*) FROM " + t.sql + " WHERE id >= 80 AND x = 'a'"))
             .containsExactly("3");
         d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 80");
+        mergedBatches(tm, tpc, t, d);
       }
       d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 40");
       // a failure in autocommit undoes the whole batch; the counts before it, the cause next
@@ -994,6 +995,118 @@ class MoreWritesIntegrationTest {
     assertThat(scalarDbX(tm, t, 12)).contains("b12!");
     assertThat(scalarDbX(tm, t, 10)).isEmpty();
     assertThat(scalarDbX(tm, t, 1)).contains("a");
+  }
+
+  /**
+   * A prepared batch of writes by key on PostgreSQL, its entries as one statement (todo 329): the
+   * same outcomes and counts as one by one, two entries on one key and a row in flight among them.
+   */
+  private static void mergedBatches(
+      DistributedTransactionManager tm, TwoPhaseCommitTransactionManager tpc, Table t, Connection d)
+      throws Exception {
+    try (PreparedStatement ins =
+        d.prepareStatement("INSERT INTO " + t.sql + " (id, x) VALUES (?, 'm')")) {
+      for (int id = 90; id < 96; id++) {
+        ins.setInt(1, id);
+        ins.addBatch();
+      }
+      assertThat(ins.executeBatch()).hasSize(6).containsOnly(1);
+    }
+    d.setAutoCommit(false);
+    try (PreparedStatement ps =
+        d.prepareStatement("UPDATE " + t.sql + " SET x = CONCAT(x, ?) WHERE id = ?")) {
+      // each entry its own values; a key with no row counts 0
+      int[][] entries = {{90, 1}, {91, 2}, {99, 3}, {92, 4}};
+      for (int[] entry : entries) {
+        ps.setString(1, String.valueOf(entry[1]));
+        ps.setInt(2, entry[0]);
+        ps.addBatch();
+      }
+      assertThat(ps.executeBatch()).containsExactly(1, 1, 0, 1);
+      // two entries on one key: the second sees the first's write, as one by one
+      for (String s : List.of("a", "b")) {
+        ps.setString(1, s);
+        ps.setInt(2, 93);
+        ps.addBatch();
+      }
+      assertThat(ps.executeBatch()).containsExactly(1, 1);
+    }
+    d.commit();
+    assertThat(rows(d, "SELECT id, x FROM " + t.sql + " WHERE id BETWEEN 90 AND 93 ORDER BY id"))
+        .containsExactly("90/m1", "91/m2", "92/m4", "93/mab");
+    // a row this transaction read, changed by ScalarDB before the batch: first-updater-wins
+    assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 94")).containsExactly("m");
+    DistributedTransaction other = tm.begin();
+    other.update(
+        Update.newBuilder()
+            .namespace(N("wb"))
+            .table(t.scalarDbName)
+            .partitionKey(id(94))
+            .textValue(N("x"), "s")
+            .build());
+    other.commit();
+    try (PreparedStatement ps = d.prepareStatement("UPDATE " + t.sql + " SET x = ? WHERE id = ?")) {
+      for (int id : new int[] {95, 94}) {
+        ps.setString(1, "late");
+        ps.setInt(2, id);
+        ps.addBatch();
+      }
+      assertThatThrownBy(ps::executeBatch)
+          .isInstanceOfSatisfying(
+              BatchUpdateException.class, b -> assertThat(b.getSQLState()).isEqualTo("40001"));
+    }
+    d.rollback();
+    // a key a ScalarDB transaction holds prepared aborts the batch
+    TwoPhaseCommitTransaction held = tpc.begin();
+    held.update(
+        Update.newBuilder()
+            .namespace(N("wb"))
+            .table(t.scalarDbName)
+            .partitionKey(id(95))
+            .textValue(N("x"), "held")
+            .build());
+    held.prepare();
+    try (PreparedStatement ps = d.prepareStatement("UPDATE " + t.sql + " SET x = ? WHERE id = ?")) {
+      for (int id : new int[] {94, 95}) {
+        ps.setString(1, "w");
+        ps.setInt(2, id);
+        ps.addBatch();
+      }
+      assertThatThrownBy(ps::executeBatch)
+          .isInstanceOfSatisfying(
+              BatchUpdateException.class, b -> assertThat(b.getSQLState()).isEqualTo("40001"));
+      d.rollback();
+    } finally {
+      held.rollback();
+    }
+    // a DELETE by key, a key with no row among them
+    try (PreparedStatement ps = d.prepareStatement("DELETE FROM " + t.sql + " WHERE id = ?")) {
+      for (int id : new int[] {94, 98, 95}) {
+        ps.setInt(1, id);
+        ps.addBatch();
+      }
+      assertThat(ps.executeBatch()).containsExactly(1, 0, 1);
+    }
+    d.commit();
+    d.setAutoCommit(true);
+    assertThat(rows(d, "SELECT id FROM " + t.sql + " WHERE id BETWEEN 90 AND 99 ORDER BY id"))
+        .containsExactly("90", "91", "92", "93");
+    assertThat(scalarDbX(tm, t, 93)).contains("mab");
+    assertThat(scalarDbX(tm, t, 94)).isEmpty();
+    // an INSERT of a key whose delete left a tombstone, among others: taken over, as one by one
+    try (PreparedStatement ins =
+        d.prepareStatement("INSERT INTO " + t.sql + " (id, x) VALUES (?, ?)")) {
+      for (int id : new int[] {96, 94, 97}) {
+        ins.setInt(1, id);
+        ins.setString(2, "n" + id);
+        ins.addBatch();
+      }
+      assertThat(ins.executeBatch()).containsExactly(1, 1, 1);
+    }
+    assertThat(rows(d, "SELECT id, x FROM " + t.sql + " WHERE id IN (94, 96, 97) ORDER BY id"))
+        .containsExactly("94/n94", "96/n96", "97/n97");
+    assertThat(scalarDbX(tm, t, 94)).contains("n94");
+    d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 90");
   }
 
   /** Inserts {@code from} and the key after it as one batch of {@code ps}. */

@@ -33,10 +33,18 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.IntFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.JdbcParameter;
+import net.sf.jsqlparser.expression.LongValue;
+import net.sf.jsqlparser.expression.StringValue;
+import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
+import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
+import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
+import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.statement.delete.Delete;
 import net.sf.jsqlparser.statement.update.Update;
 import org.jspecify.annotations.Nullable;
@@ -160,9 +168,50 @@ final class Writes {
       throw new IllegalStateException("no statement to send together");
     }
 
+    /**
+     * The write over many entries of a batch at once, each a key's values (todo 329); null when the
+     * plan has none.
+     */
+    @Nullable Merge merge() {
+      return null;
+    }
+
+    /**
+     * What {@link #merge()}'s statement returned for {@code entries} entries: each one's count,
+     * recorded; null when one needs more than that statement, and the entries are undone and run
+     * one by one.
+     */
+    long @Nullable [] merged(Run run, ResultSet rs, int entries) throws SQLException {
+      throw new IllegalStateException("no merged statement");
+    }
+
     /** The texts of the statements planned ahead, for tests; the CAS is chosen per key. */
     abstract List<String> sql();
   }
+
+  /**
+   * A write over many entries of a batch as one statement (todo 329), so that what a statement
+   * costs around its execution is paid once: each entry's placeholders bound in turn, then the
+   * stamp's.
+   */
+  static final class Merge {
+    private final IntFunction<String> text;
+    final int placeholders;
+    private final Map<Integer, String> texts = new ConcurrentHashMap<>();
+
+    Merge(IntFunction<String> text, int placeholders) {
+      this.text = text;
+      this.placeholders = placeholders;
+    }
+
+    /** The statement for {@code entries} entries. */
+    String sql(int entries) {
+      return texts.computeIfAbsent(entries, text::apply);
+    }
+  }
+
+  /** At most this many entries of a batch are merged, which bounds their texts and parameters. */
+  static final int MERGE_MAX = 64;
 
   /**
    * Plans a write statement, or says why the driver cannot run it yet.
@@ -524,6 +573,10 @@ final class Writes {
             : null;
     boolean delete = shape.kind() == StatementShape.Kind.DELETE;
     boolean imported = t.layout() == Layout.DECOUPLED_IMPORTED;
+    Merge merge =
+        dmlSet == null || span == null || ast.tableRefs().size() != 1 || !fullKey(engine, where, t)
+            ? null
+            : mergedKeyed(n, ast, t, exposed, span, picked, snapshot, delete, imported, from, end);
     return new KeyedPlan(
         n,
         delete,
@@ -537,7 +590,337 @@ final class Writes {
         where != null,
         dmlSet == null
             ? null
-            : fusedKeyed(n, new Step(keys, inWhere), afterImages, dmlSet, all, delete, imported));
+            : fusedKeyed(n, new Step(keys, inWhere), afterImages, dmlSet, all, delete, imported),
+        merge);
+  }
+
+  /**
+   * Whether {@code where} is the table's key alone: each key column, unqualified, equal to a
+   * placeholder or a literal, once, and nothing else, so that an entry writes at most its own row.
+   */
+  private static boolean fullKey(Engine engine, @Nullable Expression where, TableInfo t) {
+    List<Expression> conjuncts = new ArrayList<>();
+    conjuncts(where, conjuncts);
+    if (conjuncts.size() != t.keyColumns().size()) {
+      return false;
+    }
+    Set<String> seen = new HashSet<>();
+    for (Expression e : conjuncts) {
+      if (!(e instanceof EqualsTo)) {
+        return false;
+      }
+      Expression column = ((EqualsTo) e).getLeftExpression();
+      Expression value = ((EqualsTo) e).getRightExpression();
+      if (!(column instanceof Column)) {
+        Expression other = column;
+        column = value;
+        value = other;
+      }
+      if (!(column instanceof Column)
+          || ((Column) column).getTable() != null
+          || !(value instanceof JdbcParameter
+              || value instanceof LongValue
+              || value instanceof StringValue)) {
+        return false;
+      }
+      String name = engine.columnKey(engine.resolveIdentifier(((Column) column).getColumnName()));
+      if (t.keyColumns().stream().noneMatch(k -> engine.columnKey(k).equals(name))
+          || !seen.add(name)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static void conjuncts(@Nullable Expression e, List<Expression> out) {
+    if (e instanceof AndExpression) {
+      conjuncts(((AndExpression) e).getLeftExpression(), out);
+      conjuncts(((AndExpression) e).getRightExpression(), out);
+    } else if (e instanceof ParenthesedExpressionList
+        && ((ParenthesedExpressionList<?>) e).size() == 1) {
+      conjuncts(((ParenthesedExpressionList<?>) e).get(0), out);
+    } else if (e != null) {
+      out.add(e);
+    }
+  }
+
+  /** {@code source}'s characters {@code [from, to)}, each placeholder in them {@code p}'s. */
+  private static String filled(
+      String source, int from, int to, List<int[]> holes, IntFunction<String> p) {
+    StringBuilder out = new StringBuilder();
+    int at = from;
+    for (int i = 0; i < holes.size(); i++) {
+      int[] h = holes.get(i);
+      if (h[0] >= from && h[1] <= to) {
+        out.append(source, at, h[0]).append(p.apply(i + 1));
+        at = h[1];
+      }
+    }
+    return out.append(source, at, to).toString();
+  }
+
+  /**
+   * The fused statement of {@link #fusedKeyed} over the entries of a batch (todo 329), each a row
+   * of {@code scalardb_native_e}: the keys read per entry, which a lateral subquery keeps on the
+   * key's index; the gate closed also when two entries reach one key, as one by one the second
+   * would see the first's write; the DML joined to the entries, each placeholder its entry's
+   * column; and per entry its key, whether the DML wrote it and the CAS stamped it, the gate, and
+   * at SNAPSHOT and SERIALIZABLE whether an after image matched. Null when the text cannot be
+   * rewritten.
+   */
+  private static @Nullable Merge mergedKeyed(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      List<String> picked,
+      boolean snapshot,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end) {
+    List<int[]> holes = ast.placeholderSpans();
+    if (holes == null || holes.isEmpty() || from < 0) {
+      return null;
+    }
+    String source = ast.source();
+    String e = "scalardb_native_e";
+    IntFunction<String> p = j -> e + ".scalardb_native_p" + j;
+    String predicate = filled(source, span[0], span[1], holes, p);
+    int width = n.keyColumns.size();
+    String d = "scalardb_native_d";
+    String keys =
+        "SELECT "
+            + e
+            + ".scalardb_native_n, "
+            + n.readColumns("d")
+            + ", "
+            + n.readColumns("m")
+            + ", m."
+            + n.txId
+            + ", m."
+            + n.txVersion
+            + ", m."
+            + n.txState
+            + " FROM "
+            + e
+            + " CROSS JOIN LATERAL (SELECT "
+            + String.join(", ", picked)
+            + " FROM "
+            + n.view
+            + " "
+            + exposed
+            + " WHERE "
+            + predicate
+            + " OFFSET 0) d LEFT JOIN "
+            + n.meta
+            + " m ON "
+            + n.keyJoin("m", "d");
+    String everyKey =
+        "("
+            + n.columns("")
+            + ") IN (SELECT "
+            + Names.numbered("", d, width)
+            + " FROM scalardb_native_keys) AND (SELECT scalardb_native_go FROM"
+            + " scalardb_native_gate)";
+    String before = filled(source, 0, from, holes, p);
+    String dml =
+        onDataTable(
+            n.engine,
+            ast,
+            t,
+            true,
+            before
+                + (before.isEmpty() || Character.isWhitespace(before.charAt(before.length() - 1))
+                    ? ""
+                    : " ")
+                + (delete ? "USING " : "FROM ")
+                + e
+                + " "
+                + filled(source, from, span[0], holes, p)
+                + "("
+                + predicate
+                + ") AND ("
+                + everyKey
+                + ")"
+                + filled(source, span[1], end, holes, p),
+            from);
+    if (dml == null) {
+      return null;
+    }
+    StringBuilder head = new StringBuilder("WITH ").append(e).append(" (scalardb_native_n");
+    for (int j = 1; j <= holes.size(); j++) {
+      head.append(", scalardb_native_p").append(j);
+    }
+    head.append(") AS (VALUES ");
+    StringBuilder sql =
+        new StringBuilder("), scalardb_native_keys (scalardb_native_n, ")
+            .append(Names.numbered("", d, width))
+            .append(", ")
+            .append(Names.numbered("", "scalardb_native_m", width))
+            .append(", scalardb_native_id, scalardb_native_version, scalardb_native_state) AS (")
+            .append(keys)
+            .append(")");
+    if (snapshot) {
+      sql.append(", scalardb_native_after AS (SELECT 1 FROM ")
+          .append(e)
+          .append(" CROSS JOIN LATERAL (SELECT 1 FROM ")
+          .append(SplitRead.afterImages(n.engine, t, t.dataColumns()))
+          .append(" ")
+          .append(exposed)
+          .append(" WHERE ")
+          .append(predicate)
+          .append(" OFFSET 0) scalardb_native_x LIMIT 1)");
+    }
+    sql.append(
+            ", scalardb_native_gate (scalardb_native_go) AS (SELECT NOT EXISTS (SELECT 1 FROM"
+                + " scalardb_native_keys WHERE scalardb_native_state IN (1, 2) OR"
+                + " scalardb_native_m0 IS NULL)")
+        .append(snapshot ? " AND NOT EXISTS (SELECT 1 FROM scalardb_native_after)" : "")
+        .append(" AND NOT EXISTS (SELECT 1 FROM scalardb_native_keys GROUP BY ")
+        .append(Names.numbered("", d, width))
+        .append(" HAVING count(*) > 1)), scalardb_native_written AS (")
+        .append(dml)
+        .append(" RETURNING ")
+        .append(e)
+        .append(".scalardb_native_n AS scalardb_native_wn, ")
+        .append(n.aliased("", "scalardb_native_w"))
+        .append(")");
+    List<String> metaKey = new ArrayList<>();
+    for (int i = 0; i < width; i++) {
+      metaKey.add(n.engine.quote(n.keyColumns.get(i)) + " = k.scalardb_native_m" + i);
+    }
+    String cas =
+        String.join(" AND ", metaKey)
+            + " AND ("
+            + Names.numbered("k", d, width)
+            + ") IN (SELECT "
+            + Names.numbered("", "scalardb_native_w", width)
+            + " FROM scalardb_native_written) AND "
+            + n.committed()
+            + " AND "
+            + n.txId
+            + " IS NOT DISTINCT FROM k.scalardb_native_id";
+    boolean remove = delete && !imported;
+    String stamp =
+        n.stamp(
+            "CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE COALESCE("
+                + n.txVersion
+                + ", 0) + 1 END");
+    sql.append(", scalardb_native_stamped AS (")
+        .append(stamp, 0, stamp.length() - "WHERE ".length())
+        .append("FROM scalardb_native_keys k WHERE ")
+        .append(cas)
+        .append(" AND (k.scalardb_native_id IS NULL OR ")
+        .append(n.txVersion)
+        .append(" IS NOT DISTINCT FROM k.scalardb_native_version)")
+        .append(remove ? " AND k.scalardb_native_id IS NULL" : "")
+        .append(" RETURNING k.scalardb_native_n)");
+    if (remove) {
+      sql.append(", scalardb_native_removed AS (DELETE FROM ")
+          .append(n.meta)
+          .append(" USING scalardb_native_keys k WHERE ")
+          .append(cas)
+          .append(" AND k.scalardb_native_id IS NOT NULL AND ")
+          .append(n.txVersion)
+          .append(" IS NOT DISTINCT FROM k.scalardb_native_version RETURNING k.scalardb_native_n)");
+    }
+    sql.append(" SELECT ")
+        .append(e)
+        .append(".scalardb_native_n, ")
+        .append(Names.numbered("k", d, width))
+        .append(", ")
+        .append(Names.numbered("k", "scalardb_native_m", width))
+        .append(", k.scalardb_native_id, k.scalardb_native_version, k.scalardb_native_state,")
+        .append(" EXISTS (SELECT 1 FROM scalardb_native_written w WHERE w.scalardb_native_wn = ")
+        .append(e)
+        .append(".scalardb_native_n), EXISTS (SELECT 1 FROM scalardb_native_stamped c WHERE")
+        .append(" c.scalardb_native_n = ")
+        .append(e)
+        .append(".scalardb_native_n)")
+        .append(
+            remove
+                ? " OR EXISTS (SELECT 1 FROM scalardb_native_removed c WHERE c.scalardb_native_n = "
+                    + e
+                    + ".scalardb_native_n)"
+                : "")
+        .append(", (SELECT scalardb_native_go FROM scalardb_native_gate)")
+        .append(snapshot ? ", EXISTS (SELECT 1 FROM scalardb_native_after)" : "")
+        .append(" FROM ")
+        .append(e)
+        .append(" LEFT JOIN scalardb_native_keys k ON k.scalardb_native_n = ")
+        .append(e)
+        .append(".scalardb_native_n ORDER BY 1");
+    String rest = sql.toString();
+    String row = ", ?".repeat(holes.size());
+    return new Merge(
+        k -> {
+          StringBuilder out = new StringBuilder(head);
+          for (int i = 1; i <= k; i++) {
+            out.append(i == 1 ? "(" : ", (").append(i).append(row).append(')');
+          }
+          return out.append(rest).toString();
+        },
+        holes.size());
+  }
+
+  /**
+   * The fused INSERT of {@link #fusedInsert} over the entries of a batch (todo 329): the one row of
+   * the statement's VALUES once per entry, which holds every placeholder of it. Null for any other
+   * INSERT.
+   */
+  private static @Nullable Merge mergedInsert(
+      Names n, SqlAst ast, TableInfo t, @Nullable Expression row, int end, String keysReturned) {
+    if (!(row instanceof ParenthesedExpressionList)
+        || ((ParenthesedExpressionList<?>) row).isEmpty()) {
+      return null;
+    }
+    ParenthesedExpressionList<?> items = (ParenthesedExpressionList<?>) row;
+    int[] first = ast.span((Expression) items.get(0));
+    int[] last = ast.span((Expression) items.get(items.size() - 1));
+    String source = ast.source();
+    if (first == null || last == null) {
+      return null;
+    }
+    // the row's parentheses, with nothing but blanks between them and its items
+    int open = first[0] - 1;
+    while (open >= 0 && Character.isWhitespace(source.charAt(open))) {
+      open--;
+    }
+    int close = last[1];
+    while (close < source.length() && Character.isWhitespace(source.charAt(close))) {
+      close++;
+    }
+    if (open < 0
+        || close >= source.length()
+        || source.charAt(open) != '('
+        || source.charAt(close) != ')') {
+      return null;
+    }
+    List<Integer> inside = ast.placeholdersIn(open, close + 1);
+    if (inside == null
+        || inside.isEmpty()
+        || inside.size() != ast.parameterCount()
+        || !source.substring(close + 1, end).isBlank()) {
+      return null;
+    }
+    String values = ", " + source.substring(open, close + 1);
+    String upToRow = source.substring(0, close + 1);
+    IntFunction<@Nullable String> text =
+        k ->
+            onDataTable(
+                n.engine,
+                ast,
+                t,
+                true,
+                upToRow + values.repeat(k - 1) + " RETURNING " + keysReturned,
+                -1);
+    if (text.apply(2) == null) {
+      return null;
+    }
+    return new Merge(
+        k -> fusedInsert(n, Objects.requireNonNull(text.apply(k)), false), inside.size());
   }
 
   /**
@@ -860,8 +1243,13 @@ final class Writes {
               floatKeys);
     }
     SqlAst.TableRef ref = shape.table();
+    Merge merge =
+        fused == null || returning != null
+            ? null
+            : mergedInsert(n, ast, t, shape.insertRow(), end, n.aliased("", "scalardb_native_k"));
     return new InsertPlan(
         n,
+        merge,
         new Step(insert, all),
         fused == null ? null : new Step(fusedInsert(n, fused, inFlight != null), all),
         readBack,
@@ -1228,6 +1616,59 @@ final class Writes {
       counts[i] = outcomes.get(i).count;
     }
     return counts;
+  }
+
+  /**
+   * Applies entries of a batch of one plan as its {@link Plan#merge()} statement (todo 329), under
+   * the savepoint of entries sent together, released first as {@link #applyTogether} does. Null
+   * when one needs more than the statement: the entries are undone to the savepoint, nothing
+   * recorded, and the caller runs them one by one. They share one stamp, as one statement's keys
+   * do.
+   */
+  static long @Nullable [] applyMerged(
+      Connection vendor, Plan plan, List<Context> contexts, boolean release) throws SQLException {
+    Merge m = Objects.requireNonNull(plan.merge());
+    Run run = new Run(vendor, contexts.get(0));
+    String sql =
+        (release ? "RELEASE SAVEPOINT " + TOGETHER + "; " : "")
+            + "SAVEPOINT "
+            + TOGETHER
+            + "; "
+            + m.sql(contexts.size());
+    try (PreparedStatement ps = run.prepare(sql)) {
+      int at = 1;
+      for (Context c : contexts) {
+        for (int j = 1; j <= m.placeholders; j++) {
+          c.bind(ps, at++, j, false);
+        }
+      }
+      run.stamp(ps, at);
+      try {
+        boolean rows = ps.execute();
+        while (!rows) {
+          if (ps.getUpdateCount() == -1) {
+            throw new SQLException("a merged batch returned no rows", "XX000");
+          }
+          rows = ps.getMoreResults();
+        }
+        long[] counts;
+        try (ResultSet rs = ps.getResultSet()) {
+          counts = plan.merged(run, rs, contexts.size());
+        }
+        if (counts == null) {
+          undoTogether(vendor, null);
+        }
+        return counts;
+      } catch (SQLException e) {
+        if (!undoable(e)) {
+          throw e;
+        }
+        undoTogether(vendor, e);
+        return null;
+      }
+    } finally {
+      run.context.running(null);
+    }
   }
 
   /**
@@ -1644,6 +2085,8 @@ final class Writes {
     // the steps as one statement, on PostgreSQL (todo 328); the steps one by one when a key has no
     // metadata row
     final @Nullable Step fused;
+    // a batch's entries of this plan as one statement, for a predicate that is the key (todo 329)
+    final @Nullable Merge merge;
 
     KeyedPlan(
         Names n,
@@ -1656,7 +2099,8 @@ final class Writes {
         Step dml,
         @Nullable Step matches,
         boolean predicate,
-        @Nullable Step fused) {
+        @Nullable Step fused,
+        @Nullable Merge merge) {
       super(n);
       this.delete = delete;
       this.imported = imported;
@@ -1668,6 +2112,7 @@ final class Writes {
       this.matches = matches;
       this.predicate = predicate;
       this.fused = fused;
+      this.merge = merge;
     }
 
     @Override
@@ -1760,6 +2205,45 @@ final class Writes {
         }
       }
       return new Together(run, f.rows.size(), null, !f.rows.isEmpty());
+    }
+
+    @Override
+    @Nullable Merge merge() {
+      return merge;
+    }
+
+    /**
+     * As {@link #together(Run, ResultSet)} for each entry, its count the key it wrote, if any; null
+     * for anything but every key found written and stamped, with the gate open.
+     */
+    @Override
+    long @Nullable [] merged(Run run, ResultSet rs, int entries) throws SQLException {
+      int width = n.keyColumns.size();
+      int flags = 2 * width + 5; // written, stamped, the gate, and an after image matched
+      long[] counts = new long[entries];
+      Anchors anchors = run.context.anchors();
+      boolean wrote = false;
+      while (rs.next()) {
+        if (!rs.getBoolean(flags + 2) || (afterImages != null && rs.getBoolean(flags + 3))) {
+          return null;
+        }
+        Object[] key = readKey(rs, 2, width);
+        if (key == null) {
+          continue; // no row for the entry's key: its count is 0, as the statement alone would say
+        }
+        if (!rs.getBoolean(flags)
+            || !rs.getBoolean(flags + 1)
+            || !anchors.unchanged(
+                n.table, key, rs.getString(2 * width + 2), rs.getObject(2 * width + 3))) {
+          return null;
+        }
+        counts[rs.getInt(1) - 1]++;
+        wrote = true;
+      }
+      if (wrote) {
+        anchors.wrote(run.txId);
+      }
+      return counts;
     }
 
     /** What the fused statement returned: per key its row, and whether it was written, stamped. */
@@ -2060,9 +2544,12 @@ final class Writes {
     final @Nullable Step repeats;
     final @Nullable String returning;
     final String exposed;
+    // a batch's single-row entries of this plan as one INSERT (todo 329)
+    private final @Nullable Merge merge;
 
     InsertPlan(
         Names n,
+        @Nullable Merge merge,
         Step insert,
         @Nullable Step fused,
         List<Step> readBack,
@@ -2073,6 +2560,7 @@ final class Writes {
         String exposed,
         boolean generatedKey) {
       super(n);
+      this.merge = merge;
       this.generatedKey = generatedKey;
       this.insert = insert;
       this.fused = fused;
@@ -2171,6 +2659,25 @@ final class Writes {
     @Override
     @Nullable Step together() {
       return returning == null ? fused : null;
+    }
+
+    @Override
+    @Nullable Merge merge() {
+      return merge;
+    }
+
+    /** Each entry's one row, recorded; null when a row was not stamped, as a tombstone is not. */
+    @Override
+    long @Nullable [] merged(Run run, ResultSet rs, int entries) throws SQLException {
+      Keys keys = new Keys();
+      if (inserted(rs, keys) != entries || keys.rows.size() != entries) {
+        return null;
+      }
+      run.context.anchors().wrote(run.txId);
+      run.context.inserted(keys);
+      long[] counts = new long[entries];
+      Arrays.fill(counts, 1);
+      return counts;
     }
 
     /** As {@link #applyFused}, null when a tombstone is to be taken over. */
