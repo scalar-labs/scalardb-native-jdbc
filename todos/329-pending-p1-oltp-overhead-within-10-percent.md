@@ -278,3 +278,13 @@ the driver's client side or time outside the server's transactions. Next: run (b
 the client. The client's BenchBase build failed at first on its `-Werror` under JDK 25 (`a4642e3`
 fixes `matrix.sh`); the working tree then ran after the baseline from a waiter on the client, with
 `detached.sh` paused until it finished.
+
+### 2026-10-25: BenchBase on AWS, runs (a), (b), (c) with the client profiled
+
+Run `20261025-1135`, `docs/benchmarks/benchbase-postgresql-aws.md` ("Second run"): (b), the driver
+with every table plain, is at 0.99 on TPC-C and YCSB, so routing costs about 1%; (c) 0.71 and 0.89.
+Per TPC-C commit, (c) against (a): server statements +0.72 ms, the driver's client CPU +0.40 ms
+(`LockPlan.applyFused`, `applyTogether`, `KeyedPlan.applyFused`, `Run.prepare`, `Run.<init>`), and
+about 1.2 ms of server CPU outside the statements (protocol, commit, WAL writer, autovacuum), of a
+transaction 2.3 ms longer. Next, if pursued: the server's CPU per process (backends against
+background), to tell how much of the 1.2 ms is on the transaction's path.
