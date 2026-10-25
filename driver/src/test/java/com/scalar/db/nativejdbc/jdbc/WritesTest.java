@@ -137,6 +137,42 @@ class WritesTest {
   }
 
   @Test
+  void aWriteByItsKey_isTheSlimStatementFirst() throws Exception {
+    List<String> update = plan("UPDATE t SET x = ? WHERE id = ?");
+    // the key's metadata row by the key, the DML gated on it being committed, the CAS on it
+    assertThat(update.get(update.size() - 1))
+        .isEqualTo(
+            "WITH scalardb_native_keys (scalardb_native_m0, scalardb_native_id,"
+                + " scalardb_native_version, scalardb_native_state) AS (SELECT t.\"id\","
+                + " t.\"tx_id\", t.\"tx_version\", t.\"tx_state\" FROM \"ns\".\"t_meta\" t"
+                + " WHERE id = ?), scalardb_native_gate (scalardb_native_go) AS (SELECT EXISTS"
+                + " (SELECT 1 FROM scalardb_native_keys WHERE COALESCE(scalardb_native_state, 3) ="
+                + " 3)), scalardb_native_written AS (UPDATE t SET x = ? WHERE (id = ?) AND (SELECT"
+                + " scalardb_native_go FROM scalardb_native_gate) RETURNING \"id\" AS"
+                + " scalardb_native_w0), scalardb_native_stamped AS (UPDATE \"ns\".\"t_meta\" SET"
+                + " \"tx_id\" = ?, \"tx_prepared_at\" = ?, \"tx_committed_at\" = ?, \"tx_state\" ="
+                + " 3, \"tx_version\" = CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE"
+                + " COALESCE(\"tx_version\", 0) + 1 END FROM scalardb_native_keys k WHERE \"id\" ="
+                + " k.scalardb_native_m0 AND (k.scalardb_native_m0) IN (SELECT scalardb_native_w0"
+                + " FROM scalardb_native_written) AND COALESCE(\"tx_state\", 3) = 3 AND \"tx_id\""
+                + " IS NOT DISTINCT FROM k.scalardb_native_id AND (k.scalardb_native_id IS NULL OR"
+                + " \"tx_version\" IS NOT DISTINCT FROM k.scalardb_native_version) RETURNING 1)"
+                + " SELECT k.scalardb_native_m0, k.scalardb_native_id, k.scalardb_native_version,"
+                + " k.scalardb_native_state, (SELECT count(*) FROM scalardb_native_written), (SELECT"
+                + " count(*) FROM scalardb_native_stamped), (SELECT scalardb_native_w0 FROM"
+                + " scalardb_native_written) FROM (SELECT 1) scalardb_native_one LEFT JOIN"
+                + " scalardb_native_keys k ON TRUE");
+    // a created table's DELETE removes the metadata row, as the fused statement does
+    List<String> delete = plan(created(), "DELETE FROM t WHERE id = ?");
+    assertThat(delete.get(delete.size() - 1))
+        .contains("scalardb_native_removed AS (DELETE FROM \"ns\".\"t_meta\" USING")
+        .contains("+ (SELECT count(*) FROM scalardb_native_removed)");
+    // a predicate beyond the key: the fused statement alone
+    assertThat(plan("UPDATE t SET x = ? WHERE id = ? AND x = ?"))
+        .noneMatch(q -> q.contains("scalardb_native_gate (scalardb_native_go) AS (SELECT EXISTS"));
+  }
+
+  @Test
   void delete_withoutAPredicate_getsTheKeyBeforeATrailingComment() throws Exception {
     assertThat(plan("DELETE FROM t AS a -- all").get(1))
         .isEqualTo("DELETE FROM t AS a WHERE \"id\" = ? -- all");

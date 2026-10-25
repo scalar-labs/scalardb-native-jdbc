@@ -1420,7 +1420,14 @@ MariaDB, a T-SQL batch on SQL Server, and an anonymous PL/SQL block on Oracle (t
   entries on one key, a tombstone, a key the DML skipped, a duplicate), the entries are undone and
   sent together as above, or one by one. They share one stamp, as one statement's keys do; what a
   statement costs the server around its execution (binding, locking, the executor's setup for a
-  plan of several data-modifying CTEs) is paid once. Multi-key driver writes and multi-key ScalarDB prepares can
+  plan of several data-modifying CTEs) is paid once. A single UPDATE or DELETE by the key alone
+  runs a slimmer statement first (todo 329): the key's metadata row read by the key, the DML gated
+  on it being committed (which a row in flight, a key without a metadata row and one whose
+  committed image is a before image fail, as does an after image the key alone matches: the same
+  key in flight), and the CAS on its tx_id and version; when the gate is closed nothing is written
+  and the fused statement runs as before. It costs the server a third of what the fused one does
+  beyond a plain write (+32 µs against +88 in pgbench), most of the difference what a statement
+  costs around its execution, which grows with its plan. Multi-key driver writes and multi-key ScalarDB prepares can
   deadlock across keys whatever the per-key order; the database detects it and the retry contract of
   section 6 covers it.
 - **Predicate shapes for the two-arm read.** `P` must reference one table, be deterministic (it is

@@ -577,6 +577,10 @@ final class Writes {
         dmlSet == null || span == null || ast.tableRefs().size() != 1 || !fullKey(engine, where, t)
             ? null
             : mergedKeyed(n, ast, t, exposed, span, picked, snapshot, delete, imported, from, end);
+    Step slim =
+        merge == null || span == null
+            ? null
+            : slimKeyed(n, ast, t, exposed, span, inWhere, all, delete, imported, from, end);
     return new KeyedPlan(
         n,
         delete,
@@ -591,7 +595,133 @@ final class Writes {
         dmlSet == null
             ? null
             : fusedKeyed(n, new Step(keys, inWhere), afterImages, dmlSet, all, delete, imported),
-        merge);
+        merge,
+        slim);
+  }
+
+  /**
+   * A write by the table's key alone as a slimmer statement than {@link #fusedKeyed} (todo 329):
+   * the key's metadata row read by the key itself; the DML gated on that row being committed, which
+   * a row in flight, a key without a metadata row and one whose committed image is a before image
+   * all fail, as at every level does a row in flight whose after image alone the key matches, the
+   * same key; and the CAS on its tx_id and version. What a statement costs around its execution
+   * grows with its plan: this one's is a third of the fused one's. Its one row is the metadata
+   * row's key, tx_id, version and state, how many rows the DML wrote and the CAS stamped, and the
+   * key it wrote, as the data table spells it. Null when the text cannot be rewritten.
+   */
+  private static @Nullable Step slimKeyed(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      List<Integer> inWhere,
+      List<Integer> all,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end) {
+    String source = ast.source();
+    int width = n.keyColumns.size();
+    String m = "scalardb_native_m";
+    String w = "scalardb_native_w";
+    String dml =
+        onDataTable(
+            n.engine,
+            ast,
+            t,
+            true,
+            source.substring(0, span[0])
+                + "("
+                + source.substring(span[0], span[1])
+                + ") AND (SELECT scalardb_native_go FROM scalardb_native_gate)"
+                + source.substring(span[1], end),
+            from);
+    if (dml == null) {
+      return null;
+    }
+    List<String> metaKey = new ArrayList<>();
+    for (int i = 0; i < width; i++) {
+      metaKey.add(n.engine.quote(n.keyColumns.get(i)) + " = k." + m + i);
+    }
+    String cas =
+        String.join(" AND ", metaKey)
+            + " AND ("
+            + Names.numbered("k", m, width)
+            + ") IN (SELECT "
+            + Names.numbered("", w, width)
+            + " FROM scalardb_native_written) AND "
+            + n.committed()
+            + " AND "
+            + n.txId
+            + " IS NOT DISTINCT FROM k.scalardb_native_id";
+    boolean remove = delete && !imported;
+    String stamp =
+        n.stamp(
+            "CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE COALESCE("
+                + n.txVersion
+                + ", 0) + 1 END");
+    StringBuilder sql =
+        new StringBuilder("WITH scalardb_native_keys (")
+            .append(Names.numbered("", m, width))
+            .append(
+                ", scalardb_native_id, scalardb_native_version, scalardb_native_state) AS (SELECT ")
+            .append(n.readColumns(exposed))
+            .append(", ")
+            .append(exposed)
+            .append(".")
+            .append(n.txId)
+            .append(", ")
+            .append(exposed)
+            .append(".")
+            .append(n.txVersion)
+            .append(", ")
+            .append(exposed)
+            .append(".")
+            .append(n.txState)
+            .append(" FROM ")
+            .append(n.meta)
+            .append(" ")
+            .append(exposed)
+            .append(" WHERE ")
+            .append(source, span[0], span[1])
+            .append("), scalardb_native_gate (scalardb_native_go) AS (SELECT EXISTS (SELECT 1 FROM")
+            .append(" scalardb_native_keys WHERE COALESCE(scalardb_native_state, 3) = 3)),")
+            .append(" scalardb_native_written AS (")
+            .append(dml)
+            .append(" RETURNING ")
+            .append(n.aliased("", w))
+            .append("), scalardb_native_stamped AS (")
+            .append(stamp, 0, stamp.length() - "WHERE ".length())
+            .append("FROM scalardb_native_keys k WHERE ")
+            .append(cas)
+            .append(" AND (k.scalardb_native_id IS NULL OR ")
+            .append(n.txVersion)
+            .append(" IS NOT DISTINCT FROM k.scalardb_native_version)")
+            .append(remove ? " AND k.scalardb_native_id IS NULL" : "")
+            .append(" RETURNING 1)");
+    if (remove) {
+      sql.append(", scalardb_native_removed AS (DELETE FROM ")
+          .append(n.meta)
+          .append(" USING scalardb_native_keys k WHERE ")
+          .append(cas)
+          .append(" AND k.scalardb_native_id IS NOT NULL AND ")
+          .append(n.txVersion)
+          .append(" IS NOT DISTINCT FROM k.scalardb_native_version RETURNING 1)");
+    }
+    sql.append(" SELECT ")
+        .append(Names.numbered("k", m, width))
+        .append(", k.scalardb_native_id, k.scalardb_native_version, k.scalardb_native_state,")
+        .append(" (SELECT count(*) FROM scalardb_native_written), (SELECT count(*) FROM")
+        .append(" scalardb_native_stamped)")
+        .append(remove ? " + (SELECT count(*) FROM scalardb_native_removed)" : "");
+    for (int i = 0; i < width; i++) {
+      sql.append(", (SELECT ").append(w).append(i).append(" FROM scalardb_native_written)");
+    }
+    sql.append(" FROM (SELECT 1) scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE");
+    List<Integer> binds = new ArrayList<>(inWhere);
+    binds.addAll(all);
+    return new Step(sql.toString(), binds);
   }
 
   /**
@@ -2087,6 +2217,8 @@ final class Writes {
     final @Nullable Step fused;
     // a batch's entries of this plan as one statement, for a predicate that is the key (todo 329)
     final @Nullable Merge merge;
+    // the write as a slimmer statement for such a predicate, tried before the fused one (todo 329)
+    final @Nullable Step slim;
 
     KeyedPlan(
         Names n,
@@ -2100,7 +2232,8 @@ final class Writes {
         @Nullable Step matches,
         boolean predicate,
         @Nullable Step fused,
-        @Nullable Merge merge) {
+        @Nullable Merge merge,
+        @Nullable Step slim) {
       super(n);
       this.delete = delete;
       this.imported = imported;
@@ -2113,12 +2246,13 @@ final class Writes {
       this.predicate = predicate;
       this.fused = fused;
       this.merge = merge;
+      this.slim = slim;
     }
 
     @Override
     List<String> sql() {
       List<String> out = new ArrayList<>();
-      for (Step s : Arrays.asList(afterImages, locked, keys, dml, fused)) {
+      for (Step s : Arrays.asList(afterImages, locked, keys, dml, fused, slim)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -2128,6 +2262,18 @@ final class Writes {
 
     @Override
     long apply(Run run) throws SQLException {
+      if (slim != null) {
+        Long written;
+        try (PreparedStatement ps = run.prepare(slim, null)) {
+          run.stamp(ps, slim.binds.size() + 1);
+          try (ResultSet rs = ps.executeQuery()) {
+            written = slim(run, rs, true);
+          }
+        }
+        if (written != null) {
+          return written;
+        }
+      }
       if (fused != null) {
         Long written = applyFused(run, fused);
         if (written != null) {
@@ -2189,12 +2335,54 @@ final class Writes {
 
     @Override
     @Nullable Step together() {
-      return fused;
+      return slim != null ? slim : fused;
+    }
+
+    /**
+     * What the slim statement returned: how many rows it wrote, recorded; null when it wrote
+     * nothing because the key's metadata row is in flight or missing, which the fused statement
+     * then tells. {@code strict}: a stamp that missed, or an anchor that moved, aborts, as the
+     * fused statement's do; otherwise it is null too, for entries sent together to be undone and
+     * run one by one.
+     */
+    private @Nullable Long slim(Run run, ResultSet rs, boolean strict) throws SQLException {
+      int width = n.keyColumns.size();
+      rs.next();
+      if (readKey(rs, 1, width) == null || inFlight(rs.getObject(width + 3))) {
+        return null;
+      }
+      long written = rs.getLong(width + 4);
+      if (written == 0) {
+        return 0L;
+      }
+      if (rs.getLong(width + 5) != written) {
+        if (!strict) {
+          return null;
+        }
+        throw new Aborted("a row the statement writes changed after it was read");
+      }
+      Object[] key = Objects.requireNonNull(readKey(rs, width + 6, width));
+      if (!run.context
+          .anchors()
+          .unchanged(n.table, key, rs.getString(width + 1), rs.getObject(width + 2))) {
+        if (!strict) {
+          return null;
+        }
+        throw new Aborted("a row this transaction read was changed by another one since");
+      }
+      if (strict) {
+        run.context.anchors().wrote(run.txId);
+      }
+      return written;
     }
 
     /** As {@link #applyFused}, null for anything but every key written and stamped at once. */
     @Override
     @Nullable Together together(Run run, ResultSet rs) throws SQLException {
+      if (slim != null) {
+        Long written = slim(run, rs, false);
+        return written == null ? null : new Together(run, written, null, written > 0);
+      }
       Fused f = fused(rs);
       if (f.after || !f.open || f.written.contains(false) || f.stamped.contains(false)) {
         return null;
