@@ -143,6 +143,42 @@ What remains is the single-row writes, a fused statement each: Payment +76% at p
 1,554 µs: its warehouse, district and customer updates), Delivery +126% (its ten districts'
 writes one at a time), StockLevel +89% (its join's planning and arms).
 
+## Fifth run: tier A and RDS side by side, round trips, a profile (2026-10-25)
+
+Run `20261025-1558` (`BENCHBASE=1 READS=0 REPS=2 BB_WORKLOADS=tpcc BB_RUNS=a,c`, a JFR recording
+with CPU-time sampling per run), HEAD `a119c5d`, both tiers at once from one client: tier A as
+before; tier B RDS for PostgreSQL 16.13, `db.m5.2xlarge`, 100 GB gp3, single-AZ in the client's
+zone, default parameters. `perf-tier-a.sh` profiled tier A's host during the first repetition of
+(a) and (c), which slowed it by up to 10% (vendor 811 against 896/s in the second).
+
+| TPC-C | round trip µs, median / p99 | (a) | (c) | (c)/(a) |
+|---|---|---|---|---|
+| tier A | 222 / 255 | 853.6 | 549.8 | 0.64 (0.62 in the second repetition) |
+| RDS | 114 / 155 | 905.4 | 627.0 | **0.69** |
+
+RDS's round trip was the shorter one here. Per commit:
+
+| | tier A (a) | tier A (c) | RDS (a) | RDS (c) |
+|---|---|---|---|---|
+| active ms | 0.365 | 1.236 | 1.527 | 2.667 |
+| idle in transaction ms | 3.807 | 4.967 | 2.285 | 2.587 |
+| server CPU ms | 0.878 | 2.207 | n/a | n/a |
+| client CPU ms (JFR) | 0.275 | 0.608 | 0.356 | 0.650 |
+
+- On RDS the commit's WAL flush to EBS is in every transaction: the busy backends wait on
+  `IO:WALSync` in 11-12% of the samples (under 1% on tier A), which both runs pay, and the ratio is
+  higher. RDS p50 against (a): NewOrder +33%, Payment +32%, OrderStatus +32%, Delivery +111%,
+  StockLevel +128%.
+- Tier A's (c) transaction took 2.6 ms longer, against 1.5 ms in the fourth run, with the server's
+  extra CPU the same (+1.33 ms against +1.31): the extra is idle in transaction (+1.16 against +0.22
+  ms), the client's side. The client's CPU was +0.33 ms; the rest is not explained by this run,
+  which also ran two BenchBase JVMs side by side and sampled their CPU every millisecond.
+- The profile (perf at 49 Hz, the backends' own time; call stacks did not unwind) is flat. Grouped,
+  the executor's setup per execution (expressions, tuple descriptors, slots) grows from 4.2% of the
+  backends' samples in (a) to 7.2% in (c), of 2.4 times the CPU; memory contexts (7%) and hash,
+  catalog and lock lookups (6%) keep their share of it. The extra server CPU is what each statement
+  costs around its rows, which grows with the size of its plan.
+
 ## Reports
 
 ### HEAD 93f5217

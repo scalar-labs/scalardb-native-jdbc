@@ -306,3 +306,13 @@ or one by one when an entry needs more. AWS run `20261025-1419`, the same machin
 930/s to 1,065/s (+14.4%; 0.52 to 0.60 of a vendor at 1,786/s), NewOrder p50 6.13 to 4.84 ms, the
 server's CPU per commit 2.81 to 2.27 ms. Left: the single-row writes, a fused statement each
 (Payment +76%, Delivery +126% at p50), and StockLevel.
+
+### 2026-10-25: BenchBase on AWS, tier A and RDS, round trips and a profile
+
+Run `20261025-1558`, `docs/benchmarks/benchbase-postgresql-aws.md` ("Fifth run"): TPC-C tier A 0.64
+at a round trip of 222 µs, RDS 0.69 at 114 µs, the commit's WAL flush to EBS in every transaction
+there. Tier A's (c) took 1.1 ms more idle in transaction than in the fourth run, not explained by
+the client's CPU (+0.33 ms); this run ran both tiers' JVMs on one client and sampled their CPU every
+millisecond. perf (flat, no call stacks) grows the executor's setup per execution from 4.2% to 7.2%
+of the backends' samples. Next: one tier at a time without CPU sampling; the time each fused
+statement costs around its execution, measured locally against pg_stat_statements' execution time.
