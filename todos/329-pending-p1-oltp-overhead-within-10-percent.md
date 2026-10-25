@@ -297,3 +297,12 @@ background processes +0.05 ms. The vendor ran at 528, 711 and 1,151/s in the thr
 0.71 and 0.63: about 2 ms a transaction whatever the round trip. pgbench, 15 keyed stock updates in
 one round trip: plain 1.59 ms, 15 fused 2.44 ms, one fused statement over the 15 keys
 (`= ANY(ARRAY[...])`) 1.51 ms. Candidate: a batch's entries of one plan merged into one statement.
+
+### 2026-10-25: a batch's entries of one prepared write as one statement
+
+`8599a2c`: an UPDATE or DELETE by the key alone over a numbered VALUES list of the entries, an
+INSERT of one row once per entry, up to 64, under the batch's savepoint, undone and sent together
+or one by one when an entry needs more. AWS run `20261025-1419`, the same machines: TPC-C (c)
+930/s to 1,065/s (+14.4%; 0.52 to 0.60 of a vendor at 1,786/s), NewOrder p50 6.13 to 4.84 ms, the
+server's CPU per commit 2.81 to 2.27 ms. Left: the single-row writes, a fused statement each
+(Payment +76%, Delivery +126% at p50), and StockLevel.

@@ -125,6 +125,24 @@ transaction updating 15 random `stock` rows by key, its statements pipelined in 
 The merged statement reads its keys with `= ANY(ARRAY[...])` in the predicate on the committed view;
 the keys as a joined `VALUES` list scanned the whole view instead (400 ms).
 
+## Fourth run: a batch's entries as one statement (2026-10-25)
+
+Run `20261025-1419` (`BENCHBASE=1 READS=0 REPS=2 BB_WORKLOADS=tpcc BB_RUNS=a,c
+BASELINE=aca4d97`): HEAD `8599a2c`, which merges a batch's entries of one prepared write, against
+`aca4d97` just before it, on the same machines. The shortest round trip of the four runs: (a)
+1,786/s.
+
+| TPC-C | (a) | (c) before, `aca4d97` | (c) merged, `8599a2c` |
+|---|---|---|---|
+| throughput | 1,786 | 930 (0.52) | **1,065 (0.60)**, +14.4% |
+| NewOrder p50 / p95 µs | 3,253 / 4,602 | 6,130 / 9,189 | **4,835 / 6,882** |
+| server CPU per commit | 0.96 ms | 2.81 ms | **2.27 ms** |
+
+NewOrder's two batches, its stock updates and its order_line inserts, are one statement each now.
+What remains is the single-row writes, a fused statement each: Payment +76% at p50 (885 against
+1,554 µs: its warehouse, district and customer updates), Delivery +126% (its ten districts'
+writes one at a time), StockLevel +89% (its join's planning and arms).
+
 ## Reports
 
 ### HEAD 93f5217
