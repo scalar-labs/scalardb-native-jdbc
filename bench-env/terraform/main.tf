@@ -80,6 +80,12 @@ variable "pg_stat_statements" {
   default     = false
 }
 
+variable "profiling" {
+  description = "Tier A: perf installed on the database hosts, for perf-tier-a.sh to profile the engine during a run"
+  type        = bool
+  default     = false
+}
+
 variable "lifetime_minutes" {
   description = "Each EC2 instance terminates itself this long after boot"
   type        = number
@@ -222,6 +228,7 @@ resource "aws_instance" "db" {
     lifetime       = var.lifetime_minutes
     db_memory_mb   = var.db_memory_mb
     pgss           = var.pg_stat_statements
+    profiling      = var.profiling
     oracle_image   = var.oracle_image
     registry_user  = var.oracle_registry_user
     registry_token = var.oracle_registry_token

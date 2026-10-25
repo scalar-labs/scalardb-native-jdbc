@@ -61,3 +61,8 @@ case "${engine}" in
       --shm-size=17g '${oracle_image}' ;;
 %{ endif ~}
 esac
+%{ if profiling ~}
+# perf for perf-tier-a.sh, installed once the engine runs so that it does not wait for it
+apt-get install -y "linux-tools-$(uname -r)" linux-tools-common
+sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+%{ endif ~}

@@ -221,7 +221,13 @@ idle-in-transaction time (pg_stat_database), WAL, and on tier A the container's 
 packets (`pg_read_file`, a superuser's); each run's top statements are in its `server.txt`, in
 `bb-benchbase-runs.tgz`. `BASELINE=<commit>` copies that commit's tree beside the working tree and
 runs the same after it (reports prefixed `base-`), for what a change is worth with the network in
-between. About 4 minutes a run with loading: TPC-C and YCSB, (a) and (c), 3 repetitions, about
+between. Each run also measures the round trip from the client before it executes (2,000 prepared
+`SELECT 1`, median and p99), since the ratio to (a) depends on it: the driver adds a roughly fixed
+time a transaction, and placements in one zone gave the vendor 528 to 1,786 TPC-C transactions a
+second. With `profiling = true`, tier A's database hosts get perf, and `perf-tier-a.sh OUT RUN...`,
+run from the laptop beside a run, records 45 s of each named BenchBase run on the host (through the
+client, which alone reaches it) and fetches the backends' profiles, by function and with what each
+calls. About 4 minutes a run with loading: TPC-C and YCSB, (a) and (c), 3 repetitions, about
 50 minutes per tree.
 
 ## Cost

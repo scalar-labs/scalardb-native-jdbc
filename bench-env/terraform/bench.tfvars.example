@@ -16,3 +16,5 @@ client_profile = ""
 db_memory_mb = 0
 # tier A PostgreSQL: pg_stat_statements loaded, for BenchBase's server statistics (BENCHBASE=1)
 pg_stat_statements = false
+# tier A: perf on the database hosts, for perf-tier-a.sh
+profiling = false

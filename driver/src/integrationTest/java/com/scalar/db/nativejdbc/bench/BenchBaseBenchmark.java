@@ -251,6 +251,7 @@ class BenchBaseBenchmark {
         st.execute(before);
       }
     }
+    long[] roundTrip = SERVER_STATS ? Server.roundTrip(e) : null;
     Server.@Nullable Snapshot start = SERVER_STATS ? Server.snapshot(e) : null;
     Sampler sampler = SERVER_STATS ? new Sampler(e) : null;
     Path histograms = dir.resolve("histograms.json");
@@ -270,7 +271,9 @@ class BenchBaseBenchmark {
       }
     }
     Server server =
-        start == null ? null : Server.since(e, start, sampler, dir.resolve("server.txt"));
+        start == null || roundTrip == null
+            ? null
+            : Server.since(e, start, sampler, roundTrip, dir.resolve("server.txt"));
     return Result.read(run, dir, histograms, imported, plain, server);
   }
 
@@ -288,7 +291,31 @@ class BenchBaseBenchmark {
       long cpuMicros,
       long packets,
       double backendsCpuMs,
-      double othersCpuMs) {
+      double othersCpuMs,
+      long roundTripMedianMicros,
+      long roundTripP99Micros) {
+
+    /**
+     * The network's round trip from this JVM, the client's: a prepared {@code SELECT 1} 2,000 times
+     * after 200 to warm it, its median and 99th percentile in microseconds.
+     */
+    static long[] roundTrip(Engines e) throws SQLException {
+      long[] times = new long[2000];
+      try (Connection c = e.open();
+          PreparedStatement ps = c.prepareStatement("SELECT 1")) {
+        for (int i = -200; i < times.length; i++) {
+          long t = System.nanoTime();
+          try (ResultSet rs = ps.executeQuery()) {
+            rs.next();
+          }
+          if (i >= 0) {
+            times[i] = System.nanoTime() - t;
+          }
+        }
+      }
+      Arrays.sort(times);
+      return new long[] {times[times.length / 2] / 1000, times[times.length * 99 / 100] / 1000};
+    }
 
     /** The counters at one moment. */
     record Snapshot(
@@ -355,7 +382,8 @@ class BenchBaseBenchmark {
      * The counters since {@code start}, with pg_stat_statements' top statements written to {@code
      * to}.
      */
-    static Server since(Engines e, Snapshot start, @Nullable Sampler sampler, Path to)
+    static Server since(
+        Engines e, Snapshot start, @Nullable Sampler sampler, long[] roundTrip, Path to)
         throws Exception {
       // the benchmark's sessions report their counters as they end, just before
       Thread.sleep(1000);
@@ -394,7 +422,9 @@ class BenchBaseBenchmark {
           end.cpuMicros() < 0 || start.cpuMicros() < 0 ? -1 : end.cpuMicros() - start.cpuMicros(),
           end.packets() < 0 || start.packets() < 0 ? -1 : end.packets() - start.packets(),
           backends,
-          others);
+          others,
+          roundTrip[0],
+          roundTrip[1]);
     }
 
     private static @Nullable String file(Connection c, String path) {
@@ -915,8 +945,8 @@ class BenchBaseBenchmark {
       out.append(
           "\n| run | commits | active ms/commit | idle in transaction ms/commit | WAL KB/commit |"
               + " server CPU ms/commit | backends' CPU ms/commit | other processes' CPU ms/commit |"
-              + " server packets/commit |\n"
-              + "|---|---|---|---|---|---|---|---|---|\n");
+              + " server packets/commit | round trip µs, median / p99 |\n"
+              + "|---|---|---|---|---|---|---|---|---|---|\n");
       results.forEach(
           (run, rs) -> {
             List<Server> ss = rs.stream().map(Result::server).filter(Objects::nonNull).toList();
@@ -926,7 +956,7 @@ class BenchBaseBenchmark {
             out.append(
                 String.format(
                     Locale.ROOT,
-                    "| (%s) | %.0f | %.3f | %.3f | %.1f | %s | %s | %s | %s |%n",
+                    "| (%s) | %.0f | %.3f | %.3f | %.1f | %s | %s | %s | %s | %.0f / %.0f |%n",
                     run,
                     median(ss.stream().map(x -> (double) x.commits()).toList()),
                     median(ss.stream().map(x -> x.perCommit(x.activeMs())).toList()),
@@ -960,9 +990,9 @@ class BenchBaseBenchmark {
                             Locale.ROOT,
                             "%.1f",
                             median(
-                                ss.stream()
-                                    .map(x -> x.perCommit((double) x.packets()))
-                                    .toList()))));
+                                ss.stream().map(x -> x.perCommit((double) x.packets())).toList())),
+                    median(ss.stream().map(x -> (double) x.roundTripMedianMicros()).toList()),
+                    median(ss.stream().map(x -> (double) x.roundTripP99Micros()).toList())));
           });
     }
     List<String> txns =
