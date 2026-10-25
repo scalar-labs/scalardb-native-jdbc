@@ -450,6 +450,57 @@ public final class Catalog implements AutoCloseable {
     return out;
   }
 
+  /**
+   * Returns, on Oracle, the synonyms a statement sent as written must not name (todo 314), as a
+   * parsed statement may not use them (todo 282): one of a table or view among {@code names}, of
+   * another synonym, of an object that is not a table or view, or over a database link; a synonym
+   * of an Oracle-maintained schema's object is left out, as {@code DUAL}. Elsewhere none. Read once
+   * per load of ScalarDB's catalog, which {@code names} must follow from.
+   *
+   * @param names the names of ScalarDB's tables and schemas the statement must not contain
+   * @return the synonyms' names
+   * @throws SQLException if the catalogs cannot be read
+   */
+  public List<String> guardedSynonyms(Collection<String> names) throws SQLException {
+    if (engine != Engine.ORACLE) {
+      return List.of();
+    }
+    Snapshot s = snapshot();
+    List<String> known = s.guardedSynonyms;
+    if (known != null) {
+      return known;
+    }
+    Set<String> guarded = new HashSet<>();
+    for (String n : names) {
+      guarded.add(n.toLowerCase(Locale.ROOT));
+    }
+    List<String> out =
+        withConnection(
+            c -> {
+              List<String> found = new ArrayList<>();
+              try (PreparedStatement ps =
+                      c.prepareStatement(
+                          "SELECT s.synonym_name, s.table_name, s.db_link, (SELECT"
+                              + " MIN(o.object_type) FROM all_objects o WHERE o.owner ="
+                              + " s.table_owner AND o.object_name = s.table_name AND"
+                              + " o.object_type IN ('TABLE', 'VIEW')) FROM all_synonyms s"
+                              + " WHERE s.db_link IS NOT NULL OR s.table_owner NOT IN (SELECT"
+                              + " u.username FROM all_users u WHERE u.oracle_maintained = 'Y')");
+                  ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                  if (rs.getString(3) != null
+                      || rs.getString(4) == null
+                      || guarded.contains(rs.getString(2).toLowerCase(Locale.ROOT))) {
+                    found.add(rs.getString(1));
+                  }
+                }
+              }
+              return List.copyOf(found);
+            });
+    s.guardedSynonyms = out;
+    return out;
+  }
+
   /** A full table name, {@code namespace.table}; a ScalarDB namespace holds no dot. */
   private static QualifiedName split(String full) {
     int dot = full.indexOf('.');
@@ -855,6 +906,8 @@ public final class Catalog implements AutoCloseable {
     final boolean caseInsensitive;
     final Instant expiresAt;
     final SetupObjects setupObjects;
+    // Oracle's synonyms an unparsed statement must not name, read on first use (todo 314)
+    volatile @Nullable List<String> guardedSynonyms;
     private final Map<String, VirtualTable> byName = new HashMap<>();
     private final Map<String, VirtualTable> byLeft = new HashMap<>();
     private final Map<String, VirtualTable> byRight = new HashMap<>();

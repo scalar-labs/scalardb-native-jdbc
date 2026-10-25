@@ -14,18 +14,25 @@ import org.jspecify.annotations.Nullable;
 public final class Outcome<T> {
   private final @Nullable T value;
   private final @Nullable String reason;
+  private final boolean unreadable;
 
-  private Outcome(@Nullable T value, @Nullable String reason) {
+  private Outcome(@Nullable T value, @Nullable String reason, boolean unreadable) {
     this.value = value;
     this.reason = reason;
+    this.unreadable = unreadable;
   }
 
   static <T> Outcome<T> of(T value) {
-    return new Outcome<>(Objects.requireNonNull(value), null);
+    return new Outcome<>(Objects.requireNonNull(value), null, false);
   }
 
   static <T> Outcome<T> refused(String reason) {
-    return new Outcome<>(null, Objects.requireNonNull(reason));
+    return new Outcome<>(null, Objects.requireNonNull(reason), false);
+  }
+
+  /** Refused since the driver cannot tell which tables the statement names (todo 314). */
+  static <T> Outcome<T> unreadable(String reason) {
+    return new Outcome<>(null, Objects.requireNonNull(reason), true);
   }
 
   /**
@@ -64,6 +71,17 @@ public final class Outcome<T> {
   }
 
   /**
+   * Returns whether the statement was refused only because the driver cannot tell which tables it
+   * names: it could not be parsed, or its table references could not all be found. Such a statement
+   * may still be sent as written when its words name no ScalarDB table (todo 314).
+   *
+   * @return whether the refusal is of that kind
+   */
+  public boolean isUnreadable() {
+    return unreadable;
+  }
+
+  /**
    * Returns the value, or empty when refused.
    *
    * @return the optional value
@@ -73,7 +91,7 @@ public final class Outcome<T> {
   }
 
   <U> Outcome<U> mapRefusal() {
-    return refused(reason());
+    return new Outcome<>(null, reason(), unreadable);
   }
 
   @Override

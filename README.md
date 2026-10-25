@@ -219,7 +219,9 @@ first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
 - Set the isolation level with `setTransactionIsolation` only. `SET`, `RESET` and `set_config` of
   it are refused; a database function of your own that changes it is not detected, so don't.
 - A statement on a ScalarDB table that the driver cannot parse or rewrite is refused with `0AN01`, not
-  run as written. A read-only connection cannot write ScalarDB tables (`25006`).
+  run as written. One the parser cannot read is sent as written, in a transaction too, when its words
+  name no ScalarDB table (comments and literals included) and it is a single query, DML or DDL statement,
+  except at SERIALIZABLE on MySQL, MariaDB and SQL Server. A read-only connection cannot write ScalarDB tables (`25006`).
 - Passthrough, `setClientInfo("scalardbnative.passthrough", "true")` in autocommit, sends statements as
   written, for what the driver refuses on tables ScalarDB does not manage. A statement that names a
   ScalarDB table, or ScalarDB's own schema, is refused there with `0AN01`, wherever the name stands

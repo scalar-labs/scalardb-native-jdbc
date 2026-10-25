@@ -418,7 +418,7 @@ public final class SqlAst {
       }
       stmt = statements.get(0);
     } catch (Exception e) {
-      return Outcome.refused("the statement cannot be parsed: " + firstLine(e));
+      return Outcome.unreadable("the statement cannot be parsed: " + firstLine(e));
     }
     if (stmt instanceof Execute) {
       return Outcome.refused(
@@ -451,7 +451,7 @@ public final class SqlAst {
       // the walk does not know SET and RESET; they name no table unless an expression holds a
       // subquery, and the check below refuses any table node the walk did not visit
       if (!(stmt instanceof SetStatement) && !(stmt instanceof ResetStatement)) {
-        return Outcome.refused("the statement's table references cannot be enumerated");
+        return Outcome.unreadable("the statement's table references cannot be enumerated");
       }
     }
     Set<String> cteKeys = new LinkedHashSet<>();
@@ -484,7 +484,7 @@ public final class SqlAst {
     }
     Node root = rootOf(stmt, walker.tables, walker.columns, sql, engine == Engine.SQLSERVER);
     if (root == null) {
-      return Outcome.refused("the statement's tokens cannot be located");
+      return Outcome.unreadable("the statement's tokens cannot be located");
     }
     if (engine == Engine.POSTGRESQL && hasUnicodeEscapedIdentifier(root)) {
       return Outcome.refused(
@@ -598,7 +598,7 @@ public final class SqlAst {
     walked.addAll(walker.columns);
     for (Object v : values) {
       if (v instanceof Table && !accounted.contains(v)) {
-        return Outcome.refused(
+        return Outcome.unreadable(
             "the table "
                 + ((Table) v).getFullyQualifiedName()
                 + " appears in a clause the driver"

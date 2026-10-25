@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "314"
 tags: [parser, refusal, postgresql]
@@ -42,9 +42,22 @@ written. Conservative: any identifier that could name a ScalarDB table keeps the
 Some are plain grammar gaps (`RELEASE SAVEPOINT`, `ORDER BY ... USING`). **Effort:** Small each,
 slow to land.
 
+## Recommended Action
+
+Option 1, approved 2026-10-25, with the conditions of design 4.7 ("Unparsed vendor syntax"): no
+protected name in the text, comments and literals included (on Oracle also the synonyms a parsed
+statement may not use); a query, DML or DDL by its first word, not stored code; one statement; no
+Unicode escape, invisible character, executable MySQL comment or SQL-as-text function; refused at
+SERIALIZABLE on MySQL, MariaDB and SQL Server, where every read must be locked.
+
 ## Acceptance Criteria
 
-- [ ] T4's parser refusals on statements without ScalarDB tables run, with nothing else changed.
+- [x] T4's parser refusals on statements without ScalarDB tables run, with nothing else changed:
+  refused 745 to 592 in both layouts, passed 4223 to 4376 (d) and 4243 to 4396 (i), the failed
+  statements the same (21 and 1, before the change too). Those still refused are transaction
+  control (`SAVEPOINT settings`, `RELEASE`, `COMMIT AND CHAIN`, `SET TRANSACTION`), stored code
+  (`CREATE FUNCTION`, `CREATE RULE`, `DO`), `PREPARE`/`EXECUTE`, several statements or a `;` in a
+  literal, and statements that name a ScalarDB table.
 
 ## Work Log
 
@@ -52,3 +65,11 @@ slow to land.
 
 **By:** Claude Code
 - `RegressIntegrationTest`'s report lists the refusals by reason.
+
+### 2026-10-25 - Done
+
+**By:** Claude Code
+- `SqlWords.whyNotAsWritten`, `Outcome.isUnreadable`, `Router.unparsed`,
+  `Catalog.guardedSynonyms`; `UnparsedIntegrationTest` on every engine.
+- Found on the way: passthrough's name check misreads `--` after a dollar quote on PostgreSQL and
+  without a space on MySQL (todo 330).

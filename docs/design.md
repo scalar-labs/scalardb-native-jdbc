@@ -742,16 +742,17 @@ runs a second lookup on the before image index; for other columns it uses the OR
 | Statement | Route |
 |---|---|
 | Touches plain tables only | pass through unchanged |
+| A statement the parser cannot read | sent as written when its words name no ScalarDB table and it is a query, DML or DDL; otherwise **refuse** (`0AN01`). See 4.7, "Unparsed vendor syntax" (todo 314) |
 | SELECT over plain and/or ScalarDB tables | each ScalarDB table name replaced by the level's read surface (4.2); one native statement, except the coarse-check path of 4.2, which sends the check first, and the SERIALIZABLE locking re-read of 4.2 on MySQL, MariaDB and SQL Server |
 | INSERT / UPDATE / DELETE on exactly one ScalarDB table | 4.3 |
-| DML on several tables, INSERT ... SELECT, MERGE, DML mixing plain and ScalarDB tables, UPDATE of a key column, anything the parser cannot interpret | **refuse** with a clear error; never guess. 4.7 lists the vendor syntax the parser does not interpret and the hints refused on a ScalarDB table |
+| DML on several tables, INSERT ... SELECT, MERGE, DML mixing plain and ScalarDB tables, UPDATE of a key column, anything the parser cannot interpret on a ScalarDB table | **refuse** with a clear error; never guess. 4.7 lists the vendor syntax the parser does not interpret and the hints refused on a ScalarDB table |
 | A session statement: `SET`, `RESET`, `USE`, `ALTER SESSION` | pass through, then re-read the session state (section 1); refused if it reads a table, as in `SET x = (SELECT ...)`, and `SET autocommit` and `SET TRANSACTION` are refused, since the JDBC methods carry those. Forms JSQLParser does not parse, such as PostgreSQL `SET search_path TO a` (write `= a`, or call `setSchema`) and `BEGIN`, fall under "anything the parser cannot interpret" |
 | A procedure call: `CALL`, `EXEC`, `{call ...}` | **refuse** (`0AN01`): the driver cannot see what the procedure touches; run it in passthrough mode if it touches no ScalarDB table |
 | A function that runs SQL given as text: PostgreSQL `query_to_xml` and the other XML exports, `dblink`, `crosstab`, `connectby`, `ts_stat`, `ts_rewrite`; Oracle `dbms_xmlgen`, `dbms_xmlquery`, `dbms_xmlstore`, `dbms_xmlsave`, `dbms_sql`, the URI types (`DBURITYPE`, `XDBURITYPE`, `HTTPURITYPE`, `URITYPE`) and `SYS_DBURIGEN`, `XMLQUERY`, `XMLTABLE`, `XMLEXISTS` (XQuery reads tables through `fn:collection("oradb:...")`); SQL Server `OPENQUERY`, `OPENROWSET`, `OPENDATASOURCE` | **refuse** (`0AN01`) wherever it appears, for the same reason; run it in passthrough mode if its SQL touches no ScalarDB table. A function the user wrote that runs SQL or changes the session cannot be recognised and is not supported on a connection that also reaches ScalarDB tables |
 | A name through a synonym, `T_data`, `T_tx_metadata` or `T_scalardb` | **refuse** (`42000`), naming the table to use (section 1, "The catalog") |
 | DDL, `TRUNCATE` | on plain tables only: passed through, and the catalog's resolutions are dropped. On a ScalarDB table **refuse** (`0AN01`), in passthrough mode too, where the driver cannot see it but the operator contract forbids it: run raw, it would leave ScalarDB's table metadata, and the read view and in-flight index the setup made (section 3) behind, and on decoupled tables ScalarDB refuses schema changes such as adding a column (`throwIfTransactionMetadataDecouplingApplied`). Change or truncate the table through ScalarDB's admin, then run the setup again and refresh the catalog (4.4) |
 | Bulk maintenance that leaves the schema alone (`ANALYZE`, `VACUUM`, statistics) | on plain tables, passthrough mode, in autocommit; on a ScalarDB table, a connection of the database's own driver with ScalarDB's transactions on the table stopped, since passthrough refuses it (below) |
-| Any statement in passthrough mode | sent as written, unless it names a ScalarDB table, its data, metadata or virtual table, ScalarDB's catalog schema or its default coordinator namespace: then **refuse** (`0AN01`), since sent as written it would read prepared records as committed and write rows without their metadata (todo 323). The names are found by the text's words, in any case, comments left out and string literals kept, so that an unparsed statement, a function body or SQL built from a literal is checked as a parsed statement is; a plain table of the same name in another schema is refused too. A procedure, a view, a trigger or SQL built at run time reaches a table without naming it, and stays the application's (section 7) |
+| Any statement in passthrough mode | sent as written, unless it names a ScalarDB table, its data, metadata or virtual table, ScalarDB's catalog schema or its default coordinator namespace, or on Oracle a synonym a parsed statement could not use (4.7): then **refuse** (`0AN01`), since sent as written it would read prepared records as committed and write rows without their metadata (todo 323). The names are found by the text's words, in any case, comments left out and string literals kept, so that an unparsed statement, a function body or SQL built from a literal is checked as a parsed statement is; a plain table of the same name in another schema is refused too. A procedure, a view, a trigger or SQL built at run time reaches a table without naming it, and stays the application's (section 7) |
 
 **What "the parser can interpret" means.** The text is exactly one statement; JSQLParser parses it;
 every table node of the parser's public syntax tree is a reference the walk visited, a column qualifier
@@ -1556,13 +1557,41 @@ dropping those refusals, with the rules below in place.
   is at worst a slower plan: Oracle, PostgreSQL and MySQL never raise an error for an unusable comment
   hint.
 
-**Unparsed vendor syntax.** JSQLParser 5.4 does not parse Oracle `RETURNING ... INTO`, flashback
-`AS OF TIMESTAMP` and the `MODEL` clause, nor the SQL Server lock hints above. Under 4.1 such a statement
-is refused even when it touches plain tables only, since the driver cannot tell. The relaxation of
-passing through a statement whose token stream contains none of the catalog's names is **deferred**: a
-user-defined view over a ScalarDB table would slip through it (section 7), and a synonym would too,
-since a parsed name is refused as a synonym only after the engine has resolved it. The parser's
-coverage of each engine's syntax is therefore part of the certification of that engine.
+**Unparsed vendor syntax.** JSQLParser 5.4 does not parse, among others, Oracle `RETURNING ... INTO`,
+flashback `AS OF TIMESTAMP` and the `MODEL` clause, PostgreSQL's `ORDER BY ... USING`, MySQL's `FORCE
+INDEX FOR ORDER BY`, SQL Server's `TABLESAMPLE` and `UPDATE TOP`, and about 300 statements of
+PostgreSQL's regression tests (T4). The driver only rewrites statements on ScalarDB tables, and sends a
+statement on plain tables unchanged; what it needs from the parse is which tables a statement names.
+When the parser cannot tell (it fails, or the driver cannot find every table reference in its tree),
+the statement's words answer instead (todo 314), and it is **sent as written**, in a transaction too,
+when all of these hold, erring toward refusing:
+
+- **None of the names a passthrough statement must not contain** (4.1's table, "Any statement in
+  passthrough mode"), found in the text's words in any case, comments and literals included; on Oracle
+  also each synonym a parsed statement could not use: one of a ScalarDB table or one of its tables, of
+  another synonym, of what is not a table or view, or over a database link, read once per load of the
+  catalog. A plain table of the same name in another schema is refused too.
+- **A query, DML or DDL by its first word**: `SELECT`, `WITH`, `VALUES`, `TABLE`, `INSERT`, `UPDATE`,
+  `DELETE`, `MERGE`, `CREATE`, `ALTER`, `DROP`, `COMMENT`; `REPLACE` on MySQL and MariaDB;
+  PostgreSQL's cursor statements `DECLARE`, `FETCH`, `MOVE` and `CLOSE`. Transaction and session
+  control (`END`, `COMMIT AND CHAIN`, `RELEASE SAVEPOINT`, `SET TRANSACTION`, `USE`) would change what
+  the driver tracks; procedural code (`DO`, `CALL`, `EXECUTE`, a T-SQL or PL/SQL block) and a `CREATE`
+  or `ALTER` of a function, procedure, trigger, rule, package or event reach tables without naming
+  them, and `ALTER SESSION` and `ALTER SYSTEM` change the session.
+- **One statement**: no `;` but at its end, in a literal too.
+- **No name spelled other than by its letters**: no PostgreSQL Unicode escape (`U&`), no invisible
+  formatting character, no comment MySQL and MariaDB run (`/*! ... */`); and no function that runs SQL
+  given as text, as a parsed statement may not call ("Errors"), nor PostgreSQL's `set_config`.
+- **Not where every read is locked**: at SERIALIZABLE on MySQL, MariaDB and SQL Server the driver
+  locks every table a statement reads (4.2), which needs the parsed statement; there it is refused, and
+  in a read-only transaction there with `25006`, as passthrough (todo 324).
+
+After a DDL statement sent so, the session is read again and the resolved names are dropped, as after a
+parsed one. The decision is kept per text, as a parsed one is (4.1), and taken again when the catalog,
+the session or the level moves. What remains is what a parsed statement on plain tables leaves to the
+application too: a user view over a ScalarDB table, a procedure or trigger that reaches one, SQL built
+at run time (section 7). The parser's coverage of each engine's syntax still decides what is served on
+ScalarDB tables, and stays part of that engine's certification.
 
 ---
 
@@ -1950,16 +1979,18 @@ between `T` and plain tables are the database's own.
   statically), a trigger on one, such a foreign key on one. SQL built at run time is not seen.
 - **User-defined views over a ScalarDB table** are invisible to the catalog, which knows the names
   ScalarDB registered: a statement through a user view of `T` passes through as a plain-table statement
-  and bypasses both sides like a native writer. This is also why the pass-through relaxation for
-  unparsed statements is deferred (4.7). Synonyms are not this gap: the engine reports them and the
-  driver refuses them, whatever they stand for, so an application that reaches any table through a
-  synonym must name the table.
+  and bypasses both sides like a native writer, and so does a statement the parser cannot read that
+  names only the view (4.7). Synonyms are not this gap: the engine reports them and the driver refuses
+  them, whatever they stand for, so an application that reaches any table through a synonym must name
+  the table; an unparsed statement that names such a synonym is refused too (4.7).
 - **A table registered after the catalog was loaded is plain** until the TTL expires or the catalog is
   refreshed (4.4).
 - **Non-ASCII column names on Oracle** are folded by the driver, code point by code point, not by
   Oracle; table and schema names beyond ASCII are folded by Oracle itself.
-- **Unparsed vendor syntax is refused even on plain tables** (4.7); the parser's coverage of an engine's
-  syntax is part of that engine's certification.
+- **Unparsed vendor syntax is refused on ScalarDB tables**, and on plain tables where its words cannot
+  show it is safe to send (4.7): one that names a ScalarDB table, transaction or session control,
+  procedural code, several statements, and any at SERIALIZABLE on MySQL, MariaDB and SQL Server. The
+  parser's coverage of an engine's syntax is part of that engine's certification.
 
 ---
 
@@ -2057,7 +2088,8 @@ retries.
     `APPEND`, the duplicate-key hints and SQL Server `NOLOCK` are refused on a ScalarDB table; SQL Server
     `WITH (UPDLOCK, ROWLOCK)` does not parse and is stripped before parsing and re-applied as the locking
     re-read, which corrects the 4.6 assumption; Oracle `RETURNING ... INTO`, `AS OF` and `MODEL` are
-    refused under the never-guess rule; user views over `T` are a recorded gap.
+    refused under the never-guess rule; user views over `T` are a recorded gap. Revised 2026-10-25
+    (todo 314): an unparsed statement whose words name no ScalarDB table is sent as written (4.7).
 14. From the two code reviews of the implementation (2026-10-09): names resolve through the engine's own
     catalog under per-engine identifier rules measured on all five engines ("Identifiers per engine");
     synonyms are refused; the catalog is one per database and credentials, loaded whole on its own

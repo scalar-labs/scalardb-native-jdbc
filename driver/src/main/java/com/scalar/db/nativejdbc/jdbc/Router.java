@@ -571,8 +571,9 @@ final class Router {
   }
 
   /**
-   * The names a passthrough statement must not contain (todo 323): every ScalarDB table's, its
-   * physical tables' among them, ScalarDB's catalog schema and its default coordinator namespace.
+   * The names a statement sent as written must not contain, in passthrough (todo 323) or unparsed
+   * (todo 314): every ScalarDB table's, its physical tables' among them, ScalarDB's catalog schema,
+   * its default coordinator namespace, and on Oracle the synonyms a parsed statement may not use.
    */
   private List<String> protectedNames() throws SQLException {
     List<String> names = new ArrayList<>();
@@ -588,7 +589,33 @@ final class Router {
         names.add(t.virtualTable());
       }
     }
+    names.addAll(catalog.guardedSynonyms(List.copyOf(names)));
     return names;
+  }
+
+  /**
+   * Routes a statement the parser could not read (todo 314): sent as written when its words name no
+   * ScalarDB table and it is a query, DML or DDL ({@link SqlWords#whyNotAsWritten}); refused where
+   * every read must be locked, which needs the parsed statement.
+   */
+  private Route unparsed(String sql, String reason) throws SQLException {
+    if (readOnlySerializable()) {
+      // unparsed, it may write (todo 324)
+      throw new SQLException(READ_ONLY, "25006");
+    }
+    if (lockingSerializable()) {
+      throw Errors.unsupported(
+          reason
+              + "; at SERIALIZABLE on MySQL, MariaDB and SQL Server the driver locks every read,"
+              + " which it cannot do in a statement it cannot parse");
+    }
+    String why = SqlWords.whyNotAsWritten(sql, engine, protectedNames());
+    if (why != null) {
+      throw Errors.unsupported(reason + "; it is not sent as written since " + why);
+    }
+    // DDL may change what names resolve to, and the session's settings, as parsed DDL does
+    boolean ddl = SqlWords.startsDdl(sql, engine);
+    return route(sql, sql, null, ddl, ddl, false, null, 0, 0, List.of(), false);
   }
 
   /**
@@ -631,6 +658,9 @@ final class Router {
       parsed = SqlAst.analyze(sql, engine, !quotes);
     }
     if (!parsed.isPresent()) {
+      if (parsed.isUnreadable()) {
+        return unparsed(sql, parsed.reason());
+      }
       throw Errors.unsupported(parsed.reason());
     }
     SqlAst ast = parsed.get();
