@@ -53,6 +53,8 @@ if [ -n "${BENCHBASE:-}" ]; then
     rm -rf ~/benchbase-src ~/benchbase-dist
     git clone -q https://github.com/cmu-db/benchbase.git ~/benchbase-src &&
       git -C ~/benchbase-src checkout -q 33c00473807ebd49304d114a6d769d2d2b2bbb34 &&
+      # its -Werror fails on JDK 25's new warnings; the classes are the same without it
+      sed -i 's#<arg>-Werror</arg>##' ~/benchbase-src/pom.xml &&
       (cd ~/benchbase-src && ./mvnw -q -B clean package -P postgres -DskipTests -Dfmt.skip=true) &&
       mkdir -p ~/benchbase-dist && tar -xzf ~/benchbase-src/target/benchbase-postgres.tgz -C ~/benchbase-dist ||
       echo "=== $tier BenchBase build FAILED"
