@@ -288,3 +288,12 @@ Per TPC-C commit, (c) against (a): server statements +0.72 ms, the driver's clie
 about 1.2 ms of server CPU outside the statements (protocol, commit, WAL writer, autovacuum), of a
 transaction 2.3 ms longer. Next, if pursued: the server's CPU per process (backends against
 background), to tell how much of the 1.2 ms is on the transaction's path.
+
+### 2026-10-25: BenchBase on AWS, the server's CPU per process
+
+Run `20261025-1253`, `docs/benchmarks/benchbase-postgresql-aws.md` ("Third run"): of the extra
+1.89 ms of server CPU a TPC-C commit, 1.84 ms is the client backends' own, on the transaction's path;
+background processes +0.05 ms. The vendor ran at 528, 711 and 1,151/s in the three runs, (c) at 0.76,
+0.71 and 0.63: about 2 ms a transaction whatever the round trip. pgbench, 15 keyed stock updates in
+one round trip: plain 1.59 ms, 15 fused 2.44 ms, one fused statement over the 15 keys
+(`= ANY(ARRAY[...])`) 1.51 ms. Candidate: a batch's entries of one plan merged into one statement.

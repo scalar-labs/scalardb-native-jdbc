@@ -93,6 +93,38 @@ extra rows), which these counters do not separate. The client's (c) samples in t
 
 YCSB (c), p50 against (a): Read +4%, Insert +11%, Scan +15%, Update +17%, read-modify-write +18%.
 
+## Third run: the server's CPU per process (2026-10-25)
+
+Run `20261025-1253` (`BENCHBASE=1 READS=0 REPS=2 BB_WORKLOADS=tpcc BB_RUNS=a,c`), HEAD `f163cb8`,
+with the harness sampling `pg_stat_activity` and `/proc/<pid>/stat` every 200 ms. This placement's
+round trip was shorter again: (a) 1,151/s, (c) 724/s, **0.63**. Over the three runs the vendor ran
+at 528, 711 and 1,151/s and (c) at 0.76, 0.71 and 0.63 of it: the driver adds about 2 ms a TPC-C
+transaction whatever the network, so the ratio falls as the round trip shortens.
+
+| per TPC-C commit | (a) | (c) |
+|---|---|---|
+| server CPU, all (the container's cgroup) | 0.89 ms | 2.78 ms |
+| the client backends | 0.86 ms | 2.70 ms |
+| every other process (autovacuum, WAL writer, checkpointer) | 0.02 ms | 0.07 ms |
+| the busy backends' samples `active` | 20% | 43% |
+
+**The extra server CPU is the backends' own**, on the transaction's path, not background work. It
+is more than pg_stat_statements' execution and planning (+0.72 ms in the second run): what each
+statement costs around its execution, as binding its parameters, locking its relations and setting
+up the executor for a plan of several data-modifying CTEs.
+
+**A batch's writes as one statement** (pgbench on the laptop, `-M prepared`, 4 clients, a
+transaction updating 15 random `stock` rows by key, its statements pipelined in one round trip):
+
+| | latency |
+|---|---|
+| 15 plain UPDATEs, the vendor's | 1.59 ms |
+| 15 fused UPDATEs, the driver's today | 2.44 ms (+53%) |
+| one fused UPDATE of the 15 keys | **1.51 ms** (-5%) |
+
+The merged statement reads its keys with `= ANY(ARRAY[...])` in the predicate on the committed view;
+the keys as a joined `VALUES` list scanned the whole view instead (400 ms).
+
 ## Reports
 
 ### HEAD 93f5217
