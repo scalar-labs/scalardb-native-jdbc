@@ -316,3 +316,27 @@ the client's CPU (+0.33 ms); this run ran both tiers' JVMs on one client and sam
 millisecond. perf (flat, no call stacks) grows the executor's setup per execution from 4.2% to 7.2%
 of the backends' samples. Next: one tier at a time without CPU sampling; the time each fused
 statement costs around its execution, measured locally against pg_stat_statements' execution time.
+
+### 2026-10-25: what a fused single-row write costs, part by part (local, pgbench)
+
+TPC-C's stock update by its full key in variants, pgbench inside the container (one client, Unix
+socket, `synchronous_commit` off), the container's CPU per transaction against pg_stat_statements'
+execution time; two rounds, averaged:
+
+| variant | CPU µs | execution µs | CPU around it µs |
+|---|---|---|---|
+| plain UPDATE | 102 | 16 | 86 |
+| the metadata row's UPDATE alone | 100 | 13 | 87 |
+| UPDATE, then the stamp from its keys (one statement) | 118 | 28 | 91 |
+| the same as two statements, pipelined | 139 | 28 | 112 |
+| fused, without the after image, keys from the data table | 162 | 37 | 125 |
+| fused, without the after image | 190 | 44 | 146 |
+| fused, as now | 200 | 48 | 152 |
+
+Against the plain UPDATE the fused statement costs +98 µs: the metadata row itself +16, the keys,
+gate and CAS structure +44, the keys read through the committed view +28, the after image +10, and
+two thirds of it around the execution, which pg_stat_statements does not count. A slim form for a
+write by the full key, the key's metadata row read by its key, the DML gated on it being committed,
+the CAS on its tx_id and version, costs +32 µs in autocommit and +33 in a transaction against +88
+and +85 for the fused one, with no savepoint; an optimistic write under a savepoint, undone when
+its stamp misses, costs +53, the savepoint alone about 37.
