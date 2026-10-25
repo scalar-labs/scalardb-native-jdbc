@@ -252,17 +252,25 @@ class BenchBaseBenchmark {
       }
     }
     Server.@Nullable Snapshot start = SERVER_STATS ? Server.snapshot(e) : null;
+    Sampler sampler = SERVER_STATS ? new Sampler(e) : null;
     Path histograms = dir.resolve("histograms.json");
-    benchBase(
-        e,
-        workload,
-        run,
-        dir,
-        "execute",
-        "--execute=true",
-        "-jh",
-        histograms.toAbsolutePath().toString());
-    Server server = start == null ? null : Server.since(e, start, dir.resolve("server.txt"));
+    try {
+      benchBase(
+          e,
+          workload,
+          run,
+          dir,
+          "execute",
+          "--execute=true",
+          "-jh",
+          histograms.toAbsolutePath().toString());
+    } finally {
+      if (sampler != null) {
+        sampler.close();
+      }
+    }
+    Server server =
+        start == null ? null : Server.since(e, start, sampler, dir.resolve("server.txt"));
     return Result.read(run, dir, histograms, imported, plain, server);
   }
 
@@ -278,7 +286,9 @@ class BenchBaseBenchmark {
       double idleInTxMs,
       long walBytes,
       long cpuMicros,
-      long packets) {
+      long packets,
+      double backendsCpuMs,
+      double othersCpuMs) {
 
     /** The counters at one moment. */
     record Snapshot(
@@ -345,7 +355,8 @@ class BenchBaseBenchmark {
      * The counters since {@code start}, with pg_stat_statements' top statements written to {@code
      * to}.
      */
-    static Server since(Engines e, Snapshot start, Path to) throws Exception {
+    static Server since(Engines e, Snapshot start, @Nullable Sampler sampler, Path to)
+        throws Exception {
       // the benchmark's sessions report their counters as they end, just before
       Thread.sleep(1000);
       Snapshot end = snapshot(e);
@@ -367,6 +378,13 @@ class BenchBaseBenchmark {
       } catch (SQLException ex) {
         out.append("pg_stat_statements unavailable: ").append(ex.getMessage()).append('\n');
       }
+      double backends = -1;
+      double others = -1;
+      if (sampler != null) {
+        out.append('\n').append(sampler.report());
+        backends = sampler.cpuMs(true);
+        others = sampler.cpuMs(false);
+      }
       Files.writeString(to, out);
       return new Server(
           end.commits() - start.commits(),
@@ -374,7 +392,9 @@ class BenchBaseBenchmark {
           end.idleInTxMs() - start.idleInTxMs(),
           end.walBytes() - start.walBytes(),
           end.cpuMicros() < 0 || start.cpuMicros() < 0 ? -1 : end.cpuMicros() - start.cpuMicros(),
-          end.packets() < 0 || start.packets() < 0 ? -1 : end.packets() - start.packets());
+          end.packets() < 0 || start.packets() < 0 ? -1 : end.packets() - start.packets(),
+          backends,
+          others);
     }
 
     private static @Nullable String file(Connection c, String path) {
@@ -390,6 +410,159 @@ class BenchBaseBenchmark {
 
     double perCommit(double v) {
       return commits == 0 ? Double.NaN : v / commits;
+    }
+  }
+
+  /**
+   * Over a run's execute phase, every 200 ms on a connection of its own: each server process's type
+   * and CPU ({@code /proc/<pid>/stat}, kept at its last reading, so that a session that ends still
+   * counts), and the client backends' state and wait. Where {@code /proc} cannot be read (RDS), the
+   * states only. CPU in ticks of 10 ms, Linux's USER_HZ.
+   */
+  static final class Sampler implements AutoCloseable {
+
+    private static final String WITH_CPU =
+        "SELECT pid, backend_type, state, wait_event_type, wait_event,"
+            + " pg_read_file('/proc/' || pid || '/stat', 0, 400, true)"
+            + " FROM pg_stat_activity WHERE pid <> pg_backend_pid()";
+
+    private static final String WITHOUT_CPU =
+        "SELECT pid, backend_type, state, wait_event_type, wait_event, NULL"
+            + " FROM pg_stat_activity WHERE pid <> pg_backend_pid()";
+
+    private final Thread thread;
+    private volatile boolean stop;
+    private final Map<Integer, String> types = new TreeMap<>();
+    // per process: its first and last [user, system] ticks
+    private final Map<Integer, long[]> first = new TreeMap<>();
+    private final Map<Integer, long[]> last = new TreeMap<>();
+    // per client backend: how often it was seen in each "state / wait"
+    private final Map<Integer, Map<String, Integer>> seen = new TreeMap<>();
+    private int samples;
+    private @Nullable String failure;
+
+    Sampler(Engines e) {
+      thread = new Thread(() -> run(e), "server-sampler");
+      thread.setDaemon(true);
+      thread.start();
+    }
+
+    private void run(Engines e) {
+      try (Connection c = e.open();
+          Statement st = c.createStatement()) {
+        String query = WITH_CPU;
+        while (!stop) {
+          try (ResultSet rs = st.executeQuery(query)) {
+            synchronized (this) {
+              samples++;
+              while (rs.next()) {
+                int pid = rs.getInt(1);
+                String type = String.valueOf(rs.getString(2));
+                types.put(pid, type);
+                String stat = rs.getString(6);
+                if (stat != null && stat.indexOf(')') > 0) {
+                  String[] f = stat.substring(stat.lastIndexOf(')') + 2).split(" ", -1);
+                  long[] ticks = {Long.parseLong(f[11]), Long.parseLong(f[12])};
+                  first.putIfAbsent(pid, ticks);
+                  last.put(pid, ticks);
+                }
+                if (type.equals("client backend")) {
+                  String state =
+                      rs.getString(3)
+                          + (rs.getString(4) == null
+                              ? ""
+                              : " / " + rs.getString(4) + ":" + rs.getString(5));
+                  seen.computeIfAbsent(pid, k -> new TreeMap<>()).merge(state, 1, Integer::sum);
+                }
+              }
+            }
+          } catch (SQLException ex) {
+            if (query.equals(WITHOUT_CPU)) {
+              throw ex;
+            }
+            query = WITHOUT_CPU; // no superuser: pg_read_file refused
+          }
+          Thread.sleep(200);
+        }
+      } catch (SQLException | InterruptedException | RuntimeException ex) {
+        synchronized (this) {
+          failure = String.valueOf(ex);
+        }
+      }
+    }
+
+    @Override
+    public void close() throws InterruptedException {
+      stop = true;
+      thread.join(10_000);
+    }
+
+    /** The CPU of the client backends, or of every other process, over the run; -1 if unread. */
+    synchronized double cpuMs(boolean backends) {
+      if (last.isEmpty()) {
+        return -1;
+      }
+      long ticks = 0;
+      for (Map.Entry<Integer, long[]> p : last.entrySet()) {
+        if ("client backend".equals(types.get(p.getKey())) == backends) {
+          long[] f = Objects.requireNonNull(first.get(p.getKey()));
+          ticks += p.getValue()[0] - f[0] + p.getValue()[1] - f[1];
+        }
+      }
+      return ticks * 10.0;
+    }
+
+    /** CPU per process type, and the busy client backends' states, as text for server.txt. */
+    synchronized String report() {
+      StringBuilder out = new StringBuilder("samples\t").append(samples).append('\n');
+      if (failure != null) {
+        out.append("sampler failed: ").append(failure).append('\n');
+      }
+      Map<String, long[]> byType = new TreeMap<>();
+      for (Map.Entry<Integer, long[]> p : last.entrySet()) {
+        long[] f = Objects.requireNonNull(first.get(p.getKey()));
+        long[] t = byType.computeIfAbsent(types.get(p.getKey()), k -> new long[3]);
+        t[0]++;
+        t[1] += p.getValue()[0] - f[0];
+        t[2] += p.getValue()[1] - f[1];
+      }
+      out.append("\nprocess type\tprocesses\tuser ms\tsystem ms\n");
+      byType.forEach(
+          (type, t) ->
+              out.append(type)
+                  .append('\t')
+                  .append(t[0])
+                  .append('\t')
+                  .append(t[1] * 10)
+                  .append('\t')
+                  .append(t[2] * 10)
+                  .append('\n'));
+      // the benchmark's sessions: the client backends not idle in at least 10% of the samples
+      Map<String, Integer> states = new TreeMap<>();
+      int total = 0;
+      for (Map<String, Integer> m : seen.values()) {
+        int all = m.values().stream().mapToInt(Integer::intValue).sum();
+        if (all - m.getOrDefault("idle / Client:ClientRead", 0) < all / 10) {
+          continue;
+        }
+        for (Map.Entry<String, Integer> x : m.entrySet()) {
+          states.merge(x.getKey(), x.getValue(), Integer::sum);
+          total += x.getValue();
+        }
+      }
+      out.append("\nbusy client backends' state / wait\tsamples\tshare\n");
+      int sum = total;
+      states.entrySet().stream()
+          .sorted((x, y) -> y.getValue() - x.getValue())
+          .forEach(
+              x ->
+                  out.append(x.getKey())
+                      .append('\t')
+                      .append(x.getValue())
+                      .append('\t')
+                      .append(String.format(Locale.ROOT, "%.1f%%", 100.0 * x.getValue() / sum))
+                      .append('\n'));
+      return out.toString();
     }
   }
 
@@ -741,8 +914,9 @@ class BenchBaseBenchmark {
     if (results.values().stream().flatMap(List::stream).anyMatch(r -> r.server() != null)) {
       out.append(
           "\n| run | commits | active ms/commit | idle in transaction ms/commit | WAL KB/commit |"
-              + " server CPU ms/commit | server packets/commit |\n"
-              + "|---|---|---|---|---|---|---|\n");
+              + " server CPU ms/commit | backends' CPU ms/commit | other processes' CPU ms/commit |"
+              + " server packets/commit |\n"
+              + "|---|---|---|---|---|---|---|---|---|\n");
       results.forEach(
           (run, rs) -> {
             List<Server> ss = rs.stream().map(Result::server).filter(Objects::nonNull).toList();
@@ -752,7 +926,7 @@ class BenchBaseBenchmark {
             out.append(
                 String.format(
                     Locale.ROOT,
-                    "| (%s) | %.0f | %.3f | %.3f | %.1f | %s | %s |%n",
+                    "| (%s) | %.0f | %.3f | %.3f | %.1f | %s | %s | %s | %s |%n",
                     run,
                     median(ss.stream().map(x -> (double) x.commits()).toList()),
                     median(ss.stream().map(x -> x.perCommit(x.activeMs())).toList()),
@@ -768,6 +942,18 @@ class BenchBaseBenchmark {
                                 ss.stream()
                                     .map(x -> x.perCommit((double) x.cpuMicros()) / 1000)
                                     .toList())),
+                    ss.stream().anyMatch(x -> x.backendsCpuMs() < 0)
+                        ? "n/a"
+                        : String.format(
+                            Locale.ROOT,
+                            "%.3f",
+                            median(ss.stream().map(x -> x.perCommit(x.backendsCpuMs())).toList())),
+                    ss.stream().anyMatch(x -> x.othersCpuMs() < 0)
+                        ? "n/a"
+                        : String.format(
+                            Locale.ROOT,
+                            "%.3f",
+                            median(ss.stream().map(x -> x.perCommit(x.othersCpuMs())).toList())),
                     ss.stream().anyMatch(x -> x.packets() < 0)
                         ? "n/a"
                         : String.format(
