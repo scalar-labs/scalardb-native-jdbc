@@ -285,9 +285,10 @@ class MaelstromIntegrationTest {
             inline,
             false,
             Level.SERIALIZABLE.mixed,
-            // SQL Server commits about a third as many: 60 seconds showed no read skew there, 240
-            // did
-            e.engine() == Engine.SQLSERVER ? 4 * ANOMALY_SECONDS : ANOMALY_SECONDS,
+            // 60 seconds showed no read skew on SQL Server, which commits about a third as many,
+            // nor
+            // on MySQL and MariaDB on GitHub's runners now and then; 240 did
+            4 * ANOMALY_SECONDS,
             0,
             Level.READ_COMMITTED.jdbc);
     assertThat(output).contains(INVALID);

@@ -3,7 +3,8 @@ name: Isolation
 # The isolation tests of testing plan T5 ("Where T5 runs"): Maelstrom and Elle's list-append and
 # rw-register over every level, side and layout, the faults, the read-only readers, bank,
 # membership and their controls. They run daily rather than per pull request, as ScalarDB's own do:
-# about 1.5 hours per engine. Pull requests run the unit and integration tests (ci.yml).
+# about 1 hour per engine on GitHub's runners, one engine at a time. Pull requests run the unit and
+# integration tests (ci.yml).
 on:
   schedule:
     - cron: "0 18 * * *" # 03:00 JST
@@ -24,6 +25,8 @@ jobs:
     timeout-minutes: 150
     strategy:
       fail-fast: false
+      # one engine at a time: the runners the repository gets are few, and pull requests need them
+      max-parallel: 1
       matrix:
         engine: [Postgresql, Oracle, Mysql, Mariadb, Sqlserver]
     steps:
