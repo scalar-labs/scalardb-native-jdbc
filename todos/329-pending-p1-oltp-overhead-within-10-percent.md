@@ -266,3 +266,15 @@ server active +0.42 ms, idle in transaction +0.13 ms (+0.54 before).
   said +0.9 ms, counting other sessions).
 - The laptop's noise (the vendor's run alone from 655 to 737/s in this session) is as large as what
   is left to measure: further steps are measured on AWS (`docs/plans/benchmark-environment.md`).
+
+### 2026-10-25: BenchBase on AWS, tier A
+
+`matrix.sh BENCHBASE=1` and the harness's server counters (`93f5217`), run `20261025-1006`:
+`docs/benchmarks/benchbase-postgresql-aws.md`. TPC-C 0.76 (baseline `ef77549` 0.59), YCSB 0.92
+(0.70): the laptop's ratios hold with a network between client and server. Round trips equal; the
+server's CPU per TPC-C commit triples (0.90 to 2.82 ms) and its active time is +0.53 ms, idle in
+transaction +0.37 ms, of a transaction 2.3 ms longer at the client: about 1.4 ms is unaccounted for,
+the driver's client side or time outside the server's transactions. Next: run (b) and a profile of
+the client. The client's BenchBase build failed at first on its `-Werror` under JDK 25 (`a4642e3`
+fixes `matrix.sh`); the working tree then ran after the baseline from a waiter on the client, with
+`detached.sh` paused until it finished.
