@@ -34,6 +34,37 @@ public final class SqlWords {
     return first(withoutComments(sql, engine).toLowerCase(Locale.ROOT), names);
   }
 
+  /**
+   * Returns the first of {@code names} that the text's words name, in any case, comments and
+   * literals included, so that no engine's reading of a comment or a quote can hide one (todos 314,
+   * 330); a word is also split at {@code #}, {@code @} and {@code $}, where a name may end at a
+   * MySQL comment or an Oracle database link.
+   *
+   * @param sql the statement's text
+   * @param names the names, in any case
+   * @return the name found, as given, or null
+   */
+  public static @Nullable String named(String sql, Collection<String> names) {
+    String text = sql.toLowerCase(Locale.ROOT);
+    String named = first(text, names);
+    return named != null
+        ? named
+        : first(text.replace('#', ' ').replace('@', ' ').replace('$', ' '), names);
+  }
+
+  /**
+   * Returns whether a statement is PostgreSQL's {@code DROP OWNED}, which drops every object a role
+   * owns, a ScalarDB table's among them, without naming one (todo 331).
+   *
+   * @param sql the statement's text
+   * @param engine the engine, which decides how comments are read
+   * @return whether it drops what a role owns
+   */
+  public static boolean dropsOwned(String sql, Engine engine) {
+    String text = withoutComments(sql, engine).toLowerCase(Locale.ROOT);
+    return firstWord(text).equals("drop") && ddlKind(text).equals("owned");
+  }
+
   /** The words a statement may start with to be sent as written unparsed (todo 314). */
   private static final Set<String> AS_WRITTEN =
       Set.of(
@@ -162,11 +193,7 @@ public final class SqlWords {
             + ", which runs SQL given as text or a prepared statement, or changes the session";
       }
     }
-    // a name may end where the engine starts a comment (#) or a link (@), or meet a $
-    String named = first(text, names);
-    if (named == null) {
-      named = first(text.replace('#', ' ').replace('@', ' ').replace('$', ' '), names);
-    }
+    String named = named(sql, names);
     return named == null ? null : "it names " + named + ", which ScalarDB manages";
   }
 

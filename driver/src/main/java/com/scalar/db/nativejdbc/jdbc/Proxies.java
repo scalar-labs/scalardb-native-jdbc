@@ -55,6 +55,7 @@ public final class Proxies {
    * @param inflightWait how long a write waits for a row in flight to settle, zero to abort at once
    * @param predicateChecks whether a read of one table checks its predicate's rows in flight before
    *     it aborts on its table's (design 4.2)
+   * @param coordinatorNamespace ScalarDB's namespace for its coordinator table
    * @return the connection the application uses
    * @throws SQLException if the session cannot be read or the isolation level set
    */
@@ -63,7 +64,8 @@ public final class Proxies {
       Engine engine,
       Catalog catalog,
       Duration inflightWait,
-      boolean predicateChecks)
+      boolean predicateChecks,
+      String coordinatorNamespace)
       throws SQLException {
     // vendor defaults differ (Connector/J and MariaDB start at REPEATABLE READ), so every engine
     // starts at READ COMMITTED, the driver's default level (design section 1)
@@ -73,7 +75,7 @@ public final class Proxies {
       session.requireReadCommittedSnapshot(vendor);
     }
     session.schemas(vendor); // read now, outside any transaction
-    Router router = new Router(engine, catalog, session, predicateChecks);
+    Router router = new Router(engine, catalog, session, predicateChecks, coordinatorNamespace);
     // a URL may open the connection read-only, as pgjdbc's readOnly does
     router.setReadOnly(vendor.isReadOnly());
     // ScalarDbTables, reached with unwrap, is the driver's own interface (design section 1)

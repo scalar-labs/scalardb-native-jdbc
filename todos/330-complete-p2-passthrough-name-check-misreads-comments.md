@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "330"
 tags: [passthrough, safety, postgresql, mysql]
@@ -39,10 +39,12 @@ Keeps comments out, at the cost of following each engine's lexing exactly. **Eff
 
 ## Recommended Action
 
+Option 1: passthrough matches names over the whole text, comments kept (`SqlWords.named`), a word also split at `#`, `@` and `$`.
+
 ## Acceptance Criteria
 
-- [ ] Both statements above are refused in passthrough on their engines.
-- [ ] `SqlWordsTest` covers them.
+- [x] Both statements above are refused in passthrough on their engines.
+- [x] `SqlWordsTest` covers them.
 
 ## Work Log
 
@@ -50,3 +52,8 @@ Keeps comments out, at the cost of following each engine's lexing exactly. **Eff
 
 **By:** Claude Code
 - Reproduced with `SqlWords.find` as above.
+
+### 2026-10-25 - Fixed
+
+**By:** Claude Code
+- Passthrough uses `SqlWords.named`; a name in a comment now refuses the statement. `SqlWordsTest.named_readsCommentsAsWords_soNoLexingOfThemHidesAName`. The tools' `check` keeps `find` for function bodies.

@@ -131,7 +131,12 @@ public final class NativeJdbcDriver implements Driver {
       Catalog catalog = catalog(parsed, settings, vendor, vendorProperties);
       catalog.verify();
       return Proxies.connection(
-          connection, parsed.engine(), catalog, settings.inflightWait, settings.predicateChecks);
+          connection,
+          parsed.engine(),
+          catalog,
+          settings.inflightWait,
+          settings.predicateChecks,
+          settings.coordinatorNamespace);
     } catch (SQLException | RuntimeException e) {
       try {
         connection.close();

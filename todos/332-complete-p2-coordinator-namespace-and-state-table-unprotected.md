@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "332"
 tags: [code-review, passthrough, safety, coordinator]
@@ -36,10 +36,12 @@ It errs the safe way, but refuses any unparsed statement with a column or litera
 
 ## Recommended Action
 
+Option 1: the connect property `scalardbnative.coordinatorNamespace` (default `coordinator`, not from the URL), protected in passthrough and unparsed statements.
+
 ## Acceptance Criteria
 
-- [ ] A configured coordinator namespace is refused in passthrough and unparsed statements.
-- [ ] Design 4.1 (passthrough row) and 4.7 name the rule.
+- [x] A configured coordinator namespace is refused in passthrough and unparsed statements.
+- [x] Design 4.1 (passthrough row) and 4.7 name the rule.
 
 ## Work Log
 
@@ -47,3 +49,8 @@ It errs the safe way, but refuses any unparsed statement with a column or litera
 
 **By:** Claude Code
 - Read in `Router.protectedNames`.
+
+### 2026-10-25 - Fixed
+
+**By:** Claude Code
+- `DriverProperties`, `Proxies.connection`, `Router.coordinatorNamespace`; `DriverPropertiesTest`.

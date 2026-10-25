@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "331"
 tags: [ddl, safety, setup]
@@ -45,10 +45,12 @@ the setup's objects. **Effort:** Medium.
 
 ## Recommended Action
 
+Option 2 for parsed DDL with targets, by its table references: an unqualified one naming a ScalarDB namespace, or one naming a read view or in-flight index, is refused; `DROP OWNED` is refused; DDL parsed without targets (kind OTHER, starting CREATE/ALTER/DROP/COMMENT) is refused when its words name a namespace, a setup object or a protected name. A plain table in a ScalarDB namespace stays plain.
+
 ## Acceptance Criteria
 
-- [ ] Each statement above is refused with `0AN01` on its engine, through the driver.
-- [ ] DDL on plain tables, schemas and views still passes.
+- [x] Each statement above is refused with `0AN01` on its engine, through the driver.
+- [x] DDL on plain tables, schemas and views still passes.
 
 ## Work Log
 
@@ -56,3 +58,8 @@ the setup's objects. **Effort:** Medium.
 
 **By:** Claude Code
 - Parser probe as above.
+
+### 2026-10-25 - Fixed
+
+**By:** Claude Code
+- `Router.reached`; `UnparsedIntegrationTest` drops the namespace (per engine), the read view, `DROP OWNED` and `ALTER SCHEMA ... RENAME` through the driver, each refused `0AN01`.

@@ -377,12 +377,19 @@ final class Router {
   /** How long an in-flight count is used before it is read again. */
   private static final long COUNT_TTL_NANOS = 1_000_000_000L;
 
-  /** ScalarDB's default namespace for its coordinator table, which passthrough must not name. */
-  private static final String COORDINATOR_NAMESPACE = "coordinator";
+  /** ScalarDB's default namespace for its coordinator table. */
+  static final String COORDINATOR_NAMESPACE = "coordinator";
 
   private final Engine engine;
   private final Catalog catalog;
   private final Session session;
+
+  /**
+   * ScalarDB's namespace for its coordinator table, which a statement sent as written must not
+   * name.
+   */
+  private final String coordinatorNamespace;
+
   private final ReentrantLock lock = new ReentrantLock();
   // per metadata table: the in-flight count, capped above PER_ROW_ABOVE_IN_RANGES, when it was
   // read, and which per-row choices were last made: 1 by equality, 2 in ranges
@@ -431,14 +438,20 @@ final class Router {
   private final boolean predicateChecks;
 
   Router(Engine engine, Catalog catalog, Session session) {
-    this(engine, catalog, session, false);
+    this(engine, catalog, session, false, COORDINATOR_NAMESPACE);
   }
 
-  Router(Engine engine, Catalog catalog, Session session, boolean predicateChecks) {
+  Router(
+      Engine engine,
+      Catalog catalog,
+      Session session,
+      boolean predicateChecks,
+      String coordinatorNamespace) {
     this.predicateChecks = predicateChecks;
     this.engine = engine;
     this.catalog = catalog;
     this.session = session;
+    this.coordinatorNamespace = coordinatorNamespace;
   }
 
   void setPassthrough(boolean on) {
@@ -573,12 +586,13 @@ final class Router {
   /**
    * The names a statement sent as written must not contain, in passthrough (todo 323) or unparsed
    * (todo 314): every ScalarDB table's, its physical tables' among them, ScalarDB's catalog schema,
-   * its default coordinator namespace, and on Oracle the synonyms a parsed statement may not use.
+   * its coordinator namespace (todo 332), and on Oracle the synonyms a parsed statement may not
+   * use.
    */
   private List<String> protectedNames() throws SQLException {
     List<String> names = new ArrayList<>();
     names.add(catalog.metadataSchema());
-    names.add(COORDINATOR_NAMESPACE);
+    names.add(coordinatorNamespace);
     for (TableInfo t : catalog.scalarDbTables()) {
       names.add(t.table());
       names.add(t.dataTable());
@@ -591,6 +605,56 @@ final class Router {
     }
     names.addAll(catalog.guardedSynonyms(List.copyOf(names)));
     return names;
+  }
+
+  /** The namespaces of ScalarDB's tables, which DDL on a schema or database reaches them by. */
+  private Set<String> namespaces() throws SQLException {
+    Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+    for (TableInfo t : catalog.scalarDbTables()) {
+      names.add(t.namespace());
+    }
+    return names;
+  }
+
+  /** The setup's read views and in-flight indexes, which a ScalarDB table is read through. */
+  private Set<String> setupNames() throws SQLException {
+    Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+    for (TableInfo t : catalog.scalarDbTables()) {
+      names.add(engine.readViewName(t.table()));
+      names.add(engine.inflightIndexName(t.table()));
+    }
+    return names;
+  }
+
+  /**
+   * What DDL that names no ScalarDB table still reaches one by (todo 331): its namespace, as {@code
+   * DROP SCHEMA} or {@code DROP DATABASE} names it, the setup's read view or in-flight index, or
+   * {@code DROP OWNED}; for DDL the parser reads without its targets ({@code ALTER SCHEMA}, {@code
+   * ALTER INDEX}), any of these or a protected name among its words.
+   *
+   * @return what it reaches, or null
+   */
+  private @Nullable String reached(String sql, SqlAst ast) throws SQLException {
+    if (ast.kind() == SqlAst.Kind.OTHER) {
+      if (!SqlWords.startsDdl(sql, engine)) {
+        return null;
+      }
+      List<String> names = protectedNames();
+      names.addAll(namespaces());
+      names.addAll(setupNames());
+      return SqlWords.named(sql, names);
+    }
+    if (SqlWords.dropsOwned(sql, engine)) {
+      return "what a role owns";
+    }
+    Set<String> namespaces = namespaces();
+    Set<String> setup = setupNames();
+    for (SqlAst.TableRef ref : ast.tableRefs()) {
+      if ((ref.schema() == null && namespaces.contains(ref.name())) || setup.contains(ref.name())) {
+        return ref.schema() == null ? ref.name() : ref.schema() + "." + ref.name();
+      }
+    }
+    return null;
   }
 
   /**
@@ -609,13 +673,9 @@ final class Router {
               + "; at SERIALIZABLE on MySQL, MariaDB and SQL Server the driver locks every read,"
               + " which it cannot do in a statement it cannot parse");
     }
-    // and what DDL could reach a ScalarDB table by: its namespace, and the setup's view and index
     List<String> names = protectedNames();
-    for (TableInfo t : catalog.scalarDbTables()) {
-      names.add(t.namespace());
-      names.add(engine.readViewName(t.table()));
-      names.add(engine.inflightIndexName(t.table()));
-    }
+    names.addAll(namespaces());
+    names.addAll(setupNames());
     String why = SqlWords.whyNotAsWritten(sql, engine, names);
     if (why != null) {
       throw Errors.unsupported(reason + "; it is not sent as written since " + why);
@@ -643,7 +703,7 @@ final class Router {
         // unparsed, it may write (todo 324)
         throw new SQLException(READ_ONLY, "25006");
       }
-      String named = SqlWords.find(sql, engine, protectedNames());
+      String named = SqlWords.named(sql, protectedNames());
       if (named != null) {
         // sent as written, it would bypass ScalarDB's protocol on the table (todo 323)
         throw Errors.unsupported(
@@ -734,6 +794,12 @@ final class Router {
               forcedPerRow,
               forcedAnchoring != null ? forcedAnchoring : anchoring(vendor))
           .booleans(booleans(ast, scalarDb));
+    }
+    if (kind == SqlAst.Kind.DDL || kind == SqlAst.Kind.TRUNCATE || kind == SqlAst.Kind.OTHER) {
+      String reached = reached(sql, ast);
+      if (reached != null) {
+        throw Errors.unsupported(SCHEMA_CHANGE + " (" + reached + ")");
+      }
     }
     String routed = sql;
     if ((kind == SqlAst.Kind.SELECT || (kind == SqlAst.Kind.DML && engine == Engine.SQLSERVER))

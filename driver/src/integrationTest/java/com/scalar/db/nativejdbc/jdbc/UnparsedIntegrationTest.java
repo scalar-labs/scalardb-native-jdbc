@@ -112,6 +112,21 @@ class UnparsedIntegrationTest {
     try (Connection d = e.openDriver();
         Statement st = d.createStatement()) {
       assertThat(st.executeUpdate("INSERT INTO up.s (id, x) VALUES (1, 1)")).isEqualTo(1);
+      // DDL that names no ScalarDB table but reaches one, parsed or not (todo 331)
+      String dropNamespace =
+          switch (e.engine()) {
+            case POSTGRESQL -> "DROP SCHEMA up RESTRICT";
+            case MYSQL, MARIADB -> "DROP DATABASE up";
+            case SQLSERVER -> "DROP SCHEMA up";
+            case ORACLE -> "DROP USER up CASCADE";
+          };
+      assertRefused(() -> st.execute(dropNamespace), "0AN01", "");
+      assertRefused(
+          () -> st.execute("DROP VIEW up." + e.engine().readViewName(N("s"))), "0AN01", "ScalarDB");
+      if (e.engine() == Engine.POSTGRESQL) {
+        assertRefused(() -> st.execute("DROP OWNED BY no_such_role"), "0AN01", "a role owns");
+        assertRefused(() -> st.execute("ALTER SCHEMA up RENAME TO up2"), "0AN01", "(up)");
+      }
       if (e.engine() == Engine.SQLSERVER) {
         // T-SQL needs no ; between statements: nothing unparsed is sent there
         assertRefused(() -> st.executeQuery(read(e, "upp.p")), "0AN01", "without a ;");

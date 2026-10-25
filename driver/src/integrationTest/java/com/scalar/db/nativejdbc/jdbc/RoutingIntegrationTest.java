@@ -245,8 +245,10 @@ class RoutingIntegrationTest {
       // a plain table of the same name in another schema too: the words are checked, not the
       // tables they resolve to
       assertRefused(() -> st.execute("VACUUM m1plain.s"), "0AN01", "names a ScalarDB table");
-      // a statement that names none still runs, the name in a comment counting for nothing
-      st.execute("VACUUM m1.p -- not m1.s");
+      // nor in a comment, which an engine may read otherwise than the driver (todo 330)
+      assertRefused(() -> st.execute("VACUUM m1.p -- not m1.s"), "0AN01", "names a ScalarDB table");
+      // a statement that names none still runs
+      st.execute("VACUUM m1.p -- a note");
       assertThat(c.getClientInfo(NativeJdbcDriver.PASSTHROUGH)).isEqualTo("true");
     }
   }

@@ -23,13 +23,20 @@ final class DriverProperties {
   static final String PREFIX = "scalardbnative.";
 
   static final String METADATA_SCHEMA = PREFIX + "metadataSchema";
+  static final String COORDINATOR_NAMESPACE = PREFIX + "coordinatorNamespace";
   static final String CATALOG_TTL_MS = PREFIX + "catalogTtlMs";
   static final String ALLOW_NO_CATALOG = PREFIX + "allowNoCatalog";
   static final String INFLIGHT_WAIT_MS = PREFIX + "inflightWaitMs";
   static final String PREDICATE_CHECKS = PREFIX + "predicateChecks";
 
   private static final Set<String> KNOWN =
-      Set.of(METADATA_SCHEMA, CATALOG_TTL_MS, ALLOW_NO_CATALOG, INFLIGHT_WAIT_MS, PREDICATE_CHECKS);
+      Set.of(
+          METADATA_SCHEMA,
+          COORDINATOR_NAMESPACE,
+          CATALOG_TTL_MS,
+          ALLOW_NO_CATALOG,
+          INFLIGHT_WAIT_MS,
+          PREDICATE_CHECKS);
 
   /** A table registered with ScalarDB is protected after at most this long, whatever is set. */
   static final Duration MAX_CATALOG_TTL = Catalog.MAX_TTL;
@@ -40,6 +47,7 @@ final class DriverProperties {
   private static final String SQLSTATE_UNABLE_TO_CONNECT = "08001";
 
   final String metadataSchema;
+  final String coordinatorNamespace;
   final Duration catalogTtl;
   final boolean allowNoCatalog;
   final Duration inflightWait;
@@ -47,11 +55,13 @@ final class DriverProperties {
 
   private DriverProperties(
       String metadataSchema,
+      String coordinatorNamespace,
       Duration catalogTtl,
       boolean allowNoCatalog,
       Duration inflightWait,
       boolean predicateChecks) {
     this.metadataSchema = metadataSchema;
+    this.coordinatorNamespace = coordinatorNamespace;
     this.catalogTtl = catalogTtl;
     this.allowNoCatalog = allowNoCatalog;
     this.inflightWait = inflightWait;
@@ -100,6 +110,11 @@ final class DriverProperties {
       throw new SQLException(
           METADATA_SCHEMA + " must be a plain identifier", SQLSTATE_UNABLE_TO_CONNECT);
     }
+    String coordinator = all.getProperty(COORDINATOR_NAMESPACE, "coordinator");
+    if (!IDENTIFIER.matcher(coordinator).matches()) {
+      throw new SQLException(
+          COORDINATOR_NAMESPACE + " must be a plain identifier", SQLSTATE_UNABLE_TO_CONNECT);
+    }
     long ttl = nonNegative(all, CATALOG_TTL_MS, 60_000);
     if (ttl > MAX_CATALOG_TTL.toMillis()) {
       throw new SQLException(
@@ -108,6 +123,7 @@ final class DriverProperties {
     }
     return new DriverProperties(
         schema,
+        coordinator,
         Duration.ofMillis(ttl),
         bool(all, ALLOW_NO_CATALOG),
         Duration.ofMillis(nonNegative(all, INFLIGHT_WAIT_MS, 0)),
@@ -134,6 +150,12 @@ final class DriverProperties {
           METADATA_SCHEMA,
           current.metadataSchema,
           "ScalarDB's system namespace, where virtual_tables and its table metadata live"),
+      info(
+          COORDINATOR_NAMESPACE,
+          current.coordinatorNamespace,
+          "ScalarDB's namespace for its coordinator table"
+              + " (scalar.db.consensus_commit.coordinator.namespace), which no statement sent as"
+              + " written may name"),
       info(
           CATALOG_TTL_MS,
           Long.toString(current.catalogTtl.toMillis()),

@@ -493,7 +493,7 @@ class SnapshotIntegrationTest {
           d.setAutoCommit(true);
           d.setClientInfo("scalardbnative.passthrough", "true");
           // the level is read, not the text, which may start with a comment (todo 249)
-          st.execute("/* c */ SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+          st.execute("/* note */ SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ");
           assertThat(d.getTransactionIsolation())
               .as("%s: REPEATABLE READ set in SQL", at)
               .isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);

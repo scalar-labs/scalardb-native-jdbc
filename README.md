@@ -225,8 +225,10 @@ first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
   MySQL and MariaDB. A read-only connection cannot write ScalarDB tables (`25006`).
 - Passthrough, `setClientInfo("scalardbnative.passthrough", "true")` in autocommit, sends statements as
   written, for what the driver refuses on tables ScalarDB does not manage. A statement that names a
-  ScalarDB table, or ScalarDB's own schema, is refused there with `0AN01`, wherever the name stands
-  but in a comment, a plain table of the same name in another schema included. DDL or maintenance
+  ScalarDB table, or ScalarDB's own schema or coordinator namespace, is refused there with `0AN01`,
+  wherever the name stands, a comment or a plain table of the same name in another schema included.
+  Set `scalardbnative.coordinatorNamespace` in the connect properties when ScalarDB's
+  `scalar.db.consensus_commit.coordinator.namespace` is not `coordinator`. DDL or maintenance
   on a ScalarDB table goes through a connection of the database's own driver, with ScalarDB's
   transactions on the table stopped.
 - Don't create, over a ScalarDB table: a view; a trigger, on it or on another table that writes it; a

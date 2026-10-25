@@ -56,6 +56,24 @@ class SqlWordsTest {
         .isEqualTo("orders");
   }
 
+  @Test
+  void named_readsCommentsAsWords_soNoLexingOfThemHidesAName() {
+    // a dollar quote on PostgreSQL, 1 minus -1 on MySQL: no comment either (todo 330)
+    assertThat(SqlWords.named("SELECT $$--$$, x FROM orders", NAMES)).isEqualTo("orders");
+    assertThat(SqlWords.named("SELECT 1--1, x FROM orders", NAMES)).isEqualTo("orders");
+    assertThat(SqlWords.named("VACUUM plain -- orders\n", NAMES)).isEqualTo("orders");
+    assertThat(SqlWords.named("SELECT x FROM orders#\n", NAMES)).isEqualTo("orders");
+    assertThat(SqlWords.named("SELECT * FROM orders2, old_orders", NAMES)).isNull();
+  }
+
+  @Test
+  void dropsOwned_byTheWordsAfterDrop() {
+    assertThat(SqlWords.dropsOwned("DROP OWNED BY app", Engine.POSTGRESQL)).isTrue();
+    assertThat(SqlWords.dropsOwned("/* x */ drop  owned by app cascade", Engine.POSTGRESQL))
+        .isTrue();
+    assertThat(SqlWords.dropsOwned("DROP TABLE owned", Engine.POSTGRESQL)).isFalse();
+  }
+
   private static @Nullable String why(String sql, Engine engine) {
     return SqlWords.whyNotAsWritten(sql, engine, NAMES);
   }

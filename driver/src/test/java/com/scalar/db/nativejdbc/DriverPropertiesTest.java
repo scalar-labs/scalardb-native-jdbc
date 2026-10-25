@@ -16,6 +16,7 @@ class DriverPropertiesTest {
   void defaults() throws SQLException {
     DriverProperties p = DriverProperties.read(Map.of(), null);
     assertThat(p.metadataSchema).isEqualTo("scalardb");
+    assertThat(p.coordinatorNamespace).isEqualTo("coordinator");
     assertThat(p.catalogTtl).isEqualTo(Duration.ofSeconds(60));
     assertThat(p.allowNoCatalog).isFalse();
     assertThat(p.inflightWait).isEqualTo(Duration.ZERO);
@@ -27,10 +28,12 @@ class DriverPropertiesTest {
     info.setProperty("scalardbnative.metadataSchema", "meta");
     info.setProperty("scalardbnative.catalogTtlMs", "5000");
     info.setProperty("scalardbnative.allowNoCatalog", "TRUE");
+    info.setProperty("scalardbnative.coordinatorNamespace", "coord");
     DriverProperties p = DriverProperties.read(Map.of("scalardbnative.catalogTtlMs", "7000"), info);
     assertThat(p.metadataSchema).isEqualTo("meta");
     assertThat(p.catalogTtl).isEqualTo(Duration.ofSeconds(7));
     assertThat(p.allowNoCatalog).isTrue();
+    assertThat(p.coordinatorNamespace).isEqualTo("coord");
   }
 
   @Test
@@ -38,6 +41,7 @@ class DriverPropertiesTest {
     for (String key :
         new String[] {
           "scalardbnative.metadataSchema",
+          "scalardbnative.coordinatorNamespace",
           "scalardbnative.allowNoCatalog",
           "scalardbnative.passthrough"
         }) {
@@ -57,6 +61,11 @@ class DriverPropertiesTest {
     Properties schema = new Properties();
     schema.setProperty("scalardbnative.metadataSchema", "a; drop");
     assertThatThrownBy(() -> DriverProperties.read(Map.of(), schema))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("plain identifier");
+    Properties coordinator = new Properties();
+    coordinator.setProperty("scalardbnative.coordinatorNamespace", "c d");
+    assertThatThrownBy(() -> DriverProperties.read(Map.of(), coordinator))
         .isInstanceOf(SQLException.class)
         .hasMessageContaining("plain identifier");
   }
@@ -80,11 +89,12 @@ class DriverPropertiesTest {
         .extracting(i -> i.name)
         .containsExactly(
             "scalardbnative.metadataSchema",
+            "scalardbnative.coordinatorNamespace",
             "scalardbnative.catalogTtlMs",
             "scalardbnative.allowNoCatalog",
             "scalardbnative.inflightWaitMs",
             "scalardbnative.predicateChecks");
-    assertThat(infos[1].value).isEqualTo("1000");
-    assertThat(infos[2].choices).containsExactly("true", "false");
+    assertThat(infos[2].value).isEqualTo("1000");
+    assertThat(infos[3].choices).containsExactly("true", "false");
   }
 }
