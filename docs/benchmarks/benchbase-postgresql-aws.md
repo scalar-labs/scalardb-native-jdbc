@@ -179,6 +179,27 @@ RDS's round trip was the shorter one here. Per commit:
   catalog and lock lookups (6%) keep their share of it. The extra server CPU is what each statement
   costs around its rows, which grows with the size of its plan.
 
+## Sixth run: the slim single-row write (2026-10-25)
+
+Run `20261025-1806` (`BENCHBASE=1 READS=0 REPS=2 BB_WORKLOADS=tpcc,ycsb BB_RUNS=a,c
+BASELINE=f8ce61e`): HEAD `7d3abbf`, whose single write by the key alone runs the slim statement
+first, against `f8ce61e`, merged batches without it, on the same machines; round trip about 100 µs,
+no profiling, no JFR.
+
+| | baseline `f8ce61e` | slim `7d3abbf` |
+|---|---|---|
+| TPC-C (c), (a) 1,432-1,442/s | 951.7 (0.66) | **999.9 (0.69)**, +5.1% |
+| TPC-C added per transaction | +1.43 ms | +1.23 ms |
+| TPC-C server CPU per commit, (a) 0.85 ms | 2.08 ms | 1.86 ms |
+| YCSB (c), (a) 8,521-8,547/s | 7,143 (0.84) | **7,317 (0.86)**, +2.4% |
+| YCSB added per operation | +92 µs | +79 µs |
+
+p50 against (a), baseline then slim: Payment +52% then +37%, Delivery +97% then +81%, NewOrder +36%
+both (its writes merged already), StockLevel +106% then +110%; YCSB Update +39% then +23%,
+read-modify-write +34% then +24%, Read +11% both, Scan +13% then +16%, Insert +18% then +19%.
+At this round trip a YCSB operation takes the vendor about 0.47 ms, so its reads' +11% is about 27
+µs: the in-flight check of the rewritten read.
+
 ## Reports
 
 ### HEAD 93f5217

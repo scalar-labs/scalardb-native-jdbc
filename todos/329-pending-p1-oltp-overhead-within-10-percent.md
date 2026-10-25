@@ -340,3 +340,13 @@ write by the full key, the key's metadata row read by its key, the DML gated on 
 the CAS on its tx_id and version, costs +32 µs in autocommit and +33 in a transaction against +88
 and +85 for the fused one, with no savepoint; an optimistic write under a savepoint, undone when
 its stamp misses, costs +53, the savepoint alone about 37.
+
+### 2026-10-25: the slim single-row write on AWS
+
+`7d3abbf` against `f8ce61e`, run `20261025-1806` ("Sixth run"), round trip about 100 µs: TPC-C
++5.1% (0.66 to 0.69), Payment's p50 overhead +52% to +37%; YCSB +2.4% (0.84 to 0.86), updates +39%
+to +23%, read-modify-write +34% to +24%. What remains per YCSB operation is about +79 µs, its reads
++11% (the in-flight check); per TPC-C transaction +1.23 ms. Locally, a slim form for a write by a
+prefix of the key (Delivery's order_line update), the metadata rows read by the prefix with an
+anti-join for a data row without one, costs +117 µs against +179 for the fused form, about 1% of
+TPC-C.
