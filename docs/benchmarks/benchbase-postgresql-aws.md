@@ -200,6 +200,40 @@ read-modify-write +34% then +24%, Read +11% both, Scan +13% then +16%, Insert +1
 At this round trip a YCSB operation takes the vendor about 0.47 ms, so its reads' +11% is about 27
 µs: the in-flight check of the rewritten read.
 
+## Seventh run: the decoupled and inline layouts side by side (2026-10-25)
+
+Run `20261025-2251` (`BENCHBASE=1 READS=0 REPS=2 BB_WORKLOADS=tpcc,ycsb BB_RUNS=a,c
+BB_LAYOUTS="decoupled inline"`): HEAD `04213dc`, run (c)'s tables in ScalarDB's decoupled layout
+and then in its inline one, on the same machines. The round trip was 364 µs, against the sixth
+run's 105 µs (the same subnet, no placement group), so the vendor's rates are about a third of the
+sixth run's and the ratios do not compare with its; the two layouts compare with each other.
+
+| | decoupled | inline |
+|---|---|---|
+| TPC-C (a) | 518.5/s | 508.7/s |
+| TPC-C (c) | 422.7 (0.82) | **429.9 (0.85)** |
+| TPC-C added per transaction | +1.75 ms | +1.44 ms |
+| TPC-C server CPU per commit, (a) then (c) | 0.96, 2.10 ms | 0.99, 1.99 ms |
+| TPC-C statement time per commit, (a) then (c) | 0.76, 1.73 ms | 0.76, 1.51 ms |
+| TPC-C WAL per commit, (a) then (c) | 8.2, 18.6 KB | 7.3, 16.2 KB |
+| YCSB (c), (a) 3,842-3,878/s | 3,592.5 (0.93) | not valid: every InsertRecord refused |
+
+p95 against (a), decoupled then inline: Delivery 1.46 then 1.41, NewOrder 1.17 then 1.14,
+OrderStatus 1.21 then 1.16, Payment 1.17 both, StockLevel 1.94 then 2.03.
+
+The inline layout writes in less statement time (TPC-C's writes 32.3 s a repetition decoupled,
+25.1 s inline, 14.4 s the vendor's) but reads in more (12.6 s decoupled, 14.6 s inline, 9.3 s the
+vendor's): its locking read's check of in-flight rows' before images runs beside it (13 µs, about
+nine a transaction), and a plain read of `item` takes 12 µs to the vendor's 6. The largest single
+statement is Delivery's `order_line` update by a prefix of the key, the inline fused form, 176 µs a
+call to the vendor's 51. Its slim updates take 39-51 µs to the vendor's 14-24.
+
+YCSB's InsertRecord is `INSERT INTO usertable VALUES (...)` without a column list, which the driver
+refuses on an inline table (0AN01, its metadata columns beside the user's); the run counts the
+refusals as unexpected errors, so its (c) throughput is not the workload's. Its other operations'
+p95 against (a), decoupled then inline: Read 1.06 then 1.46 (p50 776 then 761 µs), Update 1.10
+then 1.09, read-modify-write 1.11 then 1.10, Scan 1.10 then 0.97.
+
 ## Reports
 
 ### HEAD 93f5217
