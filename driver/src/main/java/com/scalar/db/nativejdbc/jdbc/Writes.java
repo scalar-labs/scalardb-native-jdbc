@@ -640,27 +640,7 @@ final class Writes {
     if (dml == null) {
       return null;
     }
-    List<String> metaKey = new ArrayList<>();
-    for (int i = 0; i < width; i++) {
-      metaKey.add(n.engine.quote(n.keyColumns.get(i)) + " = k." + m + i);
-    }
-    String cas =
-        String.join(" AND ", metaKey)
-            + " AND ("
-            + Names.numbered("k", m, width)
-            + ") IN (SELECT "
-            + Names.numbered("", w, width)
-            + " FROM scalardb_native_written) AND "
-            + n.committed()
-            + " AND "
-            + n.txId
-            + " IS NOT DISTINCT FROM k.scalardb_native_id";
     boolean remove = delete && !imported;
-    String stamp =
-        n.stamp(
-            "CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE COALESCE("
-                + n.txVersion
-                + ", 0) + 1 END");
     StringBuilder sql =
         new StringBuilder("WITH scalardb_native_keys (")
             .append(Names.numbered("", m, width))
@@ -691,24 +671,8 @@ final class Writes {
             .append(dml)
             .append(" RETURNING ")
             .append(n.aliased("", w))
-            .append("), scalardb_native_stamped AS (")
-            .append(stamp, 0, stamp.length() - "WHERE ".length())
-            .append("FROM scalardb_native_keys k WHERE ")
-            .append(cas)
-            .append(" AND (k.scalardb_native_id IS NULL OR ")
-            .append(n.txVersion)
-            .append(" IS NOT DISTINCT FROM k.scalardb_native_version)")
-            .append(remove ? " AND k.scalardb_native_id IS NULL" : "")
-            .append(" RETURNING 1)");
-    if (remove) {
-      sql.append(", scalardb_native_removed AS (DELETE FROM ")
-          .append(n.meta)
-          .append(" USING scalardb_native_keys k WHERE ")
-          .append(cas)
-          .append(" AND k.scalardb_native_id IS NOT NULL AND ")
-          .append(n.txVersion)
-          .append(" IS NOT DISTINCT FROM k.scalardb_native_version RETURNING 1)");
-    }
+            .append(")")
+            .append(casSteps(n, Names.numbered("k", m, width), "1", remove));
     sql.append(" SELECT ")
         .append(Names.numbered("k", m, width))
         .append(", k.scalardb_native_id, k.scalardb_native_version, k.scalardb_native_state,")
@@ -917,45 +881,8 @@ final class Writes {
         .append(".scalardb_native_n AS scalardb_native_wn, ")
         .append(n.aliased("", "scalardb_native_w"))
         .append(")");
-    List<String> metaKey = new ArrayList<>();
-    for (int i = 0; i < width; i++) {
-      metaKey.add(n.engine.quote(n.keyColumns.get(i)) + " = k.scalardb_native_m" + i);
-    }
-    String cas =
-        String.join(" AND ", metaKey)
-            + " AND ("
-            + Names.numbered("k", d, width)
-            + ") IN (SELECT "
-            + Names.numbered("", "scalardb_native_w", width)
-            + " FROM scalardb_native_written) AND "
-            + n.committed()
-            + " AND "
-            + n.txId
-            + " IS NOT DISTINCT FROM k.scalardb_native_id";
     boolean remove = delete && !imported;
-    String stamp =
-        n.stamp(
-            "CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE COALESCE("
-                + n.txVersion
-                + ", 0) + 1 END");
-    sql.append(", scalardb_native_stamped AS (")
-        .append(stamp, 0, stamp.length() - "WHERE ".length())
-        .append("FROM scalardb_native_keys k WHERE ")
-        .append(cas)
-        .append(" AND (k.scalardb_native_id IS NULL OR ")
-        .append(n.txVersion)
-        .append(" IS NOT DISTINCT FROM k.scalardb_native_version)")
-        .append(remove ? " AND k.scalardb_native_id IS NULL" : "")
-        .append(" RETURNING k.scalardb_native_n)");
-    if (remove) {
-      sql.append(", scalardb_native_removed AS (DELETE FROM ")
-          .append(n.meta)
-          .append(" USING scalardb_native_keys k WHERE ")
-          .append(cas)
-          .append(" AND k.scalardb_native_id IS NOT NULL AND ")
-          .append(n.txVersion)
-          .append(" IS NOT DISTINCT FROM k.scalardb_native_version RETURNING k.scalardb_native_n)");
-    }
+    sql.append(casSteps(n, Names.numbered("k", d, width), "k.scalardb_native_n", remove));
     sql.append(" SELECT ")
         .append(e)
         .append(".scalardb_native_n, ")
@@ -993,6 +920,62 @@ final class Writes {
           return out.append(rest).toString();
         },
         holes.size());
+  }
+
+  /**
+   * The CAS of 4.3 step 3 as CTEs over {@code scalardb_native_keys k}, for the keys the DML wrote:
+   * each one's metadata row stamped at the version read, a NULL tx_id at version 1 (4.4), as {@code
+   * scalardb_native_stamped}; a DELETE of a created table removes the row instead but for a NULL
+   * tx_id, as {@code scalardb_native_removed}, an imported table's keeping a tombstone (4.5).
+   * {@code read}: k's key columns the DML's rows are matched on; {@code returning}: what each CTE
+   * returns. One text for the fused, merged and slim statements.
+   */
+  private static String casSteps(Names n, String read, String returning, boolean remove) {
+    int width = n.keyColumns.size();
+    List<String> metaKey = new ArrayList<>();
+    for (int i = 0; i < width; i++) {
+      metaKey.add(n.engine.quote(n.keyColumns.get(i)) + " = k.scalardb_native_m" + i);
+    }
+    String cas =
+        String.join(" AND ", metaKey)
+            + " AND ("
+            + read
+            + ") IN (SELECT "
+            + Names.numbered("", "scalardb_native_w", width)
+            + " FROM scalardb_native_written) AND "
+            + n.committed()
+            + " AND "
+            + n.txId
+            + " IS NOT DISTINCT FROM k.scalardb_native_id";
+    String stamp =
+        n.stamp(
+            "CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE COALESCE("
+                + n.txVersion
+                + ", 0) + 1 END");
+    StringBuilder out =
+        new StringBuilder(", scalardb_native_stamped AS (")
+            .append(stamp, 0, stamp.length() - "WHERE ".length())
+            .append("FROM scalardb_native_keys k WHERE ")
+            .append(cas)
+            .append(" AND (k.scalardb_native_id IS NULL OR ")
+            .append(n.txVersion)
+            .append(" IS NOT DISTINCT FROM k.scalardb_native_version)")
+            .append(remove ? " AND k.scalardb_native_id IS NULL" : "")
+            .append(" RETURNING ")
+            .append(returning)
+            .append(")");
+    if (remove) {
+      out.append(", scalardb_native_removed AS (DELETE FROM ")
+          .append(n.meta)
+          .append(" USING scalardb_native_keys k WHERE ")
+          .append(cas)
+          .append(" AND k.scalardb_native_id IS NOT NULL AND ")
+          .append(n.txVersion)
+          .append(" IS NOT DISTINCT FROM k.scalardb_native_version RETURNING ")
+          .append(returning)
+          .append(")");
+    }
+    return out.toString();
   }
 
   /**
@@ -1103,51 +1086,10 @@ final class Writes {
     binds.addAll(all);
     // the CAS of 4.3 step 3 on the key's metadata row, at the version read; a row with a NULL
     // tx_id is stamped at version 1 (4.4)
-    List<String> metaKey = new ArrayList<>();
-    for (int i = 0; i < width; i++) {
-      metaKey.add(n.engine.quote(n.keyColumns.get(i)) + " = k.scalardb_native_m" + i);
-    }
-    String cas =
-        String.join(" AND ", metaKey)
-            + " AND ("
-            + Names.numbered("k", d, width)
-            + ") IN (SELECT "
-            + Names.numbered("", "scalardb_native_w", width)
-            + " FROM scalardb_native_written) AND "
-            + n.committed()
-            + " AND "
-            + n.txId
-            + " IS NOT DISTINCT FROM k.scalardb_native_id";
-    String returning = " RETURNING " + Names.numbered("k", d, width);
     // a DELETE of a created table removes the metadata row, but for a NULL tx_id, which is
     // stamped and kept (4.4); an imported table's keeps a tombstone (4.5)
     boolean remove = delete && !imported;
-    String stamp =
-        n.stamp(
-            "CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE COALESCE("
-                + n.txVersion
-                + ", 0) + 1 END");
-    sql.append(", scalardb_native_stamped AS (")
-        .append(stamp, 0, stamp.length() - "WHERE ".length())
-        .append("FROM scalardb_native_keys k WHERE ")
-        .append(cas)
-        .append(" AND (k.scalardb_native_id IS NULL OR ")
-        .append(n.txVersion)
-        .append(" IS NOT DISTINCT FROM k.scalardb_native_version)")
-        .append(remove ? " AND k.scalardb_native_id IS NULL" : "")
-        .append(returning)
-        .append(")");
-    if (remove) {
-      sql.append(", scalardb_native_removed AS (DELETE FROM ")
-          .append(n.meta)
-          .append(" USING scalardb_native_keys k WHERE ")
-          .append(cas)
-          .append(" AND k.scalardb_native_id IS NOT NULL AND ")
-          .append(n.txVersion)
-          .append(" IS NOT DISTINCT FROM k.scalardb_native_version")
-          .append(returning)
-          .append(")");
-    }
+    sql.append(casSteps(n, Names.numbered("k", d, width), Names.numbered("k", d, width), remove));
     String written = n.keyJoinNumbered("w", "scalardb_native_w", "k", d);
     String stamped = n.keyJoinNumbered("c", d, "k", d);
     sql.append(" SELECT k.*, EXISTS (SELECT 1 FROM scalardb_native_written w WHERE ")
@@ -1685,10 +1627,11 @@ final class Writes {
    * its statement (a row in flight, a tombstone, a key the DML skipped, a conflict, an error): the
    * entries are undone to the savepoint, nothing recorded, and the caller runs them one by one,
    * which tells the outcome as before. {@code release} releases first the savepoint an earlier text
-   * left set, which otherwise stays to the next such text or the transaction's end.
+   * left set, which otherwise stays to the next such text or the transaction's end; {@code sent}
+   * runs as the text is sent, its binds taken, from when it may set the savepoint.
    */
   static long @Nullable [] applyTogether(
-      Connection vendor, List<Plan> plans, List<Context> contexts, boolean release)
+      Connection vendor, List<Plan> plans, List<Context> contexts, boolean release, Runnable sent)
       throws SQLException {
     List<Run> runs = new ArrayList<>();
     StringBuilder sql =
@@ -1711,6 +1654,7 @@ final class Writes {
         at = runs.get(i).stamp(ps, at);
       }
       try {
+        sent.run(); // the savepoint is set from here on, whatever follows
         boolean rows = ps.execute();
         for (int i = 0; i < plans.size(); i++) {
           while (!rows) {
@@ -1756,7 +1700,8 @@ final class Writes {
    * do.
    */
   static long @Nullable [] applyMerged(
-      Connection vendor, Plan plan, List<Context> contexts, boolean release) throws SQLException {
+      Connection vendor, Plan plan, List<Context> contexts, boolean release, Runnable sent)
+      throws SQLException {
     Merge m = Objects.requireNonNull(plan.merge());
     Run run = new Run(vendor, contexts.get(0));
     String sql =
@@ -1774,6 +1719,7 @@ final class Writes {
       }
       run.stamp(ps, at);
       try {
+        sent.run(); // the savepoint is set from here on, whatever follows
         boolean rows = ps.execute();
         while (!rows) {
           if (ps.getUpdateCount() == -1) {
@@ -2340,20 +2286,21 @@ final class Writes {
 
     /**
      * What the slim statement returned: how many rows it wrote, recorded; null when it wrote
-     * nothing because the key's metadata row is in flight or missing, which the fused statement
-     * then tells. {@code strict}: a stamp that missed, or an anchor that moved, aborts, as the
-     * fused statement's do; otherwise it is null too, for entries sent together to be undone and
-     * run one by one.
+     * nothing, the gate closed or the key's row gone, which the fused statement then tells. {@code
+     * strict}: a stamp that missed, or an anchor that moved, aborts, as the fused statement's do;
+     * otherwise it is null too, for entries sent together to be undone and run one by one.
      */
     private @Nullable Long slim(Run run, ResultSet rs, boolean strict) throws SQLException {
       int width = n.keyColumns.size();
       rs.next();
-      if (readKey(rs, 1, width) == null || inFlight(rs.getObject(width + 3))) {
-        return null;
-      }
+      Object state = rs.getObject(width + 3);
       long written = rs.getLong(width + 4);
-      if (written == 0) {
-        return 0L;
+      // anything but a committed row written: the fused statement, which tells each case (a key
+      // with no row, deleted since it was read, in flight, without metadata, in another state)
+      if (readKey(rs, 1, width) == null
+          || (state != null && ((Number) state).intValue() != 3)
+          || written == 0) {
+        return null;
       }
       if (rs.getLong(width + 5) != written) {
         if (!strict) {
@@ -2401,8 +2348,8 @@ final class Writes {
     }
 
     /**
-     * As {@link #together(Run, ResultSet)} for each entry, its count the key it wrote, if any; null
-     * for anything but every key found written and stamped, with the gate open.
+     * As {@link #together(Run, ResultSet)} for each entry, its count the key it wrote; null for
+     * anything but every entry's key found, written and stamped, with the gate open.
      */
     @Override
     long @Nullable [] merged(Run run, ResultSet rs, int entries) throws SQLException {
@@ -2417,7 +2364,9 @@ final class Writes {
         }
         Object[] key = readKey(rs, 2, width);
         if (key == null) {
-          continue; // no row for the entry's key: its count is 0, as the statement alone would say
+          // no row for the entry's key: one by one tells whether it has none, or its value missed
+          // it as this statement's VALUES typed it (a CHAR key's blanks against text)
+          return null;
         }
         if (!rs.getBoolean(flags)
             || !rs.getBoolean(flags + 1)

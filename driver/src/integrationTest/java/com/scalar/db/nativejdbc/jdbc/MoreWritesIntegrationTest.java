@@ -926,7 +926,7 @@ class MoreWritesIntegrationTest {
         assertThat(rows(d, "SELECT COUNT(*) FROM " + t.sql + " WHERE id >= 80 AND x = 'a'"))
             .containsExactly("3");
         d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 80");
-        mergedBatches(tm, tpc, t, d);
+        mergedBatches(e, tm, tpc, t, d);
       }
       d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 40");
       // a failure in autocommit undoes the whole batch; the counts before it, the cause next
@@ -1002,7 +1002,11 @@ class MoreWritesIntegrationTest {
    * same outcomes and counts as one by one, two entries on one key and a row in flight among them.
    */
   private static void mergedBatches(
-      DistributedTransactionManager tm, TwoPhaseCommitTransactionManager tpc, Table t, Connection d)
+      Engines e,
+      DistributedTransactionManager tm,
+      TwoPhaseCommitTransactionManager tpc,
+      Table t,
+      Connection d)
       throws Exception {
     try (PreparedStatement ins =
         d.prepareStatement("INSERT INTO " + t.sql + " (id, x) VALUES (?, 'm')")) {
@@ -1106,6 +1110,46 @@ class MoreWritesIntegrationTest {
     assertThat(rows(d, "SELECT id, x FROM " + t.sql + " WHERE id IN (94, 96, 97) ORDER BY id"))
         .containsExactly("94/n94", "96/n96", "97/n97");
     assertThat(scalarDbX(tm, t, 94)).contains("n94");
+    // a batch whose entry lacks a value fails before it is sent: the next batch of the transaction
+    // does not release a savepoint the first never set
+    d.setAutoCommit(false);
+    try (PreparedStatement ps = d.prepareStatement("UPDATE " + t.sql + " SET x = ? WHERE id = ?")) {
+      ps.setString(1, "p");
+      ps.setInt(2, 90);
+      ps.addBatch();
+      ps.clearParameters();
+      ps.setInt(2, 91);
+      ps.addBatch();
+      assertThatThrownBy(ps::executeBatch).isInstanceOf(SQLException.class);
+      for (int id : new int[] {90, 91}) {
+        ps.setString(1, "q");
+        ps.setInt(2, id);
+        ps.addBatch();
+      }
+      assertThat(ps.executeBatch()).containsExactly(1, 1);
+    }
+    d.commit();
+    assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id IN (90, 91) ORDER BY id"))
+        .containsExactly("q", "q");
+    // a metadata row in a state other than in flight or committed is no committed image: a write by
+    // its key counts 0 and writes nothing, as the fused statement does
+    try (Connection v = e.open();
+        Statement s = v.createStatement()) {
+      assertThat(s.executeUpdate("UPDATE " + t.meta + " SET tx_state = 4 WHERE id = 92"))
+          .isEqualTo(1);
+    }
+    try (PreparedStatement ps = d.prepareStatement("UPDATE " + t.sql + " SET x = ? WHERE id = ?")) {
+      ps.setString(1, "r");
+      ps.setInt(2, 92);
+      assertThat(ps.executeUpdate()).isZero();
+    }
+    d.rollback();
+    assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 92")).containsExactly("m4");
+    d.setAutoCommit(true);
+    try (Connection v = e.open();
+        Statement s = v.createStatement()) {
+      s.executeUpdate("UPDATE " + t.meta + " SET tx_state = 3 WHERE id = 92");
+    }
     d.createStatement().executeUpdate("DELETE FROM " + t.sql + " WHERE id >= 90");
   }
 

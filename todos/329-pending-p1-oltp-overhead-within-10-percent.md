@@ -350,3 +350,34 @@ to +23%, read-modify-write +34% to +24%. What remains per YCSB operation is abou
 prefix of the key (Delivery's order_line update), the metadata rows read by the prefix with an
 anti-join for a data row without one, costs +117 µs against +179 for the fused form, about 1% of
 TPC-C.
+
+### 2026-10-25: review of the batch savepoint, the merged write and the slim write
+
+`/code-review high` over `92dacfc..main` (the driver's changes since step 2's review), each finding
+checked:
+
+- Fixed: the slim write accepted a committed metadata row with nothing written as a count of 0;
+  the fused statement tells a row deleted since it was read (an abort) from one never there. Slim
+  now takes only a row written and stamped; anything else runs the fused statement, which it
+  leaves nothing to undo for.
+- Checked, not a divergence: a metadata row in a state other than 1, 2, 3 or NULL is no committed
+  image, and the fused statement counts 0 as slim did; slim now hands it to the fused one anyway.
+  `MoreWritesIntegrationTest` covers it (state 4: 0 rows, nothing written).
+- Fixed: the batch's savepoint was marked set before the text was sent, so a bind that failed
+  (a missing value) left the next batch's text releasing a savepoint never set: 3B001, the
+  application's transaction lost. It is marked as the text is sent now; the new test fails without
+  the fix ("savepoint does not exist").
+- Fixed: the merged keyed write took an entry whose key it found no row for as a count of 0; its
+  VALUES type the placeholders apart from their columns, so a CHAR key's trailing blanks against a
+  text value missed the row. Any entry without a row now runs the entries one by one.
+- Fixed: after a merged statement failed, the next window merged again over entries it had failed
+  for, up to four times for 64 entries; not again now up to where it failed.
+- Fixed: the in-flight check is prepared only on PostgreSQL, where pgjdbc keeps its plan; other
+  drivers would pay a prepare and a close per call.
+- Done: one builder for the CAS and stamp CTEs of the fused, merged and slim statements;
+  `placeholdersIn` reads `placeholderSpans`.
+- Left, as trade-offs: a write slim does not take pays one more statement before the fused one
+  (keys without metadata, in flight, missing); and each plan's merged form has a text per entry
+  count from 2 to 64, twice (with and without the release), so pgjdbc's cache of 256 statements
+  per connection can fill for an application with many batched statements. Fixed sizes, padded,
+  would bound it.

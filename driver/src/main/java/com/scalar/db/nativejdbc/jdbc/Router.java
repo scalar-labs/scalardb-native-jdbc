@@ -2076,10 +2076,17 @@ final class Router {
         lock.unlock();
       }
       if (!inFlight) {
-        // prepared, so the vendor's statement cache keeps its plan (todo 329)
-        try (PreparedStatement st = vendor.prepareStatement(check)) {
+        // prepared on PostgreSQL, so that pgjdbc's statement cache keeps its plan (todo 329); a
+        // prepare and close a call costs other drivers round trips
+        try (Statement st =
+            engine == Engine.POSTGRESQL
+                ? vendor.prepareStatement(check)
+                : vendor.createStatement()) {
           st.setQueryTimeout(timeout);
-          try (ResultSet rs = st.executeQuery()) {
+          try (ResultSet rs =
+              st instanceof PreparedStatement
+                  ? ((PreparedStatement) st).executeQuery()
+                  : st.executeQuery(check)) {
             inFlight = rs.next();
           }
         }

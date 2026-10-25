@@ -1300,11 +1300,15 @@ public final class Proxies {
             () -> owner.rollbackOnly = true,
             true,
             () -> {
+              // up to here a merged statement failed: not merged again, but sent as below
+              int unmerged = 0;
               for (int i = 0; i < size; ) {
                 // the next entries of one plan with a merged form, as one statement (todo 329)
                 Writes.Plan first = routes.apply(i).write;
                 Writes.Plan merging =
-                    sendsTogether && first != null && first.merge() != null ? first : null;
+                    sendsTogether && i >= unmerged && first != null && first.merge() != null
+                        ? first
+                        : null;
                 int same = i;
                 while (merging != null
                     && same < size
@@ -1318,9 +1322,13 @@ public final class Proxies {
                   for (int j = i; j < same; j++) {
                     contexts.add(writeContext(parameters.apply(j), inserted, null));
                   }
-                  boolean release = owner.together;
-                  owner.together = true; // set from here on, undone to or not
-                  long[] got = Writes.applyMerged(owner.vendor, merging, contexts, release);
+                  long[] got =
+                      Writes.applyMerged(
+                          owner.vendor,
+                          merging,
+                          contexts,
+                          owner.together,
+                          () -> owner.together = true); // set once sent, undone to or not
                   if (got != null) {
                     for (int j = i; j < same; j++) {
                       counts[j] = got[j - i];
@@ -1333,6 +1341,7 @@ public final class Proxies {
                   }
                   // sent together instead, where each entry sees the ones before it, as for two
                   // on one key; one by one if that needs more
+                  unmerged = same;
                   end = Math.min(same, i + Writes.TOGETHER_MAX);
                 }
                 while (end == i && sendsTogether && end < size && end - i < Writes.TOGETHER_MAX) {
@@ -1349,9 +1358,13 @@ public final class Proxies {
                     plans.add(Objects.requireNonNull(routes.apply(j).write));
                     contexts.add(writeContext(parameters.apply(j), inserted, null));
                   }
-                  boolean release = owner.together;
-                  owner.together = true; // set from here on, undone to or not
-                  long[] got = Writes.applyTogether(owner.vendor, plans, contexts, release);
+                  long[] got =
+                      Writes.applyTogether(
+                          owner.vendor,
+                          plans,
+                          contexts,
+                          owner.together,
+                          () -> owner.together = true); // set once sent, undone to or not
                   if (got != null) {
                     for (int j = i; j < end; j++) {
                       counts[j] = got[j - i];

@@ -1480,21 +1480,17 @@ public final class SqlAst {
    *     {@code ?} or one that cannot be placed in the text
    */
   public @Nullable List<Integer> placeholdersIn(int from, int to) {
+    List<int[]> spans = placeholderSpans();
+    if (spans == null) {
+      return null;
+    }
     List<Integer> out = new ArrayList<>();
-    int n = 0;
-    for (Token t = root.jjtGetFirstToken(); t != null && t.kind != 0; t = t.next) {
-      if (t.image.equals("?")) {
-        n++;
-        int[] s = span(t, t);
-        if (s == null) {
-          return null;
-        }
-        if (s[0] >= from && s[1] <= to) {
-          out.add(n);
-        }
+    for (int i = 0; i < spans.size(); i++) {
+      if (spans.get(i)[0] >= from && spans.get(i)[1] <= to) {
+        out.add(i + 1);
       }
     }
-    return n == parameterCount ? out : null;
+    return out;
   }
 
   /**
