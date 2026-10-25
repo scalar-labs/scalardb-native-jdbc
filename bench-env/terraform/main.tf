@@ -74,6 +74,12 @@ variable "db_memory_mb" {
   default     = 0
 }
 
+variable "pg_stat_statements" {
+  description = "Tier A PostgreSQL: pg_stat_statements loaded, planning tracked, for BenchBase's server statistics (matrix.sh BENCHBASE=1)"
+  type        = bool
+  default     = false
+}
+
 variable "lifetime_minutes" {
   description = "Each EC2 instance terminates itself this long after boot"
   type        = number
@@ -215,6 +221,7 @@ resource "aws_instance" "db" {
     password       = var.db_password
     lifetime       = var.lifetime_minutes
     db_memory_mb   = var.db_memory_mb
+    pgss           = var.pg_stat_statements
     oracle_image   = var.oracle_image
     registry_user  = var.oracle_registry_user
     registry_token = var.oracle_registry_token

@@ -17,7 +17,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -42,6 +44,7 @@ import javax.xml.transform.OutputKeys;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -114,6 +117,13 @@ class BenchBaseBenchmark {
       !System.getProperty("nativejdbc.benchbase.layout", "decoupled").equals("inline");
 
   private static final String TIER = System.getProperty("nativejdbc.bench.tier", "local");
+
+  // -Dnativejdbc.benchbase.serverStats=true: per run, PostgreSQL's account of it (pg_stat_database,
+  // pg_stat_wal, pg_stat_statements if loaded, the server's CPU and packets where it can read
+  // them),
+  // read over JDBC, so that it works from a client of its own
+  private static final boolean SERVER_STATS =
+      Boolean.getBoolean("nativejdbc.benchbase.serverStats");
 
   private static final Path OUT = Path.of("build", "bench");
 
@@ -231,6 +241,9 @@ class BenchBaseBenchmark {
         Statement st = c.createStatement()) {
       // the statistics of the loaded tables, and in (c) of the metadata tables the setup filled
       st.execute("ANALYZE");
+      if (SERVER_STATS) {
+        Server.reset(st);
+      }
       // -Dnativejdbc.benchbase.beforeExecute=SELECT pg_stat_statements_reset(): a statement run
       // last
       String before = System.getProperty("nativejdbc.benchbase.beforeExecute", "");
@@ -238,6 +251,7 @@ class BenchBaseBenchmark {
         st.execute(before);
       }
     }
+    Server.@Nullable Snapshot start = SERVER_STATS ? Server.snapshot(e) : null;
     Path histograms = dir.resolve("histograms.json");
     benchBase(
         e,
@@ -248,7 +262,135 @@ class BenchBaseBenchmark {
         "--execute=true",
         "-jh",
         histograms.toAbsolutePath().toString());
-    return Result.read(run, dir, histograms, imported, plain);
+    Server server = start == null ? null : Server.since(e, start, dir.resolve("server.txt"));
+    return Result.read(run, dir, histograms, imported, plain, server);
+  }
+
+  /**
+   * What PostgreSQL counted over a run's execute phase: its commits, the time its sessions were
+   * active and idle in a transaction (pg_stat_database), the WAL written, and, where the server
+   * lets {@code pg_read_file} read them (a superuser in a container, not RDS), the container's CPU
+   * and the packets the host sent; -1 for what it could not read.
+   */
+  record Server(
+      long commits,
+      double activeMs,
+      double idleInTxMs,
+      long walBytes,
+      long cpuMicros,
+      long packets) {
+
+    /** The counters at one moment. */
+    record Snapshot(
+        long commits,
+        double activeMs,
+        double idleInTxMs,
+        long walBytes,
+        long cpuMicros,
+        long packets) {}
+
+    /** Before a run: pg_stat_statements emptied, where it is loaded. */
+    static void reset(Statement st) {
+      try {
+        st.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
+        st.execute("SELECT pg_stat_statements_reset()");
+      } catch (SQLException ex) {
+        // not in shared_preload_libraries: the run goes on without its statements
+      }
+    }
+
+    static Snapshot snapshot(Engines e) throws SQLException {
+      try (Connection c = e.open();
+          Statement st = c.createStatement()) {
+        long commits;
+        double active;
+        double idle;
+        long wal;
+        try (ResultSet rs =
+            st.executeQuery(
+                "SELECT d.xact_commit, d.active_time, d.idle_in_transaction_time, w.wal_bytes"
+                    + " FROM pg_stat_database d, pg_stat_wal w"
+                    + " WHERE d.datname = current_database()")) {
+          assertThat(rs.next()).isTrue();
+          commits = rs.getLong(1);
+          active = rs.getDouble(2);
+          idle = rs.getDouble(3);
+          wal = rs.getLong(4);
+        }
+        long cpu = -1;
+        String stat = file(c, "/sys/fs/cgroup/cpu.stat");
+        if (stat != null) {
+          Matcher m = Pattern.compile("(?m)^usage_usec (\\d+)").matcher(stat);
+          cpu = m.find() ? Long.parseLong(m.group(1)) : -1;
+        }
+        long packets = -1;
+        String net = file(c, "/proc/net/dev");
+        if (net != null) {
+          packets = 0;
+          for (String line : net.split("\n", -1)) {
+            int colon = line.indexOf(':');
+            if (colon < 0 || line.substring(0, colon).trim().equals("lo")) {
+              continue;
+            }
+            // receive: bytes packets errs drop fifo frame compressed multicast; then transmit
+            String[] f = line.substring(colon + 1).trim().split("\\s+", -1);
+            packets += Long.parseLong(f[9]);
+          }
+        }
+        return new Snapshot(commits, active, idle, wal, cpu, packets);
+      }
+    }
+
+    /**
+     * The counters since {@code start}, with pg_stat_statements' top statements written to {@code
+     * to}.
+     */
+    static Server since(Engines e, Snapshot start, Path to) throws Exception {
+      // the benchmark's sessions report their counters as they end, just before
+      Thread.sleep(1000);
+      Snapshot end = snapshot(e);
+      StringBuilder out = new StringBuilder("calls\texec ms\tplan ms\tplans\trows\tquery\n");
+      try (Connection c = e.open();
+          Statement st = c.createStatement();
+          ResultSet rs =
+              st.executeQuery(
+                  "SELECT calls, round(total_exec_time::numeric, 1), round(total_plan_time::numeric,"
+                      + " 1), plans, rows, left(regexp_replace(query, '\\s+', ' ', 'g'), 400)"
+                      + " FROM pg_stat_statements"
+                      + " WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())"
+                      + " ORDER BY total_exec_time DESC LIMIT 80")) {
+        while (rs.next()) {
+          for (int i = 1; i <= 6; i++) {
+            out.append(rs.getString(i)).append(i < 6 ? "\t" : "\n");
+          }
+        }
+      } catch (SQLException ex) {
+        out.append("pg_stat_statements unavailable: ").append(ex.getMessage()).append('\n');
+      }
+      Files.writeString(to, out);
+      return new Server(
+          end.commits() - start.commits(),
+          end.activeMs() - start.activeMs(),
+          end.idleInTxMs() - start.idleInTxMs(),
+          end.walBytes() - start.walBytes(),
+          end.cpuMicros() < 0 || start.cpuMicros() < 0 ? -1 : end.cpuMicros() - start.cpuMicros(),
+          end.packets() < 0 || start.packets() < 0 ? -1 : end.packets() - start.packets());
+    }
+
+    private static @Nullable String file(Connection c, String path) {
+      try (PreparedStatement ps = c.prepareStatement("SELECT pg_read_file(?)")) {
+        ps.setString(1, path);
+        try (ResultSet rs = ps.executeQuery()) {
+          return rs.next() ? rs.getString(1) : null;
+        }
+      } catch (SQLException ex) {
+        return null; // no superuser, or no such file: RDS
+      }
+    }
+
+    double perCommit(double v) {
+      return commits == 0 ? Double.NaN : v / commits;
+    }
   }
 
   /** Runs BenchBase in its own JVM, with the driver's classes and this JVM's vendor driver. */
@@ -466,7 +608,8 @@ class BenchBaseBenchmark {
       Map<String, Map<String, Long>> counts,
       Map<String, long[]> latencies,
       List<String> imported,
-      List<String> plain) {
+      List<String> plain,
+      @Nullable Server server) {
 
     private static final Pattern NUMBER = Pattern.compile("\"([^\"]+)\": *([0-9.E+-]+)");
 
@@ -477,7 +620,12 @@ class BenchBaseBenchmark {
     private static final Pattern ENTRY = Pattern.compile("\"[^\"]*\\.(\\w+)/\\d+\":(\\d+)");
 
     static Result read(
-        String run, Path dir, Path histograms, List<String> imported, List<String> plain)
+        String run,
+        Path dir,
+        Path histograms,
+        List<String> imported,
+        List<String> plain,
+        @Nullable Server server)
         throws IOException {
       Path out = dir.resolve("execute");
       Path summary = only(out, ".summary.json");
@@ -522,7 +670,8 @@ class BenchBaseBenchmark {
           counts,
           latencies,
           imported,
-          plain);
+          plain,
+          server);
     }
 
     private static Double number(Map<String, Double> numbers, String key) {
@@ -588,6 +737,47 @@ class BenchBaseBenchmark {
                   Math.round(median(med(rs, "95th Percentile"))),
                   Math.round(median(med(rs, "99th Percentile")))));
         });
+    if (results.values().stream().flatMap(List::stream).anyMatch(r -> r.server() != null)) {
+      out.append(
+          "\n| run | commits | active ms/commit | idle in transaction ms/commit | WAL KB/commit |"
+              + " server CPU ms/commit | server packets/commit |\n"
+              + "|---|---|---|---|---|---|---|\n");
+      results.forEach(
+          (run, rs) -> {
+            List<Server> ss = rs.stream().map(Result::server).filter(Objects::nonNull).toList();
+            if (ss.isEmpty()) {
+              return;
+            }
+            out.append(
+                String.format(
+                    Locale.ROOT,
+                    "| (%s) | %.0f | %.3f | %.3f | %.1f | %s | %s |%n",
+                    run,
+                    median(ss.stream().map(x -> (double) x.commits()).toList()),
+                    median(ss.stream().map(x -> x.perCommit(x.activeMs())).toList()),
+                    median(ss.stream().map(x -> x.perCommit(x.idleInTxMs())).toList()),
+                    median(
+                        ss.stream().map(x -> x.perCommit((double) x.walBytes()) / 1024).toList()),
+                    ss.stream().anyMatch(x -> x.cpuMicros() < 0)
+                        ? "n/a"
+                        : String.format(
+                            Locale.ROOT,
+                            "%.3f",
+                            median(
+                                ss.stream()
+                                    .map(x -> x.perCommit((double) x.cpuMicros()) / 1000)
+                                    .toList())),
+                    ss.stream().anyMatch(x -> x.packets() < 0)
+                        ? "n/a"
+                        : String.format(
+                            Locale.ROOT,
+                            "%.1f",
+                            median(
+                                ss.stream()
+                                    .map(x -> x.perCommit((double) x.packets()))
+                                    .toList()))));
+          });
+    }
     List<String> txns =
         results.values().stream()
             .flatMap(List::stream)

@@ -19,7 +19,9 @@
 # Before either: aws login --profile hiroyuki_yamada (the user signs in). run.sh then works only as
 # the role scalardb-bench (setup-account.sh), assumed anew on every refresh.
 # Environment: BENCH_DB_PASSWORD, SSH_KEY (the private key of bench.tfvars' public one), BENCH_BUCKET,
-# MAX_RUN_MINUTES (default 480, below a login session of 12 hours, with room for the destroy).
+# MAX_RUN_MINUTES (default 480, below a login session of 12 hours, with room for the destroy);
+# matrix.sh's REPS, INFLIGHT, CHANGED, WRITERS, READS, BENCHBASE, BB_WORKLOADS and BB_TIME; BASELINE,
+# a commit whose tree BENCHBASE runs too.
 # Arguments after `run` go to matrix.sh (and from there to Gradle).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -119,7 +121,11 @@ for key, url in urls.items():
   (cd "$repo" && git ls-files -co --exclude-standard -z | tar -c -f - --null -T -) |
     ssh_ "rm -rf $tier && mkdir $tier && tar -x -C $tier"
   copied=$tier
-  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-1}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
+  # BASELINE=<commit>: that commit's tree beside it, for matrix.sh's BENCHBASE runs to compare with
+  if [ -n "${BASELINE:-}" ]; then
+    (cd "$repo" && git archive "$BASELINE") | ssh_ "rm -rf $tier-base && mkdir $tier-base && tar -x -C $tier-base"
+  fi
+  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-1}' BENCHBASE='${BENCHBASE:-}' BB_WORKLOADS='${BB_WORKLOADS:-}' BB_TIME='${BB_TIME:-}' BASE_DIR='${BASELINE:+../$tier-base}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
   if [ -n "${BENCH_BUCKET:-}" ]; then cmds+=("$cmd"); continue; fi
   (
     ssh_ "$cmd" > "$out/$tier.log" 2>&1 || echo "tier $tier failed, see $out/$tier.log"

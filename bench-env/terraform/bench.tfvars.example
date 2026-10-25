@@ -14,3 +14,5 @@ oracle_registry_token = ""
 client_profile = ""
 # tier A: memory per database container (file cache included), e.g. 1536 for data read from disk; 0 for none
 db_memory_mb = 0
+# tier A PostgreSQL: pg_stat_statements loaded, for BenchBase's server statistics (BENCHBASE=1)
+pg_stat_statements = false

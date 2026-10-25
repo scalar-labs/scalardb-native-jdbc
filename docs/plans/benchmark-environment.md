@@ -210,6 +210,20 @@ with `scalardbnative.predicateChecks` on, as Oracle's did on the laptop (629 aga
 16 writers). About 2 minutes per engine and run, after the instances are up. Tier B's Oracle is 19c:
 the predicate's check has not run there before.
 
+**BenchBase (T6 of `testing.md`, todo 329).** `BENCHBASE=1 READS=0 run.sh run` runs
+`BenchBaseBenchmark` on the tier's PostgreSQL: TPC-C (scale 4) and YCSB (weights 50,5,15,10,0,20),
+4 terminals, runs (a), the vendor URL, and (c), every table on ScalarDB, `REPS` times each,
+`BB_TIME` seconds a run (120 by default), assertions off. The client builds BenchBase once, at the
+commit the harness was written against (`33c00473`). With `pg_stat_statements = true` in
+`bench.tfvars`, tier A's PostgreSQL loads pg_stat_statements with planning tracked, for both runs
+alike. Each run's report adds what the server counted per commit, read over JDBC: active and
+idle-in-transaction time (pg_stat_database), WAL, and on tier A the container's CPU and the host's
+packets (`pg_read_file`, a superuser's); each run's top statements are in its `server.txt`, in
+`bb-benchbase-runs.tgz`. `BASELINE=<commit>` copies that commit's tree beside the working tree and
+runs the same after it (reports prefixed `base-`), for what a change is worth with the network in
+between. About 4 minutes a run with loading: TPC-C and YCSB, (a) and (c), 3 repetitions, about
+50 minutes per tree.
+
 ## Cost
 
 Rough, from memory of AWS on-demand prices in `us-east-1`, to be checked with the Pricing API before
