@@ -32,6 +32,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.IntFunction;
@@ -43,9 +44,12 @@ import net.sf.jsqlparser.expression.LongValue;
 import net.sf.jsqlparser.expression.StringValue;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
+import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.statement.delete.Delete;
+import net.sf.jsqlparser.statement.insert.Insert;
+import net.sf.jsqlparser.statement.select.Values;
 import net.sf.jsqlparser.statement.update.Update;
 import org.jspecify.annotations.Nullable;
 
@@ -264,6 +268,14 @@ final class Writes {
     }
     Names n = new Names(engine, t);
     if (t.layout() == Layout.INLINE) {
+      if (vendor != null
+          && shape.kind() == StatementShape.Kind.INSERT
+          && shape.insertColumns().isEmpty()) {
+        StatementShape listed = listingColumns(shape, n, t, vendor);
+        if (listed != null) {
+          return plan(engine, listed, t, tables, snapshot, locks, vendor);
+        }
+      }
       inlineRefusals(engine, shape, t, tables);
     }
     if (vendor != null && shape.kind() == StatementShape.Kind.INSERT) {
@@ -278,17 +290,55 @@ final class Writes {
   }
 
   /**
+   * An INSERT into an inline table that lists no columns, with the columns its values fall to
+   * listed: the data table's first ones in its own order, as many as a row has values, when they
+   * are all the user's (todo 329; ScalarDB adds its metadata columns after them). {@code null} when
+   * a metadata column is among them or the text cannot be rewritten.
+   */
+  private static @Nullable StatementShape listingColumns(
+      StatementShape shape, Names n, TableInfo t, Connection vendor) throws SQLException {
+    SqlAst ast = shape.ast();
+    ExpressionList<?> top = ((Values) ((Insert) ast.statement()).getSelect()).getExpressions();
+    int width =
+        ((ExpressionList<?>) (top instanceof ParenthesedExpressionList<?> ? top : top.get(0)))
+            .size();
+    Set<String> data = new HashSet<>();
+    for (String c : t.dataColumns()) {
+      data.add(n.engine.columnKey(c));
+    }
+    List<String> order = List.copyOf(columns(vendor, n).keySet());
+    if (width > order.size()) {
+      return null;
+    }
+    StringJoiner list = new StringJoiner(", ", "(", ") ");
+    for (String c : order.subList(0, width)) {
+      if (!data.contains(n.engine.columnKey(c))) {
+        return null;
+      }
+      list.add(n.engine.quote(c));
+    }
+    int at = rowsStart(ast);
+    if (at < 0) {
+      return null;
+    }
+    String source = ast.source();
+    SqlAst listed = ast.reparse(source.substring(0, at) + list + source.substring(at));
+    return listed == null ? null : StatementShape.of(listed).orElse(null);
+  }
+
+  /**
    * The writes an inline table refuses (milestone 10b): one naming a metadata column, which only
-   * ScalarDB and the driver write, and an INSERT without a column list, whose values would fall to
-   * the table's columns, the metadata ones among them.
+   * ScalarDB and the driver write, and an INSERT without a column list whose values would fall to a
+   * metadata column.
    */
   private static void inlineRefusals(
       Engine engine, StatementShape shape, TableInfo t, String tables) throws SQLException {
     if (shape.kind() == StatementShape.Kind.INSERT && shape.insertColumns().isEmpty()) {
       throw refused(
           tables,
-          "an INSERT into a table in ScalarDB's inline layout names its columns, as the table"
-              + " holds ScalarDB's metadata columns too");
+          "an INSERT that lists no columns into a table in ScalarDB's inline layout runs only"
+              + " when its values fall to the table's user columns, not ScalarDB's metadata"
+              + " columns");
     }
     Set<String> data = new HashSet<>();
     for (String c : t.dataColumns()) {

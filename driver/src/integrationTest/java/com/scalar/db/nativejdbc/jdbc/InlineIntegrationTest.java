@@ -84,8 +84,16 @@ class InlineIntegrationTest {
       assertThat(rows(d, "SELECT * FROM inl.imp ORDER BY id"))
           .as("the data columns only")
           .containsExactly("1/a", "2/b");
-      // writes (10b): an INSERT names its columns, and none names a metadata column
-      assertThatThrownBy(() -> st.executeUpdate("INSERT INTO inl.imp VALUES (3, 'c')"))
+      // writes (10b): none names a metadata column; an INSERT that lists no columns gives its
+      // values to the user's, ScalarDB's metadata columns after them (todo 329), and is refused
+      // where they would reach one
+      assertThat(st.executeUpdate("INSERT INTO inl.imp VALUES (3, 'c')")).isEqualTo(1);
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO inl.imp VALUES (?, ?)")) {
+        ps.setInt(1, 4);
+        ps.setString(2, "d");
+        assertThat(ps.executeUpdate()).isEqualTo(1);
+      }
+      assertThatThrownBy(() -> st.executeUpdate("INSERT INTO inl.imp VALUES (5, 'e', 'x')"))
           .isInstanceOf(SQLFeatureNotSupportedException.class);
       assertThatThrownBy(() -> st.executeUpdate("UPDATE inl.imp SET tx_state = 3"))
           .isInstanceOf(SQLFeatureNotSupportedException.class);
@@ -116,7 +124,7 @@ class InlineIntegrationTest {
                         + e.engine().quote("tx_version")
                         + " FROM inl.imp ORDER BY id"))
             .as("the update stamped at the next version, the delete took the row")
-            .containsExactly("1/z/2");
+            .containsExactly("1/z/2", "3/c/1", "4/d/1");
       }
       // and at the stronger levels, a locking read included (10c)
       d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);

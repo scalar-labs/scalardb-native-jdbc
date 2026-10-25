@@ -163,7 +163,8 @@ first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
 
 - Reads and writes of ScalarDB tables work on all five engines, in both of ScalarDB's layouts. In
   the inline layout, the metadata columns in the row, they are kept from the application: `SELECT *`
-  and `RETURNING *` give the data columns, an `INSERT` names its columns, and a statement naming a
+  and `RETURNING *` give the data columns, an `INSERT` without a column list gives its values to
+  the user's columns (refused where they would reach a metadata column), and a statement naming a
   `tx_` or `before_` column ScalarDB keeps is refused with `0AN01`.
 - Declare transactions that only read as read-only (`setReadOnly(true)`, Spring's
   `@Transactional(readOnly = true)`). At SERIALIZABLE on MySQL, MariaDB and SQL Server such a

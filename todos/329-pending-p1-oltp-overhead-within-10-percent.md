@@ -420,3 +420,12 @@ it while the write waits) and fails with either CAS removed; every layout and pa
 first, the inline slim write misses the moved row and the fused statement writes on the committed
 one, as the vendor's would, while the decoupled slim write aborts. Next, the cloud: both layouts on the same machines
 (`BB_LAYOUTS="decoupled inline"`).
+
+### 2026-10-26: the seventh run, and an inline INSERT without a column list
+
+Run `20261025-2251`, the layouts side by side (benchbase-postgresql-aws.md): TPC-C 0.82 decoupled,
+0.85 inline, +1.75 then +1.44 ms a transaction. YCSB's inline run is void: its InsertRecord,
+`INSERT INTO usertable VALUES (...)`, was refused (0AN01). Such an INSERT now gets the data
+table's first columns in its own order, as many as a row has values, when they are all the user's,
+and is planned as if it listed them; a row reaching a metadata column is still refused.
+`InlineIntegrationTest` covers both on the five engines. Next: YCSB again on both layouts.

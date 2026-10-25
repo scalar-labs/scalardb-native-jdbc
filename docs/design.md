@@ -181,8 +181,9 @@ one-table forms above are left for later, measured. What differs: an INSERT stam
 inserted where they stand; a DELETE is the anchored delete of the row, its predicate read again over
 the key when it misses a row a writer changed; the setup backfills an imported table's NULL metadata
 and, on SQL Server, builds an unfiltered in-flight index on the application's own table. An INSERT
-without a column list is refused rather than expanded, and so is any statement naming a metadata
-column, in a SET value, a RETURNING item or the generated keys asked; `SELECT *`, `RETURNING *` and
+without a column list gets the data table's first columns, as many as a row has values, when they
+are all the user's (ScalarDB adds its metadata columns after them), and is refused otherwise; so is
+any statement naming a metadata column, in a SET value, a RETURNING item or the generated keys asked; `SELECT *`, `RETURNING *` and
 the generated keys give the data columns. No warning about `before_*` indexes yet: the locking re-read
 goes through the primary key.
 
