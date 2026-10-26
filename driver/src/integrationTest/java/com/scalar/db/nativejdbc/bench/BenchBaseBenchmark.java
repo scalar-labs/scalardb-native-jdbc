@@ -337,7 +337,7 @@ class BenchBaseBenchmark {
     boolean oracle = e.engine() == Engine.ORACLE;
     long[] roundTrip = stats(e) ? Server.roundTrip(e) : null;
     Server.@Nullable Snapshot start = stats(e) && !oracle ? Server.snapshot(e) : null;
-    OracleStats.@Nullable Counters oracleStart = stats(e) && oracle ? OracleStats.read(e) : null;
+    OracleStats.@Nullable Counters oracleStart = stats(e) && oracle ? OracleStats.start(e) : null;
     Sampler sampler = stats(e) && !oracle ? new Sampler(e) : null;
     Path histograms = dir.resolve("histograms.json");
     try {
@@ -557,6 +557,19 @@ class BenchBaseBenchmark {
         Map<String, double[]> sql,
         Map<String, String> sqlText,
         Map<String, double[]> waits) {}
+
+    /**
+     * The counters at a run's start, after emptying the shared pool: a cursor the run before left
+     * could drop out of {@code V$SQL} between this reading and the end's and come back with its
+     * counters, so that its earlier calls counted as this run's (the first Oracle run, 20261027-0133).
+     */
+    static Counters start(Engines e) throws SQLException {
+      try (Connection c = e.open();
+          Statement st = c.createStatement()) {
+        st.execute("ALTER SYSTEM FLUSH SHARED_POOL");
+      }
+      return read(e);
+    }
 
     static Counters read(Engines e) throws SQLException {
       try (Connection c = e.open();

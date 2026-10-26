@@ -60,6 +60,16 @@ What the server counted per commit, TPC-C, fast:
 
 ## Findings
 
+**A caveat on the per-statement figures (`V$SQL`)**, found by the design session: the driver's
+deltas carry calls from earlier runs. The SNAPSHOT decoupled cell's first run lists the vendor's
+` SELECT S_QUANTITY ... FOR UPDATE` with the vendor run's own count to the call (614,539), and in
+its second run the warehouse block and the item read show about twice their first run's calls. A
+cursor seems to leave `V$SQL` between the start's reading and the end's and come back with its
+counters. The host's figures (CPU, redo, commits, packets, DB time) are not affected; the
+statement CPU below is an upper bound, and the stock read counted 10.4 times a commit is this
+artifact (the driver's locks are one gated and nine plain a NewOrder). The harness now flushes the
+shared pool before each run's start reading.
+
 1. **On Oracle, the TPC-C overhead is the server's CPU, not round trips.** Unlike PostgreSQL, where
    the extra round trips explained most of the gap, here the database host spends 1.3–3.1 ms more
    CPU per commit than for the vendor's statements, and the active time grows by the same amount.
