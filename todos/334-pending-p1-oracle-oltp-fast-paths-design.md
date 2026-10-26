@@ -103,6 +103,16 @@ they carry most of a TPC-C transaction. Hand the implementation and measurement 
 with the design text as its brief. Do not touch `bench-env/` or `BenchBaseBenchmark` while the
 PostgreSQL matrix runs (todo 329, 2026-10-26); add the Oracle BenchBase build after.
 
+The division of work (decided 2026-10-26): the design session, on Fable, writes for each form the
+SQL or PL/SQL text, the columns the driver reads back, and a table of what the driver does for each
+outcome (a key written and stamped, written and not, not written, in flight, missing, a duplicate),
+so that implementing is translation; the implementing session, on Opus, writes the text builders
+and their unit tests, runs the Oracle suite, measures, and sends any case the design leaves open
+back to the design rather than deciding it, since the open cases are the ones where a mistake is a
+silent lost update. Before the forms merge, the semantics-bearing parts of the implementation (the
+result handling and the outcome rules, not the text builders) get one review pass on Fable against
+the design text.
+
 ## Files
 
 - `docs/design.md`: section 5 (engine mapping), 4.2 (reads, "A table found clear"), 4.3 (writes,
