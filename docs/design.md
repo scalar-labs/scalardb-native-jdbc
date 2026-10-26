@@ -1564,8 +1564,9 @@ rests on, is not argued from that table but checked: the first block of a table 
 runs with the cursor opened after the OUT binds on the same locals, and the driver compares the
 key through both under `Anchors.key`; equal, the table is marked and its blocks run without the
 cursor from then on; different, the table keeps the cursor for the rest of the process and the
-driver logs both values with their classes, one line; a block whose row has no key (`rows` 0)
-decides nothing, and the next one checks. Confirmation test 3 measured the two equal for the
+driver logs the two keys' classes per column, one WARN line, the values at DEBUG only, since a
+key may be a person's identifier and a default-level log reaches aggregators; a block whose row
+has no key (`rows` 0) decides nothing, and the next one checks. Confirmation test 3 measured the two equal for the
 nine key types ScalarDB declares, the padded `CHAR` included; the check holds it on every table
 through the connection's own ojdbc and properties (`mapDateToTimestamp` and the like), where a
 mismatch would otherwise be an anchor not found and a silent lost update. What the driver does
