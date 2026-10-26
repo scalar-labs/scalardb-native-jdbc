@@ -339,6 +339,47 @@ YCSB, slow:
 
 The raw output is in `bench-env/results/20261026-1433/` (git-ignored).
 
+## Tenth run: decoupled READ COMMITTED with its one-round-trip locking read (2026-10-26)
+
+Run `20261026-2036` (`SOURCE=816f506 BENCHBASE=1 READS=0 BB_LAYOUTS=decoupled
+BB_ISOLATIONS=READ_COMMITTED NET_DELAYS="0 250"`): `816f506` alone, which differs from the ninth
+run's code only in the decoupled locking read at READ COMMITTED (`Router.lockingRead`,
+`Writes.LockPlan`), sent as that commit rather than the shared working tree. A new cluster placement
+group, round trips 70 and 331-333 µs as the ninth run's. Before is the ninth run's cell, after this
+run's; SNAPSHOT decoupled is the ninth run's, for scale.
+
+| | before | after | SNAPSHOT decoupled |
+|---|---|---|---|
+| TPC-C fast (c)/(a), added per transaction | 0.38, +3.66 ms | **0.66, +1.19 ms** | 0.78, +0.61 ms |
+| TPC-C slow | 0.42, +10.1 ms | **0.83, +1.48 ms** | 0.93, +0.60 ms |
+| YCSB fast, added per operation | 0.33, +825 µs | **0.66, +214 µs** | 0.85, +73 µs |
+| YCSB slow | 0.56, +755 µs | **0.81, +223 µs** | 0.92, +80 µs |
+| TPC-C packets per commit, (a) then (c) | 19.7, 44.5 | 19.7, **20.0** | 19.6, 19.6 |
+| TPC-C active ms per commit, fast, (a) then (c) | 0.383, 1.394 | 0.386, 1.069 | 0.377, 0.794 |
+| TPC-C server CPU ms per commit, fast, (a) then (c) | 0.877, 2.608 | 0.913, 1.985 | 0.877, 1.315 |
+| TPC-C p95 ms, fast, (a) then (c) | 4.8, 14.4 | 4.9, 7.4 | 4.8, 5.9 |
+| YCSB p95 ms, fast, (a) then (c) | 1.6, 5.9 | 1.7, 3.2 | 1.6, 1.9 |
+
+The packets per commit are the vendor's again: the step-by-step lock is gone. What is left at READ
+COMMITTED is server time per statement. Fast TPC-C, statement time per commit (`pg_stat_statements`,
+one repetition): 970 µs against SNAPSHOT decoupled's 613. The largest differences, READ COMMITTED
+then SNAPSHOT per commit:
+
+- The stock lock: 24.7 µs a call, 4.51 a commit, plus the metadata read beside it, 6.1 µs a call;
+  at SNAPSHOT the lock is the vendor's statement, 10 µs a call. The lock's text (cut at 400
+  characters in `server.txt`) carries correlated subqueries into `stock_tx_metadata` for the anchor
+  columns, which the second statement reads again.
+- Delivery's `order_line` update beyond the key, the keys-CTE form: 244 µs a call, against the
+  SNAPSHOT form's 143 µs.
+- Keyed writes in the keys-CTE form (district, customer, warehouse): about 125 µs a commit, where
+  SNAPSHOT writes on tables it found clear with the vendor's statements.
+- The item read with its version columns, 53 against 21 µs a commit; the merged batch, 149
+  against 93; StockLevel, 77 against 40.
+
+pgss-sum.py counts the lock's second statement as "read: before images of in-flight rows", since
+it names `before_tx_id`; it is the one-round-trip lock's version read (6.1 µs), not the step-by-step
+check. SAVEPOINT ran 632 times in a repetition, ROLLBACK 513, SHOW 640.
+
 ## Reports
 
 ### HEAD 93f5217

@@ -776,3 +776,15 @@ Found on the way, not changed here: a clean SpotBugs run of `cb59f57` fails in `
 `b0b46ef`'s `Run.prepare(String, boolean, String[])` (OBL_UNSATISFIED_OBLIGATION_EXCEPTION_EDGE:
 the statement it returns) and reports the suppression on `applyFastRcDecoupled` as unnecessary;
 reported to the Oracle session.
+
+### 2026-10-26, night: `816f506` on AWS, decoupled READ COMMITTED
+
+Run `20261026-2036`, `816f506` alone (`SOURCE=`), decoupled, READ COMMITTED, both round trips;
+tables in `docs/benchmarks/benchbase-postgresql-aws.md`, "Tenth run". TPC-C 0.38 → 0.66 fast
+(+3.66 → +1.19 ms a transaction), 0.42 → 0.83 slow (+10.1 → +1.48 ms); YCSB 0.33 → 0.66 fast
+(+825 → +214 µs), 0.56 → 0.81 slow. Packets per TPC-C commit 44.5 → 20.0 (vendor 19.7). Against
+SNAPSHOT decoupled (+0.61 ms, +73 µs) the rest is server time: 970 against 613 µs of statements a
+commit. The stock lock is 24.7 + 6.1 µs a row against 10 (its text carries correlated subqueries
+for the anchor columns, which the second statement reads again); Delivery's beyond-key write 244
+against 143 µs; the keys-CTE keyed writes about 125 µs a commit where SNAPSHOT sends the vendor's
+statements; the item read 53 against 21, the merged batch 149 against 93, StockLevel 77 against 40.
