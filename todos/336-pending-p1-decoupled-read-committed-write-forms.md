@@ -195,3 +195,38 @@ order_line write near 120 to 140. Record in todo 329's log and here; then ask th
 The three forms designed and measured as above; the design paragraphs in `docs/design.md` 4.3;
 the pgbench variants in the designing session's scratchpad (not in the repository). Handed to an
 Opus session.
+
+### 2026-10-26: task 1, the five confirmation tests, all passing on PostgreSQL (Opus)
+
+`DecoupledReadCommittedIntegrationTest` on PostgreSQL under Testcontainers, a decoupled imported
+table `rcd.imp` and a decoupled created table `rcd.made`, each test the design's statement written
+out by hand on vendor connections (or the driver itself for 2's anchor, 3 and 4), printed under
+`[336]`:
+
+1. **The CAS sees the newest row and the snapshot's.** B (`BEGIN`, the data row updated, the
+   metadata row given another `tx_id` and `tx_version + 1`, both locks held); A's statement on
+   another thread, its DML waiting on the data row (checked: not done after 700 ms); B commits. A
+   returns `written` 1, `stamped` 0, and the snapshot's `tx_id`, `tx_version`, `tx_state` as before
+   B (`1/0/seed/5/3`). Alone: `1/1/seed/5/3`, the metadata row then `driver-tx`, version 6 (5 + 1),
+   state 3. For the imported table's upsert stamp, the created table's `UPDATE T_meta ... FROM`
+   stamp, and the created table's DELETE, whose metadata row is removed alone and kept when raced.
+   Decides forms 2 and 3: the `EXISTS` of the stamp's WHERE reads the snapshot, the stamped row is
+   the newest after the wait.
+2. **A key without a metadata row** on the imported table (a row the application inserted after
+   the setup): `1/1/null/null/null`, the metadata row inserted at version 1, state 3, the
+   statement's `tx_id`. A driver read of such a key records an anchor that `Anchors.unchanged`
+   finds equal to NULLs and not to a version. Decides form 2's last column.
+3. **An aggregate read records no anchor**: `SELECT SUM(v) ... WHERE id BETWEEN 5 AND 9` at READ
+   COMMITTED in a transaction leaves `Anchors.recorded` false, both tables. Form 3 applies to
+   Delivery as the design expects.
+4. **A row the transaction wrote before**: a read, two keyed writes of the key in one transaction,
+   both count 1, the version raised twice (5 to 7), the second value read back; both tables. A
+   regression test for form 2 (the anchor of a row the transaction stamped holds).
+5. **The before-image rule beyond the key**: a ScalarDB transaction holds row 12 prepared, its
+   before image `x = 'pick'`, its after image `'moved'`; the design's statement beyond the key for
+   `UPDATE ... SET v = 9 WHERE x = 'pick'` returns `0/0/t` (nothing written, nothing stamped, the
+   before-image column true) on both tables; the driver's abort is form 3's to add, the test kept
+   as its regression test.
+
+The anchors are read in the tests from the driver connection's handler by reflection (the field
+`anchors` of `Proxies`' connection handler), the one way a test sees `Anchors.recorded`.
