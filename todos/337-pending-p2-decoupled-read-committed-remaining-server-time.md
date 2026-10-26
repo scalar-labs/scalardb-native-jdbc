@@ -192,3 +192,25 @@ the benchmark's `server.txt`. The test asserts the gate and the count with rows 
 Gates: unit tests 397; the PostgreSQL suite 139 tests, 88 run, all passing; SpotBugs main clean,
 the integration tests' remaining findings the benchmark classes'. The other engines' suites and the
 local measurement next.
+
+### 2026-10-27: todo 337 measured locally, decoupled READ COMMITTED (Opus)
+
+TPC-C on `bb-pgss`, 4 terminals, 60 s, scale 4, decoupled, READ COMMITTED; `cb16d83^` (todo 336
+built) and `cb16d83` exported and run back to back, after first, once no other container was busy:
+
+| | before (todo 336) | after (todo 337) |
+|---|---|---|
+| (c) vs (a) | 0.85 (583.7/s against 685.2) | 0.88 (591.3/s against 674.0) |
+| server CPU ms/commit, run (c) | 2.10 | 2.06 |
+| active ms/commit | 1.39 | 1.30 |
+| server exec ms in all | 29866 | 29385 |
+| the stock lock's versions read, µs a call | 14.8 | 12.0 |
+| the district lock's versions read | 8.4 | 8.9 |
+| StockLevel's count | 1051 | 980 |
+| the item read (unchanged by design) | 14.8 | 15.0 |
+
+The two changed statements move as the design measured with pgbench (the versions read about 3 µs
+a call, StockLevel 7%); the throughput difference, 3 points, is inside the laptop's run-to-run
+noise (the same todo 336 tree measured 0.80 a day earlier). The InitPlan's sequential scan seen on
+the small test table does not show here: TPC-C's metadata tables are large enough for the partial
+index. The AWS cells decide, with todo 336's.
