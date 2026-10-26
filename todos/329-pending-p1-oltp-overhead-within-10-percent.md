@@ -788,3 +788,18 @@ commit. The stock lock is 24.7 + 6.1 µs a row against 10 (its text carries corr
 for the anchor columns, which the second statement reads again); Delivery's beyond-key write 244
 against 143 µs; the keys-CTE keyed writes about 125 µs a commit where SNAPSHOT sends the vendor's
 statements; the item read 53 against 21, the merged batch 149 against 93, StockLevel 77 against 40.
+
+### 2026-10-26, late: decoupled READ COMMITTED, what is left and the forms for it (todo 336)
+
+The tenth run (`816f506` alone, run `20261026-2036`): decoupled READ COMMITTED TPC-C 0.38 → 0.66
+fast (+3.66 → +1.19 ms), 0.42 → 0.83 slow (+10.1 → +1.48 ms); YCSB fast 0.33 → 0.66, slow 0.56 →
+0.81; packets a commit 44.5 → 20.0 (vendor 19.7). Against decoupled SNAPSHOT (+0.61 ms fast) the
+rest is server time per statement, 970 against 613 µs a commit: the lock's unused version lookups
+(24.7 against 10 µs a call), the keyed writes' slim keys-CTE form (42.6 to 54.9 against the
+clear-table statement's 29.4 to 43.4), Delivery's fused write beyond the key (239 against 143),
+the merged batch (201 against 120 for five). Candidate texts timed on the server by
+`pg_stat_statements` minimum and mean (todo 336's table): reshaping the keys-CTE statements gains
+nothing, the clear-table statement with the CAS folded into its stamp is within 1 to 2 µs of the
+floor. Designed in `docs/design.md` 4.3 as "The keyed write at READ COMMITTED on a decoupled
+table" and "The write beyond the key at READ COMMITTED on a decoupled table", the lock's paragraph
+amended; the implementing brief is todo 336.

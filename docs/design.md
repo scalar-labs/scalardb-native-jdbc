@@ -1409,6 +1409,79 @@ predicate matching nothing or the gate closed, which the table's coarse check th
 statements above running in the latter case and telling which key is in flight. Nothing is
 written while a key is in flight, as before. A batch's entries keep the forms of 4.4.
 
+**The keyed write at READ COMMITTED on a decoupled table (todo 336).** At this level every statement
+reads its own snapshot, so no table is found clear and a write by key took the statement above in
+its slim form: the key's metadata row read into a CTE, a gate on it, the DML under the gate, the CAS
+joined to the CTE. Timed on the server alone that statement is a few microseconds over the
+clear-table statement; under the benchmark's four terminals it is half as much again to twice
+(AWS, the ninth run, decoupled: district 42.6 µs against 29.4, customer 46 to 55 against 41 to 43;
+the laptop 56.6 against 26.8), its materialized CTE and its extra executor nodes paying for the
+contention. Where no wait is configured (`scalardbnative.inflightWaitMs` unset or 0) the write by
+key on PostgreSQL is instead the clear-table statement with the CAS of step 3 in its stamp, and the
+key's metadata row as the snapshot read it beside it:
+
+```sql
+WITH scalardb_native_keys (scalardb_native_m0, ..., scalardb_native_id, scalardb_native_version,
+                           scalardb_native_state) AS
+       (SELECT s.k, s.tx_id, s.tx_version, s.tx_state FROM T_meta s WHERE <the key as written>),
+     scalardb_native_w AS (<the user's UPDATE or DELETE as written on T> RETURNING k AS scalardb_native_w0, ...),
+     scalardb_native_s AS (<the stamp of the clear-table statement from scalardb_native_w: a created
+                            table's UPDATE T_meta ... FROM scalardb_native_w, which a DELETE removes
+                            instead; an imported table's INSERT ... ON CONFLICT (k) DO UPDATE>
+                           ... WHERE COALESCE(tx_state, 3) = 3
+                             AND EXISTS (SELECT 1 FROM scalardb_native_keys c
+                                         WHERE c.scalardb_native_m0 = <the stamped row's k0> AND ...
+                                           AND c.scalardb_native_id IS NOT DISTINCT FROM <its tx_id>
+                                           AND c.scalardb_native_version IS NOT DISTINCT FROM <its tx_version>)
+                           RETURNING 1)
+SELECT (SELECT count(*) FROM scalardb_native_w), (SELECT count(*) FROM scalardb_native_s),
+       k.scalardb_native_id, k.scalardb_native_version, k.scalardb_native_state
+FROM (SELECT 1) scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE
+```
+
+The CAS is the `EXISTS`: the metadata row's `tx_id` and `tx_version` as the stamp finds the row,
+locked and newest, equal to the ones the statement's snapshot read. PostgreSQL re-evaluates an
+UPDATE's WHERE on the row as it is after a wait on it, and `ON CONFLICT DO UPDATE`'s on the row it
+conflicts with, while a subquery keeps the statement's snapshot, the property the locking read at
+this level rests on; so a row changed between the snapshot and the lock is not stamped, as the slim
+statement's CAS refused it. The binds: the key's, the DML's, the stamp's three values; the metadata
+row read once, one probe of the key. What the driver does with the row returned, `written`,
+`stamped`, then the snapshot's `tx_id`, `tx_version` and `tx_state` of the key (NULLs for a key
+without a metadata row):
+
+| the statement returns | the driver |
+|---|---|
+| `written` 0 | 0 rows, as the vendor: the key does not exist, or its row stopped matching; nothing is stamped |
+| `written` 1, `stamped` 1, the anchor unchanged (`Anchors.unchanged` on the snapshot's `tx_id` and `tx_version`, which holds for a row the transaction wrote before) | the write; the anchors told of it |
+| `written` 1, `stamped` 1, the anchor moved | abort `40001`, "a row this transaction read was changed by another one since"; the data row written is undone with the transaction |
+| `written` 1, `stamped` 0, `tx_state` 1 or 2 | abort `40001`, "being written by a ScalarDB transaction" (section 6; no wait is configured) |
+| `written` 1, `stamped` 0, otherwise | abort `40001`, "changed after it was read": the row moved between the snapshot and the lock, or a created table's metadata row is gone |
+
+No gate: its purpose was to write nothing while a key is in flight so that the level's bounded wait
+holds no lock, and without a wait the abort undoes the data write with the transaction; a key in
+flight is told by its stamp, which `COALESCE(tx_state, 3) = 3` refuses. A key without a metadata
+row, an imported table's before its backfill, is stamped by the upsert's insert, as the clear-table
+statement stamps it (4.4). The DML locks the data row and the stamp the metadata row after it, the
+steps' order. With a wait configured the slim statement stays, its gate keeping the data unwritten
+through the wait. A batch's entries by key take the same statement over the entries of
+`scalardb_native_e` as the clear-table batch form does (4.4), the key's metadata read per entry by a
+lateral subquery and the CAS and the row returned per entry.
+
+**The write beyond the key at READ COMMITTED on a decoupled table (todo 336).** The same
+statement, the keys the predicate matches in place of the one key, when the transaction recorded no
+anchor of the table (`Anchors.recorded`), which is Delivery's case: its order lines are read by an
+aggregate, which records none (to be confirmed by a test; a transaction that read the table's rows
+keeps the fused statement, whose rows carry each key's version for the anchors). The DML as written
+over the data table, returning its keys; the stamp from them with the CAS as above, the subquery on
+`T_meta` by the stamped row's key in place of the CTE, one probe per key; and the rule of 4.2 for
+this level that a row in flight whose before image alone the predicate matches aborts, as a column:
+`EXISTS (SELECT 1 FROM <the before images of T, 4.2> WHERE <the predicate>)`, one probe of the
+in-flight index. The driver: that column true, abort "being written by a ScalarDB transaction";
+`stamped` below `written`, abort "changed after it was read"; else the count written. Timed on the
+laptop over an order's ten lines, server time, the fused statement 56 µs at the least and 127 on
+average, the clear-table statement 28 and 70, this one 34 and 85; on AWS the fused statement was
+239 µs a call against the clear-table statement's 143.
+
 An INSERT on PostgreSQL is the user's INSERT, returning its keys, and their metadata rows inserted from
 those keys (`ON CONFLICT DO NOTHING`), in one statement. A tombstone the insert skips is taken over by
 the CAS afterwards (4.5), a second round trip only for those keys. Where a duplicate must be told from a
@@ -1430,8 +1503,10 @@ its state and aborts, or fails as NOWAIT fails, since the lock held on it must n
 statement (section 6). No row in flight is matched by its before image alone, since the images of
 a row differ in no key column. On a decoupled table, whose state is in its metadata row, which the
 lock's re-read of a data row does not reach, the same locking read is two statements in one round
-trip: the lock as above, then the keys, versions and states of the rows the predicate matches, read
-from the data table joined to its metadata table in a snapshot taken after the lock. A prepare that
+trip: the lock as written with its rows' keys appended and nothing else (todo 336: it carried the
+anchored read's two version lookups a row, which the second statement reads again), then the keys,
+versions and states of the rows the predicate matches, read from the data table joined to its
+metadata table in a snapshot taken after the lock. A prepare that
 committed before the lock was granted shows there as state 1 or 2, and one that has not committed
 cannot change the metadata row, since it needs the data row's lock the driver now holds; a row the
 read shows in flight with a before image, or among the locked rows, aborts or fails as NOWAIT
