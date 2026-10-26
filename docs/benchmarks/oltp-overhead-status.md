@@ -37,8 +37,16 @@ one (busier) machine state, inline layout, 60 s:
 | YCSB (c)/(a) | 0.98 | 0.71 | about 1.0 |
 
 Left there, by size: Delivery's write beyond the key, the two-arm shape of a key read (one scan
-with CASE per column would do), the slim write's keys CTE; and at both levels the inline row's
-width (WAL 17 KB a commit against 7), which is ScalarDB's layout.
+with CASE per column would do), the slim write's keys CTE.
+
+**Run (d), the layout alone.** The harness now has a fourth run, the vendor's driver on the tables
+of (c), imported into ScalarDB and set up. Locally at REPEATABLE READ, inline, TPC-C: (a) 1.00,
+(d) **1.01**, (c) 0.92; YCSB (d) 0.98, (c) 0.98. ScalarDB's wider rows cost the vendor 20 to 37%
+more server time per statement and nothing in throughput, their metadata columns staying NULL. The
+driver's rows are wider still because it writes the stamp into each (WAL 15.8 KB a commit against
+(d)'s 11.7 and (a)'s 10.1), which is the protocol's cost, not the layout's. So (c) against (d),
+0.92 and +0.54 ms a transaction here, is the number the driver owns, and the 10% target stands on
+its own terms. Run with `-Dnativejdbc.benchbase.runs=a,c,d` (`BB_RUNS` on AWS).
 
 The rest of this page is the state before these changes; its "Where the remaining cost goes" and
 "Open ideas" are superseded by the todo's entry, which lists what is left: the first-touch reads'
@@ -172,8 +180,9 @@ The fast paths are only allowed where they give exactly what the step-by-step pr
 
 ## How to measure
 
-- Locally: `BenchBaseBenchmark` (`driver/src/integrationTest/.../bench/`), runs (a) and (c),
-  `-Dnativejdbc.benchbase.layout=inline` for the inline layout. The command is in
+- Locally: `BenchBaseBenchmark` (`driver/src/integrationTest/.../bench/`), runs (a), (c) and (d),
+  `-Dnativejdbc.benchbase.layout=inline` for the inline layout,
+  `-Dnativejdbc.benchbase.isolation=READ_COMMITTED` for the default level. The command is in
   [benchbase-postgresql-aws.md](benchbase-postgresql-aws.md) and `bench-env/matrix.sh`.
 - AWS: `bench-env/run.sh plan` / `run` / `fetch` ([../plans/benchmark-environment.md](../plans/benchmark-environment.md)),
   with `BENCHBASE=1`, `BB_WORKLOADS`, `BB_RUNS`, `BB_LAYOUTS="decoupled inline"`, and `BASELINE=<commit>`

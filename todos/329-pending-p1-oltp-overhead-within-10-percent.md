@@ -595,10 +595,31 @@ Left at READ COMMITTED, in order of size: Delivery's `order_line` write beyond t
 form (169 µs against 52 for ten rows, 0.15 ms a commit); the two-arm shape of a key read on an
 inline table, which one scan with `CASE WHEN tx_state IN (1, 2) THEN before_x ELSE x END` per
 column could replace, the key columns needing none, so the index stays (about 7 µs a read, 0.13 ms
-a commit over 21 reads); the slim write's keys CTE (about 9 µs a write). Common to both levels and
-larger than any of these: WAL per commit is 17 KB against the vendor's 7, the inline row carrying
-its before images, which is ScalarDB's layout rather than the driver's protocol, and shows as
-server CPU outside statement execution (about 0.5 ms a commit here).
+a commit over 21 reads); the slim write's keys CTE (about 9 µs a write).
+
+**Run (d), the layout's cost alone** (`BenchBaseBenchmark`, runs `a,c,d`): the vendor's own driver
+on the tables of (c), imported into ScalarDB and set up, bypassing the protocol. I had written
+that the inline row's width, WAL 17 KB a commit against 7, was ScalarDB's layout and larger than
+anything left; (d) says otherwise. Local, inline, REPEATABLE READ, 60 s, one machine state:
+
+| TPC-C | (a) vendor, plain tables | (d) vendor, ScalarDB's tables | (c) the driver |
+|---|---|---|---|
+| throughput/s, vs (a) | 658, 1.00 | 662, **1.01** | 608, 0.92 |
+| WAL KB per commit | 10.1 | 11.7 | 15.8 |
+| server CPU ms per commit | 1.28 | 1.43 | 1.62 |
+| statement time per kind, (d) and (c) against (a) | | reads 1.29, inserts 1.22, updates 1.37 | |
+
+YCSB: (d) 0.98, (c) 0.98. The vendor on ScalarDB's tables pays 20 to 37% more server time per
+statement for the wider tuples, and nothing in throughput at four terminals, the run being bound by
+round trips; its rows' metadata columns stay NULL, since no ScalarDB transaction touches them. The
+driver's rows are wider because the driver writes the stamp into every row, `tx_id` a 36-character
+text among five columns, which is the protocol's cost, not the layout's: WAL 15.8 against 11.7,
+and (c) against (d) is +0.54 ms a transaction, 0.92. Per statement at REPEATABLE READ, (c) against
+(d): the stock lock 18.5 against 17.3 µs, the item read 10.2 against 8.6 (the first-touch probe),
+the oorder insert 52 against 45, the customer update 56 against 51, Delivery's order_line update
+64.5 against 60.9, the merged order_line insert of 15 rows 319 against 15 × 23, the customer read
+by last name 82 against 68. Of the stamp, only `tx_prepared_at` and `tx_committed_at` (16 bytes)
+are open to question; `tx_id`, `tx_state` and `tx_version` are what ScalarDB reads.
 
 The integration suite: it passes in full against an external PostgreSQL (a throwaway container,
 `-Dnativejdbc.postgresql.url`). Under Testcontainers four passthrough tests (`RoutingIntegrationTest`

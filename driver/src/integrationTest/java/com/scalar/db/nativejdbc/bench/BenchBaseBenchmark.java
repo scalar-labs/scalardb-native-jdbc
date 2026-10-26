@@ -58,14 +58,20 @@ import org.w3c.dom.NodeList;
  * an unpacked BenchBase distribution built for the engine; the result is written to {@code
  * build/bench/benchbase-<engine>.md}, BenchBase's own output beside it.
  *
- * <p>Three runs per workload, each on freshly loaded tables, as ScalarDB's schema and coordinator
- * tables exist in all three:
+ * <p>Four runs per workload, each on freshly loaded tables, as ScalarDB's schema and coordinator
+ * tables exist in all of them:
  *
  * <ul>
  *   <li>(a) the vendor URL;
  *   <li>(b) the driver, every table plain: the cost of routing;
  *   <li>(c) the driver, every table with a primary key imported into ScalarDB and set up: the cost
  *       of the rewrite. TPC-C's {@code history} has none and stays plain.
+ *   <li>(d) the vendor URL on the tables of (c), imported and set up, bypassing ScalarDB's
+ *       protocol: the cost of ScalarDB's layout alone, which in the inline layout is the row's
+ *       metadata and before-image columns, so that (c) against (d) is the driver's protocol by
+ *       itself (todo 329). In the decoupled layout the data tables are the vendor's own, and (d) is
+ *       near (a). On PostgreSQL an INSERT without a column list fills the columns it leaves out
+ *       with NULL, so YCSB's runs there too.
  * </ul>
  *
  * <p>No ScalarDB transactions run. BenchBase loads through the vendor URL in every run, from its
@@ -208,7 +214,7 @@ class BenchBaseBenchmark {
     benchBase(e, workload, "a", dir, "load", "--create=true", "--load=true");
     List<String> imported = new ArrayList<>();
     List<String> plain = new ArrayList<>();
-    if (run.equals("c")) {
+    if (run.equals("c") || run.equals("d")) {
       try (Connection c = e.open()) {
         DatabaseMetaData md = c.getMetaData();
         try (ResultSet rs = md.getTables(null, ns, "%", new String[] {"TABLE"})) {
@@ -672,7 +678,7 @@ class BenchBaseBenchmark {
     f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
     Document d =
         f.newDocumentBuilder().parse(sample.resolve("sample_" + workload + "_config.xml").toFile());
-    boolean vendor = run.equals("a");
+    boolean vendor = run.equals("a") || run.equals("d");
     String url = e.url() + (e.url().contains("?") ? "&" : "?") + "currentSchema=" + SCHEMA;
     set(
         d,
@@ -913,9 +919,9 @@ class BenchBaseBenchmark {
   /** The workload's section: the runs overall, then per transaction type, medians of the reps. */
   private static String table(String workload, Map<String, List<Result>> results) {
     StringBuilder out = new StringBuilder("\n## ").append(workload).append("\n\n");
-    List<Result> c = results.get("c");
+    List<Result> c = results.get("c") != null ? results.get("c") : results.get("d");
     if (c != null) {
-      out.append("Run (c): imported ")
+      out.append("Runs (c) and (d): imported ")
           .append(String.join(", ", c.get(0).imported()))
           .append("; plain ")
           .append(c.get(0).plain().isEmpty() ? "none" : String.join(", ", c.get(0).plain()))

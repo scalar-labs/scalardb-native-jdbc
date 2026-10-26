@@ -9,7 +9,8 @@
 # share the client's CPU (with -Dnativejdbc.bench.checkPlan=true, Oracle's plan of the predicate's
 # check instead); READS=0 leaves out the read benchmark. BENCHBASE=1 adds BenchBase's workloads
 # (BenchBaseBenchmark, milestone T6), one engine at a time; BASE_DIR, a second tree (run.sh's
-# BASELINE), runs them after, its reports prefixed base-. BB_RUNS picks the runs (a,c by default;
+# BASELINE), runs them after, its reports prefixed base-. BB_RUNS picks the runs (a,c by default; d
+# is the vendor on the ScalarDB tables, the layout's cost alone;
 # b is the driver with every table plain), BB_JVM_ARGS the execute phase's JVM options ({dir}, the
 # run's directory: -XX:StartFlightRecording:...,filename={dir}/execute.jfr), BB_LAYOUTS the layouts of
 # run (c)'s tables (decoupled by default; "decoupled inline" runs both, inline's reports prefixed
