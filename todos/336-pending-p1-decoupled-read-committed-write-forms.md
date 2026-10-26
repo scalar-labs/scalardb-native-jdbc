@@ -366,3 +366,9 @@ lock's versions read rose from 5.4 to 15.7 µs locally as its first statement fe
 16.4 (the design's guess: the metadata rows no longer warmed by the first statement). If the AWS
 cell shows the same, note it here; if the second statement grows more than the first shrinks
 there, send it back to the design with the numbers.
+
+### 2026-10-26: the other engines' suites (Opus)
+
+MySQL, MariaDB, SQL Server and Oracle, from an export of HEAD (`git archive`, other sessions'
+uncommitted edits left out), under Testcontainers: 298 tests, 204 run, all passing (40 min). The
+PostgreSQL-only branches changed nothing on the other engines, as built. Pending: the AWS cells.
