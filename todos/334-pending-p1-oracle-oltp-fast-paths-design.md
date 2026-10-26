@@ -444,3 +444,84 @@ beside the data row, where the paragraph named `OF t.k`; (7) not built, as low-v
 the predicate block's entries, the inline SNAPSHOT statement through `executeBatch`, the merged
 `FORALL` block (the block of entries already makes a batch one execution and one fetch), and the
 one-round-trip autocommit of a raising block (the open case of the row read back stands).
+
+### 2026-10-26: decision requested now (the user): the row read back, cursor or OUT binds
+
+The user asks the design to decide this case now, before the AWS run, so that the run measures the
+form the driver will ship. The question, with what is known:
+
+- **As built:** every block that returns a row opens a `SYS_REFCURSOR` over `dual` on its locals,
+  read through `readKey`; ojdbc fetches that cursor in a second round trip (fact 8, measured by
+  `v$mystat` and by the client's chunks, `DBMS_SQL.RETURN_RESULT` the same). So in a transaction a
+  keyed write, a write beyond the key, a decoupled INSERT and a block of batch entries cost 2 round
+  trips where PostgreSQL's forms cost 1; in autocommit 3.
+- **The alternative:** the counts as NUMBER OUT binds and the key through an OUT bind registered
+  with the JDBC type `Writes.columns` reads for the column from `ALL_TAB_COLUMNS` (2 NUMBER, 12
+  VARCHAR2, 1 CHAR, 101 BINARY_DOUBLE and BINARY_FLOAT through `TO_BINARY_DOUBLE`, 93 DATE and
+  TIMESTAMP, -3 RAW), read as `readKey` reads that type. Fact 3b measured it equal under
+  `Anchors.key` to what the reads record for all nine types, the padded CHAR included; a type outside
+  that table (TIMESTAMP WITH TIME ZONE, INTERVAL, NCHAR, one the setup did not record) would keep the
+  cursor. One round trip in a transaction, two in autocommit.
+- **The risk the design named:** an OUT bind typed otherwise than the reads record is an anchor
+  not found, which `Anchors.unchanged` takes as unchanged, a silent lost update. The table above is
+  the evidence against it for the types ScalarDB imports; the cursor stays for any other.
+- **Where the change lands:** the row read back is one method per plan (`KeyedPlan.applyBlock`,
+  `applyPredicateBlock`, `applyFast`'s Oracle branch, `InsertPlan.applyOracleBlock`,
+  `Writes.applyOracleEntries`), and the block texts' last line; the implementing session estimates
+  an hour and the suites.
+
+Asked: cursor as designed, or OUT binds with the cursor kept for a type outside the table. Answer
+here, and the implementing session builds it.
+
+### 2026-10-26: decided (Fable): OUT binds, the cursor kept as the check and the fallback
+
+Decision: the blocks return their row through OUT binds, the counts as `NUMBER`, the key through
+binds registered with the JDBC type the reads report for the column's declared type (2 `NUMBER`,
+12 `VARCHAR2`, 1 `CHAR`, 101 `BINARY_DOUBLE` and `BINARY_FLOAT` through `TO_BINARY_DOUBLE`, 93
+`DATE` and `TIMESTAMP`, -3 `RAW`), read by a sibling of `readKey` that switches on the type as
+`readKey` does; a key column of a declared type outside the table keeps the cursor. The objection
+the design raised against OUT binds is answered by a check, not by the table: the first block of
+a table in a process runs the OUT text with the cursor opened after the binds on the same locals,
+the driver compares the key through both under `Anchors.key`, and marks the table verified (OUT
+binds alone from then on) or cursor-only for the rest of the process (one WARN line with both
+values and their classes); a row without a key (`rows` 0) decides nothing and the next block
+checks. One round trip per block in a transaction, as PostgreSQL's forms; the check costs one
+more, once per table per process. The design text (4.3 "The keyed write on Oracle") carries the
+rule; the other blocks refer to it.
+
+Why a check and not the table alone. Fact 3b registered each OUT bind with the type the table's
+own result set reported and found the key equal under `Anchors.key` for the nine types: strong
+evidence for those types under the container's ojdbc with its default properties. The driver
+will map the declared type (`ALL_TAB_COLUMNS`, todo 277) to that reported type by a table of its
+own, and what no table can see is the connection's properties
+(`oracle.jdbc.mapDateToTimestamp=false` makes the reads report 91 and read a `java.sql.Date`,
+where a bind registered 93 reads a `LocalDateTime`), an ojdbc version reporting a type otherwise,
+or a declared variant the nine did not cover. Each is an anchor not found, which
+`Anchors.unchanged` takes as unchanged: the silent lost update the design named. The check
+compares the two paths on the real column, through the real connection, at the first write; the
+two keys come from the same local of the same block execution, so a difference can only be the
+client's typing, and a mismatch costs the table its one round trip, loudly, never its exactness.
+
+Weighed and set aside: ojdbc's `RETURNING ... INTO` return parameter (`registerReturnParameter`),
+typed by the driver all the same and not available to a block; one `VARCHAR2` OUT bind with a
+canonical text of the key, re-typed by the driver, the typing twice and lossy for
+`BINARY_DOUBLE` and timestamps; the key from the driver's own bind values or the literal, which
+have the application's Java type, not the reads'; a describe of the key columns at plan build
+(`SELECT <key as the reads read it> FROM T WHERE 1 = 0`) to take the registration type from the
+engine, which settles the table's mapping but not the `CallableStatement`-against-`ResultSet`
+reading and costs a round trip per table anyway, so the check at first use is both cheaper and
+stronger; the cursor as designed, two round trips per block, which the AWS run would measure for
+a form that would not ship.
+
+Consequences in the text: each block's last line is the assignments `? := l_rows; ... ? := l_k;`
+in place of `OPEN ? FOR SELECT ... FROM dual` (4.3's keyed write in both layouts, the write
+beyond the key, the clear-table block, the INSERT; 4.4's block of entries per entry); the
+predicate block's `l_k.COUNT` is a PL/SQL expression again, so the implementing session's text
+note resolves itself; the write beyond the key returns counts only and needs no check; the block
+of entries returns `n, done` and the write's row per entry as OUT binds, its checking run the
+cursor over the `UNION ALL` as built, fetched whole. For the implementing session: the row read
+back is one method per plan and the block texts' last line; build the checking variant as the
+OUT text plus the cursor, so the two texts never differ in anything but that line; make
+confirmation test 3b an assertion for the nine types, registering by the declared type as the
+driver will; add a unit test of the check's three outcomes (equal, different, no key); log the
+round trips of the four blocks again, and the first write's extra one.

@@ -1494,7 +1494,8 @@ BEGIN
        AND COALESCE(t.tx_version, 0) = COALESCE(l_version, 0);
     l_written := SQL%ROWCOUNT;
   END IF;
-  OPEN ? FOR SELECT l_rows, 1, l_id, l_version, l_state, l_written, l_written, l_k FROM dual;
+  ? := l_rows; ? := 1; ? := l_id; ? := l_version; ? := l_state;
+  ? := l_written; ? := l_written; ? := l_k;
 END;
 ```
 
@@ -1527,7 +1528,8 @@ BEGIN
       l_stamped := SQL%ROWCOUNT;
     END IF;
   END IF;
-  OPEN ? FOR SELECT l_rows, l_meta, l_id, l_version, l_state, l_written, l_stamped, l_k FROM dual;
+  ? := l_rows; ? := l_meta; ? := l_id; ? := l_version; ? := l_state;
+  ? := l_written; ? := l_stamped; ? := l_k;
 END;
 ```
 
@@ -1543,14 +1545,29 @@ name and the `RETURNING` appended before any trailing comment, as `onDataTable` 
 driver's binds, in text order: `P`'s placeholders for the read; then, in the inline UPDATE, the
 stamp's three values, the user's SET placeholders and `P`'s again; in the decoupled block the SET
 placeholders, `P`'s again, and the stamp's three values after the DML where a stamp is written;
-last the cursor, the block's one OUT bind, a `SYS_REFCURSOR` the driver registers as
-`OracleTypes.CURSOR` on a `CallableStatement` and reads as a result set. Its one row is
-`rows, meta, tx_id, tx_version, tx_state, written, stamped, k...`: whether a data row was found,
-whether it has a metadata row (1 always in the inline layout), the version and state read, how
-many rows the DML wrote and the CAS stamped (equal in the inline layout, one statement), and the
-key as read, through `readKey`, the code that recorded the anchor, so the two agree on every key
-type without a mapping of its own. The cursor is opened over `dual` on the block's variables,
-bound as it opens, so it outlives the block. What the driver does with the row:
+last the row, as OUT binds of the `CallableStatement`, `rows, meta, tx_id, tx_version,
+tx_state, written, stamped, k...`: whether a data row was found, whether it has a metadata row (1
+always in the inline layout), the version and state read, how many rows the DML wrote and the
+CAS stamped (equal in the inline layout, one statement), and the key as the data row spells it.
+OUT binds come back with the execute, one round trip; a `SYS_REFCURSOR` over `dual`, the form
+first designed, costs a second round trip for its fetch (todo 335's confirmation test 8) and
+stays only where said next. The counts are `NUMBER` binds. The key's binds are registered with
+the JDBC type the driver's reads report for the column's declared type, 2 for `NUMBER`, 12 for
+`VARCHAR2`, 1 for `CHAR`, 101 for `BINARY_DOUBLE` and for `BINARY_FLOAT`, which the block returns
+through `TO_BINARY_DOUBLE` as `Names.key` reads it, 93 for `DATE` and `TIMESTAMP`, -3 for `RAW`,
+and read by a sibling of `readKey` with its switch on the type (a `LocalDateTime` for 93), so
+that the two cannot drift; a key column of any other declared type keeps the cursor, read through
+`readKey`. That the key read back equals the one the reads recorded, which `Anchors.unchanged`
+rests on, is not argued from that table but checked: the first block of a table in a process
+runs with the cursor opened after the OUT binds on the same locals, and the driver compares the
+key through both under `Anchors.key`; equal, the table is marked and its blocks run without the
+cursor from then on; different, the table keeps the cursor for the rest of the process and the
+driver logs both values with their classes, one line; a block whose row has no key (`rows` 0)
+decides nothing, and the next one checks. Confirmation test 3 measured the two equal for the
+nine key types ScalarDB declares, the padded `CHAR` included; the check holds it on every table
+through the connection's own ojdbc and properties (`mapDateToTimestamp` and the like), where a
+mismatch would otherwise be an anchor not found and a silent lost update. What the driver does
+with the row:
 
 | the row | the driver |
 |---|---|
@@ -1717,8 +1734,8 @@ BEGIN
       l_stamped := SQL%ROWCOUNT;
     END IF;
   END IF;
-  OPEN ? FOR SELECT l_k.COUNT, l_held, l_missing, l_after, l_written, l_stamped, l_skipped, l_abort
-                FROM dual;
+  ? := l_k.COUNT; ? := l_held; ? := l_missing; ? := l_after;
+  ? := l_written; ? := l_stamped; ? := l_skipped; ? := l_abort;
 END;
 ```
 
@@ -1754,8 +1771,8 @@ Every `FORALL` runs its statement once per element in one call of the SQL engine
 collection runs none, and the gate skips it anyway. The binds, in text order: the stamp's three
 values; `P`'s placeholders in the keys read; at SNAPSHOT `P`'s again in the after-image check; the
 user's SET placeholders and `P`'s again in step 2; `P`'s again in an inline DELETE's zero-row rule;
-and the cursor last. The row read back is `found, held, missing, after, written, stamped,
-skipped, abort`: how many keys the predicate matched, how many of them in flight, without a
+and the row last, `NUMBER` OUT binds, counts only, so no key to check. The row read back is
+`found, held, missing, after, written, stamped, skipped, abort`: how many keys the predicate matched, how many of them in flight, without a
 metadata row, whether an after image matched, how many rows step 2 wrote and step 3 stamped, how
 many keys were skipped, and the abort code. What the driver does with it:
 
@@ -1796,7 +1813,7 @@ BEGIN
            tx_version = CASE WHEN tx_id IS NULL THEN 1 ELSE COALESCE(tx_version, 0) + 1 END
      WHERE k = l_w(i) AND COALESCE(tx_state, 3) = 3;
   l_stamped := SQL%ROWCOUNT;
-  OPEN ? FOR SELECT l_written, l_stamped FROM dual;
+  ? := l_written; ? := l_stamped;
 END;
 ```
 
@@ -1860,14 +1877,14 @@ BEGIN
      WHERE k = l_k AND COALESCE(tx_state, 3) = 3;
     l_stamped := SQL%ROWCOUNT;
   END IF;
-  OPEN ? FOR SELECT l_meta, l_stamped, l_k FROM dual;
+  ? := l_meta; ? := l_stamped; ? := l_k;
 END;
 ```
 
-The binds: the stamp's three values first, the user's placeholders in the INSERT, the cursor
-last. The row read back is `meta, stamped, k...`: whether the metadata row was inserted, whether
-an existing one was stamped instead, and the key as the data row spells it, through `readKey`,
-which the driver records as the row inserted (`Context.inserted`) and reads the generated keys
+The binds: the stamp's three values first, the user's placeholders in the INSERT, the row's OUT
+binds last, typed and checked as the keyed write's above. The row read back is `meta, stamped,
+k...`: whether the metadata row was inserted, whether an existing one was stamped instead, and
+the key as the data row spells it, which the driver records as the row inserted (`Context.inserted`) and reads the generated keys
 back by, when asked for them, as today.
 
 | the row | the driver |
@@ -2139,9 +2156,9 @@ vendor's own statement, then on AWS with the rest.
   vendor's. ORA-08177 from a batch at SNAPSHOT is `40001`, rollback-only, as from a statement.
 
   *The block of entries, where the write's form is a block.* The keyed write, the write beyond
-  the key and the decoupled INSERT return a cursor, so ojdbc cannot batch them. Up to 16
-  consecutive parameter sets of one such write go as one anonymous block whose body is the
-  write's block body once per entry, in order, each entry's locals suffixed by its number, each
+  the key and the decoupled INSERT return their row through OUT binds, so ojdbc cannot batch
+  them. Up to 16 consecutive parameter sets of one such write go as one anonymous block whose
+  body is the write's block body once per entry, in order, each entry's locals suffixed by its number, each
   entry's placeholders its own binds, so that each entry sees the ones before it, as a batch's
   statements do. The block stops at the first entry whose outcome is not final by its own rules:
   for the keyed write a row in flight, a key without a metadata row, a committed row not written,
@@ -2149,9 +2166,11 @@ vendor's own statement, then on AWS with the rest.
   an after image matched, an abort code, a stamp short; for the INSERT a stamp short. A key
   without a row (count 0), a predicate matching nothing, a state that is no committed image
   (count 0), and every entry written and stamped are final, and the block goes on. Each entry's
-  sub-block runs under `IF l_stop = 0`, and sets `l_stop` when it stops. The cursor returns one
-  row per entry, `n, done` and then the write's own row, `done` 0 for an entry the block did not
-  reach, by a `UNION ALL` of one `SELECT ... FROM dual` per entry over that entry's locals. No
+  sub-block runs under `IF l_stop = 0`, and sets `l_stop` when it stops. The rows come back per
+  entry as OUT binds, `n, done` and then the write's own row as the write returns it, `done` 0
+  for an entry the block did not reach; the checking run's cursor is a `UNION ALL` of one
+  `SELECT ... FROM dual` per entry over that entry's locals, fetched whole in one round trip
+  (`setFetchSize` of the entries and one). No
   savepoint: an entry's outcome, once final, is what the entry alone would have had, so there is
   nothing to undo when the block stops, and the driver records the entries done, handles the
   stopping entry by its single form (the wait and the block again, the steps, or the abort), and
@@ -2170,9 +2189,8 @@ vendor's own statement, then on AWS with the rest.
   read, which hands the entries to the block of entries, whose order they need; then the DML and
   the CAS as `FORALL` statements, `SQL%BULK_ROWCOUNT` per entry; for the INSERT the user's INSERT
   as a `FORALL` with `RETURNING k BULK COLLECT INTO`, the metadata insert as a `FORALL` under the
-  hint, and the takeover as a `FORALL` over the entries whose row count was 0. The cursor returns
-  one row per entry as above, over the entries' collections by constant index, `l_k(1), l_k(2)`,
-  one `SELECT ... FROM dual` per entry. Each placeholder of the statement becomes a collection,
+  hint, and the takeover as a `FORALL` over the entries whose row count was 0. The rows come back
+  per entry as above, from the entries' collections by constant index, `l_k(1), l_k(2)`. Each placeholder of the statement becomes a collection,
   one element per entry, whose element type is the type ojdbc binds the scalar as, so that the
   value compares and converts exactly as it does in the statement by itself: `NUMBER` for
   `setInt`, `setLong`, `setShort`, `setBigDecimal`, and for `setDouble` and `setFloat` unless the
