@@ -254,3 +254,52 @@ Facts the implementing session confirms by test: `FORALL` over an empty collecti
 skips it anyway); `RETURNING ... BULK COLLECT INTO` across a `FORALL`'s executions (the inline
 UPDATE's versions); `SQL%BULK_ROWCOUNT` after a `FORALL` whose statement carries the user's
 placeholders; and a `MERGE` inside `FORALL` with `l_w(i)` in its `USING` clause.
+
+### 2026-10-26: form 4 designed (Fable), design 4.3 "An INSERT on Oracle" and 4.4 "Batches on Oracle"
+
+The vendor's own batching sets the target, so that was checked first: Oracle's JDBC Developer's
+Guide (23ai, performance extensions, update batching) says standard batching gains only for
+`PreparedStatement`, "does not implement true batching for generic statements and callable
+statements", and takes no callable statement with an OUT parameter. Hence the division: entries
+that are not consecutive parameter sets of one prepared write run one per round trip, each its
+single form, at parity with the vendor; parameter sets of one prepared write go in one round
+trip by one of two means.
+
+- **The vendor's batching for writes whose form is one plain statement**: the inline INSERT with
+  its stamp columns, and the inline statement with the stamp at SNAPSHOT (clear or gated). Nothing
+  to build but adding the entries' binds to the rewritten statement; the counts are the vendor's.
+  The gate is one condition for all entries in the snapshot, so counts all 0 ask the coarse check
+  and any count above 0 marks the table clear.
+- **The block of entries for writes whose form is a block** (keyed, beyond the key, decoupled
+  INSERT): the write's block body repeated per entry, up to 16, sequential, stopping at the first
+  entry whose outcome is not final by its own rules, one cursor row per entry with a `done`
+  column. No savepoint, unlike PostgreSQL's text of entries: each entry's outcome is final once
+  made, so a stop needs no undo, and a failure undoes the whole block by itself (statement-level
+  atomicity), after which the entries are replayed one by one, as PostgreSQL replays. Weighed and
+  rejected: undoing to a savepoint on a stop, which PostgreSQL needs because its statements cannot
+  stop mid-text and a failed statement aborts its transaction; neither holds on Oracle.
+- **The merged `FORALL` block**, one statement execution per step for all entries (the form of the
+  write beyond the key with the keys given), built after the block of entries and measured
+  against it. Its risk is the typing of the entries' values as collection elements, which is the
+  one place a mistake is silent (a value converted or compared otherwise than the scalar bind):
+  decided as "the type ojdbc binds the scalar as", by the setter, never the column's type (a CHAR
+  column would pad a `setString` and match a row the statement alone misses), with the table in
+  the design; anything outside the table keeps the block of entries. Two entries on one key are
+  told before any write by comparing the keys as read, and go to the block of entries, whose order
+  they need.
+- **The decoupled INSERT block** was needed first (the batch of inserts is built on it) and is in
+  4.3: the two inserts with `RETURNING ... INTO` carrying the key, the metadata insert under
+  `IGNORE_ROW_ON_DUPKEY_INDEX` as today, and the tombstone takeover inside the block, which was a
+  second round trip; ORA-00001 propagates and is classified as today. The inline INSERT needs no
+  block: it is the one statement with the stamp columns already.
+
+Facts the implementing session confirms by test: `RETURNING k INTO` of an `IDENTITY` key inside
+the block; `FORALL ... INSERT ... RETURNING BULK COLLECT INTO` keeping the entries' order;
+`IGNORE_ROW_ON_DUPKEY_INDEX` inside a `FORALL`; ojdbc's `BatchUpdateException` counts on a
+duplicate in the middle of a prepared batch (`executeBatch` of the inline INSERT); and that a
+`CallableStatement` with the cursor OUT bind is refused by `addBatch`, so that the block of
+entries is the only way.
+
+Left: form 5 (the locking read: the in-flight check and the lock in one round trip at SNAPSHOT,
+and at READ COMMITTED the one-statement form if Oracle's statement restart gives the newest
+version's anchor, to verify first), form 6 (the read side with the micro-benchmark session).

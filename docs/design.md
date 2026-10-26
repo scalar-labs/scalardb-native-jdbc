@@ -1786,6 +1786,61 @@ counted, locally then on AWS. The collections hold every key the predicate match
 session's memory, as the steps hold them in the driver's; a write over a large share of a table
 costs that much either way, and the block keeps no row cap, as the steps keep none.
 
+**An INSERT on Oracle, one block (todo 334).** An INSERT of one row by `VALUES`, without a
+`RETURNING` of its own (refused on Oracle anyway), at both levels. In the inline layout it is no
+block: the user's INSERT with the stamp's five columns, `tx_id, tx_state, tx_version,
+tx_prepared_at, tx_committed_at`, added to its column list and `?, 3, 1, ?, ?` to its row, the one
+statement the layout's INSERT already is, with `executeUpdate`'s 1 as its count; the inline layout
+has no tombstone to take over (4.5). In the decoupled layout the two inserts of 4.3 run in one
+block, the key of the row inserted carried from the first to the second by `RETURNING ... INTO`,
+which PL/SQL has and the statement alone has not, an `IDENTITY` key included; the metadata insert
+skips a key that has a row under `IGNORE_ROW_ON_DUPKEY_INDEX`, as today, and the block takes such
+a row over at once, the orphan or tombstone of 4.5, by the stamp under the deemed-committed
+condition, on its current version since nothing was read, the CAS 4.3 prescribes for it; a
+duplicate of the data row raises ORA-00001 out of the block, which leaves nothing of it, and the
+driver classifies it as today (`InsertPlan.duplicate`: another constraint's, in flight, written
+after the snapshot, or the application's), a second round trip only then. Exact because it is the
+INSERT's protocol with the tombstone's second round trip folded in.
+
+```plsql
+DECLARE
+  l_i T_meta.tx_id%TYPE;  l_p T_meta.tx_prepared_at%TYPE;  l_c T_meta.tx_committed_at%TYPE;
+  l_k T.k%TYPE;  l_meta NUMBER := 0;  l_stamped NUMBER := 0;
+BEGIN
+  l_i := ?;  l_p := ?;  l_c := ?;
+  INSERT INTO T (<the user's columns>) VALUES (<the user's values>) RETURNING k INTO l_k;
+  INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (k)) */ INTO T_meta x
+         (k, tx_id, tx_state, tx_version, tx_prepared_at, tx_committed_at)
+  VALUES (l_k, l_i, 3, 1, l_p, l_c);
+  l_meta := SQL%ROWCOUNT;
+  IF l_meta = 0 THEN                                        -- a row exists: an orphan, taken over
+    UPDATE T_meta SET tx_id = l_i, tx_prepared_at = l_p, tx_committed_at = l_c, tx_state = 3,
+           tx_version = CASE WHEN tx_id IS NULL THEN 1 ELSE COALESCE(tx_version, 0) + 1 END
+     WHERE k = l_k AND COALESCE(tx_state, 3) = 3;
+    l_stamped := SQL%ROWCOUNT;
+  END IF;
+  OPEN ? FOR SELECT l_meta, l_stamped, l_k FROM dual;
+END;
+```
+
+The binds: the stamp's three values first, the user's placeholders in the INSERT, the cursor
+last. The row read back is `meta, stamped, k...`: whether the metadata row was inserted, whether
+an existing one was stamped instead, and the key as the data row spells it, through `readKey`,
+which the driver records as the row inserted (`Context.inserted`) and reads the generated keys
+back by, when asked for them, as today.
+
+| the row | the driver |
+|---|---|
+| `meta` 1 | the row is written and stamped: count 1, `anchors.wrote(tx_id)` |
+| `meta` 0, `stamped` 1 | the same, over a tombstone or an orphan taken over (4.5) |
+| `meta` 0, `stamped` 0 | abort `40001`, "a key the statement inserts is being written by ScalarDB": the metadata row is in flight, an imported table's ScalarDB insert between its metadata upsert and its data insert (section 1); the data row stays until the rollback |
+| ORA-00001 | nothing of the block remains; the duplicate classified as today, the primary key's by its constraint's type, then in flight, written after the snapshot, or the application's |
+| any other error | the vendor's own; nothing of the block remains |
+
+A multi-row INSERT and an `INSERT ... SELECT`, which Oracle's `RETURNING` cannot serve, keep the
+steps. A `BEFORE INSERT` row trigger still refuses the INSERT (todo 275): the key `RETURNING`
+gives would be the trigger's, exact, but the refusal is lifted only with a test.
+
 ### 4.4 Builder notes
 
 - **Autocommit.** A write is three statements that must share one database transaction. In autocommit
@@ -1913,6 +1968,104 @@ costs that much either way, and the block keeps no row cap, as the steps keep no
   costs around its execution, which grows with its plan. Multi-key driver writes and multi-key ScalarDB prepares can
   deadlock across keys whatever the per-key order; the database detects it and the retry contract of
   section 6 covers it.
+
+  **Batches on Oracle (todo 334).** What the vendor's driver does sets the target. ojdbc batches
+  the parameter sets of one `PreparedStatement` in one round trip, an array execution of the one
+  statement; for `Statement.addBatch(sql)` and callable statements it "does not implement true
+  batching", each entry a round trip, and a callable statement with an OUT parameter cannot be
+  batched at all (the JDBC Developer's Guide, update batching). So on Oracle a batch's entries that
+  are not consecutive parameter sets of one prepared write run one per round trip, each its own
+  form above, where the vendor pays the same; and the parameter sets of one prepared write go in
+  one round trip, by one of two means, chosen by the write's form. Every Oracle block binds the
+  stamp's three values first into locals, so that a block holding several entries binds them
+  once, which the single forms of 4.3 may do as well. In autocommit a batch runs in one
+  transaction of its own, as above.
+
+  *The vendor's batching, where the write's form is one plain statement.* An inline INSERT with
+  its stamp columns, and at SNAPSHOT the inline statement with the stamp on a table the
+  transaction found clear, or has not yet, with the gate: the driver adds each entry's binds to
+  the one rewritten statement and runs `executeBatch`, the vendor's own array execution, the
+  stamp's values bound once per entry. The counts come back per entry, as the vendor's do. For
+  the INSERT each is 1, a duplicate among them ORA-00001 from `executeBatch`, after which the
+  driver classifies the duplicate as the single form does, with the counts ojdbc reports for the
+  entries before it (an array execution stops at the failing row and keeps the rows before it),
+  and replays nothing, since the statement has no second part to be short of. For the gated statement at SNAPSHOT the gate is one condition for every entry,
+  the snapshot being the transaction's: counts all 0 ask the coarse check, which sends the
+  entries to their blocks when it finds a row and marks the table clear otherwise; any count above
+  0 means the gate was open, the table is marked clear, and every entry's count is the vendor's,
+  a 0 among them a predicate that matched nothing; on a table found clear every count is the
+  vendor's. ORA-08177 from a batch at SNAPSHOT is `40001`, rollback-only, as from a statement.
+
+  *The block of entries, where the write's form is a block.* The keyed write, the write beyond
+  the key and the decoupled INSERT return a cursor, so ojdbc cannot batch them. Up to 16
+  consecutive parameter sets of one such write go as one anonymous block whose body is the
+  write's block body once per entry, in order, each entry's locals suffixed by its number, each
+  entry's placeholders its own binds, so that each entry sees the ones before it, as a batch's
+  statements do. The block stops at the first entry whose outcome is not final by its own rules:
+  for the keyed write a row in flight, a key without a metadata row, a committed row not written,
+  a stamp short, several rows matched; for the write beyond the key a key in flight, missing or
+  an after image matched, an abort code, a stamp short; for the INSERT a stamp short. A key
+  without a row (count 0), a predicate matching nothing, a state that is no committed image
+  (count 0), and every entry written and stamped are final, and the block goes on. Each entry's
+  sub-block runs under `IF l_stop = 0`, and sets `l_stop` when it stops. The cursor returns one
+  row per entry, `n, done` and then the write's own row, `done` 0 for an entry the block did not
+  reach, by a `UNION ALL` of one `SELECT ... FROM dual` per entry over that entry's locals. No
+  savepoint: an entry's outcome, once final, is what the entry alone would have had, so there is
+  nothing to undo when the block stops, and the driver records the entries done, handles the
+  stopping entry by its single form (the wait and the block again, the steps, or the abort), and
+  sends the entries after it as a new block. A failure the block raises, ORA-00001, ORA-08177, a
+  data error, a deadlock, undoes the whole block, Oracle's statement-level atomicity, and the
+  driver runs the entries one by one, which tells the same outcome and counts as before, the
+  `BatchUpdateException` carrying the counts of the entries before the failing one; a timeout or a
+  cancel ends the batch as it would at an entry, without the replay. The anchor check of the
+  keyed write runs per entry on the rows returned, a moved anchor an abort as for one statement.
+
+  *The entries merged, one statement for all.* The block of entries runs each entry's statements
+  once per entry; a batch of keyed writes or of decoupled INSERTs of one prepared statement can
+  run them once for all, as `FORALL` statements over the entries' values, the form of 4.3's write
+  beyond the key with the keys given rather than read: step 1 once per entry by `SELECT ... INTO`
+  on its key, two entries on one key told before anything is written by comparing the keys as
+  read, which hands the entries to the block of entries, whose order they need; then the DML and
+  the CAS as `FORALL` statements, `SQL%BULK_ROWCOUNT` per entry; for the INSERT the user's INSERT
+  as a `FORALL` with `RETURNING k BULK COLLECT INTO`, the metadata insert as a `FORALL` under the
+  hint, and the takeover as a `FORALL` over the entries whose row count was 0. The cursor returns
+  one row per entry as above, over the entries' collections by constant index, `l_k(1), l_k(2)`,
+  one `SELECT ... FROM dual` per entry. Each placeholder of the statement becomes a collection,
+  one element per entry, whose element type is the type ojdbc binds the scalar as, so that the
+  value compares and converts exactly as it does in the statement by itself: `NUMBER` for
+  `setInt`, `setLong`, `setShort`, `setBigDecimal`, and for `setDouble` and `setFloat` unless the
+  connection sets `SetFloatAndDoubleUseBinary`; `VARCHAR2(32767)` for `setString`; `RAW(32767)`
+  for `setBytes`; `DATE` for `setDate` and a `LocalDate`; `TIMESTAMP` for `setTimestamp` and a
+  `LocalDateTime`; `TIMESTAMP WITH TIME ZONE` for an `OffsetDateTime`; a `setNull` by its type.
+  Not by the column's type: a `setString` against a CHAR column compares without padding as a
+  scalar bind does, and a CHAR-typed element would pad it and match a row the statement alone
+  misses. An entry bound any other way (a boolean, a stream, a LOB, an object) keeps the block
+  of entries. Up to 64 entries per text, as on PostgreSQL. Built after the block of entries and
+  measured against it: what it saves is executions inside one call, not round trips.
+
+  What the driver does with the rows of a block of entries, per entry in order:
+
+  | the row | the driver |
+  |---|---|
+  | `done` 1, the write's row final | the entry's count and records as the single form says; `anchors.wrote(tx_id)` once for the batch |
+  | `done` 1, the write's row the stopping outcome | the single form's handling of that row: the bounded sleep and the entry again, the steps, or the abort; then the entries after it as a new block |
+  | `done` 0 | not reached: sent again after the stopping entry is settled |
+  | an anchor moved (keyed write, from the rows returned) | abort `40001`; the batch fails with the counts before the entry, the transaction rollback-only |
+  | two entries on one key | no case: the second sees the first's row, as the statements would; the merged form hands such entries to the block of entries before writing |
+  | a failure raised by the block | nothing of the block remains; the entries one by one, their counts and the failure as `BatchUpdateException` reports them; a timeout or a cancel ends the batch |
+  | `executeBatch` on the vendor's batching, a count 0 under the gate | all 0: the coarse check, then the blocks or the table marked clear; some above 0: the table marked clear, the 0s the vendor's |
+
+  What must keep holding on Oracle: `MoreWritesIntegrationTest.batches` (20 entries, entries that
+  see the ones before, a tombstone taken over in a batch, a duplicate as the 19th entry in a
+  transaction, which the replay reports with 18 counts); `batches` on the inline tables. To add: a
+  block of 16 entries stopping at an entry in flight at READ COMMITTED with the wait set, the
+  batch completing after the row settles with every count 1; the same at SNAPSHOT, `40001` with the
+  counts before it; a prepared INSERT batch on an inline table through `executeBatch` with a
+  duplicate in the middle, the vendor's counts before it and the classification; the gated inline
+  UPDATE batch with the table not clear, every count 0, the coarse check and the blocks. Measured:
+  NewOrder's stock updates (ten keyed entries) and `order_line` inserts (ten entries) against the
+  vendor's `executeBatch`, round trips counted; the inline INSERT batch should match the vendor's
+  by construction, and the block of entries is read against the merged form once that exists.
 - **Predicate shapes for the two-arm read.** `P` must reference one table, be deterministic (it is
   evaluated twice through `NOT COALESCE(P, false)` or its CASE form), and contain no subquery over `T`. `LIKE`, `IN`,
   ranges and `IS NULL` rewrite by column substitution, as ScalarDB's `convertConjunctionToBeforeImage`
