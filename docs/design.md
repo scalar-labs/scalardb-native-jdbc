@@ -1503,10 +1503,15 @@ its state and aborts, or fails as NOWAIT fails, since the lock held on it must n
 statement (section 6). No row in flight is matched by its before image alone, since the images of
 a row differ in no key column. On a decoupled table, whose state is in its metadata row, which the
 lock's re-read of a data row does not reach, the same locking read is two statements in one round
-trip: the lock as written with its rows' keys appended and nothing else (todo 336: it carried the
-anchored read's two version lookups a row, which the second statement reads again), then the keys,
-versions and states of the rows the predicate matches, read from the data table joined to its
-metadata table in a snapshot taken after the lock. A prepare that
+trip: the lock as written over the data table, the rows as they are, with its rows' keys appended
+and nothing else (todo 336: it locked the committed copy, one probe of the metadata table a row,
+and carried the anchored read's two version lookups a row, which the second statement reads
+again), then the keys, versions and states of the rows the predicate matches, read from the data
+table joined to its metadata table in a snapshot taken after the lock. So a row a ScalarDB prepare
+is inserting, in flight with no before image, which the committed copy left out and the read
+returned without, is locked and shown in flight among the locked rows, and the read aborts or
+fails as NOWAIT fails, as the inline layout's lock does with it: the two layouts agree, and the
+rule of section 6 holds, a lock on a row in flight never outlasting the statement. A prepare that
 committed before the lock was granted shows there as state 1 or 2, and one that has not committed
 cannot change the metadata row, since it needs the data row's lock the driver now holds; a row the
 read shows in flight with a before image, or among the locked rows, aborts or fails as NOWAIT
