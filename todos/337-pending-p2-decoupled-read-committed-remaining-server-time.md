@@ -243,3 +243,9 @@ on MySQL and Oracle. Tasks for the builder: `Writes.inFlightCheck`, `Writes.clea
 untouched; `Setup.gatherHistogram`'s PostgreSQL branch, dry run included; tests: each probe's
 EXPLAIN on an unanalyzed metadata table shows the partial index (the 5,000-row test table's
 InitPlan goes from the sequential scan to the index), and the setup's plan lists the ANALYZE.
+
+### 2026-10-27: the other engines' suites (Opus)
+
+MySQL, MariaDB, SQL Server and Oracle from an export of HEAD (`2301048` and before it `cb16d83`),
+Testcontainers: 304 tests, 208 run, all passing (40 min); the changes are PostgreSQL's alone, as
+built.
