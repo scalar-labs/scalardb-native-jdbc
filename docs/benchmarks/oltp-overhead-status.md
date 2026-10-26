@@ -46,9 +46,11 @@ transaction runs beside the benchmark. Locally at REPEATABLE READ, inline, TPC-C
 (d) **1.01**, (c) 0.92; YCSB (d) 0.98, (c) 0.98. ScalarDB's wider rows cost the vendor 20 to 37%
 more server time per statement and nothing in throughput, their metadata columns staying NULL. The
 driver's rows are wider still because it writes the stamp into each (WAL 15.8 KB a commit against
-(d)'s 11.7 and (a)'s 10.1), which is the protocol's cost, not the layout's. So (c) against (d),
-0.92 and +0.54 ms a transaction here, is the number the driver owns, and the 10% target stands on
-its own terms. Run with `-Dnativejdbc.benchbase.runs=a,c,d` (`BB_RUNS` on AWS).
+(d)'s 11.7 and (a)'s 10.1), which is the protocol's cost, not the layout's. The target stays (c)
+against (a), the vendor on plain tables, which is what an application compares against; (d) only
+attributes the gap, protocol against table shape, when deciding where to work, and is not part of
+the standard matrix. Run with `-Dnativejdbc.benchbase.runs=a,c,d` (`BB_RUNS` on AWS) when that
+question comes up.
 
 The rest of this page is the state before these changes; its "Where the remaining cost goes" and
 "Open ideas" are superseded by the todo's entry, which lists what is left: the first-touch reads'

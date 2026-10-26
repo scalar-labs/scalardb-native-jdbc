@@ -621,7 +621,9 @@ and (c) against (d) is +0.54 ms a transaction, 0.92. Per statement at REPEATABLE
 the oorder insert 52 against 45, the customer update 56 against 51, Delivery's order_line update
 64.5 against 60.9, the merged order_line insert of 15 rows 319 against 15 × 23, the customer read
 by last name 82 against 68. Of the stamp, only `tx_prepared_at` and `tx_committed_at` (16 bytes)
-are open to question; `tx_id`, `tx_state` and `tx_version` are what ScalarDB reads.
+are open to question; `tx_id`, `tx_state` and `tx_version` are what ScalarDB reads. The target
+remains (c) against (a); (d) is a diagnostic for attributing the gap, run when that question
+comes up, not a reference.
 
 The integration suite: it passes in full against an external PostgreSQL (a throwaway container,
 `-Dnativejdbc.postgresql.url`). Under Testcontainers four passthrough tests (`RoutingIntegrationTest`
