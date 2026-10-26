@@ -208,3 +208,49 @@ would give and which needs `TABLE()` of a local type, 12.1, to be checked, or th
 re-read from the metadata table by the stamp's `tx_id`), form 4 (batches), form 5 (the locking
 read, with the statement-restart verification), form 6 (the read side with the micro-benchmark
 session). Nothing in `bench-env/` or `BenchBaseBenchmark` was touched.
+
+### 2026-10-26: form 3 designed (Fable), design 4.3, "The write beyond the key on Oracle"
+
+The predicate write is the keyed block with step 1 over the predicate's keys, step 2 as a `FORALL`
+over them and step 3 as a `FORALL` over the keys written, with step 2's zero-row rule made inside
+the block. The decision that shaped it: **the block returns one row of counts, no per-key rows.**
+Oracle's `TABLE` operator takes a collection type declared in a package specification; one
+declared in an anonymous block fails with ORA-22905 (12.1, oracle-base's article on the TABLE
+operator with locally defined types, checked today), so a cursor over the block's own collections
+is not available, and per-key rows would need SQL-level types the setup creates per table and the
+catalog checks. Every per-key decision but one is a function of what the block itself read, so it
+moves into the block: in flight, missing metadata, an after image matched, the zero-row rule
+(`skipOrAbort`'s four cases, as codes 1 to 4, and a key matching several rows as 5), the stamp
+count. The one that cannot is the comparison with an anchor the transaction recorded before the
+statement, so **a write with recorded anchors on its table keeps the steps**, which at READ
+COMMITTED is a predicate write after a read of the same table (TPC-C has none: Delivery's
+`order_line` write follows an aggregate, which records no anchor) and at SNAPSHOT a `SKIP LOCKED`
+read's table. The follow-up, if a workload shows the case: the keys read in one round trip, then
+sent with their anchors into a block of a per-count text, two round trips instead of 1 + 2n.
+
+Other decisions, each mirroring the PostgreSQL form the implementer translates from:
+
+- The inline UPDATE folds its CAS into the version it writes, -1 where the row moved
+  (`fusedKeyedInline`'s `scalardb_native_ok`), so a moved row that still matches is written and
+  reported an abort, and one that stopped matching is the skip of the zero-row rule; the inline
+  DELETE keeps its CAS in the WHERE and re-reads the predicate on a skipped row (`matches`, todo
+  292). Weighed and rejected for the UPDATE: the re-read with the predicate, which decides on a
+  later version than the one the DML met.
+- The keys read is the keys step's text in the decoupled layout (`rc_T` with the metadata rows
+  joined) and the two arms of `fusedKeyedInline` in the inline one, where `rc_T`'s CASE columns
+  would hide a non-key predicate from the indexes.
+- The stamp's three values are bound first into locals, so one text serves the `FORALL`
+  statements and the imported table's `MERGE`, whose two branches both need them.
+- The decoupled clear-table block (the DML with the gate returning its keys, the stamp as a
+  `FORALL`, two counts back) is given here, where it is needed for a write beyond the key; the
+  inline layout's clear-table form is the keyed form's statement, whose predicate is any.
+- "The same version" is one rule in forms 2 and 3: `tx_id` equal with two NULLs equal (`DECODE`
+  in SQL, an explicit `IS NULL` pair in a PL/SQL expression, which has no `DECODE`) and
+  `COALESCE(tx_version, 0)` equal, which agrees with `Anchors.Version.is` and with `cas()` on every
+  row ScalarDB writes (a row with a `tx_id` has a version of 1 or more). `SQL%BULK_ROWCOUNT` is
+  copied into a local array right after its `FORALL`, before the zero-row rule's own statements.
+
+Facts the implementing session confirms by test: `FORALL` over an empty collection (the gate
+skips it anyway); `RETURNING ... BULK COLLECT INTO` across a `FORALL`'s executions (the inline
+UPDATE's versions); `SQL%BULK_ROWCOUNT` after a `FORALL` whose statement carries the user's
+placeholders; and a `MERGE` inside `FORALL` with `l_w(i)` in its `USING` clause.

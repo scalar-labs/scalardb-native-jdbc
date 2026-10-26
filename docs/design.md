@@ -1578,6 +1578,214 @@ on the same container, since the container runs under emulation and its times me
 absolute; then on AWS once BenchBase has an Oracle build, after the PostgreSQL matrix, the time
 added per transaction against the vendor on plain tables, both layouts, both levels.
 
+**The write beyond the key on Oracle, the same block over the predicate's keys (todo 334).** An
+UPDATE or DELETE whose WHERE clause is not the full key, at both levels, in both layouts, without
+a locking clause, when the transaction recorded no anchor of the table: at SNAPSHOT no read records
+one (4.2 on Oracle), bar a `SKIP LOCKED` read; at READ COMMITTED a transaction that read the table
+before has them, and its write keeps the steps as today, for a reason given below. The protocol is
+the predicate form of 4.3: the keys the predicate matches by its committed image, with their
+metadata, then each key as the keyed write, its DML with the predicate re-applied and its CAS. The
+argument is the keyed block's, with one more decision moved into the block: step 2's zero-row
+rule for a key the DML skipped, which depends on the row read again and on the version the block
+itself read, so it is the block's to make. What cannot move into the block is the comparison with
+an anchor the transaction recorded before the statement, which needs each key read beside its
+version, and a block cannot return rows of its own collections: Oracle's `TABLE` operator takes a
+collection type declared in a package specification, not one declared in an anonymous block
+(ORA-22905, 12.1), so per-key rows would need types the setup creates and the catalog checks, a
+cost not worth the case; and the comparison cannot run inside the block either, since the anchors
+are in the driver. So the block returns one row of counts, and the write with recorded anchors on
+its table keeps the steps, the keys read, each key's DML and CAS, as today; a variant that reads
+the keys in one round trip and sends them with their anchors into a block of a per-count text, two
+round trips, is the follow-up if a workload shows the case (TPC-C's predicate write, Delivery's
+`order_line`, follows an aggregate, which records nothing).
+
+Why the block is exact. Its keys read is step 1's statement, the committed images through `rc_T`
+with their metadata rows, each key with whether it has a metadata row, its version and its state;
+in the inline layout the two arms `fusedKeyedInline` reads on PostgreSQL, the committed rows with
+their versions and the rows in flight whose before image matches, with a state of 1. A key in
+flight closes the gate, nothing is written, and the driver waits or aborts as for the keyed block;
+a key without a metadata row closes it too, and the steps stamp it; at SNAPSHOT the after-image
+check runs before any write, as the fused statement's CTE does, and closes it. Past the gate the
+DML runs once per key by `FORALL`, the user's statement with its predicate and the key, each
+execution the step's own statement, with `SQL%BULK_ROWCOUNT(i)` telling which keys it wrote. For a
+key it skipped the block reads the row again by its key and applies step 2's rule as
+`skipOrAbort` does: no row, or a state of 1 or 2, or the version still the one read, is an abort;
+a version that moved is a row that stopped matching, skipped, as a native UPDATE at READ COMMITTED
+skips it; an inline DELETE, whose CAS is in its WHERE clause and whose row may have moved and
+still match, also re-reads the predicate on the row now and aborts if it matches (todo 292). The
+inline UPDATE needs no such re-read: its CAS is folded into the version it writes, -1 where the
+row moved, so a moved row that still matches is written and the block reports it, an abort, where
+one that stopped matching is not written, the skip above; this is `fusedKeyedInline`'s
+`scalardb_native_ok`. Then the CAS runs once per key written, `FORALL` over those keys, and a stamp
+short of the rows written is an abort. At SNAPSHOT a row changed after the snapshot fails its
+`FORALL` execution with ORA-08177, which fails the block, and nothing of it remains. The decoupled
+UPDATE, the stamp bound first into locals so that one text serves every statement inside:
+
+```plsql
+DECLARE
+  l_i T_meta.tx_id%TYPE;  l_p T_meta.tx_prepared_at%TYPE;  l_c T_meta.tx_committed_at%TYPE;
+  TYPE t_k IS TABLE OF T.k%TYPE;         l_k t_k;          -- the keys read, one per key column
+  TYPE t_n IS TABLE OF NUMBER;           l_nometa t_n;  l_version t_n;  l_state t_n;
+  TYPE t_ix IS TABLE OF PLS_INTEGER INDEX BY PLS_INTEGER;  l_cnt t_ix;  l_do t_ix;
+  TYPE t_id IS TABLE OF T_meta.tx_id%TYPE;  l_id t_id;
+  l_held NUMBER := 0;  l_missing NUMBER := 0;  l_after NUMBER := 0;
+  l_written NUMBER := 0;  l_stamped NUMBER := 0;  l_skipped NUMBER := 0;  l_abort NUMBER := 0;
+  n_id T_meta.tx_id%TYPE;  n_version NUMBER;  n_state NUMBER;  n_nometa NUMBER;
+BEGIN
+  l_i := ?;  l_p := ?;  l_c := ?;
+  SELECT d.k, CASE WHEN m.k IS NULL THEN 1 ELSE 0 END, m.tx_id, m.tx_version, m.tx_state
+    BULK COLLECT INTO l_k, l_nometa, l_id, l_version, l_state
+    FROM (SELECT t.k FROM rc_T t WHERE P) d LEFT JOIN T_meta m ON m.k = d.k;      -- step 1
+  FOR i IN 1 .. l_k.COUNT LOOP
+    IF l_state(i) IN (1, 2) THEN l_held := l_held + 1; END IF;
+    IF l_nometa(i) = 1 THEN l_missing := l_missing + 1; END IF;
+  END LOOP;
+  SELECT COUNT(*) INTO l_after FROM dual                                           -- SNAPSHOT only
+   WHERE EXISTS (SELECT 1 FROM <the after images of T, hinted> t WHERE P);
+  IF l_held = 0 AND l_missing = 0 AND l_after = 0 AND l_k.COUNT > 0 THEN            -- the gate
+    FORALL i IN 1 .. l_k.COUNT
+      UPDATE T t SET <the user's SET items> WHERE (P) AND t.k = l_k(i);             -- step 2
+    FOR i IN 1 .. l_k.COUNT LOOP l_cnt(i) := SQL%BULK_ROWCOUNT(i); END LOOP;   -- before any other SQL
+    FOR i IN 1 .. l_k.COUNT LOOP
+      IF l_cnt(i) = 1 THEN
+        l_written := l_written + 1;  l_do(l_do.COUNT + 1) := i;
+      ELSIF l_cnt(i) > 1 THEN
+        l_abort := 5;  EXIT;                                        -- a key matched several rows
+      ELSE                                                          -- step 2's zero-row rule
+        BEGIN
+          SELECT CASE WHEN m.k IS NULL THEN 1 ELSE 0 END, m.tx_id, m.tx_version, m.tx_state
+            INTO n_nometa, n_id, n_version, n_state
+            FROM T t LEFT JOIN T_meta m ON m.k = t.k WHERE t.k = l_k(i);
+        EXCEPTION WHEN NO_DATA_FOUND THEN l_abort := 1;  EXIT;      -- deleted since it was read
+        END;
+        IF n_state IN (1, 2) THEN l_abort := 2;  EXIT; END IF;      -- went in flight
+        IF n_nometa = l_nometa(i) AND ((n_id IS NULL AND l_id(i) IS NULL) OR n_id = l_id(i))
+           AND COALESCE(n_version, 0) = COALESCE(l_version(i), 0) THEN   -- the same version
+          l_abort := 3;  EXIT;                                      -- still at its version
+        END IF;
+        l_skipped := l_skipped + 1;                                 -- moved: stopped matching
+      END IF;
+    END LOOP;
+    IF l_abort = 0 AND l_do.COUNT > 0 THEN
+      FORALL j IN 1 .. l_do.COUNT                                                   -- step 3
+        UPDATE T_meta SET tx_id = l_i, tx_prepared_at = l_p, tx_committed_at = l_c, tx_state = 3,
+               tx_version = CASE WHEN tx_id IS NULL THEN 1 ELSE COALESCE(tx_version, 0) + 1 END
+         WHERE k = l_k(l_do(j)) AND COALESCE(tx_state, 3) = 3
+           AND DECODE(tx_id, l_id(l_do(j)), 1, 0) = 1
+           AND COALESCE(tx_version, 0) = COALESCE(l_version(l_do(j)), 0);
+      l_stamped := SQL%ROWCOUNT;
+    END IF;
+  END IF;
+  OPEN ? FOR SELECT l_k.COUNT, l_held, l_missing, l_after, l_written, l_stamped, l_skipped, l_abort
+                FROM dual;
+END;
+```
+
+A decoupled DELETE deletes in step 2 and, on a created table, deletes the metadata row in step
+3 under the CAS's three conditions; on an imported table step 3 is the stamp above, the
+tombstone. The inline UPDATE's step 2 is the user's statement with the stamp in its SET list and
+the CAS folded into the version, over the row's own state, returning the versions it wrote
+into `l_v`, a `t_n`:
+
+```plsql
+    FORALL i IN 1 .. l_k.COUNT
+      UPDATE T t SET tx_id = l_i, tx_prepared_at = l_p, tx_committed_at = l_c, tx_state = 3,
+             tx_version = CASE WHEN DECODE(t.tx_id, l_id(i), 1, 0) = 1
+                                AND COALESCE(t.tx_version, 0) = COALESCE(l_version(i), 0)
+                               THEN CASE WHEN t.tx_id IS NULL THEN 1
+                                         ELSE COALESCE(t.tx_version, 0) + 1 END
+                               ELSE -1 END,
+             <the user's SET items>
+       WHERE (P) AND t.k = l_k(i) AND COALESCE(t.tx_state, 3) = 3
+       RETURNING t.tx_version BULK COLLECT INTO l_v;
+```
+
+with no step 3, `l_stamped` the rows of `l_v` that are not -1, and `l_written` all of them, so
+that a moved row written with -1 is a stamp short, the abort of the fused statement. The inline
+DELETE's step 2 is `DELETE FROM T t WHERE (P) AND t.k = l_k(i) AND COALESCE(t.tx_state, 3) = 3 AND
+DECODE(t.tx_id, l_id(i), 1, 0) = 1 AND COALESCE(t.tx_version, 0) = COALESCE(l_version(i), 0)`, no
+step 3, `l_stamped` equal to `l_written`, and its zero-row rule adds, after the three aborts
+above, `SELECT COUNT(*) INTO n FROM T t WHERE (P) AND t.k = l_k(i)`: a row that still matches is
+an abort (code 4), the `matches` step of the inline DELETE. The inline keys read, in step 1's
+place: `SELECT t.k, 0, t.tx_id, t.tx_version, t.tx_state FROM T t WHERE (P) AND COALESCE(t.tx_state,
+3) = 3 UNION ALL SELECT t.k, 0, NULL, NULL, 1 FROM <the in-flight copy of T, hinted> t WHERE P`.
+Every `FORALL` runs its statement once per element in one call of the SQL engine; an empty
+collection runs none, and the gate skips it anyway. The binds, in text order: the stamp's three
+values; `P`'s placeholders in the keys read; at SNAPSHOT `P`'s again in the after-image check; the
+user's SET placeholders and `P`'s again in step 2; `P`'s again in an inline DELETE's zero-row rule;
+and the cursor last. The row read back is `found, held, missing, after, written, stamped,
+skipped, abort`: how many keys the predicate matched, how many of them in flight, without a
+metadata row, whether an after image matched, how many rows step 2 wrote and step 3 stamped, how
+many keys were skipped, and the abort code. What the driver does with it:
+
+| the row | the driver |
+|---|---|
+| `found` 0 | nothing matched: count 0, as the vendor's statement finds no row; no abort |
+| `after` 1 (SNAPSHOT) | nothing written; abort `40001`, "a row the statement writes is being written by a ScalarDB transaction" |
+| `held` above 0 | nothing written; at READ COMMITTED with `scalardbnative.inflightWaitMs` set, the bounded sleep of section 6 and the block again, which reads the keys afresh; otherwise, and at SNAPSHOT always, abort `40001` |
+| `missing` above 0 | nothing written; the steps one by one, which write the version-1 metadata rows (4.4) and then each key |
+| `abort` 1, 2, 3, 4 or 5 | abort `40001`: a key the DML skipped was deleted since it was read, went in flight, is still at its version (an image in flight showed), still matches the inline DELETE's predicate at another version, or matched several rows; the rows written before it stay until the rollback |
+| `stamped` below `written` | abort `40001`, "a row the statement writes changed after it was read": a metadata row moved, went in flight or lost its metadata between the read and the CAS, or an inline row moved under the lock and still matched (its version -1) |
+| `stamped` equal to `written` | count `written`, `anchors.wrote(tx_id)` when above 0; `skipped` keys stopped matching and count for nothing, as `applySteps` counts |
+| ORA-08177, ORA-08176, ORA-00060, any other error | as the keyed block: the error's own mapping, nothing of the block remains |
+| a duplicate in a batch | not this form: a batch's entries run one by one, each this block |
+
+Where the transaction found the table clear at SNAPSHOT, or has not found it yet and recorded no
+anchor of it, the inline layout runs the vendor's statement with the stamp of the keyed form,
+whose predicate is any; the decoupled layout runs its own clear-table block, the keyed block
+without its read: the user's DML with the gate, returning the keys it wrote, and the stamp over
+them, exact for the reason given for the inline statement, the metadata rows of a clear table
+committed in the snapshot and a moved one failing the stamp with ORA-08177, the stamp's count
+short of the DML's otherwise an abort, as on PostgreSQL:
+
+```plsql
+DECLARE
+  l_i T_meta.tx_id%TYPE;  l_p T_meta.tx_prepared_at%TYPE;  l_c T_meta.tx_committed_at%TYPE;
+  TYPE t_k IS TABLE OF T.k%TYPE;  l_w t_k;
+  l_written NUMBER := 0;  l_stamped NUMBER := 0;
+BEGIN
+  l_i := ?;  l_p := ?;  l_c := ?;
+  UPDATE T t SET <the user's SET items>
+   WHERE (P) AND NOT EXISTS (SELECT /*+ INDEX(m <T_inflight>) */ 1 FROM T_meta m
+                              WHERE m.tx_state IN (1, 2))          -- the gate, dropped once clear
+   RETURNING t.k BULK COLLECT INTO l_w;
+  l_written := SQL%ROWCOUNT;
+  FORALL i IN 1 .. l_w.COUNT
+    UPDATE T_meta SET tx_id = l_i, tx_prepared_at = l_p, tx_committed_at = l_c, tx_state = 3,
+           tx_version = CASE WHEN tx_id IS NULL THEN 1 ELSE COALESCE(tx_version, 0) + 1 END
+     WHERE k = l_w(i) AND COALESCE(tx_state, 3) = 3;
+  l_stamped := SQL%ROWCOUNT;
+  OPEN ? FOR SELECT l_written, l_stamped FROM dual;
+END;
+```
+
+A created table's DELETE deletes the metadata rows in the `FORALL` instead, `WHERE k = l_w(i) AND
+COALESCE(tx_state, 3) = 3`; an imported table's stamp is a `MERGE` per key, `MERGE INTO T_meta m
+USING (SELECT l_w(i) AS k FROM dual) s ON (m.k = s.k) WHEN MATCHED THEN UPDATE SET <the stamp>
+WHERE COALESCE(m.tx_state, 3) = 3 WHEN NOT MATCHED THEN INSERT (k, tx_id, tx_state, tx_version,
+tx_prepared_at, tx_committed_at) VALUES (s.k, l_i, 3, 1, l_p, l_c)`, which also writes the row a
+key had none of yet (4.4) and a DELETE's tombstone (4.5), the upsert of PostgreSQL's form. The
+driver reads the two counts and decides as `applyFast` does: a count above 0 is written and
+stamped at once when the two agree, the table marked clear and `anchors.wrote(tx_id)`, an abort
+when they differ; 0 on a table found clear is the vendor's 0, and on a table not yet found clear
+asks the coarse check, which sends the block above when it finds a row and marks the table clear
+otherwise. The merged forms of 4.4, a batch's entries of one of these writes, are the batch form
+of todo 334.
+
+What must keep holding on Oracle, beside the keyed form's tests: `committedWhileItWaits` beyond
+the key, which is the anchored case and keeps the steps; `inFlightWait`; `SnapshotIntegrationTest`'s
+UPDATE by predicate after a ScalarDB commit or a prepare and rollback of a row the transaction read,
+which aborts; `InlineIntegrationTest`'s DELETE by predicate of a row a writer changed (todo 292).
+To add: a predicate write at READ COMMITTED over two keys where another connection moves one so
+that it stops matching, counted 1 and the other key stamped; the same where the moved row still
+matches, an abort, in both layouts (the inline UPDATE through its -1 version); a predicate matching
+nothing, count 0 and nothing read back but the counts; and the clear-table block on a created and
+an imported table, the imported one over a key without a metadata row. Measured as the keyed form
+is: Delivery's `order_line` write beside the vendor's UPDATE by the same prefix, round trips
+counted, locally then on AWS. The collections hold every key the predicate matches, in the
+session's memory, as the steps hold them in the driver's; a write over a large share of a table
+costs that much either way, and the block keeps no row cap, as the steps keep none.
+
 ### 4.4 Builder notes
 
 - **Autocommit.** A write is three statements that must share one database transaction. In autocommit
