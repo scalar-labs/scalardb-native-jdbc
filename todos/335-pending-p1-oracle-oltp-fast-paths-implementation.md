@@ -158,3 +158,100 @@ vendor on plain tables on Oracle, not PostgreSQL's numbers.
 ## Work Log
 
 (the implementing session's, from the confirmation tests on)
+
+### 2026-10-26: task 1, the eight confirmation tests, all passing on Oracle Free 23
+
+`OracleFormsIntegrationTest` (eight methods, vendor connections, no ScalarDB), run against
+`gvenzl/oracle-free:23-slim-faststart` on the laptop through ojdbc11 23.26.3.0.0, with
+`-Dnativejdbc.oracle.url=jdbc:oracle:thin:@localhost:1521/FREEPDB1` on a container started by hand
+(`docker run -d --name ofa-oracle -p 1521:1521 -e ORACLE_PASSWORD=test ...`, the SYSDBA setting of
+`Engines.ORACLE` applied with sqlplus), so that a run costs 8 s rather than a container start. The
+results, as the tests print them under `[335]`:
+
+1. **Statement-level atomicity of a block.** A block that updates a row and then raises, by
+   `RAISE_APPLICATION_ERROR(-20001)` (SQLState 72000) and by ORA-01407 (a NOT NULL violation, SQLState
+   72000): the exception reaches the client, the row is unchanged when read in the same transaction,
+   and the transaction is open and usable (a later UPDATE and commit go through). Confirmed: forms 2
+   to 5 need no savepoint around a block; a batch's failed block is replayed one by one.
+2. **ORA-08177 out of a block at SERIALIZABLE.** Both a block whose UPDATE meets a row changed and
+   committed after the snapshot and one whose `SELECT ... INTO ... FOR UPDATE` does fail with error
+   code 8177 and SQLState 72000, which `Writes.asRetryable` (through `oracleSerialization`) maps to
+   `40001`; the row the block updated before the failing statement is back as it was (read in the
+   same transaction, where the block's own write would show). A later UPDATE of an unchanged row in
+   that transaction fails with ORA-08177 too, as section 5 states. A plain `SELECT ... FOR UPDATE` of
+   such a row fails with 8177 as well, form 5's conflict check at SNAPSHOT. Confirmed.
+3. **A `SYS_REFCURSOR` over `dual` on the block's locals.** For each key type (NUMBER(10),
+   NUMBER(19) with a value beyond double precision, VARCHAR2, CHAR(5) stored padded, BINARY_FLOAT
+   through `TO_BINARY_DOUBLE`, BINARY_DOUBLE, DATE with a time part, TIMESTAMP(6), RAW), a local
+   `T.k%TYPE` filled by `SELECT ... INTO`, returned through `OPEN ? FOR SELECT ... l_k FROM dual`,
+   registered as `OracleTypes.CURSOR` (-10, checked against the class) and read after `execute()`
+   through `Writes.readKey`, equals under `Anchors.key` what `readKey` gives for the table's column:
+   the same Java class each time (BigDecimal, String padded, Double, LocalDateTime, byte[]) and the
+   same JDBC type reported (NUMBER as 2, CHAR as 1, BINARY_DOUBLE as 101, DATE and TIMESTAMP as 93,
+   RAW as -3). A row not found leaves the local NULL, which `readKey` reads as no key. Confirmed.
+   **3b, recorded for the design, not asserted:** the same key through a scalar OUT bind registered
+   with the JDBC type the table's result set reported, read as `readKey` reads that type
+   (`getObject(i, LocalDateTime.class)` for 93, `getObject(i)` otherwise), equals under `Anchors.key`
+   for all nine types as well.
+4. **Binds in a block.** Seven `?` placeholders bound by position on a `CallableStatement`: the
+   key in the read's WHERE, the stamp's three values, the user's SET placeholder, the key again in
+   the DML's WHERE, and the cursor last; the row and the cursor row come back as expected.
+   `addBatch()` on that statement is refused at once: ORA-17090 "Operation not allowed: Stored
+   procedure with out or inout parameters cannot be batched". Confirmed: form 4's block of entries
+   is the only way to batch a block.
+5. **`FORALL` and `RETURNING`.** (a) `FORALL` over an empty collection runs and raises nothing, and
+   `SQL%ROWCOUNT` after it is 0 (not NULL). (b) `RETURNING k BULK COLLECT INTO` across a `FORALL`
+   UPDATE over keys (3, 1, 99, 2), 99 matching no row, collects (3, 1, 2): one element per row
+   written, in iteration order, none for a skipped key; `SQL%ROWCOUNT` 3; `SQL%BULK_ROWCOUNT(i)` is
+   (1, 1, 0, 1) with two scalar `?` binds in the statement. A `FORALL` INSERT `RETURNING k BULK
+   COLLECT INTO` returns the IDENTITY keys in entry order. (d) `MERGE` inside `FORALL` with `l_w(i)`
+   in its `USING` subquery and the stamp from locals: one row updated, one inserted, `SQL%ROWCOUNT` 2.
+   (e) `INSERT ... RETURNING k INTO l_k` of an IDENTITY key, then the metadata insert under
+   `IGNORE_ROW_ON_DUPKEY_INDEX(x (k))` with `l_k`: `SQL%ROWCOUNT` 1; the hinted insert of a key that
+   has a row gives `SQL%ROWCOUNT` 0 and leaves the row alone (form 4's `l_meta`). (f) The hint inside
+   a `FORALL` INSERT over (1, 7, 2) with 1 and 2 present: `SQL%ROWCOUNT` 1, `SQL%BULK_ROWCOUNT` (0, 1,
+   0). Confirmed, with one text correction: a collection's `.COUNT` is a PL/SQL expression and is
+   refused inside the cursor's SQL (`OPEN ? FOR SELECT l_k.COUNT ... FROM dual` fails with
+   ORA-06550/ORA-00904 "L_K"."COUNT": invalid identifier); it goes through a NUMBER local assigned
+   before the OPEN. The design's predicate block has it in its SELECT; sent back as a text note.
+6. **The restart of a waiting `SELECT ... FOR UPDATE` at READ COMMITTED, both layouts.** A holds a
+   prepare-shaped change (the data row changed, the metadata row to state 1, version 2) and B's
+   one-statement lock waits; A commits; B's row is `1/p/P1/2/1`, the newest, on the inline layout
+   and on the decoupled one through `T LEFT JOIN T_meta ... FOR UPDATE OF t.k`: the restart runs the
+   join again at the new point in time. The second case, A committing a plain write (state 3,
+   version 5): B's row carries A's `tx_id` and version on both layouts. Extra: a `FOR UPDATE` whose
+   WHERE has the gate's `NOT EXISTS (SELECT /*+ INDEX(m ...) */ 1 FROM T_meta m WHERE m.tx_state IN
+   (1, 2))` locks no metadata row (another session updates it without waiting). Confirmed: the
+   inline one-statement form, and the decoupled layout's one statement, which test 6 selects over
+   its two round trips.
+7. **ojdbc's batching.** A prepared batch of five inline INSERTs with a duplicate as the third:
+   `executeBatch` throws `BatchUpdateException` ORA-00001, SQLState 23000, `getUpdateCounts()` and
+   `getLargeUpdateCounts()` both `[1, 1]`; the rows in the transaction after it are the two before
+   the duplicate (and the pre-existing one), the fourth and fifth not written; the transaction is
+   usable after it. Confirmed as the design expects: the entries before the failing one kept and
+   counted.
+8. **Round trips, a measurement** (`SQL*Net roundtrips to/from client` from `v$mystat`, and the
+   client's chunks through a local counting proxy as `DelayProxy.requests` counts them; the two agreed
+   on every line):
+
+   | statement | autocommit off | autocommit on |
+   |---|---|---|
+   | a plain prepared UPDATE | 1 | 1 |
+   | the block with a ref cursor OUT: execute | 1 | 1 |
+   | ... the fetch of its one row | +1 | +1 |
+   | the block with three scalar OUT binds, values included | 1 | 1 |
+   | the block returning its row by `DBMS_SQL.RETURN_RESULT`, row included | 2 | 2 |
+   | the commit after a block | 1 | — |
+
+   So ojdbc sends the commit with the execute when autocommit is on (a block or an UPDATE is one
+   round trip either way), and **a ref cursor's row costs a second round trip**, which scalar OUT
+   binds do not; `RETURN_RESULT` costs the same as the cursor. The keyed block as designed is
+   therefore two round trips in a transaction (three with the commit), one round trip fewer than
+   the design counted. Sent back to the design with 3b's table as an open case: the row read back
+   through OUT binds (the counts as NUMBER, the key with the JDBC type of its column, which the
+   setup's column query knows, the cursor kept for a type outside the table) against the cursor as
+   designed.
+
+Nothing in `bench-env/` or `BenchBaseBenchmark` touched; the counting proxy is a private class of
+the test. Next: form 1 (`Router.versionless` and the clear-table memory on Oracle at SNAPSHOT), then
+form 2 with the row read back as the design answers.

@@ -379,3 +379,39 @@ work says: the implementing session builds the forms in the brief's order, runs 
 measures locally then on AWS once BenchBase has an Oracle build (after the PostgreSQL matrix), and
 sends any case the design leaves open back here; the semantics-bearing parts get one review pass
 on Fable against the design text before the forms merge.
+
+### 2026-10-26: from the implementing session (todo 335, task 1): every fact confirmed, two items back
+
+The eight confirmation tests pass on Oracle Free 23 (`OracleFormsIntegrationTest`, results in todo
+335's log): statement-level atomicity of a block; ORA-08177 out of a block (UPDATE and `FOR UPDATE`)
+as 8177/72000 with the block's earlier write undone; the ref cursor over `dual` giving `readKey` the
+same value and class as the table's column for all nine key types; positional binds and ORA-17090
+on `addBatch`; `FORALL` over an empty collection (`SQL%ROWCOUNT` 0), `RETURNING ... BULK COLLECT`
+collecting one element per row written in order, `SQL%BULK_ROWCOUNT` with scalar binds, `MERGE` in
+`FORALL`, `RETURNING INTO` of an IDENTITY key, the hint in a `FORALL` INSERT; the restart of a
+waiting `FOR UPDATE` re-reading the newest row on the inline layout **and** the joined metadata row
+on the decoupled one (so form 5's decoupled one statement is selected); ojdbc's `BatchUpdateException`
+with `[1, 1]` and the two rows before the duplicate kept. Two items for the design:
+
+1. **A text note, forms 3 and 4.** A collection's `.COUNT` is a PL/SQL expression and cannot appear
+   in the cursor's SQL: `OPEN ? FOR SELECT l_k.COUNT, l_held, ... FROM dual` fails with ORA-06550,
+   ORA-00904 `"L_K"."COUNT": invalid identifier`. The predicate block's last line (4.3, "The write
+   beyond the key on Oracle") needs a NUMBER local assigned before the OPEN; the builder will do
+   that, the paragraph may say so.
+2. **An open case, form 2 (and the INSERT block, and every block that returns a row): the row read
+   back.** Measured by `v$mystat`'s `SQL*Net roundtrips to/from client` and by the client's chunks
+   (both agree): a block's execute is one round trip, autocommit on or off (ojdbc sends the commit
+   with the execute), but **the fetch of a ref cursor's row is a second round trip**, and
+   `DBMS_SQL.RETURN_RESULT` costs the same two; three scalar OUT binds come back with the execute in
+   one. So the keyed block as designed is two round trips in a transaction where the design counted
+   one. The alternative the design set aside for its typing risk was measured too (test 3b): the key
+   through an OUT bind registered with the JDBC type the table's result set reports for the column
+   (2 for NUMBER, 12 VARCHAR2, 1 CHAR, 101 BINARY_DOUBLE and BINARY_FLOAT through
+   `TO_BINARY_DOUBLE`, 93 DATE and TIMESTAMP, -3 RAW), read as `readKey` reads that type, equals
+   under `Anchors.key` what `readKey` gives from the table for all nine types, the padded CHAR
+   included. The decision asked of the design: keep the cursor (two round trips, no type table), or
+   return the counts as NUMBER OUT binds and the key through an OUT bind typed from the column's
+   declared type (which `Writes` already reads from `ALL_TAB_COLUMNS` for the INSERT's CAST, todo
+   277), with the cursor kept for a type outside that table (TIMESTAMP WITH TIME ZONE, INTERVAL,
+   NCHAR, a type the setup did not record). The implementing session builds form 1 meanwhile and
+   form 2's result handling behind one method that reads the row, so either answer is a local change.
