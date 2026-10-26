@@ -323,3 +323,37 @@ another column, the fused statement, an abort as before), both tables. The Postg
 tests, 85 run, all passing (6 min 17 s). SpotBugs: main and unit tests clean; the integration
 tests' remaining findings are `BenchBaseBenchmark`'s and `InFlightCheckBenchmark`'s, not this
 todo's. Next: the other engines' suites once, and the measurement.
+
+### 2026-10-26: todo 336 measured locally, decoupled READ COMMITTED (Opus)
+
+TPC-C, `bb-pgss` (PostgreSQL 16), 4 terminals, 60 s, scale 4, decoupled, READ COMMITTED, the
+commit before todo 336 (`faae2ed^`) and `faae2ed` each exported with `git archive` and run
+back to back, after first, once no other container was busy (a first pair, run while another
+session's Testcontainers suite held a core, showed every statement slower in the after run,
+the untouched order INSERT 64 to 299 µs a call, and is discarded):
+
+| | before | after |
+|---|---|---|
+| (c) vs (a) | 0.83 (556.5/s against 673.1) | 0.80 (551.2/s against 687.3) |
+| server CPU ms/commit, run (c) | 2.36 | 2.17 |
+| active ms/commit | 1.55 | 1.53 |
+| server exec ms in all, pg_stat_statements | 33379 | 29454 |
+
+Per statement, server µs a call (pg_stat_statements, `mean`; texts past its 1 KB are grouped by
+form only):
+
+| statement | before | after |
+|---|---|---|
+| the stock lock, first statement | 31.6 | 16.4 |
+| the stock lock, the versions read after it | 5.4 | 15.7 |
+| the district lock | 7.6 (versions only; the lock in the steps) | 11.6 + 10.1 |
+| keyed writes (district, warehouse, oorder, customer) | slim 50.3 | 37 to 39, customer 65 |
+| the merged stock batch | 260.9 | 194.8 |
+| Delivery's order_line write | fused 195.6 | form 3 141.7 |
+| the write statements in all, ms | 11445 | 9364 |
+
+So the forms do what the design measured on the server, the writes a fifth less server time and
+the lock nearly halved in its first statement (part of that moved to the versions read, which now
+reads the metadata pages first), but on the laptop the throughput is the same: the run is bound by
+round trips and client time (idle in transaction 4.50 and 4.79 ms a commit), not by the server.
+The AWS cells decide.
