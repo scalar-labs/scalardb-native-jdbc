@@ -1186,6 +1186,97 @@ class OracleOltpIntegrationTest {
     return ORA.openDriver(ttl);
   }
 
+  /**
+   * Form 2's row the test map had none for (todo 335's log): a row another connection's keyed write
+   * holds under the vendor's lock when the block's DML reaches it. The block read the row committed
+   * before; once the other connection commits, the DML goes through on the decoupled table ({@code
+   * written} 1) and its CAS finds the metadata row at another version ({@code stamped} 0), or on
+   * the inline table the DML's own CAS finds the version moved ({@code written} 0): abort {@code
+   * 40001}, "changed after it was read", the DML undone by the rollback and the row as the other
+   * connection left it; the write then goes through.
+   */
+  @Test
+  void form2RowMovedBetweenTheReadAndTheCas() throws Exception {
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection d = driver();
+        Connection other = driver()) {
+      for (String table : List.of("t", "ti")) {
+        String sql = NS + "." + table;
+        String layout = table.equals("t") ? "decoupled" : "inline";
+        d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        d.setAutoCommit(false);
+        other.setAutoCommit(false);
+        assertThat(update(other, "UPDATE " + sql + " SET x = 'o' WHERE id = 21")).isEqualTo(1);
+        Future<Integer> write =
+            pool.submit(() -> update(d, "UPDATE " + sql + " SET x = 'd' WHERE id = 21"));
+        Thread.sleep(700);
+        assertThat(write.isDone()).as(layout + ": waits on the row").isFalse();
+        other.commit();
+        assertThatThrownBy(() -> write.get(20, TimeUnit.SECONDS))
+            .as(layout + ": the row moved between the block's read and its CAS")
+            .cause()
+            .isInstanceOf(SQLTransactionRollbackException.class)
+            .hasMessageContaining("changed after it was read")
+            .extracting(e -> ((SQLException) e).getSQLState())
+            .isEqualTo("40001");
+        d.rollback();
+        assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 21")).containsExactly("o");
+        assertThat(scalarDbX(table, 21)).isEqualTo("o");
+        assertThat(update(d, "UPDATE " + sql + " SET x = 'd' WHERE id = 21")).isEqualTo(1);
+        d.commit();
+        assertThat(scalarDbX(table, 21)).isEqualTo("d");
+        d.setAutoCommit(true);
+        other.setAutoCommit(true);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * Form 4's INSERT row the test map had none for: on an imported table a metadata row in flight
+   * for a key with no data row (ScalarDB's insert between its metadata upsert and its data insert,
+   * section 1), written here by the vendor connection. The block's MERGE finds it in flight, {@code
+   * meta} 0 and {@code stamped} 0: abort {@code 40001}, "being written by ScalarDB", no data row
+   * left by the rollback; the metadata row gone, the INSERT goes through at version 1.
+   */
+  @Test
+  void form4InsertOverAMetadataRowInFlight() throws Exception {
+    String meta =
+        NS
+            + "."
+            + Engine.ORACLE.quote(
+                Objects.requireNonNull(catalog.lookup(List.of(), N(NS), N("imp")).metadataTable()));
+    try (Connection d = driver();
+        Connection v = ORA.open()) {
+      assertThat(
+              update(
+                  v,
+                  "INSERT INTO "
+                      + meta
+                      + " (k, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\")"
+                      + " VALUES (8, 'held', 1, 1, "
+                      + System.currentTimeMillis()
+                      + ")"))
+          .isEqualTo(1);
+      d.setAutoCommit(false);
+      assertThatThrownBy(() -> update(d, "INSERT INTO " + NS + ".imp VALUES (8, 1)"))
+          .as("a metadata row in flight for a key without a data row")
+          .isInstanceOf(SQLTransactionRollbackException.class)
+          .hasMessageContaining("being written by ScalarDB")
+          .extracting(e -> ((SQLException) e).getSQLState())
+          .isEqualTo("40001");
+      d.rollback();
+      assertThat(rows(v, "SELECT COUNT(*) FROM " + NS + ".imp WHERE k = 8")).containsExactly("0");
+      assertThat(update(v, "DELETE FROM " + meta + " WHERE k = 8")).isEqualTo(1);
+      assertThat(update(d, "INSERT INTO " + NS + ".imp VALUES (8, 1)")).isEqualTo(1);
+      d.commit();
+      assertThat(rows(v, "SELECT \"tx_state\", \"tx_version\" FROM " + meta + " WHERE k = 8"))
+          .containsExactly("3/1");
+      assertThat(rows(d, "SELECT x FROM " + NS + ".imp WHERE k = 8")).containsExactly("1");
+    }
+  }
+
   private static int update(Connection c, String sql) throws SQLException {
     try (Statement st = c.createStatement()) {
       return st.executeUpdate(sql);

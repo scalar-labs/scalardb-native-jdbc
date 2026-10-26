@@ -1590,9 +1590,16 @@ final class Writes {
       if (outcome != Outcome.UNDECIDED
           && STATE.putIfAbsent(table, outcome == Outcome.VERIFIED) == null
           && outcome == Outcome.CURSOR) {
+        // the classes per column name the typing mismatch the check exists for; the values, a
+        // person's identifier maybe, only at DEBUG (design 4.3)
         LOG.warn(
-            "{}: the key read back through OUT binds, {}, differs from the key read through a"
-                + " cursor, {}; its writes keep the cursor, one round trip more each",
+            "{}: the key read back through OUT binds, typed {}, differs from the key read through"
+                + " a cursor, typed {}; its writes keep the cursor, one round trip more each",
+            table,
+            classes(out),
+            classes(cursor));
+        LOG.debug(
+            "{}: the two keys: through OUT binds {}, through the cursor {}",
             table,
             describe(out),
             describe(cursor));
@@ -1605,7 +1612,20 @@ final class Writes {
       STATE.clear();
     }
 
-    private static String describe(Object @Nullable [] key) {
+    /** The key's classes per column, "null" for a null column; "no key" for none. */
+    static String classes(Object @Nullable [] key) {
+      if (key == null) {
+        return "no key";
+      }
+      List<String> out = new ArrayList<>();
+      for (Object k : key) {
+        out.add(k == null ? "null" : k.getClass().getName());
+      }
+      return String.join(", ", out);
+    }
+
+    /** The key's values with their classes, for the DEBUG line. */
+    static String describe(Object @Nullable [] key) {
       if (key == null) {
         return "no key";
       }

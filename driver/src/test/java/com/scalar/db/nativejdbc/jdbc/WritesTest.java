@@ -898,6 +898,14 @@ class WritesTest {
     assertThat(Writes.OutBindCheck.variant("ns.b")).isEqualTo(Writes.Variant.CURSOR);
     Writes.OutBindCheck.reset();
     assertThat(Writes.OutBindCheck.variant("ns.b")).isEqualTo(Writes.Variant.CHECK);
+    // the WARN line names the classes per column, never the values (a key may be a person's
+    // identifier); the values are the DEBUG line's
+    assertThat(Writes.OutBindCheck.classes(new Object[] {"1", 5L, null}))
+        .isEqualTo("java.lang.String, java.lang.Long, null")
+        .doesNotContain("5");
+    assertThat(Writes.OutBindCheck.classes(null)).isEqualTo("no key");
+    assertThat(Writes.OutBindCheck.describe(new Object[] {"1", 5L}))
+        .isEqualTo("1 (java.lang.String), 5 (java.lang.Long)");
   }
 
   @Test

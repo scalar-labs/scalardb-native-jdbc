@@ -683,8 +683,8 @@ of the design's four tables (4.3), or none, before the AWS run:
 - `tx_state` neither 1, 2, 3 nor NULL: `MoreWritesIntegrationTest.mergedBatches` (a metadata row set to state 4, the keyed write counts 0, the row untouched).
 - the version read is not the one the transaction read: form 2 (a row read, changed by another connection, then written: `40001`); `form6ReadSideAnchorsAsOwnColumns` (the anchor from the read's own columns); the unit test above (the first-use check's mismatch, the anchor under the cursor's key).
 - `written` 1, `stamped` 1: form 2 (the UPDATE and the DELETE count 1, ScalarDB reads the row at the driver's version); `form2AnchorsOfEveryKeyType`.
-- `written` 1, `stamped` 0 (decoupled): none. The metadata row's move between the block's read and its CAS is a race inside one block, which no test times.
-- `written` 0 after a committed row was read: none at READ COMMITTED (the same race); at SNAPSHOT the ORA-08177 that comes first, form 2.
+- `written` 1, `stamped` 0 (decoupled): `form2RowMovedBetweenTheReadAndTheCas` (the entry below: the DML waits on another connection's keyed write, the CAS then finds the metadata row moved).
+- `written` 0 after a committed row was read: `form2RowMovedBetweenTheReadAndTheCas` on the inline table (the DML's own CAS finds the version moved after the wait); at SNAPSHOT the ORA-08177 that comes first, form 2.
 - `written` above 1: none; impossible with the full key.
 - ORA-08177, ORA-08176: form 2 (a row changed after the snapshot, error code 8177 as `40001`, the transaction rollback-only); `SnapshotIntegrationTest.snapshotLevels` (the engine's own conflict mapped, rollback-only after it).
 - ORA-00060, any other error: `InterleavingIntegrationTest` (ORA-00060 out of the block accepted as the deadlock's own, error code 60 with SQLState 61000, and retried); none for another error.
@@ -703,7 +703,7 @@ of the design's four tables (4.3), or none, before the AWS run:
 **An INSERT on Oracle.**
 - `meta` 1: form 4 (an INSERT of one row, count 1, ScalarDB reads it; the IDENTITY key returned and read back).
 - `meta` 0, `stamped` 1: form 4 (a tombstone taken over: the imported table's DELETE keeps its metadata row, the INSERT stamps it at the next version).
-- `meta` 0, `stamped` 0: form 4 on a created table (a key a ScalarDB prepare holds, `40001`); none on an imported table (ScalarDB's insert between its metadata upsert and its data insert).
+- `meta` 0, `stamped` 0: form 4 on a created table (a key a ScalarDB prepare holds, `40001`); `form4InsertOverAMetadataRowInFlight` on an imported table (a metadata row in flight for a key without a data row).
 - ORA-00001: form 4 (the application's duplicate, `23000`, the transaction open; a key a ScalarDB prepare holds); `form4BatchesAsOneBlock` (a duplicate in the middle of an INSERT batch); `MoreWritesIntegrationTest.batches` (the 19th entry).
 - any other error: none.
 
@@ -719,3 +719,41 @@ of the design's four tables (4.3), or none, before the AWS run:
 - any other error: none.
 
 **The block of entries (4.4).** `form4BatchesAsOneBlock`: an entry in flight stops the block, its own wait settles it and the rest go on, every count 1; at SNAPSHOT such an entry fails the batch with `40001` and the counts before it; a duplicate in the middle of an INSERT batch, the counts before it; the first batch of a table in the process checked. `MoreWritesIntegrationTest.batches`: 20 entries, entries that see the ones before, a tombstone taken over in a batch, a duplicate as the 19th entry with 18 counts. Oracle's conflicts out of a block of entries (SQLState 72000 and 61000, not replayed one by one): none.
+
+### 2026-10-26: the mismatch WARN carries the keys' classes, and the two silent rows tested
+
+As the design decided (todo 334's log 69fe378, design 4.3 at 41cfa1d): `OutBindCheck`'s WARN line
+names the table and the two keys' classes per column (`Writes.OutBindCheck.classes`, "null" for
+a null column, "no key" for none), never the values; the values with their classes go to a DEBUG
+line (`describe`). A key may be a person's identifier, and a driver's default-level log reaches
+aggregators the operator did not choose for row data; the classes name the typing mismatch the
+check exists for (a String against a BigDecimal, a `java.sql.Date` against a `LocalDateTime`),
+and a value-level one is for the driver's developers, who reproduce it on the column type with
+confirmation test 3b. `WritesTest.onOracle_theFirstUseCheck_decidesFromTheTwoKeys` asserts both
+texts.
+
+The two rows of the map whose mistake would be silent now have tests, as the design asked, the
+rest being error paths the engine's mapping covers:
+
+- **The keyed write, `written` 1 and `stamped` 0 (decoupled), and `written` 0 after a committed
+  row was read (inline)**: `OracleOltpIntegrationTest.form2RowMovedBetweenTheReadAndTheCas`.
+  Another driver connection's keyed write holds the row under the vendor's lock, uncommitted; the
+  block of the write under test reads the row committed before and its DML waits on the lock;
+  the other commits. On the decoupled table the DML goes through (`written` 1) and the CAS finds
+  the metadata row at another version and another `tx_id` (`stamped` 0); on the inline table the
+  DML's own CAS finds the version moved (`written` 0). Both abort with `40001`, "a row the
+  statement writes changed after it was read"; after the rollback the row is as the other
+  connection left it, through the driver and through ScalarDB, and the write then goes through.
+  Both layouts pass.
+- **The INSERT, `meta` 0 and `stamped` 0 on an imported table**:
+  `OracleOltpIntegrationTest.form4InsertOverAMetadataRowInFlight`. The vendor connection writes a
+  metadata row in flight (`tx_state` 1) for a key of `oo.imp` that has no data row, the window
+  between ScalarDB's metadata upsert and its data insert; the driver's INSERT of that key aborts
+  with `40001`, "a key the statement inserts is being written by ScalarDB", and the rollback
+  leaves no data row; the metadata row deleted, the INSERT goes through at version 1, state 3.
+  Passes.
+
+The map's rows updated accordingly: the keyed `written` 1 `stamped` 0 and `written` 0 rows, and
+the INSERT's `meta` 0 `stamped` 0 on an imported table, now name these tests. The ten form tests
+pass on the container; unit tests 393 passing; the full Oracle suite is not run again for a log
+line and two new tests.
