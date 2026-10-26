@@ -23,6 +23,8 @@ import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -32,6 +34,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -317,13 +320,31 @@ class ReadIntegrationTest {
           assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("0");
           router.beforeRun(vendor, List.of(plain));
           assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("3");
-          // a rollback undoes the SET made in its transaction
+          // a rollback undoes the SET made in its transaction, which the driver knows without
+          // reading the setting again: the next split read sets it in one statement
           vendor.setAutoCommit(false);
           router.beforeRun(vendor, List.of(router.route(vendor, join)));
           vendor.rollback();
-          router.rolledBack();
+          router.rolledBack(false);
           vendor.setAutoCommit(true);
-          router.beforeRun(vendor, List.of(router.route(vendor, join)));
+          AtomicInteger statements = new AtomicInteger();
+          Connection counting =
+              (Connection)
+                  Proxy.newProxyInstance(
+                      Connection.class.getClassLoader(),
+                      new Class<?>[] {Connection.class},
+                      (p, m, a) -> {
+                        if (m.getName().equals("createStatement")) {
+                          statements.incrementAndGet();
+                        }
+                        try {
+                          return m.invoke(vendor, a);
+                        } catch (InvocationTargetException wrapped) {
+                          throw wrapped.getCause();
+                        }
+                      });
+          router.beforeRun(counting, List.of(router.route(vendor, join)));
+          assertThat(statements.get()).as("one SET, no SHOW, after a rollback").isEqualTo(1);
           assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("0");
           router.beforeRun(vendor, List.of(plain));
           assertThat(rows(vendor, "SHOW max_parallel_workers_per_gather")).containsExactly("3");

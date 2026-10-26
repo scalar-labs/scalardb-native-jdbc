@@ -464,11 +464,15 @@ final class Router {
   private final Map<String, long[]> inflight = new HashMap<>();
   // per data table: the lower-cased first column of its primary key, in the database's order
   private final Map<String, String> keyLead = new HashMap<>();
-  // PostgreSQL's max_parallel_workers_per_gather: the session's own value (-1 until read), and
-  // whether the driver's 0 is in effect (null when not known, after a rollback or a SET of it),
-  // and whether a statement in the open transaction set it, which the transaction's end may undo
+  // PostgreSQL's max_parallel_workers_per_gather: the session's own value (-1 until read); whether
+  // the driver's 0 is in effect (null when not known, after a SET of it or a failed switch); the
+  // same as the open transaction began, which its rollback restores; whether the driver set it in
+  // the open transaction, which a rollback to a savepoint may have undone; and whether a statement
+  // in the open transaction set it, which the transaction's end may undo
   private long sessionWorkers = -1;
   private @Nullable Boolean workersOff;
+  private @Nullable Boolean workersOffAtStart;
+  private boolean workersSwitchedInTransaction;
   private boolean workersSetInTransaction;
   // per statement text: whether the plain statement's plan is parallel; bounded, least recently
   // used first out
@@ -2773,25 +2777,57 @@ final class Router {
 
   private void switchWorkers(Connection vendor, boolean off) throws SQLException {
     if (workersOff == null) {
+      if (sessionWorkers == 0) {
+        workersOff = true; // the session's own value is the driver's: nothing to switch, ever
+        return;
+      }
+      if (sessionWorkers > 0) {
+        // the session's value known and the setting not: set the one needed, one round trip
+        setWorkers(vendor, off ? 0 : sessionWorkers);
+        workersOff = off;
+        switched(vendor);
+        return;
+      }
       long shown;
       try (Statement st = vendor.createStatement();
           ResultSet rs = st.executeQuery("SHOW max_parallel_workers_per_gather")) {
         rs.next();
         shown = Long.parseLong(rs.getString(1));
       }
-      if (shown != 0 || sessionWorkers <= 0) {
-        sessionWorkers = shown;
-      }
+      sessionWorkers = shown;
       // a 0 with a known session value is the driver's own: only a statement that sets it, which
       // forgets the value, or a transaction's end after one, changes the session's
       workersOff = shown == 0;
+      if (!workersSwitchedInTransaction) {
+        workersOffAtStart = workersOff; // as the transaction began: the driver has not switched
+      }
     }
     if (off && !workersOff) {
       setWorkers(vendor, 0);
       workersOff = true;
+      switched(vendor);
     } else if (!off && workersOff && sessionWorkers > 0) {
       setWorkers(vendor, sessionWorkers);
       workersOff = false;
+      switched(vendor);
+    }
+  }
+
+  /**
+   * After the driver set the workers: in autocommit the session keeps the value; in a transaction a
+   * rollback undoes it, to the value the transaction began with, or to a savepoint's, unknown.
+   */
+  private void switched(Connection vendor) {
+    boolean auto;
+    try {
+      auto = vendor.getAutoCommit();
+    } catch (SQLException e) {
+      auto = false; // unknown: taken as in a transaction, whose rollback restores the start's
+    }
+    if (auto) {
+      workersOffAtStart = workersOff;
+    } else {
+      workersSwitchedInTransaction = true;
     }
   }
 
@@ -2831,11 +2867,20 @@ final class Router {
 
   private static final Pattern RESETS_ALL = Pattern.compile("\\b(reset|discard)\\s+all\\b");
 
-  /** After a rollback, which undoes a SET made in the transaction. */
-  void rolledBack() {
+  /**
+   * After a rollback, which undoes a SET made in the transaction: the whole transaction's leaves
+   * the setting as the transaction began, known without a read; one to a savepoint leaves the
+   * driver's own SET, if it made one, undone or not, so the setting is read again.
+   */
+  void rolledBack(boolean toSavepoint) {
     lock.lock();
     try {
-      workersOff = null;
+      if (!toSavepoint) {
+        workersOff = workersOffAtStart;
+        workersSwitchedInTransaction = false;
+      } else if (workersSwitchedInTransaction) {
+        workersOff = null;
+      }
     } finally {
       lock.unlock();
     }
@@ -2852,6 +2897,8 @@ final class Router {
         workersOff = null;
         workersSetInTransaction = false;
       }
+      workersOffAtStart = workersOff; // the next transaction begins with the setting as it is
+      workersSwitchedInTransaction = false;
     } finally {
       lock.unlock();
     }
@@ -2958,17 +3005,18 @@ final class Router {
         session.transactionEnded();
         transactionEnded();
       } else if (route.kind == SqlAst.Kind.ROLLBACK) {
-        rolledBack();
+        rolledBack(false);
         session.transactionEnded();
         transactionEnded();
       } else if (route.kind == SqlAst.Kind.ROLLBACK_TO_SAVEPOINT) {
-        rolledBack();
+        rolledBack(true);
         session.rolledBackToSavepoint();
       }
       if (route.changesSession) {
         if (engine == Engine.POSTGRESQL && setsWorkers(route.source)) {
           sessionWorkers = -1;
           workersOff = null;
+          workersOffAtStart = null;
           try {
             workersSetInTransaction |= !vendor.getAutoCommit();
           } catch (SQLException e) {

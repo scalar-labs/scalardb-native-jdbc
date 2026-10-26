@@ -736,3 +736,43 @@ Open after it, for the driver sessions:
   reads the setting again whenever `workersOff` is unknown, as after a rollback.
 - With round trips equal to the vendor's, what is left is server time per statement: e.g. the
   inline write beyond the key, 200 µs a call (28.2 s of 98.2 s in a fast READ COMMITTED repetition).
+
+### 2026-10-26, night: no SHOW after a rollback; the decoupled SERIALIZABLE retries
+
+From the ninth run's two findings for the driver side (above).
+
+**The SHOW.** `Router.switchWorkers` read `max_parallel_workers_per_gather` again whenever its
+state was unknown, and `rolledBack()` made it unknown after every rollback, since a rollback undoes a
+SET made in its transaction. Per repetition of the fast decoupled SERIALIZABLE cell the count of the
+SHOW equalled the count of rejected transactions (45,662 / 45,324; 111,003 / 111,425; 27,136 /
+26,926): one round trip per retry, 2 µs on the server. At the slow round trip (37,500 in a
+repetition of 13,800 commits, 330 µs each) it is about 0.9 ms of the 1.39 ms that cell adds per
+transaction. The router now keeps the value the transaction began with (`workersOffAtStart`, taken
+at every transaction end and at a switch made in autocommit) and restores it on a rollback of the
+whole transaction; a rollback to a savepoint after the driver's own SET in that transaction still
+makes it unknown, and an unknown state with a known session value is set directly, one round trip,
+instead of read and then set. `ReadIntegrationTest` asserts one SET and no SHOW after the rollback
+through a counting proxy of the connection. Verified in a local TPC-C run (decoupled,
+SERIALIZABLE, 60 s, from a copy of the tree with these hunks alone on `cb59f57`): 0 SHOW in the
+server statistics against 42,010 rejected transactions (before: one each).
+
+**The retries.** The lock graphs under SSI are the same for the vendor and the driver, so the
+doubling is not a form's doing. PostgreSQL seq-scans a one-page table whatever the predicate (checked
+on one-page copies of `district` and `district_tx_metadata`: `Seq Scan` for the keyed `FOR UPDATE`
+read and for the in-flight probe), and a seq scan at SERIALIZABLE takes a relation-level SIREAD lock,
+so on TPC-C's warehouse and district tables every NewOrder and Payment conflicts with every other for
+the vendor too; the driver's probes of the one-page metadata tables add locks on the same pairs, and
+its probes of the larger ones scan the empty partial index, which it never writes to. The per-call
+times agree (vendor's district `FOR UPDATE` 12.8 µs, the driver's 10.5 µs plus the probe's 12.1 µs,
+against 2.9 µs for the index-only probe of `stock_tx_metadata`). What differs is transaction length:
+the driver's decoupled transaction holds its locks longer (active + idle per commit 10.45 ms against
+8.09 at the slow round trip), the round trip per retry above lengthening it further, and in a regime
+where every overlapping pair conflicts the abort rate climbs steeply with length. The fix above is
+the lever the driver has; the rest of the length is the stamp's second row per write (WAL 24.7 KB a
+commit against 9.0). To be measured again on AWS: decoupled SERIALIZABLE, both round trips, from
+this commit.
+
+Found on the way, not changed here: a clean SpotBugs run of `cb59f57` fails in `Writes.java` at
+`b0b46ef`'s `Run.prepare(String, boolean, String[])` (OBL_UNSATISFIED_OBLIGATION_EXCEPTION_EDGE:
+the statement it returns) and reports the suppression on `applyFastRcDecoupled` as unnecessary;
+reported to the Oracle session.

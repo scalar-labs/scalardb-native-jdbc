@@ -1122,8 +1122,11 @@ union as a derived table.
     once and again after a statement that names the setting or resets every setting, and at the end
     of a transaction that held one (todo 107); writes and session statements, which PostgreSQL
     never runs in parallel, leave it as it is. The setting changes only when the next statement
-    needs the other value, since toggling it around every statement cost about 1 ms each, and a
-    rollback, which undoes a SET in its transaction, makes it read the setting again. Behind a
+    needs the other value, since toggling it around every statement cost about 1 ms each. A
+    rollback undoes a SET in its transaction: the driver keeps the value the transaction began
+    with and sets the one needed next in one statement, without reading the setting again, since a
+    read per rollback was a round trip per retried transaction at SERIALIZABLE (todo 329); only a
+    rollback to a savepoint after the driver's own SET makes it read the setting again. Behind a
     transaction-mode pooler such as PgBouncer the session-level SET reaches other clients; the
     driver assumes it owns its session. A split
     read whose plain statement, over the data tables, PostgreSQL plans as parallel, a long one, keeps

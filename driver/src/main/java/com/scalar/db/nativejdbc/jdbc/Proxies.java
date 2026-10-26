@@ -437,7 +437,7 @@ public final class Proxies {
         case "rollback":
           {
             Object r = forward(vendor, method, args);
-            router.rolledBack();
+            router.rolledBack(args != null && args.length > 0);
             if (args == null || args.length == 0) {
               rollbackOnly = false;
               session.transactionEnded();
@@ -1128,7 +1128,7 @@ public final class Proxies {
           owner.vendor.commit();
         } else {
           owner.vendor.rollback();
-          owner.router.rolledBack();
+          owner.router.rolledBack(false);
         }
       } finally {
         owner.router.transactionEnded();
