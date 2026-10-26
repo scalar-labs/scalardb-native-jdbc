@@ -52,7 +52,7 @@ import org.junit.jupiter.api.Test;
  * the todo's log; the facts the forms rest on are {@link OracleFormsIntegrationTest}'s.
  */
 @SuppressFBWarnings(
-    value = {"SQL_INJECTION_JDBC", "OBL_UNSATISFIED_OBLIGATION", "ODR_OPEN_DATABASE_RESOURCE"},
+    value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
     justification = "statements written in the test sources, closed with their connection")
 class OracleOltpIntegrationTest {
 

@@ -4796,7 +4796,12 @@ final class Writes {
                   : generated.length == 0
                       ? v.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)
                       : v.prepareStatement(sql, generated);
-      return track(ps);
+      try {
+        return track(ps);
+      } catch (SQLException | RuntimeException e) {
+        ps.close(); // track closed it; closed here too so that the resource's path is plain
+        throw e;
+      }
     }
 
     /** Gives a driver statement what is left of the timeout, and makes it reachable by cancel. */
@@ -7056,9 +7061,6 @@ final class Writes {
      * application, still open and scrollable past the second result, the versions to the anchors.
      * Only where no wait is configured: a wait would hold the lock.
      */
-    @SuppressFBWarnings(
-        value = "OBL_UNSATISFIED_OBLIGATION",
-        justification = "the rows are handed to the application, closed with their statement")
     private long applyFastRcDecoupled(Run run, Step step) throws SQLException {
       int width = n.keyColumns.size();
       String held = "a row the statement locks is being written by a ScalarDB transaction";

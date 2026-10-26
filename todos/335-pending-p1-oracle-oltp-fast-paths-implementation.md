@@ -757,3 +757,19 @@ The map's rows updated accordingly: the keyed `written` 1 `stamped` 0 and `writt
 the INSERT's `meta` 0 `stamped` 0 on an imported table, now name these tests. The ten form tests
 pass on the container; unit tests 393 passing; the full Oracle suite is not run again for a log
 line and two new tests.
+
+### 2026-10-26: SpotBugs on `Writes.java` after b0b46ef
+
+A clean build at cb59f57 failed `:driver:spotbugsMain` in `Writes.java` (reported by the bench
+session): `Run.prepare(String, boolean, String[])`'s statement handed to `track`, which can throw
+after the statement was made (OBL_UNSATISFIED_OBLIGATION_EXCEPTION_EDGE; `track` closes it, which
+the analysis does not follow), and the suppression of that obligation on
+`LockPlan.applyFastRcDecoupled`, where the analysis had placed it before, reported useless. The
+overload now closes the statement itself when `track` throws, and the suppression is gone;
+`spotbugsMain` and `spotbugsTest` report no warning. `spotbugsIntegrationTest` reported the two
+Oracle test classes' class-level suppressions of OBL_UNSATISFIED_OBLIGATION and
+ODR_OPEN_DATABASE_RESOURCE as useless, now removed, and the form tests' setup executing the
+cleanup's statements built from the catalog's names (SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE),
+now suppressed with the class's SQL_INJECTION_JDBC; its one remaining finding,
+`InFlightCheckBenchmark.inFlightCheck` writing the static `metaTables` from an instance method, is
+the benchmark session's, reported to it.

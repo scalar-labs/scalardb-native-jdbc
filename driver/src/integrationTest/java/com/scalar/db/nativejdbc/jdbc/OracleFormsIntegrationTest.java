@@ -49,13 +49,7 @@ import org.junit.jupiter.api.Test;
  * [335]} and recorded in todo 335's log.
  */
 @SuppressFBWarnings(
-    value = {
-      "SQL_INJECTION_JDBC",
-      "OBL_UNSATISFIED_OBLIGATION",
-      "ODR_OPEN_DATABASE_RESOURCE",
-      "UNENCRYPTED_SOCKET",
-      "UNENCRYPTED_SERVER_SOCKET"
-    },
+    value = {"SQL_INJECTION_JDBC", "UNENCRYPTED_SOCKET", "UNENCRYPTED_SERVER_SOCKET"},
     justification = "statements written in the test sources; a local proxy to the container")
 class OracleFormsIntegrationTest {
 
