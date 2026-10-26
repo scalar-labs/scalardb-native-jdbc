@@ -9,9 +9,19 @@ import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.SqlAst;
 import com.scalar.db.nativejdbc.sql.StatementShape;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Proxy;
+import java.sql.CallableStatement;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
@@ -888,6 +898,144 @@ class WritesTest {
     assertThat(Writes.OutBindCheck.variant("ns.b")).isEqualTo(Writes.Variant.CURSOR);
     Writes.OutBindCheck.reset();
     assertThat(Writes.OutBindCheck.variant("ns.b")).isEqualTo(Writes.Variant.CHECK);
+  }
+
+  @Test
+  void onOracle_theBlockThatFindsAMismatch_decidesFromTheCursorsRow() throws Exception {
+    // a table's first keyed write in the process, the checking variant: the OUT binds give the
+    // key as a String where the cursor gives the NUMBER the reads report, so the two differ under
+    // Anchors.key; the transaction read the row at version 5 under the reads' key, and the block
+    // finds it at 7, written: the write must abort for the moved version, which it does only when
+    // the block is decided from the cursor's row (the OUT key finds no anchor, "unchanged")
+    Writes.OutBindCheck.reset();
+    Writes.Plan plan = oraclePlan(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ?", false);
+    Writes.Block block = Objects.requireNonNull(plan.oracleBlock());
+    String table = block.table;
+    Writes.Step step = block.step(Writes.Variant.CHECK);
+    int at = step.outAt();
+    Map<Integer, Object> out = new HashMap<>();
+    Map<Integer, Object> cursor = new HashMap<>();
+    Object[] row = {
+      1, 1, "tx-b", 7L, 3, 1L, 1L
+    }; // rows, meta, tx_id, version, state, written, stamped
+    for (int i = 0; i < row.length; i++) {
+      out.put(at + i, row[i]);
+      cursor.put(1 + i, row[i]);
+    }
+    out.put(at + row.length, "1");
+    cursor.put(1 + row.length, 1L);
+    Anchors anchors = new Anchors();
+    anchors.read(anchors.epoch(), table, new Object[] {1L}, new Anchors.Version("tx-a", 5L));
+    Writes.Run run =
+        new Writes.Run(fakeConnection(out, step.cursorAt(), cursor), fakeContext(anchors));
+    assertThatThrownBy(() -> plan.apply(run))
+        .isInstanceOf(Writes.Aborted.class)
+        .hasMessageContaining("changed by another one since");
+    assertThat(Writes.OutBindCheck.variant(table)).isEqualTo(Writes.Variant.CURSOR);
+    // the keys equal: the write goes through against the version read, the table verified
+    Writes.OutBindCheck.reset();
+    out.put(at + row.length, 1L);
+    Anchors same = new Anchors();
+    same.read(same.epoch(), table, new Object[] {1L}, new Anchors.Version("tx-b", 7L));
+    Writes.Run verified =
+        new Writes.Run(fakeConnection(out, step.cursorAt(), cursor), fakeContext(same));
+    assertThat(plan.apply(verified)).isEqualTo(1);
+    assertThat(Writes.OutBindCheck.variant(table)).isEqualTo(Writes.Variant.OUT);
+    // no row for the key: count 0 through either path, and nothing decided
+    Writes.OutBindCheck.reset();
+    out.put(at, 0);
+    out.put(at + row.length, null);
+    cursor.put(1, 0);
+    cursor.put(1 + row.length, null);
+    Writes.Run none =
+        new Writes.Run(fakeConnection(out, step.cursorAt(), cursor), fakeContext(same));
+    assertThat(plan.apply(none)).isZero();
+    assertThat(Writes.OutBindCheck.variant(table)).isEqualTo(Writes.Variant.CHECK);
+  }
+
+  /**
+   * A vendor connection whose callable statement answers the block's OUT binds by position from
+   * {@code out} and opens, at {@code cursorAt}, a result set of one row answered from {@code
+   * cursor} (its key column a NUMBER); everything else is a no-op.
+   */
+  private static Connection fakeConnection(
+      Map<Integer, Object> out, int cursorAt, Map<Integer, Object> cursor) {
+    ResultSetMetaData md =
+        fake(
+            ResultSetMetaData.class,
+            Map.of("getColumnTypeName", "NUMBER", "getColumnType", 2),
+            null);
+    Map<String, Object> rsAnswers = new HashMap<>();
+    rsAnswers.put("getMetaData", md);
+    rsAnswers.put("next", new ArrayDeque<>(List.of(true, false)));
+    ResultSet rs = fake(ResultSet.class, rsAnswers, cursor);
+    Map<Integer, Object> outs = new HashMap<>(out);
+    outs.put(cursorAt, rs);
+    CallableStatement cs = fake(CallableStatement.class, Map.of(), outs);
+    return fake(Connection.class, Map.of("prepareCall", cs), null);
+  }
+
+  private static Writes.Context fakeContext(Anchors anchors) {
+    return fake(
+        Writes.Context.class, Map.of("anchors", anchors, "inflightWait", Duration.ZERO), null);
+  }
+
+  /**
+   * A fake of a JDBC interface: a positional getter ({@code getInt}, {@code getLong}, {@code
+   * getString}, {@code getObject}) answers from {@code byPosition}; a method named in {@code
+   * answers} returns its value, a queue of values one per call; every other method returns the
+   * default of its type.
+   */
+  @SuppressWarnings("ReferenceEquality") // a proxy's equals is its identity
+  private static <T> T fake(
+      Class<T> type, Map<String, Object> answers, @Nullable Map<Integer, Object> byPosition) {
+    return type.cast(
+        Proxy.newProxyInstance(
+            type.getClassLoader(),
+            new Class<?>[] {type},
+            (proxy, method, args) -> {
+              String name = method.getName();
+              if (byPosition != null
+                  && args != null
+                  && args.length >= 1
+                  && args[0] instanceof Integer
+                  && (name.equals("getInt")
+                      || name.equals("getLong")
+                      || name.equals("getString")
+                      || name.equals("getObject"))) {
+                Object v = byPosition.get((Integer) args[0]);
+                return switch (name) {
+                  case "getInt" -> v == null ? 0 : ((Number) v).intValue();
+                  case "getLong" -> v == null ? 0L : ((Number) v).longValue();
+                  case "getString" -> v == null ? null : v.toString();
+                  default -> v;
+                };
+              }
+              if (answers.containsKey(name)) {
+                Object a = answers.get(name);
+                return a instanceof Deque<?> q ? (q.isEmpty() ? false : q.poll()) : a;
+              }
+              Class<?> r = method.getReturnType();
+              if (r == boolean.class) {
+                return false;
+              }
+              if (r == int.class) {
+                return 0;
+              }
+              if (r == long.class) {
+                return 0L;
+              }
+              if (name.equals("hashCode")) {
+                return System.identityHashCode(proxy);
+              }
+              if (name.equals("equals")) {
+                return proxy == args[0];
+              }
+              if (name.equals("toString")) {
+                return "fake " + type.getSimpleName();
+              }
+              return null;
+            }));
   }
 
   @Test

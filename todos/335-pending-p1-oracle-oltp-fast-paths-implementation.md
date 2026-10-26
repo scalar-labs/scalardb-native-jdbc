@@ -631,3 +631,91 @@ before: the design's review pass of the result handling (`applyBlock`/`decide` n
 `applyPredicateBlock`, `applyFast`'s Oracle branch, `applyOracleBlock`, `applyGated`, `entry`,
 `applyOracleEntries`, `applyVendorBatch`) against the paragraphs' tables, and the Oracle
 BenchBase build in `matrix.sh` once the PostgreSQL matrix is done.
+
+### 2026-10-26: the block that finds a mismatch takes its row from the cursor
+
+A review of commit b0b46ef found the check fail-open for the one block that detects the mismatch:
+`applyBlock`, `applyOracleBlock` and `applyOracleEntries` recorded the outcome in `OutBindCheck`
+and went on to decide that block from the row of the OUT binds, the mistyped key included, so the
+anchor of that one write would have been the key the design's rule names as the silent lost
+update, and only the blocks after it would have had the cursor's. Now each of the three takes the
+cursor's row where `decide` says `CURSOR`: `applyBlock` the whole `KeyedRow` of the cursor,
+`applyOracleBlock` the cursor's key for the generated keys, the block of entries each reached
+entry from the cursor's row (`plan.entry(run, rs, 3)`) rather than the binds; a `CURSOR` outcome
+without a cursor row, which `FROM dual` cannot produce, fails the block as the cursor variant
+fails a block without a row (`XX000`). Equal keys and a row without a key decide from the OUT
+binds as before. The same review flagged the WARN line carrying the two key values: the design
+asked for the values with their classes, the line fires once per table per process and only on a
+mismatch, and a value shows what a class alone does not (a precision lost, a time zone shifted),
+so the line is kept as designed; a key that is sensitive would reach the log through it, which
+the design may weigh.
+
+The INSERT block's check and the block of entries' check had not run against the database (the
+form 4 tests warmed the table with a keyed write first), so each form 4 test now resets the check
+and measures the table's first INSERT and first batch in the process besides: the decoupled
+INSERT's first block 2 round trips (the inline INSERT is the vendor's statement, 1), the first
+batch of ten keyed UPDATEs 2 on either layout, the rows as written through ScalarDB after. Unit
+tests 392 passing; `OracleOltpIntegrationTest` and `OracleFormsIntegrationTest` passing on the
+container; the full Oracle suite on a fresh container after the fix: 60 tests, all passing
+(11 min 21 s). The PostgreSQL suite is not run again, the change being inside the Oracle-only
+branches. Unit tests after the mismatch test below: 393, all passing, and the mismatch test fails
+without the fix (the write counting 1 where it must abort).
+
+### 2026-10-26: the design's table rows and the tests that exercise them (asked with the review, todo 334)
+
+The review of commit b0b46ef (todo 334's log, f4671bd) asked for its one finding, the checking
+variant of `KeyedPlan.applyBlock` deciding from the OUT binds' row, which the entry above fixes
+(the same fix in `applyOracleBlock` and `applyOracleEntries`, whose OUT-bind rows the review read
+as already taken from the cursor), with a unit test:
+`WritesTest.onOracle_theBlockThatFindsAMismatch_decidesFromTheCursorsRow` drives
+`KeyedPlan.apply` through fakes of the vendor connection, the callable statement and the cursor
+(`java.lang.reflect.Proxy`, no JDBC driver) with the OUT binds giving the key as a String and the
+cursor as the NUMBER the reads report: the anchor recorded under the cursor's key at version 5, the
+block finding the row written at 7, the write aborts with the moved version and the table is marked
+cursor-only; the keys equal, the write goes through against the version read and the table is
+verified; no row, count 0 and nothing decided. And the review asked which test exercises each row
+of the design's four tables (4.3), or none, before the AWS run:
+
+**The keyed write on Oracle.**
+- `rows` 0: `OracleOltpIntegrationTest.form2KeyedWriteAsOneBlock`, a write of a missing key, count 0, both layouts.
+- `rows` 1, `meta` 0: none. No test writes a row of an imported table by its key before its backfill; `oo.imp`'s row without a metadata row is written by the predicate form (form 3), and form 4's keyed DELETE of the tombstone has its metadata row.
+- `tx_state` 1 or 2: form 2 (a row in flight: the abort at once, and with `inflightWaitMs` the wait and the write once the row settles); `MoreWritesIntegrationTest.inFlightWait` (rolled back or committed while the write waits, the wait running out).
+- `tx_state` neither 1, 2, 3 nor NULL: `MoreWritesIntegrationTest.mergedBatches` (a metadata row set to state 4, the keyed write counts 0, the row untouched).
+- the version read is not the one the transaction read: form 2 (a row read, changed by another connection, then written: `40001`); `form6ReadSideAnchorsAsOwnColumns` (the anchor from the read's own columns); the unit test above (the first-use check's mismatch, the anchor under the cursor's key).
+- `written` 1, `stamped` 1: form 2 (the UPDATE and the DELETE count 1, ScalarDB reads the row at the driver's version); `form2AnchorsOfEveryKeyType`.
+- `written` 1, `stamped` 0 (decoupled): none. The metadata row's move between the block's read and its CAS is a race inside one block, which no test times.
+- `written` 0 after a committed row was read: none at READ COMMITTED (the same race); at SNAPSHOT the ORA-08177 that comes first, form 2.
+- `written` above 1: none; impossible with the full key.
+- ORA-08177, ORA-08176: form 2 (a row changed after the snapshot, error code 8177 as `40001`, the transaction rollback-only); `SnapshotIntegrationTest.snapshotLevels` (the engine's own conflict mapped, rollback-only after it).
+- ORA-00060, any other error: `InterleavingIntegrationTest` (ORA-00060 out of the block accepted as the deadlock's own, error code 60 with SQLState 61000, and retried); none for another error.
+- a duplicate in a batch, two entries on one key: `MoreWritesIntegrationTest.batches` (entries that see the ones before, two entries on one key, run one by one); form 4's duplicate is the INSERT's.
+
+**The write beyond the key on Oracle.**
+- `after` 1: `SnapshotIntegrationTest.snapshotLevels` (an update in flight that only its after image matches: a write by the predicate aborts, UPDATE and DELETE; todo 166, the case that put `after` before `found`).
+- `found` 0: form 3 (one matching nothing, count 0).
+- `held` above 0: `MoreWritesIntegrationTest.timeoutMidWrite` (the wait on a key in flight under a predicate write, `id IN (80, 81)`, ended by the query timeout); none for the wait that ends with the write (form 3's two waits are on another connection's vendor lock, not on a ScalarDB state).
+- `missing` above 0: none at READ COMMITTED (the steps); form 3's imported table covers the clear-table block at SNAPSHOT over such a key, the MERGE, not this row.
+- `abort` 1 to 5, and `stamped` below `written`: form 3 (a key moved under the block's wait that still matches: `40001`); the test asserts the state alone, not which row the layout gives (an inline row moved under the lock, its version -1, or an `abort` code), and none names codes 3 and 4.
+- `stamped` equal to `written`: form 3 (two keys written, count 2; a key moved so that it stops matching skipped, count 1 for the other).
+- ORA-08177, ORA-08176, ORA-00060, any other error: none out of the predicate block itself (`snapshotLevels`'s 8177 is a keyed write's).
+- a duplicate in a batch: not this form.
+
+**An INSERT on Oracle.**
+- `meta` 1: form 4 (an INSERT of one row, count 1, ScalarDB reads it; the IDENTITY key returned and read back).
+- `meta` 0, `stamped` 1: form 4 (a tombstone taken over: the imported table's DELETE keeps its metadata row, the INSERT stamps it at the next version).
+- `meta` 0, `stamped` 0: form 4 on a created table (a key a ScalarDB prepare holds, `40001`); none on an imported table (ScalarDB's insert between its metadata upsert and its data insert).
+- ORA-00001: form 4 (the application's duplicate, `23000`, the transaction open; a key a ScalarDB prepare holds); `form4BatchesAsOneBlock` (a duplicate in the middle of an INSERT batch); `MoreWritesIntegrationTest.batches` (the 19th entry).
+- any other error: none.
+
+**The locking read on Oracle.**
+- SNAPSHOT, rows returned: form 5 (gated, the row returned marks the table clear; the aggregate after it one round trip).
+- SNAPSHOT, no row, table found clear: form 5 (a lock matching nothing on the table found clear, one round trip).
+- SNAPSHOT, no row, table not yet clear: form 5 (the coarse check, two round trips; a row in flight the predicate matches aborts, one it does not match leaves the lock to the committed copy, the write of it after).
+- SNAPSHOT, ORA-08177: `MoreWritesIntegrationTest.lockingReads` (a row locked since the snapshot, error code 8177 accepted as the serialization failure); `SnapshotIntegrationTest.snapshotLevels` (a locking read of a row changed after the snapshot).
+- READ COMMITTED, every row's state committed: form 5 (the lock, the write of the locked row after it holding its version; the restart: the lock waits on another connection's write and returns the row as that write left it).
+- READ COMMITTED, a row's state 1 or 2: form 5 (`40001`; the driver's ORA-00054 under NOWAIT, error code 54); `MoreWritesIntegrationTest.lockingReads`.
+- READ COMMITTED, decoupled, two statements: does not arise; the lock is one statement on both layouts on Oracle (form 5), the row stays for PostgreSQL's fallback.
+- ORA-00054 from Oracle under NOWAIT: `MoreWritesIntegrationTest.lockingReads` (another connection's `FOR UPDATE NOWAIT` on a row the driver's transaction locks).
+- any other error: none.
+
+**The block of entries (4.4).** `form4BatchesAsOneBlock`: an entry in flight stops the block, its own wait settles it and the rest go on, every count 1; at SNAPSHOT such an entry fails the batch with `40001` and the counts before it; a duplicate in the middle of an INSERT batch, the counts before it; the first batch of a table in the process checked. `MoreWritesIntegrationTest.batches`: 20 entries, entries that see the ones before, a tombstone taken over in a batch, a duplicate as the 19th entry with 18 counts. Oracle's conflicts out of a block of entries (SQLState 72000 and 61000, not replayed one by one): none.

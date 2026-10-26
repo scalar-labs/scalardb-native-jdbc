@@ -4432,16 +4432,29 @@ final class Writes {
       List<Integer> keyTypes = Objects.requireNonNull(e.keyTypes);
       if (v == Variant.CHECK) {
         // the first block of the table in this process: each reached entry's key through both
+        // paths, and the entry decided from the cursor's row where they differ
         try (ResultSet rs = Run.cursor(cs, e, k, v)) {
           while (rs.next()) {
             int i = rs.getInt(1) - 1;
-            if (rs.getInt(2) == 0) {
-              break;
+            if (i != done || rs.getInt(2) == 0) {
+              break; // not reached: after the entry that stopped the block
             }
             int at = Run.entryAt(e, k, i);
-            OutBindCheck.decide(e.table, plan.entryKey(cs, at + 2, keyTypes), plan.entryKey(rs, 3));
+            OutBindCheck.Outcome outcome =
+                OutBindCheck.decide(
+                    e.table, plan.entryKey(cs, at + 2, keyTypes), plan.entryKey(rs, 3));
+            Long count =
+                outcome == OutBindCheck.Outcome.CURSOR
+                    ? plan.entry(runs.get(i), rs, 3)
+                    : plan.entry(runs.get(i), cs, at + 2, keyTypes);
+            if (count == null) {
+              break;
+            }
+            finalized.record(i, count);
+            done++;
           }
         }
+        return done;
       }
       for (int i = 0; i < k; i++) {
         int at = Run.entryAt(e, k, i);
@@ -5392,9 +5405,18 @@ final class Writes {
           } else {
             row = KeyedRow.from(cs, step.outAt(), Objects.requireNonNull(b.keyTypes));
             if (v == Variant.CHECK) {
-              // the first block of the table in this process: the key through both paths
+              // the first block of the table in this process: the key through both paths, and
+              // the row of the cursor where they differ, so that this block's outcome is exact
               try (ResultSet rs = Run.cursor(cs, step)) {
-                OutBindCheck.decide(b.table, row.key, rs.next() ? readKey(rs, 8, width) : null);
+                KeyedRow cursor = rs.next() ? KeyedRow.from(rs, 1, width) : null;
+                OutBindCheck.Outcome outcome =
+                    OutBindCheck.decide(b.table, row.key, cursor == null ? null : cursor.key);
+                if (outcome == OutBindCheck.Outcome.CURSOR) {
+                  if (cursor == null) {
+                    throw new SQLException("the write's block returned no row", "XX000");
+                  }
+                  row = cursor;
+                }
               }
             }
           }
@@ -6244,8 +6266,15 @@ final class Writes {
           int at = step.outAt();
           Object[] key = readOutKey(cs, at + 2, Objects.requireNonNull(b.keyTypes));
           if (v == Variant.CHECK) {
+            // the key through both paths, and the cursor's where they differ
             try (ResultSet rs = Run.cursor(cs, step)) {
-              OutBindCheck.decide(b.table, key, rs.next() ? readKey(rs, 3, width) : null);
+              Object[] cursor = rs.next() ? readKey(rs, 3, width) : null;
+              if (OutBindCheck.decide(b.table, key, cursor) == OutBindCheck.Outcome.CURSOR) {
+                if (cursor == null) {
+                  throw new SQLException("the INSERT's block returned no row", "XX000");
+                }
+                key = cursor;
+              }
             }
           }
           if (cs.getInt(at) == 0 && cs.getInt(at + 1) == 0) {

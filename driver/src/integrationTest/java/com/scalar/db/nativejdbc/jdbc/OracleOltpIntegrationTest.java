@@ -706,6 +706,31 @@ class OracleOltpIntegrationTest {
                 + " round trip(s), in a transaction");
         assertThat(insert).isEqualTo(1);
         assertThat(scalarDbX(table, 101)).isEqualTo("n");
+        // the table's first INSERT block in the process, the check of the OUT binds: the key
+        // through the binds and the cursor both, one round trip more, once (decoupled; the inline
+        // INSERT is the vendor's statement, without a block)
+        Writes.OutBindCheck.reset();
+        long checked;
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO " + sql + " (id, x, v) VALUES (?, ?, ?)")) {
+          checked =
+              rt.measure(
+                  () -> {
+                    ps.setInt(1, 105);
+                    ps.setString(2, "o");
+                    ps.setInt(3, 0);
+                    assertThat(ps.executeUpdate()).isEqualTo(1);
+                  });
+        }
+        d.commit();
+        log(
+            "form 4 ("
+                + layout
+                + "): the table's first INSERT in the process, the check of the OUT binds, "
+                + checked
+                + " round trip(s)");
+        assertThat(checked).isEqualTo(table.equals("t") ? 2 : 1);
+        assertThat(scalarDbX(table, 105)).isEqualTo("o");
         // the application's duplicate, SQLState 23000, the transaction still open
         assertThatThrownBy(
                 () -> update(d, "INSERT INTO " + sql + " (id, x, v) VALUES (101, 'n', 0)"))
@@ -860,6 +885,33 @@ class OracleOltpIntegrationTest {
         assertThat(scalarDbX(table, 30)).isEqualTo("u");
         assertThat(scalarDbX(table, 39)).isEqualTo("u");
         assertThat(scalarDbX(table, 119)).isEqualTo("i");
+        // the table's first block of entries in the process, the check of the OUT binds: each
+        // reached entry's key through the binds and the cursor both, one round trip more, once
+        Writes.OutBindCheck.reset();
+        long checked;
+        try (PreparedStatement ps =
+            d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
+          checked =
+              rt.measure(
+                  () -> {
+                    for (int id = 30; id < 40; id++) {
+                      ps.setString(1, "v");
+                      ps.setInt(2, id);
+                      ps.addBatch();
+                    }
+                    assertThat(ps.executeBatch()).hasSize(10).containsOnly(1);
+                  });
+        }
+        d.commit();
+        log(
+            "form 4 ("
+                + layout
+                + "): the table's first batch in the process, the check of the OUT binds, "
+                + checked
+                + " round trip(s)");
+        assertThat(checked).isEqualTo(2);
+        assertThat(scalarDbX(table, 30)).isEqualTo("v");
+        assertThat(scalarDbX(table, 39)).isEqualTo("v");
         // an entry in flight at READ COMMITTED with the wait set: the block stops at it, the
         // entry's own wait settles it, and the rest go on; every count 1
         TwoPhaseCommitTransaction held = prepared(tpc, table, 42, "p");
