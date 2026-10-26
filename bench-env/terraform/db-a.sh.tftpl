@@ -61,6 +61,19 @@ case "${engine}" in
       --shm-size=17g '${oracle_image}' ;;
 %{ endif ~}
 esac
+%{ if engine == "oracle" ~}
+# as the tests' container (Engines.ORACLE): each logon writes its time into SYS.USER$, which a hard
+# parse at SERIALIZABLE then reads at its snapshot and now and then fails on with ORA-08177; off
+# once a PDB is open, which with Enterprise Edition's first start (creating the database) takes
+# about 20 minutes
+cat > /root/after-open.sql <<'SQL'
+WHENEVER SQLERROR EXIT FAILURE
+SELECT 1 / (SELECT COUNT(*) FROM v$pdbs WHERE open_mode = 'READ WRITE') FROM dual;
+ALTER SYSTEM SET "_disable_last_successful_login_time" = TRUE SCOPE = BOTH;
+EXIT
+SQL
+until docker exec -i db sqlplus -s / as sysdba < /root/after-open.sql > /dev/null 2>&1; do sleep 15; done
+%{ endif ~}
 %{ if profiling ~}
 # perf for perf-tier-a.sh, installed once the engine runs so that it does not wait for it
 apt-get install -y "linux-tools-$(uname -r)" linux-tools-common

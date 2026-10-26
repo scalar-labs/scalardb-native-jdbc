@@ -166,6 +166,7 @@ class BenchBaseBenchmark {
         e.engine() == Engine.POSTGRESQL || e.engine() == Engine.ORACLE,
         "PostgreSQL and Oracle so far");
     assertThat(HOME.resolve("benchbase.jar")).exists();
+    awaitOracle(e);
     Path dir = OUT.resolve("benchbase-" + e.name().toLowerCase(Locale.ROOT));
     Files.createDirectories(dir);
     StringBuilder report = new StringBuilder();
@@ -205,6 +206,28 @@ class BenchBaseBenchmark {
       Files.writeString(dir.resolveSibling(dir.getFileName() + ".md"), report);
     }
     System.out.println(report);
+  }
+
+  /**
+   * On Oracle, the database, which on its own host may still be starting: Enterprise Edition's
+   * image creates it on first start, about 20 minutes; elsewhere a refused logon fails at once.
+   */
+  private static void awaitOracle(Engines e) throws Exception {
+    if (e.engine() != Engine.ORACLE) {
+      return;
+    }
+    long deadline = System.nanoTime() + Duration.ofMinutes(45).toNanos();
+    while (true) {
+      try {
+        e.open().close();
+        return;
+      } catch (SQLException ex) {
+        if (System.nanoTime() > deadline) {
+          throw ex;
+        }
+        Thread.sleep(15_000);
+      }
+    }
   }
 
   /** Whether the run reads the server's own account of it: PostgreSQL's views so far. */

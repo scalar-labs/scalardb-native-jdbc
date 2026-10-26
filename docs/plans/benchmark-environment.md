@@ -100,7 +100,14 @@ The harness targets an external database through `-Dnativejdbc.<engine>.url`, `.
   216 MB at scale 1 and about 2.2 GB at scale 10. With `db_memory_mb` the other tier A databases are
   capped at that much memory, close to Free's 2 GB, but not at 2 CPUs: compare Free with them
   for the order of the forms, not for the times. It is a host for 23 against RDS's 19c, as for the
-  predicate's check (`docs/benchmarks/inflight-check.md`). Tier A also runs SQL Server
+  predicate's check (`docs/benchmarks/inflight-check.md`). Enterprise Edition's image creates its
+  database on first start, about 20 minutes, which `BenchBaseBenchmark` waits for; once a PDB is
+  open the host turns off the logon's write of its time into `SYS.USER$`
+  (`_disable_last_successful_login_time`), as the tests' container does, since a hard parse at
+  SERIALIZABLE reads it and now and then fails with ORA-08177. On Oracle BenchBase logs on as
+  `BBRUN` (DBA rights, a logon trigger setting `CURRENT_SCHEMA`); `serverStats` is PostgreSQL's
+  only so far. `bench-ora.tfvars` (git-ignored) holds the Oracle run's variables, the registry
+  token among them. Tier A also runs SQL Server
   (`sqlserver`): the tests' image, `mcr.microsoft.com/mssql/server:2022-latest`, in Developer
   edition, free for testing. The setup makes the database `appdb` as the tests make it, with
   `READ_COMMITTED_SNAPSHOT` and `ALLOW_SNAPSHOT_ISOLATION` on. It keeps to 80% of `db_memory_mb`.
