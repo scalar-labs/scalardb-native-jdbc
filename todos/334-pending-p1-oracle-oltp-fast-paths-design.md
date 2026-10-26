@@ -703,3 +703,11 @@ with 614,539 calls, the vendor's own count to the call) appear beside the driver
 calls and 10.2 of 147 s of CPU in all: the delta seems to carry the previous run's cursors. "The
 stock SELECT ... FOR UPDATE runs 10.4 times a commit against 5.0" reads as that artifact; the
 driver's locks are one gated and nine plain a NewOrder. Sent to the AWS session.
+
+The AWS session (2026-10-27): the per-statement deltas of run 20261027-0133 carried earlier runs'
+cursors (confirmed; the harness flushes the shared pool before the start reading, 7dbe91e; the
+host figures were unaffected). The cache cell needs no build: `BB_JVM_ARGS` passes
+`-Doracle.jdbc.implicitStatementCacheSize=128` to both runs, and ojdbc11 23.26.3.0.0 honours the
+system property (checked locally: `getImplicitCachingEnabled()` true, size 128), the vendor's parse
+calls in `V$SQL` the check. The `FOR UPDATE OF` fix's proof cell waits on a build and the user's
+approval; the batch item is sized again from a flushed run first.
