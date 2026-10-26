@@ -669,3 +669,38 @@ The client's CPU is the driver's largest own cost at both levels, 0.33 ms a comm
 call), binding 8%, routing 10% (`Router.route`, `decide`, `current`), the anchored result handler
 8% at READ COMMITTED. A hand-written delegation in place of `java.lang.reflect.Proxy` would be the
 structural change; not taken here.
+
+### 2026-10-26, later: the AWS matrix's first cell, READ COMMITTED on the decoupled layout
+
+The 6e session's first cell on AWS (cluster placement group, TPC-C, decoupled, READ COMMITTED):
+vendor 1,749 and 1,769/s, driver 658 and 676/s, 0.38, about 3.7 ms added per transaction. Not the
+fixes failing at a short round trip and not a setup problem: READ COMMITTED on the decoupled layout
+is the one cell the entry of 2026-10-26 did not cover, and it was never measured locally (READ
+COMMITTED was measured on inline, decoupled only at REPEATABLE READ). The one-statement locking
+read at that level was gated to the inline layout, since a decoupled table's state is in another
+row the lock's re-read does not reach, so a decoupled table at READ COMMITTED still took the steps:
+the before-image check, a savepoint, the lock, the check again, the versions under the lock, the
+release, six round trips per locking read; NewOrder locks ten stock rows, sixty round trips, about
+6 ms at a 100 µs round trip, which over the mix is the 3.7 ms measured. The signature in a run's
+server statistics: SAVEPOINT and RELEASE near ten a NewOrder, the before-image statement near
+twenty.
+
+The fix: on a decoupled table at READ COMMITTED, with no wait configured and a predicate and
+ORDER BY on key columns, the lock and then a read of the matched rows' keys, versions and states
+from the data table joined to its metadata table, two statements in one round trip, the second in
+a snapshot taken after the lock (design 4.3). pgjdbc keeps the first result set open and
+scrollable across `getMoreResults(KEEP_CURRENT_RESULT)` (checked on 42.7.12), so the lock's rows
+go to the application and the versions to the anchors from one execution. A row in flight among
+the matched rows with a before image, or among the locked rows, aborts, as the steps' two checks
+would; a locked key the second read does not show falls back to the steps.
+
+Measured locally, TPC-C, decoupled, READ COMMITTED, 60 s, the previous commit run from an exported
+copy of its tree and the fix from the working tree, minutes apart:
+
+| | (a) | (c) | (c)/(a) | added per transaction | packets per commit (a → c) | NewOrder p95 vs (a) |
+|---|---|---|---|---|---|---|
+| before (`3486935`) | 624/s | 272/s | 0.44 | +8.3 ms | 19.5 → 44.3 | 2.70 |
+| after | 688/s | 566/s | **0.82** | **+1.25 ms** | 19.5 → 19.9 | 1.31 |
+
+The integration suite passes (92 tests). What is left on this layout at this level is the second
+row per write and the slim write's keys CTE, as on inline, plus StockLevel's join (1.84 at p95).

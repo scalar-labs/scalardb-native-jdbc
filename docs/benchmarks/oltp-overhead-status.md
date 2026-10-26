@@ -35,6 +35,7 @@ one (busier) machine state, inline layout, 60 s:
 | TPC-C time added per transaction | +0.64 ms | +7.7 ms | **+1.11 ms** |
 | TPC-C server packets per commit, (a) → (c) | 19.4 → 19.5 | 19.5 → 44.3 | 19.4 → 19.8 |
 | YCSB (c)/(a) | 0.98 | 0.71 | about 1.0 |
+| TPC-C (c)/(a), decoupled | 0.92 | 0.44 | **0.82** (the lock in one round trip, same day) |
 
 Left there, by size: Delivery's write beyond the key, the two-arm shape of a key read (one scan
 with CASE per column would do), the slim write's keys CTE.

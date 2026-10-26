@@ -1333,16 +1333,17 @@ final class Router {
     // lock returns each row's newest version, the anchor the level wants, and a row in flight
     // shows its state; the images of a row differ in no column the statement matches or orders
     // by, so no row in flight is matched by its before image alone (design 4.2, todo 329)
+    boolean fastRc =
+        engine == Engine.POSTGRESQL
+            && !snapshot()
+            && !shape.skipLocked()
+            && !shape.grouped()
+            && shape.wherePure()
+            && shape.orderByPure()
+            && keysOnly(t, shape.whereColumns())
+            && keysOnly(t, shape.orderByColumns());
     SqlAst.SplitText fastText = null;
-    if (engine == Engine.POSTGRESQL
-        && !snapshot()
-        && n.inline
-        && !shape.skipLocked()
-        && !shape.grouped()
-        && shape.wherePure()
-        && shape.orderByPure()
-        && keysOnly(t, shape.whereColumns())
-        && keysOnly(t, shape.orderByColumns())) {
+    if (fastRc && n.inline) {
       fastText =
           SplitRead.emit(
               engine,
@@ -1410,6 +1411,46 @@ final class Router {
     }
     // at SNAPSHOT and SERIALIZABLE a row in flight aborts the transaction (section 6), NOWAIT or
     // not
+    // the same at READ COMMITTED on a decoupled table, whose state is in its metadata row, which
+    // the lock's re-read of a data row does not reach: the lock, then the keys, versions and
+    // states of the rows the predicate matches from the data table joined to its metadata table,
+    // read in a snapshot taken after the lock, two statements in one round trip (design 4.3,
+    // todo 329); the lock's own rows go to the application, the versions to the anchors
+    Writes.Step fastRcStep = null;
+    if (fastText != null) {
+      fastRcStep = new Writes.Step(fastText.sql(), fastText.parameterSources());
+    } else if (fastRc && !n.inline) {
+      String x = exposed(readRef);
+      // the predicate over the data table alone, in a derived table, as the user's columns are
+      // unqualified and the metadata table has the key's too
+      String versions =
+          "SELECT "
+              + n.readColumns("d")
+              + ", m."
+              + n.txId
+              + ", m."
+              + n.txVersion
+              + ", m."
+              + n.txState
+              + ", (m."
+              + engine.quote("before_tx_id")
+              + " IS NOT NULL OR m."
+              + engine.quote("before_tx_version")
+              + " IS NOT NULL) FROM (SELECT "
+              + n.readColumns(x)
+              + " FROM "
+              + n.data
+              + " "
+              + x
+              + (span == null ? "" : " WHERE " + ast.source().substring(span[0], span[1]))
+              + ") d LEFT JOIN "
+              + n.meta
+              + " m ON "
+              + n.keyJoin("m", "d");
+      List<Integer> binds = new ArrayList<>(text.parameterSources());
+      binds.addAll(inWhere);
+      fastRcStep = new Writes.Step(lockSql + "; " + versions, binds);
+    }
     Writes.Plan plan =
         new Writes.LockPlan(
             n,
@@ -1423,7 +1464,7 @@ final class Router {
                 : null,
             engine == Engine.POSTGRESQL && snapshot(),
             plainSql == null || all == null ? null : new Writes.Step(plainSql, all),
-            fastText == null ? null : new Writes.Step(fastText.sql(), fastText.parameterSources()));
+            fastRcStep);
     return new Route(
         sql,
         sql,

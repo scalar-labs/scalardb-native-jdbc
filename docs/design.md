@@ -1391,9 +1391,16 @@ The lock returns each row at its newest version, which PostgreSQL re-reads after
 row, and that version is the anchor the level wants, a read now (step 1); a row in flight shows
 its state and aborts, or fails as NOWAIT fails, since the lock held on it must not outlast the
 statement (section 6). No row in flight is matched by its before image alone, since the images of
-a row differ in no key column. Only where no wait is configured, as a wait would hold the lock;
-with `scalardbnative.inflightWaitMs` set, and on a decoupled table, whose state is in another row
-the lock's re-read does not reach, the locking read keeps its steps and savepoint.
+a row differ in no key column. On a decoupled table, whose state is in its metadata row, which the
+lock's re-read of a data row does not reach, the same locking read is two statements in one round
+trip: the lock as above, then the keys, versions and states of the rows the predicate matches, read
+from the data table joined to its metadata table in a snapshot taken after the lock. A prepare that
+committed before the lock was granted shows there as state 1 or 2, and one that has not committed
+cannot change the metadata row, since it needs the data row's lock the driver now holds; a row the
+read shows in flight with a before image, or among the locked rows, aborts or fails as NOWAIT
+fails, as the steps' checks before and after the lock would. Only where no wait is configured, as a
+wait would hold the lock; with `scalardbnative.inflightWaitMs` set, the locking read keeps its
+steps and savepoint at this level.
 
 The other engines still run the steps one by one, each write under a savepoint of its own. They have
 no data-modifying CTEs; their single-round-trip forms are a multi-statement batch on MySQL and

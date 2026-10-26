@@ -4488,9 +4488,80 @@ final class Writes {
             : applyPlain(run, checked, true);
       }
       if (fastRc != null && run.context.inflightWait().isZero()) {
-        return applyFastRc(run, fastRc);
+        return n.inline ? applyFastRc(run, fastRc) : applyFastRcDecoupled(run, fastRc);
       }
       return fused != null ? applyFused(run, fused) : applySteps(run);
+    }
+
+    /**
+     * The locking read at READ COMMITTED on PostgreSQL on a decoupled table as two statements in
+     * one round trip (todo 329): the lock as the steps take it, then the keys, versions and states
+     * of the rows the predicate matches, read from the data table joined to its metadata table in a
+     * snapshot taken after the lock, where a prepare that committed before the lock was granted
+     * shows, and one that has not committed cannot, since it needs the data row's lock now held
+     * (design 4.3). A row in flight among those rows with a before image, or among the locked rows,
+     * aborts, or fails as NOWAIT fails, as the steps' checks before and after the lock would; a
+     * locked key the read does not show falls back to the steps. The lock's rows go to the
+     * application, still open and scrollable past the second result, the versions to the anchors.
+     * Only where no wait is configured: a wait would hold the lock.
+     */
+    @SuppressFBWarnings(
+        value = "OBL_UNSATISFIED_OBLIGATION",
+        justification = "the rows are handed to the application, closed with their statement")
+    private long applyFastRcDecoupled(Run run, Step step) throws SQLException {
+      int width = n.keyColumns.size();
+      String held = "a row the statement locks is being written by a ScalarDB transaction";
+      PreparedStatement ps = run.prepare(step, null, true);
+      try {
+        ps.execute();
+        ResultSet rs = ps.getResultSet();
+        if (rs == null) {
+          throw new SQLException("the locking read returned no rows", "XX000");
+        }
+        // the key, then the two version lookups the anchored read appends, stale after a wait
+        int from = rs.getMetaData().getColumnCount() - width - 1;
+        List<Object[]> keys = new ArrayList<>();
+        Set<List<Object>> locked = new HashSet<>();
+        while (rs.next()) {
+          Object[] key = Objects.requireNonNull(readKey(rs, from, width));
+          keys.add(key);
+          locked.add(Anchors.key(key));
+        }
+        rs.beforeFirst();
+        if (!ps.getMoreResults(Statement.KEEP_CURRENT_RESULT)) {
+          throw new SQLException("the locking read returned no versions", "XX000");
+        }
+        Map<List<Object>, Anchors.Version> versions = new HashMap<>();
+        try (ResultSet vs = ps.getResultSet()) {
+          while (vs.next()) {
+            Object[] key = Objects.requireNonNull(readKey(vs, 1, width));
+            if (inFlight(vs.getObject(width + 3))
+                && (vs.getBoolean(width + 4) || locked.contains(Anchors.key(key)))) {
+              if (noWait) {
+                throw notAvailable(held);
+              }
+              throw new Aborted(held);
+            }
+            versions.put(
+                Anchors.key(key),
+                new Anchors.Version(vs.getString(width + 1), vs.getObject(width + 2)));
+          }
+        }
+        for (Object[] key : keys) {
+          Anchors.Version v = versions.get(Anchors.key(key));
+          if (v == null) {
+            ps.close();
+            return applySteps(run);
+          }
+          run.context.anchor(n.table, key, v);
+        }
+        ps.closeOnCompletion();
+        run.context.rows(rs, width + 2);
+        return keys.size();
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
+        throw e;
+      }
     }
 
     /**
