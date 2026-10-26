@@ -88,8 +88,15 @@ What the server counted per commit, TPC-C, fast:
    other layout and level wait under 1 s, except SNAPSHOT inline fast (585 waits, 45 s, with 17 s
    of buffer busy waits), the cell that also reads 0.59. The waits fall on the writes: the lock
    read (3.2 ms elapsed a commit against 0.1 ms CPU), the write block and the metadata update.
-   Something holds a row lock for hundreds of milliseconds; the AWS run cannot say what. TPC-C at
-   READ COMMITTED shows no such waits (5 or fewer).
+   They are deadlocks: each of those runs logs about 25 `ORA-00060: deadlock detected` (13–14 a
+   run slow), no other cell any. Oracle breaks a deadlock only after about 3 s, and the other
+   terminals queue behind the two sessions meanwhile. One side is ReadModifyWriteRecord's locking
+   read, `SELECT ... FROM (usertable t LEFT JOIN USERTABLE_tx_metadata m) ... FOR UPDATE`, which
+   locks the row in both tables; the other is the write block (versions read, `UPDATE usertable`,
+   then the `USERTABLE_tx_metadata` update), which locks the data row first and the metadata row
+   second. Two transactions on one key can take the two rows in opposite orders. TPC-C at READ
+   COMMITTED shows no such waits (5 or fewer); its locking reads are `scalardb_native_lock`
+   statements on the data table alone.
 5. **SNAPSHOT inline is the best cell, 0.69 fast and 0.74 slow,** well short of 0.9: even with the
    metadata in the row, its server CPU is 1.6 times the vendor's.
 
