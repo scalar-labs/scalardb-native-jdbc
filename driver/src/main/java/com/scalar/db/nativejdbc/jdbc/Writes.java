@@ -1335,13 +1335,17 @@ final class Writes {
 
   /**
    * The fused write of {@link #fusedKeyed} on a table in the inline layout (todo 329), its metadata
-   * in the row, so its own metadata table: the keys, the after images and the gate as there, and
-   * the user's DML over the keys with the stamp in its SET list, the predicate applied again, so
-   * that at READ COMMITTED a row that stopped matching is skipped. A row that still matches but
-   * moved since the keys were read is written with version -1, its stamp missed, for the driver to
-   * abort on, which undoes it; a DELETE is the conditional delete, its CAS in its WHERE. The same
-   * rows as {@link #fusedKeyed}'s. The stamp's three values come first, from a CTE, as they precede
-   * the predicate's placeholders. Null when the text cannot be rewritten.
+   * in the row, so its own metadata table: the keys the predicate matches as the level's read
+   * surface gives them, the committed rows with their versions and the rows in flight whose before
+   * image matches, read from the table itself rather than through the view and a join back; the
+   * gate, that no key is in flight (and at SNAPSHOT no after image matches), a condition of the DML
+   * evaluated once; and the user's DML over the keys with the stamp in its SET list, its values
+   * from a CTE joined in rather than looked up per row, the predicate applied again, so that at
+   * READ COMMITTED a row that stopped matching is skipped. A row that still matches but moved since
+   * the keys were read is written with version -1, its stamp missed, for the driver to abort on,
+   * which undoes it; a DELETE is the conditional delete, its CAS in its WHERE. The same rows as
+   * {@link #fusedKeyed}'s, each key's row joined to what the DML returned for it. Null when the
+   * text cannot be rewritten.
    */
   private static @Nullable Step fusedKeyedInline(
       Names n,
@@ -1358,18 +1362,25 @@ final class Writes {
     int width = n.keyColumns.size();
     String d = "scalardb_native_d";
     String w = "scalardb_native_w";
+    String exposed = Router.exposed(ast.tableRefs().get(0));
     String anchored =
         n.txId
             + " IS NOT DISTINCT FROM k.scalardb_native_id AND "
             + n.txVersion
             + " IS NOT DISTINCT FROM k.scalardb_native_version";
+    String gate =
+        "NOT EXISTS (SELECT 1 FROM scalardb_native_keys WHERE COALESCE(scalardb_native_state, 3)"
+            + " IN (1, 2))"
+            + (afterImages == null ? "" : " AND NOT EXISTS (SELECT 1 FROM scalardb_native_after)");
     String matched =
         (span == null ? "" : "(" + source.substring(span[0], span[1]) + ") AND ")
             + "("
             + n.columns("")
             + ") = ("
             + Names.numbered("k", d, width)
-            + ") AND (SELECT scalardb_native_go FROM scalardb_native_gate) AND "
+            + ") AND "
+            + gate
+            + " AND "
             + n.committed();
     String head = source.substring(0, from).stripTrailing();
     String rest = span == null ? source.substring(from, end) : source.substring(span[1], end);
@@ -1379,11 +1390,11 @@ final class Writes {
             : head
                 + ", "
                 + n.txId
-                + " = (SELECT scalardb_native_i FROM scalardb_native_s), "
+                + " = s.scalardb_native_i, "
                 + n.preparedAt
-                + " = (SELECT scalardb_native_p FROM scalardb_native_s), "
+                + " = s.scalardb_native_p, "
                 + n.committedAt
-                + " = (SELECT scalardb_native_c FROM scalardb_native_s), "
+                + " = s.scalardb_native_c, "
                 + n.txState
                 + " = 3, "
                 + n.txVersion
@@ -1391,19 +1402,63 @@ final class Writes {
                 + anchored
                 + " THEN CASE WHEN k.scalardb_native_id IS NULL THEN 1 ELSE COALESCE("
                 + n.txVersion
-                + ", 0) + 1 END ELSE -1 END FROM scalardb_native_keys k WHERE "
+                + ", 0) + 1 END ELSE -1 END FROM scalardb_native_s s, scalardb_native_keys k WHERE "
                 + matched
                 + rest;
     String dml = onDataTable(n.engine, ast, t, true, text, from);
     if (dml == null) {
       return null;
     }
+    // the keys as the read view gives them: the rows whose state is committed, as the view keeps
+    // them (a state that is neither in flight nor committed is no committed image, 4.4), and the
+    // rows in flight whose before image matches, which close the gate; the key twice, as its own
+    // metadata row's too
+    String where = span == null ? "" : " WHERE (" + source.substring(span[0], span[1]) + ")";
+    String keyed = n.readColumns(exposed);
+    String keysSql =
+        "SELECT "
+            + keyed
+            + ", "
+            + keyed
+            + ", "
+            + exposed
+            + "."
+            + n.txId
+            + ", "
+            + exposed
+            + "."
+            + n.txVersion
+            + ", "
+            + exposed
+            + "."
+            + n.txState
+            + " FROM "
+            + n.data
+            + " "
+            + exposed
+            + where
+            + (where.isEmpty() ? " WHERE " : " AND ")
+            + "COALESCE("
+            + exposed
+            + "."
+            + n.txState
+            + ", 3) = 3 UNION ALL SELECT "
+            + keyed
+            + ", "
+            + keyed
+            + ", NULL, NULL, 1 FROM "
+            + SplitRead.inFlight(n.engine, t, t.dataColumns())
+            + " "
+            + exposed
+            + where;
     String keyColumns =
         Names.numbered("", d, width)
             + ", "
             + Names.numbered("", "scalardb_native_m", width)
             + ", scalardb_native_id, scalardb_native_version, scalardb_native_state";
-    List<Integer> binds = new ArrayList<>(keys.binds);
+    List<Integer> inWhere = span == null ? List.of() : keys.binds;
+    List<Integer> binds = new ArrayList<>(inWhere);
+    binds.addAll(inWhere);
     StringBuilder sql =
         new StringBuilder(
                 "WITH scalardb_native_s (scalardb_native_i, scalardb_native_p, scalardb_native_c)"
@@ -1411,34 +1466,27 @@ final class Writes {
                     + " scalardb_native_keys (")
             .append(keyColumns)
             .append(") AS (")
-            .append(keys.sql)
+            .append(keysSql)
             .append(")");
     if (afterImages != null) {
       sql.append(", scalardb_native_after AS (").append(afterImages.sql).append(")");
       binds.addAll(afterImages.binds);
     }
     binds.addAll(all);
-    String written = n.keyJoinNumbered("w", w, "k", d);
-    sql.append(
-            ", scalardb_native_gate (scalardb_native_go) AS (SELECT NOT EXISTS (SELECT 1 FROM"
-                + " scalardb_native_keys WHERE scalardb_native_state IN (1, 2) OR"
-                + " scalardb_native_m0 IS NULL)")
-        .append(afterImages == null ? "" : " AND NOT EXISTS (SELECT 1 FROM scalardb_native_after)")
-        .append("), scalardb_native_written AS (")
+    sql.append(", scalardb_native_written AS (")
         .append(dml)
         .append(" RETURNING ")
         .append(n.aliased("", w))
         .append(", ")
         .append(delete ? "true" : n.txVersion + " <> -1")
-        .append(
-            " AS scalardb_native_ok) SELECT k.*, EXISTS (SELECT 1 FROM scalardb_native_written w")
-        .append(" WHERE ")
-        .append(written)
-        .append("), EXISTS (SELECT 1 FROM scalardb_native_written w WHERE ")
-        .append(written)
-        .append(" AND w.scalardb_native_ok), (SELECT scalardb_native_go FROM scalardb_native_gate)")
+        .append(" AS scalardb_native_ok) SELECT k.*, w.")
+        .append(w)
+        .append("0 IS NOT NULL, COALESCE(w.scalardb_native_ok, false), ")
+        .append(gate)
         .append(afterImages == null ? "" : ", EXISTS (SELECT 1 FROM scalardb_native_after)")
-        .append(" FROM (SELECT 1) scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE");
+        .append(" FROM (SELECT 1) scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE")
+        .append(" LEFT JOIN scalardb_native_written w ON ")
+        .append(n.keyJoinNumbered("w", w, "k", d));
     return new Step(sql.toString(), binds, Set.of(), true);
   }
 
@@ -2960,9 +3008,23 @@ final class Writes {
           });
 
   /** A fresh transaction id for a write's stamp (I5): a random UUID, as ScalarDB's own are. */
+  // the generator's output a kilobyte at a time, sliced per id: a DRBG's call costs the same for
+  // sixteen bytes as for a thousand, and a write statement takes one id
+  private static final ThreadLocal<byte[]> RANDOM_BYTES =
+      ThreadLocal.withInitial(() -> new byte[1024]);
+
+  private static final ThreadLocal<int[]> RANDOM_AT =
+      ThreadLocal.withInitial(() -> new int[] {1024});
+
   static String freshTxId() {
-    byte[] bytes = new byte[16];
-    RANDOM.get().nextBytes(bytes);
+    byte[] buffer = RANDOM_BYTES.get();
+    int[] at = RANDOM_AT.get();
+    if (at[0] + 16 > buffer.length) {
+      RANDOM.get().nextBytes(buffer);
+      at[0] = 0;
+    }
+    byte[] bytes = Arrays.copyOfRange(buffer, at[0], at[0] + 16);
+    at[0] += 16;
     bytes[6] = (byte) ((bytes[6] & 0x0f) | 0x40); // version 4
     bytes[8] = (byte) ((bytes[8] & 0x3f) | 0x80); // IETF variant
     long msb = 0;

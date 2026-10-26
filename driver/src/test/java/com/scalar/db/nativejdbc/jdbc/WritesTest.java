@@ -390,9 +390,24 @@ class WritesTest {
         .contains(
             "\"tx_version\" = CASE WHEN \"tx_id\" IS NOT DISTINCT FROM k.scalardb_native_id"
                 + " AND \"tx_version\" IS NOT DISTINCT FROM k.scalardb_native_version THEN")
-        .contains("FROM scalardb_native_keys k WHERE (x = ?) AND (\"id\") = (k.scalardb_native_d0)")
         .contains(
-            "RETURNING \"id\" AS scalardb_native_w0, \"tx_version\" <> -1 AS scalardb_native_ok");
+            "FROM scalardb_native_s s, scalardb_native_keys k WHERE (x = ?) AND (\"id\") ="
+                + " (k.scalardb_native_d0) AND NOT EXISTS (SELECT 1 FROM scalardb_native_keys WHERE"
+                + " COALESCE(scalardb_native_state, 3) IN (1, 2)) AND COALESCE(\"tx_state\", 3) = 3")
+        .contains(
+            "RETURNING \"id\" AS scalardb_native_w0, \"tx_version\" <> -1 AS scalardb_native_ok)"
+                + " SELECT k.*, w.scalardb_native_w0 IS NOT NULL, COALESCE(w.scalardb_native_ok,"
+                + " false), NOT EXISTS")
+        // the keys from the table itself: the committed rows, and the rows in flight whose before
+        // image matches, which close the gate
+        .contains(
+            "scalardb_native_keys (scalardb_native_d0, scalardb_native_m0, scalardb_native_id,"
+                + " scalardb_native_version, scalardb_native_state) AS (SELECT t.\"id\", t.\"id\","
+                + " t.\"tx_id\", t.\"tx_version\", t.\"tx_state\" FROM \"ns\".\"t\" t WHERE (x = ?)"
+                + " AND COALESCE(t.\"tx_state\", 3) = 3 UNION ALL SELECT t.\"id\","
+                + " t.\"id\", NULL, NULL, 1 FROM (SELECT m.\"id\", m.\"before_x\" AS \"x\" FROM"
+                + " \"ns\".\"t\" m WHERE m.\"tx_state\" IN (1, 2) AND (m.\"before_tx_id\" IS NOT"
+                + " NULL OR m.\"before_tx_version\" IS NOT NULL)) t WHERE (x = ?))");
     List<String> fusedDelete = plan(inline(), "DELETE FROM t WHERE x = ?");
     assertThat(fusedDelete.get(fusedDelete.size() - 1))
         .contains("DELETE FROM t USING scalardb_native_keys k WHERE (x = ?)")

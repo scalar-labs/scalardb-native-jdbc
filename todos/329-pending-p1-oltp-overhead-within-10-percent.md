@@ -632,3 +632,40 @@ manages", and pass alone; the word `p` is a ScalarDB table of `WriteIntegrationT
 (`aj.p`), which that test now drops at its end, though ScalarDB's drop leaves the imported table's
 metadata behind, and the same leftover was present in the runs that passed. Not resolved; it does
 not touch the changed paths.
+
+### 2026-10-26, night: the READ COMMITTED items, measured before building
+
+Each candidate shape was timed on the server itself before any code: pgbench in prepared mode, one
+client, on the TPC-C tables in the inline shape, the mean execution time from `pg_stat_statements`
+(`scratchpad/pgb2`). Against the vendor's statement, in one machine state:
+
+| statement, 1 client | vendor | the driver's form | candidates |
+|---|---|---|---|
+| item read by key | 8.3 µs | two arms, own versions (RC): 8.6 | one scan with CASE per column: 8.5; the RR probe form: 7.9 |
+| the same, 4 clients | 8.0 | 9.1 | one scan: 9.6; probe: 9.2 |
+| customer read by key, RR first touch | 13.5 | probe form: 9.5 | |
+| district update by key | 14.1 | slim (RC): 22.8; RR fast: 20.5 | slim with the keys joined: 29.8 |
+| order_line update by key prefix, 10 rows | 44 to 50 | fused inline (RC): 101 to 111 | keys from the table, stamp joined, written by LEFT JOIN: 75 to 90 |
+
+So the two-arm read costs within a microsecond of the vendor's in isolation and under four
+clients, the one-scan form would gain nothing, and the slim write is already near its floor: the
+items I had listed from the benchmark's per-statement times were mostly not real. What the local
+benchmark shows as a per-statement cost in (c) is the laptop: the client runs on the same eight
+cores as the server, and the driver's client takes 0.86 ms of CPU a commit against the vendor's
+0.53 (JFR, `jfr-cpu.py`), at both levels alike, so even the plain item text the driver sends at
+REPEATABLE READ measured 10.2 µs against 8.6 in (a). Per-statement server times from the laptop's
+runs are not to be read as statement costs; the AWS runs, with the client on another machine, are.
+
+Built: the inline fused write beyond the key reads its keys from the table itself (the committed
+rows with their versions and the rows in flight whose before image matches, which close the gate)
+rather than through the view and a join back, takes the stamp from its CTE by a join rather than
+three lookups per row, keeps the gate as one condition of the DML, and reads what the DML wrote by
+a left join rather than two EXISTS per key: 101 to 90 µs for Delivery's ten rows, the same result
+rows as before (`fusedKeyedInline`). The write's `tx_id` now comes from a kilobyte of the DRBG's
+output per thread, sliced per statement (`freshTxId`), which was 6% of the driver's client CPU.
+
+The client's CPU is the driver's largest own cost at both levels, 0.33 ms a commit here: by JFR,
+80% of it inclusive under the dynamic proxies' `invoke` and `forward` (reflection on every JDBC
+call), binding 8%, routing 10% (`Router.route`, `decide`, `current`), the anchored result handler
+8% at READ COMMITTED. A hand-written delegation in place of `java.lang.reflect.Proxy` would be the
+structural change; not taken here.
