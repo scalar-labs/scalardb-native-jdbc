@@ -883,6 +883,29 @@ final class Writes {
         fastMerge == null || span == null
             ? null
             : fastMerged(n, ast, t, span, delete, imported, from, end, false);
+    // at READ COMMITTED on PostgreSQL, a decoupled table, without a wait: the clear-table
+    // statement with the CAS in its stamp, by the key and over a batch's entries, and beyond the
+    // key for a transaction that recorded no anchor of the table (design 4.3, todo 336)
+    boolean rc =
+        engine == Engine.POSTGRESQL
+            && t.layout() != Layout.INLINE
+            && !snapshot
+            && !locks
+            && from >= 0
+            && ast.tableRefs().size() == 1
+            && !shape.returning();
+    Step clearRc =
+        rc && byKey && span != null
+            ? clearKeyedRc(n, ast, t, exposed, span, inWhere, all, delete, imported, from, end)
+            : null;
+    Merge clearMergeRc =
+        clearRc != null && merge != null && span != null
+            ? clearMergedRc(n, ast, t, exposed, span, delete, imported, from, end)
+            : null;
+    Step predicateRc =
+        rc && !byKey && shape.wherePure() && keyColumnsOnly(engine, t, shape.whereColumns())
+            ? clearPredicateRc(n, ast, t, exposed, span, inWhere, all, delete, imported, from, end)
+            : null;
     return new KeyedPlan(
         n,
         delete,
@@ -908,7 +931,10 @@ final class Writes {
         fastMergeClear,
         block,
         predicateBlock,
-        entries);
+        entries,
+        clearRc,
+        clearMergeRc,
+        predicateRc);
   }
 
   /**
@@ -2630,6 +2656,313 @@ final class Writes {
     List<Integer> binds = new ArrayList<>(inWhere);
     binds.addAll(all);
     return new Step(sql.toString(), binds);
+  }
+
+  /**
+   * The CAS of 4.3 step 3 folded into the clear-table statement's stamp on a decoupled table at
+   * READ COMMITTED on PostgreSQL (design 4.3, todo 336): the metadata row as the stamp finds it,
+   * locked and newest ({@code m}), at the tx_id and version {@code source}'s rows hold for its key,
+   * which read the statement's snapshot. PostgreSQL re-evaluates an UPDATE's WHERE, and {@code ON
+   * CONFLICT DO UPDATE}'s, on the row as it is after a wait, while the subquery keeps the snapshot
+   * (todo 336's confirmation test 1). {@code source}: the keys CTE ({@code c}, its key columns
+   * {@code scalardb_native_m}i) or the metadata table itself ({@code s}).
+   */
+  private static String rcCas(Names n, boolean fromKeys) {
+    int width = n.keyColumns.size();
+    List<String> join = new ArrayList<>();
+    for (int i = 0; i < width; i++) {
+      String k = n.engine.quote(n.keyColumns.get(i));
+      join.add((fromKeys ? "c.scalardb_native_m" + i : "s." + k) + " = m." + k);
+    }
+    String id = fromKeys ? "c.scalardb_native_id" : "s." + n.txId;
+    String version = fromKeys ? "c.scalardb_native_version" : "s." + n.txVersion;
+    return " AND EXISTS (SELECT 1 FROM "
+        + (fromKeys ? "scalardb_native_keys c" : n.meta + " s")
+        + " WHERE "
+        + String.join(" AND ", join)
+        + " AND "
+        + id
+        + " IS NOT DISTINCT FROM m."
+        + n.txId
+        + " AND "
+        + version
+        + " IS NOT DISTINCT FROM m."
+        + n.txVersion
+        + ")";
+  }
+
+  /**
+   * The keyed write at READ COMMITTED on a decoupled table on PostgreSQL, where no wait is
+   * configured (design 4.3 "The keyed write at READ COMMITTED on a decoupled table", todo 336): the
+   * key's metadata row as the statement's snapshot reads it, in a CTE; the user's DML as written on
+   * the data table, gated on that row's state being committed or absent, which keeps the data row
+   * unwritten for a key in flight or in another state; the clear-table stamp from it ({@link
+   * #metaStamp}) with the CAS of {@link #rcCas} on that CTE. Its one row: how many rows the DML
+   * wrote and the stamp stamped, the snapshot's tx_id, version and state of the key (NULLs without
+   * a metadata row), and the key written as the data table spells it, for the anchor. The binds:
+   * the predicate's in the CTE, then the statement's, then the stamp's three where it has them.
+   * Null when the text cannot be rewritten.
+   */
+  private static @Nullable Step clearKeyedRc(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      List<Integer> inWhere,
+      List<Integer> all,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end) {
+    String source = ast.source();
+    int width = n.keyColumns.size();
+    String w = "scalardb_native_w";
+    String dml =
+        onDataTable(
+            n.engine,
+            ast,
+            t,
+            true,
+            source.substring(0, from).stripTrailing()
+                + " WHERE ("
+                + source.substring(span[0], span[1])
+                + ") AND NOT EXISTS (SELECT 1 FROM scalardb_native_keys WHERE"
+                + " COALESCE(scalardb_native_state, 3) <> 3)"
+                + source.substring(span[1], end),
+            from);
+    if (dml == null) {
+      return null;
+    }
+    StringBuilder sql =
+        new StringBuilder("WITH scalardb_native_keys (")
+            .append(Names.numbered("", "scalardb_native_m", width))
+            .append(
+                ", scalardb_native_id, scalardb_native_version, scalardb_native_state) AS (SELECT ")
+            .append(n.readColumns(exposed))
+            .append(", ")
+            .append(exposed)
+            .append(".")
+            .append(n.txId)
+            .append(", ")
+            .append(exposed)
+            .append(".")
+            .append(n.txVersion)
+            .append(", ")
+            .append(exposed)
+            .append(".")
+            .append(n.txState)
+            .append(" FROM ")
+            .append(n.meta)
+            .append(" ")
+            .append(exposed)
+            .append(" WHERE ")
+            .append(source, span[0], span[1])
+            .append("), ")
+            .append(w)
+            .append(" AS (")
+            .append(dml)
+            .append(" RETURNING ")
+            .append(n.aliased("", w))
+            .append("), scalardb_native_s AS (")
+            .append(metaStamp(n, w, delete, imported))
+            .append(rcCas(n, true))
+            .append(" RETURNING 1) SELECT (SELECT count(*) FROM ")
+            .append(w)
+            .append("), (SELECT count(*) FROM scalardb_native_s), k.scalardb_native_id,")
+            .append(" k.scalardb_native_version, k.scalardb_native_state");
+    for (int i = 0; i < width; i++) {
+      sql.append(", (SELECT ").append(w).append(i).append(" FROM ").append(w).append(")");
+    }
+    sql.append(" FROM (SELECT 1) scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE");
+    List<Integer> binds = new ArrayList<>(inWhere);
+    binds.addAll(all);
+    return new Step(sql.toString(), binds);
+  }
+
+  /**
+   * {@link #clearKeyedRc} over the entries of a batch (design 4.3, todo 336), as {@link
+   * #fastMerged} sends them: each entry a row of {@code scalardb_native_e}; its key's metadata row
+   * read per entry by a lateral subquery into the keys CTE; the DML joined to the entries,
+   * returning each written row's entry and key; the stamp with the CAS on the CTE; and per row
+   * written its entry, how many the stamp stamped in all, the snapshot's tx_id and version of its
+   * key, and its key. Null when the text cannot be rewritten.
+   */
+  private static @Nullable Merge clearMergedRc(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end) {
+    List<int[]> holes = ast.placeholderSpans();
+    if (holes == null || holes.isEmpty()) {
+      return null;
+    }
+    String source = ast.source();
+    int width = n.keyColumns.size();
+    String e = "scalardb_native_e";
+    String w = "scalardb_native_w";
+    IntFunction<String> p = j -> e + ".scalardb_native_p" + j;
+    String predicate = filled(source, span[0], span[1], holes, p);
+    String text =
+        filled(source, 0, from, holes, p).stripTrailing()
+            + (delete ? " USING " : " FROM ")
+            + e
+            + " WHERE ("
+            + predicate
+            + ") AND NOT EXISTS (SELECT 1 FROM scalardb_native_keys g WHERE g.scalardb_native_n = "
+            + e
+            + ".scalardb_native_n AND COALESCE(g.scalardb_native_state, 3) <> 3)"
+            + filled(source, span[1], end, holes, p);
+    String dml =
+        onDataTable(
+            n.engine,
+            ast,
+            t,
+            true,
+            text
+                + " RETURNING "
+                + e
+                + ".scalardb_native_n AS scalardb_native_n, "
+                + n.aliased("", w),
+            from);
+    if (dml == null) {
+      return null;
+    }
+    StringBuilder head = new StringBuilder("WITH ").append(e).append(" (scalardb_native_n");
+    for (int j = 1; j <= holes.size(); j++) {
+      head.append(", scalardb_native_p").append(j);
+    }
+    head.append(") AS (VALUES ");
+    String tail =
+        "), scalardb_native_keys (scalardb_native_n, "
+            + Names.numbered("", "scalardb_native_m", width)
+            + ", scalardb_native_id, scalardb_native_version, scalardb_native_state) AS (SELECT "
+            + e
+            + ".scalardb_native_n, "
+            + n.readColumns("x")
+            + ", x."
+            + n.txId
+            + ", x."
+            + n.txVersion
+            + ", x."
+            + n.txState
+            + " FROM "
+            + e
+            + " CROSS JOIN LATERAL (SELECT * FROM "
+            + n.meta
+            + " "
+            + exposed
+            + " WHERE "
+            + predicate
+            + " OFFSET 0) x), "
+            + w
+            + " AS ("
+            + dml
+            + "), scalardb_native_s AS ("
+            + metaStamp(n, w, delete, imported)
+            + rcCas(n, true)
+            + " RETURNING 1) SELECT w.scalardb_native_n, (SELECT count(*) FROM"
+            + " scalardb_native_s), k.scalardb_native_id, k.scalardb_native_version, "
+            + Names.numbered("w", w, width)
+            + " FROM "
+            + w
+            + " w LEFT JOIN scalardb_native_keys k ON k.scalardb_native_n ="
+            + " w.scalardb_native_n";
+    String row = ", ?".repeat(holes.size()) + ")";
+    IntFunction<String> sql =
+        k -> {
+          StringBuilder out = new StringBuilder(head);
+          for (int i = 1; i <= k; i++) {
+            out.append(i == 1 ? "(" : ", (").append(i).append(row);
+          }
+          return out.append(tail).toString();
+        };
+    return new Merge(sql, holes.size(), false, imported || !delete);
+  }
+
+  /**
+   * The write beyond the key at READ COMMITTED on a decoupled table on PostgreSQL, for a
+   * transaction that recorded no anchor of the table and where no wait is configured (design 4.3
+   * "The write beyond the key at READ COMMITTED on a decoupled table", todo 336): whether a row in
+   * flight matches the predicate by its before image alone (4.2), one probe of the in-flight index;
+   * the user's DML as written on the data table, returning its keys; and the clear-table stamp from
+   * them with the CAS of {@link #rcCas} on the metadata table itself, read in the statement's
+   * snapshot. Its one row: how many rows the DML wrote, how many the stamp stamped, and the before
+   * images' match. The binds: the predicate's in the before images' check, then the statement's,
+   * then the stamp's three where it has them. Null when the text cannot be rewritten.
+   */
+  private static @Nullable Step clearPredicateRc(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int @Nullable [] span,
+      List<Integer> inWhere,
+      List<Integer> all,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end) {
+    String source = ast.source();
+    String w = "scalardb_native_w";
+    String where =
+        span == null
+            ? ""
+            : " WHERE ("
+                + source.substring(span[0], span[1])
+                + ")"
+                + source.substring(span[1], end);
+    String dml =
+        onDataTable(
+            n.engine, ast, t, true, source.substring(0, from).stripTrailing() + where, from);
+    if (dml == null) {
+      return null;
+    }
+    String sql =
+        "WITH scalardb_native_before (scalardb_native_b) AS (SELECT EXISTS (SELECT 1 FROM "
+            + SplitRead.inFlight(n.engine, t, t.dataColumns())
+            + " "
+            + exposed
+            + (span == null ? "" : " WHERE " + source.substring(span[0], span[1]))
+            + ")), "
+            + w
+            + " AS ("
+            + dml
+            + " RETURNING "
+            + n.aliased("", w)
+            + "), scalardb_native_s AS ("
+            + metaStamp(n, w, delete, imported)
+            + rcCas(n, false)
+            + " RETURNING 1) SELECT (SELECT count(*) FROM "
+            + w
+            + "), (SELECT count(*) FROM scalardb_native_s), (SELECT scalardb_native_b FROM"
+            + " scalardb_native_before)";
+    List<Integer> binds = new ArrayList<>(inWhere);
+    binds.addAll(all);
+    return new Step(sql, binds);
+  }
+
+  /**
+   * Whether every column of {@code columns} is a key column of {@code t}: a predicate a row's
+   * images cannot differ on, so that a row the statement's snapshot matched still matches its
+   * newest version (design 4.3, todo 336, form 3's scope, as the READ COMMITTED lock's).
+   */
+  private static boolean keyColumnsOnly(Engine engine, TableInfo t, List<String> columns) {
+    Set<String> keys = new HashSet<>();
+    for (String k : t.keyColumns()) {
+      keys.add(engine.columnKey(k));
+    }
+    for (String c : columns) {
+      if (!keys.contains(engine.columnKey(c))) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -5179,7 +5512,7 @@ final class Writes {
   }
 
   /** UPDATE and DELETE (4.3): per key, the user's statement first, the CAS second. */
-  private static final class KeyedPlan extends Plan {
+  static final class KeyedPlan extends Plan {
     final boolean delete;
     final boolean imported;
     // the metadata in the row: a DELETE is the conditional delete of the row itself (milestone 10b)
@@ -5214,6 +5547,12 @@ final class Writes {
     final @Nullable Step predicateBlock;
     // the keyed block over a batch's entries (design 4.4, todo 334)
     final @Nullable Entries entries;
+    // at READ COMMITTED on PostgreSQL on a decoupled table, without a wait: the clear-table
+    // statement with the CAS in its stamp, by the key, over a batch's entries, and beyond the key
+    // (design 4.3, todo 336)
+    final @Nullable Step clearRc;
+    final @Nullable Merge clearMergeRc;
+    final @Nullable Step predicateRc;
 
     KeyedPlan(
         Names n,
@@ -5235,8 +5574,14 @@ final class Writes {
         @Nullable Merge fastMergeClear,
         @Nullable Block block,
         @Nullable Step predicateBlock,
-        @Nullable Entries entries) {
+        @Nullable Entries entries,
+        @Nullable Step clearRc,
+        @Nullable Merge clearMergeRc,
+        @Nullable Step predicateRc) {
       super(n);
+      this.clearRc = clearRc;
+      this.clearMergeRc = clearMergeRc;
+      this.predicateRc = predicateRc;
       this.block = block;
       this.predicateBlock = predicateBlock;
       this.entries = entries;
@@ -5301,6 +5646,14 @@ final class Writes {
           return written;
         }
       }
+      if (run.context.inflightWait().isZero()) {
+        if (clearRc != null) {
+          return applyClearRc(run, clearRc);
+        }
+        if (predicateRc != null && !run.context.anchors().recorded(n.table)) {
+          return applyPredicateRc(run, predicateRc);
+        }
+      }
       if (block != null || predicateBlock != null) {
         // a write beyond the key on a table the transaction recorded anchors of keeps the steps,
         // which compare each key with its anchor
@@ -5346,6 +5699,93 @@ final class Writes {
         }
       }
       return applySteps(run);
+    }
+
+    /**
+     * The keyed write as {@link #clearKeyedRc}'s statement, and what the driver does with its row,
+     * in the design's order (4.3, todo 336): nothing written, an abort for a key the snapshot
+     * showed in flight, else the count 0 (no row, or a state that is no committed image); written
+     * and stamped, the anchor checked against the snapshot's tx_id and version, an abort when it
+     * moved; written and not stamped, an abort, "being written" when the snapshot showed the key in
+     * flight and "changed after it was read" otherwise. Never the fused statement: there is no wait
+     * to take, and an abort undoes the data row written with the transaction.
+     */
+    private long applyClearRc(Run run, Step step) throws SQLException {
+      int width = n.keyColumns.size();
+      long written;
+      long stamped;
+      String txId;
+      Object version;
+      Object state;
+      Object[] key;
+      try (PreparedStatement ps = run.prepare(step, null)) {
+        if (imported || !delete) {
+          run.stamp(ps, step.binds.size() + 1); // a created table's DELETE stamps nothing
+        }
+        try (ResultSet rs = ps.executeQuery()) {
+          rs.next();
+          written = rs.getLong(1);
+          stamped = rs.getLong(2);
+          txId = rs.getString(3);
+          version = rs.getObject(4);
+          state = rs.getObject(5);
+          key = readKey(rs, 6, width);
+        }
+      }
+      if (written == 0) {
+        // the gate closed on a key in flight, or the vendor's 0: no row, or a state that is no
+        // committed image, which counts nothing, as the fused statement counts it
+        if (inFlight(state)) {
+          throw new Aborted(
+              "a row the statement writes is being written by a ScalarDB transaction");
+        }
+        return 0L;
+      }
+      if (stamped != written || key == null) {
+        if (inFlight(state)) {
+          throw new Aborted(
+              "a row the statement writes is being written by a ScalarDB transaction");
+        }
+        throw new Aborted("a row the statement writes changed after it was read");
+      }
+      Anchors anchors = run.context.anchors();
+      if (!anchors.unchanged(n.table, key, txId, version)) {
+        throw new Aborted("a row this transaction read was changed by another one since");
+      }
+      anchors.wrote(run.txId);
+      return written;
+    }
+
+    /**
+     * The write beyond the key as {@link #clearPredicateRc}'s statement (design 4.3, todo 336): a
+     * row in flight matched by its before image alone, an abort; fewer rows stamped than written,
+     * an abort; else the count written.
+     */
+    private long applyPredicateRc(Run run, Step step) throws SQLException {
+      long written;
+      long stamped;
+      boolean before;
+      try (PreparedStatement ps = run.prepare(step, null)) {
+        if (imported || !delete) {
+          run.stamp(ps, step.binds.size() + 1);
+        }
+        try (ResultSet rs = ps.executeQuery()) {
+          rs.next();
+          written = rs.getLong(1);
+          stamped = rs.getLong(2);
+          before = rs.getBoolean(3);
+        }
+      }
+      if (before) {
+        throw new Aborted("a row the statement writes is being written by a ScalarDB transaction");
+      }
+      if (stamped != written) {
+        throw new Aborted("a row the statement writes changed after it was read");
+      }
+      if (written > 0) {
+        run.context.anchors().wrote(run.txId);
+      }
+      return written;
     }
 
     /**
@@ -5737,6 +6177,9 @@ final class Writes {
 
     @Override
     @Nullable Merge fastMerge(Context context) {
+      if (clearMergeRc != null && context.inflightWait().isZero()) {
+        return clearMergeRc;
+      }
       if (fastMerge == null || fastMergeClear == null || context.anchors().recorded(n.table)) {
         return null;
       }
@@ -5750,6 +6193,9 @@ final class Writes {
 
     @Override
     long @Nullable [] mergedFast(Run run, ResultSet rs, int entries, Merge m) throws SQLException {
+      if (m == clearMergeRc) {
+        return mergedRc(run, rs, entries);
+      }
       long[] counts = new long[entries];
       long stamped = -1;
       int rows = 0;
@@ -5772,6 +6218,38 @@ final class Writes {
         run.context.pass(check); // the gate was open
       }
       run.context.anchors().wrote(run.txId);
+      return counts;
+    }
+
+    /**
+     * What {@link #clearMergedRc}'s statement returned for {@code entries} entries: each one's
+     * count, recorded, when every entry wrote its row, every row was stamped and no anchor moved;
+     * null otherwise, the entries undone and run one by one, each telling its own outcome (a key
+     * without a row, two entries on one key, a stamp missed, an anchor moved).
+     */
+    private long @Nullable [] mergedRc(Run run, ResultSet rs, int entries) throws SQLException {
+      int width = n.keyColumns.size();
+      long[] counts = new long[entries];
+      Anchors anchors = run.context.anchors();
+      long stamped = -1;
+      int rows = 0;
+      while (rs.next()) {
+        int i = rs.getInt(1) - 1;
+        if (i < 0 || i >= entries || counts[i] != 0) {
+          return null;
+        }
+        stamped = rs.getLong(2);
+        Object[] key = readKey(rs, 5, width);
+        if (key == null || !anchors.unchanged(n.table, key, rs.getString(3), rs.getObject(4))) {
+          return null;
+        }
+        counts[i] = 1;
+        rows++;
+      }
+      if (rows != entries || stamped != rows) {
+        return null;
+      }
+      anchors.wrote(run.txId);
       return counts;
     }
 
@@ -7071,8 +7549,8 @@ final class Writes {
         if (rs == null) {
           throw new SQLException("the locking read returned no rows", "XX000");
         }
-        // the key, then the two version lookups the anchored read appends, stale after a wait
-        int from = rs.getMetaData().getColumnCount() - width - 1;
+        // the key the lock appends, its last columns (todo 336: no version lookups after it)
+        int from = rs.getMetaData().getColumnCount() - width + 1;
         List<Object[]> keys = new ArrayList<>();
         Set<List<Object>> locked = new HashSet<>();
         while (rs.next()) {
@@ -7109,7 +7587,7 @@ final class Writes {
           run.context.anchor(n.table, key, v);
         }
         ps.closeOnCompletion();
-        run.context.rows(rs, width + 2);
+        run.context.rows(rs, width);
         return keys.size();
       } catch (SQLException | RuntimeException e) {
         ps.close();

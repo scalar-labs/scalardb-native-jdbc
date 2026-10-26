@@ -230,3 +230,96 @@ out by hand on vendor connections (or the driver itself for 2's anchor, 3 and 4)
 
 The anchors are read in the tests from the driver connection's handler by reflection (the field
 `anchors` of `Proxies`' connection handler), the one way a test sees `Anchors.recorded`.
+
+### 2026-10-26: form 1 built keys-only; one case sent back (Opus)
+
+`Router.lockingRead`'s decoupled READ COMMITTED branch now emits the lock with a keys-only
+`versions` (the key columns, the two lookups left out) and `LockPlan.applyFastRcDecoupled` reads
+the key as the last columns and hides only them. What the first statement still is, from
+`DecoupledReadCommittedIntegrationTest.form1_theLocksFirstStatementHasItsKeysOnly`:
+
+```sql
+SELECT x, made."id" AS "scalardb_native_x0" FROM (SELECT t."id", t."x" FROM "rcd"."made_data" t
+  WHERE NOT EXISTS (SELECT 1 FROM "rcd"."made_tx_metadata" q WHERE q."id" = t."id"
+                    AND q."tx_state" IN (1, 2))) made WHERE id = ? FOR UPDATE
+```
+
+The committed copy's own filter, one probe of `T_meta` per row, stays. **Sent back to the
+design**: the brief's text test asks that the first statement name `T_meta` nowhere, which needs
+the lock over the data table as written (SNAPSHOT's `plainSql`) with the keys appended. That
+changes one outcome: a row a ScalarDB prepare is inserting (in flight, no before image) that the
+predicate matches is today excluded by the filter, so the lock skips it and the read returns
+without it; over the data table the lock takes it, the second statement shows it in flight among
+the locked keys, and the read aborts `40001` (or fails as NOWAIT does). Rows in flight with a
+before image abort either way. Which does the design want: the filter kept (built, no outcome
+changed), or the plain lock with the prepared insert aborting? Forms 2 and 3 go on meanwhile.
+
+### 2026-10-26: form 1 as decided; forms 2 and 3 built; two cases sent back (Opus)
+
+**Form 1, the design's answer recorded**: the plain lock over the data table, keys appended, no
+`T_meta` in the first statement; a prepared insert the predicate matches is locked, shown in flight
+by the second statement, and the read aborts `40001` or fails as NOWAIT does (the design's
+decision of 2026-10-26, design 4.3's decoupled READ COMMITTED locking-read sentences; the inline
+layout's one-statement lock already aborts on any row in flight). Built by emitting the committed
+copy raw (`SplitRead.emit`'s `raw`, rows in flight kept) with the keys-only `versions`; the text
+test asserts the metadata table named nowhere in the first statement.
+
+**Forms 2 and 3 built** (`Writes.clearKeyedRc`, `clearMergedRc`, `clearPredicateRc`, the CAS
+`rcCas`; `KeyedPlan.applyClearRc`, `applyPredicateRc`, `mergedRc`; chosen in `KeyedPlan.apply`
+and `fastMerge(Context)` when `inflightWait` is zero, form 3 also only without recorded anchors);
+the final row of form 2 carries the key written besides the design's columns, for the anchor
+check. Unit tests in `WritesTest` (the texts, created and imported, UPDATE and DELETE, one key,
+merged, beyond the key): 397 passing. The PostgreSQL suite: 134 tests, 2 failing, both cases the
+design's tables do not cover, **sent back**:
+
+1. **Form 2, a metadata row in a state neither 1, 2, 3 nor NULL** (`MoreWritesIntegrationTest`'s
+   `mergedBatches`, `tx_state` set to 4 on a key, the keyed write expected to count 0 and write
+   nothing, "no committed image, as the fused statement counts it"). Form 2 has no gate: its DML
+   writes the data row, the stamp's `COALESCE(tx_state, 3) = 3` refuses, and the decoder aborts
+   "changed after it was read". Count 0 would need the data write undone, which the statement
+   cannot do without a gate or a savepoint. Abort (a changed outcome for that test), or a gate on
+   the snapshot's state for that case alone?
+2. **Form 3, finding 134: a prepare and rollback during the statement** (`WriteIntegrationTest`'s
+   `reviewFindings`, line ~639: `UPDATE rf.imp SET x = 'drv' WHERE id = 60 AND rf.gate(x)`,
+   `gate` sleeping 3 s; a ScalarDB prepare writes `x = 'held'` at 1 s, its rollback restores `'a'`
+   at 4 s). Under form 3 the DML's re-check after the row moved runs on the prepare's after image
+   (`gate('held')`, false), so the row whose committed image matched is skipped: count 0, nothing
+   written, no abort. The before-image column reads the statement's snapshot, taken before the
+   prepare, so it shows nothing in flight. The fused statement passes (count 1) by its keys read
+   and step 2's zero-row rule (a key read whose DML skipped it is re-checked and aborts if still
+   matching). Form 3 has no such rule; the design's text gives the DML as written and the
+   before-image check at the snapshot only. What should form 3 do with a key the DML skipped after
+   a wait: is a zero-row rule wanted (which needs the keys read, the fused statement's shape), or
+   should form 3 not apply where the predicate is volatile, or something else?
+
+Both forms stay built; form 3's question decides whether it ships at all.
+
+### 2026-10-26: the two cases answered by the design, built; forms 1 to 3 committed (Opus)
+
+The design's answers (docs/design.md 4.3, committed on main by the design session):
+
+1. **Form 2 gets a gate on the snapshot's state** over the CTE it already has: the DML's WHERE
+   extended by `AND NOT EXISTS (SELECT 1 FROM scalardb_native_keys WHERE
+   COALESCE(scalardb_native_state, 3) <> 3)`, the merged form the same per entry (over the entry's
+   keys row). Written 0 with `tx_state` 1 or 2: abort "being written by a ScalarDB transaction";
+   written 0 otherwise, a state neither 1, 2, 3 nor NULL among it: 0 rows, nothing written; a key
+   without a metadata row passes the gate and is stamped by the insert. Built in `clearKeyedRc`,
+   `clearMergedRc` and `applyClearRc`; `MoreWritesIntegrationTest.mergedBatches` passes unchanged.
+2. **Form 3 ships scoped to predicates on key columns only**, pure, as the READ COMMITTED lock is
+   scoped, still only without recorded anchors of the table; predicates on other columns keep the
+   fused statement and its zero-row rule (finding 134). Built (`Writes.keyColumnsOnly` on
+   `whereColumns`, and `wherePure`); `WriteIntegrationTest.reviewFindings` passes unchanged. The
+   divergence the design accepted: a row in the abnormal state matched by a key-only predicate
+   aborts under form 3 where the fused statement skips it.
+
+Tests: `WritesTest` (the gated texts, the merged gate per entry, form 3 on `id > ?` and absent for
+`x = ?` and for an impure predicate), 397 unit tests passing; `DecoupledReadCommittedIntegrationTest`
+adds the driver-level forms: form 2 (a missing key 0; a write 1 read by ScalarDB; an anchor
+moved, an abort; a row in flight, "being written"; a row moved between the snapshot and the lock
+by another connection's keyed write, "changed after it was read"; a batch of three, merged, all
+1; with a wait configured, the slim statement waits on a row in flight and writes once it rolls
+back) and form 3 (a key range written; a key range over a row in flight, an abort; a predicate on
+another column, the fused statement, an abort as before), both tables. The PostgreSQL suite: 136
+tests, 85 run, all passing (6 min 17 s). SpotBugs: main and unit tests clean; the integration
+tests' remaining findings are `BenchBaseBenchmark`'s and `InFlightCheckBenchmark`'s, not this
+todo's. Next: the other engines' suites once, and the measurement.

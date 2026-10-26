@@ -205,6 +205,167 @@ class WritesTest {
     return Writes.plan(Engine.POSTGRESQL, shape, t, "", true, false, null).fastMerge(gated);
   }
 
+  /** A context without a wait, its anchors empty: the forms of todo 336 apply. */
+  private static Writes.Context noWait() {
+    return fakeContext(new Anchors());
+  }
+
+  private static Writes.Plan rcPlan(TableInfo t, String sql) throws Exception {
+    StatementShape shape =
+        StatementShape.of(SqlAst.parse(sql, Engine.POSTGRESQL).orElseThrow()).orElseThrow();
+    return Writes.plan(Engine.POSTGRESQL, shape, t, "", false, false, null);
+  }
+
+  @Test
+  void atReadCommitted_aDecoupledKeyedWriteIsTheClearTableStatementWithTheCas() throws Exception {
+    // the CAS in the stamp's WHERE: the metadata row as the stamp finds it, at the tx_id and
+    // version the snapshot read into the keys CTE (design 4.3, todo 336)
+    String cas =
+        " AND COALESCE(m.\"tx_state\", 3) = 3 AND EXISTS (SELECT 1 FROM scalardb_native_keys c"
+            + " WHERE c.scalardb_native_m0 = m.\"id\" AND c.scalardb_native_id IS NOT DISTINCT"
+            + " FROM m.\"tx_id\" AND c.scalardb_native_version IS NOT DISTINCT FROM"
+            + " m.\"tx_version\") RETURNING 1)";
+    String keys =
+        "WITH scalardb_native_keys (scalardb_native_m0, scalardb_native_id,"
+            + " scalardb_native_version, scalardb_native_state) AS (SELECT t.\"id\", t.\"tx_id\","
+            + " t.\"tx_version\", t.\"tx_state\" FROM \"ns\".\"t_meta\" t WHERE id = ?),"
+            + " scalardb_native_w AS (";
+    String row =
+        " SELECT (SELECT count(*) FROM scalardb_native_w), (SELECT count(*) FROM"
+            + " scalardb_native_s), k.scalardb_native_id, k.scalardb_native_version,"
+            + " k.scalardb_native_state, (SELECT scalardb_native_w0 FROM scalardb_native_w) FROM"
+            + " (SELECT 1) scalardb_native_one LEFT JOIN scalardb_native_keys k ON TRUE";
+    String upsert =
+        "scalardb_native_s AS (INSERT INTO \"ns\".\"t_meta\" AS m (\"id\", \"tx_id\","
+            + " \"tx_state\", \"tx_version\", \"tx_prepared_at\", \"tx_committed_at\") SELECT"
+            + " w.scalardb_native_w0, ?, 3, 1, ?, ? FROM scalardb_native_w w ON CONFLICT (\"id\")"
+            + " DO UPDATE SET \"tx_id\" = EXCLUDED.\"tx_id\", \"tx_prepared_at\" ="
+            + " EXCLUDED.\"tx_prepared_at\", \"tx_committed_at\" = EXCLUDED.\"tx_committed_at\","
+            + " \"tx_state\" = 3, \"tx_version\" = CASE WHEN m.\"tx_id\" IS NULL THEN 1 ELSE"
+            + " COALESCE(m.\"tx_version\", 0) + 1 END WHERE TRUE";
+    // an imported table: the DML as written on the table itself, the upsert stamp
+    Writes.KeyedPlan imported =
+        (Writes.KeyedPlan) rcPlan(table(), "UPDATE t SET x = x || ? WHERE id = ?");
+    assertThat(Objects.requireNonNull(imported.clearRc).sql)
+        .isEqualTo(
+            keys
+                + "UPDATE t SET x = x || ? WHERE (id = ?) AND NOT EXISTS (SELECT 1 FROM"
+                + " scalardb_native_keys WHERE COALESCE(scalardb_native_state, 3) <> 3) RETURNING"
+                + " \"id\" AS scalardb_native_w0), "
+                + upsert.replace(" WHERE TRUE", "")
+                + " WHERE TRUE".replace(" WHERE TRUE", "")
+                + cas.replace(" AND COALESCE", " WHERE COALESCE")
+                + row);
+    assertThat(imported.clearRc.binds).containsExactly(2, 1, 2);
+    // a created table: the DML on the data table, the UPDATE ... FROM stamp; a DELETE removes
+    Writes.KeyedPlan created =
+        (Writes.KeyedPlan) rcPlan(created(), "UPDATE t SET x = x || ? WHERE id = ?");
+    assertThat(Objects.requireNonNull(created.clearRc).sql)
+        .startsWith(
+            keys
+                + "UPDATE \"ns\".\"t_data\" AS t SET x = x || ? WHERE (id = ?) AND NOT EXISTS"
+                + " (SELECT 1 FROM scalardb_native_keys WHERE COALESCE(scalardb_native_state, 3)"
+                + " <> 3)")
+        .contains(
+            "scalardb_native_s AS (UPDATE \"ns\".\"t_meta\" m SET \"tx_id\" = ?,"
+                + " \"tx_prepared_at\" = ?, \"tx_committed_at\" = ?, \"tx_state\" = 3,")
+        .contains("FROM scalardb_native_w w WHERE m.\"id\" = w.scalardb_native_w0" + cas)
+        .endsWith(row);
+    Writes.KeyedPlan deleted = (Writes.KeyedPlan) rcPlan(created(), "DELETE FROM t WHERE id = ?");
+    assertThat(Objects.requireNonNull(deleted.clearRc).sql)
+        .contains(
+            "scalardb_native_s AS (DELETE FROM \"ns\".\"t_meta\" m USING scalardb_native_w w"
+                + " WHERE m.\"id\" = w.scalardb_native_w0"
+                + cas)
+        .doesNotContain("scalardb_native_gate");
+    // the slim statement stays for a configured wait, and the inline layout has none of this
+    assertThat(imported.slim).isNotNull();
+    assertThat(((Writes.KeyedPlan) rcPlan(inline(), "UPDATE t SET x = ? WHERE id = ?")).clearRc)
+        .isNull();
+    // nor at SNAPSHOT
+    StatementShape shape =
+        StatementShape.of(
+                SqlAst.parse("UPDATE t SET x = ? WHERE id = ?", Engine.POSTGRESQL).orElseThrow())
+            .orElseThrow();
+    assertThat(
+            ((Writes.KeyedPlan)
+                    Writes.plan(Engine.POSTGRESQL, shape, table(), "", true, false, null))
+                .clearRc)
+        .isNull();
+  }
+
+  @Test
+  void atReadCommitted_aDecoupledBatchsEntriesMergeIntoTheClearTableStatement() throws Exception {
+    Writes.Plan plan = rcPlan(table(), "UPDATE t SET x = x || ? WHERE id = ?");
+    Writes.Merge m = Objects.requireNonNull(plan.fastMerge(noWait()));
+    assertThat(m.sql(2))
+        .startsWith(
+            "WITH scalardb_native_e (scalardb_native_n, scalardb_native_p1, scalardb_native_p2)"
+                + " AS (VALUES (1, ?, ?), (2, ?, ?)), scalardb_native_keys (scalardb_native_n,"
+                + " scalardb_native_m0, scalardb_native_id, scalardb_native_version,"
+                + " scalardb_native_state) AS (SELECT scalardb_native_e.scalardb_native_n,"
+                + " x.\"id\", x.\"tx_id\", x.\"tx_version\", x.\"tx_state\" FROM"
+                + " scalardb_native_e CROSS JOIN LATERAL (SELECT * FROM \"ns\".\"t_meta\" t"
+                + " WHERE id = scalardb_native_e.scalardb_native_p2 OFFSET 0) x),"
+                + " scalardb_native_w AS (UPDATE t SET x = x || scalardb_native_e.scalardb_native_p1"
+                + " FROM scalardb_native_e WHERE (id = scalardb_native_e.scalardb_native_p2) AND NOT"
+                + " EXISTS (SELECT 1 FROM scalardb_native_keys g WHERE g.scalardb_native_n ="
+                + " scalardb_native_e.scalardb_native_n AND COALESCE(g.scalardb_native_state, 3) <>"
+                + " 3) RETURNING scalardb_native_e.scalardb_native_n AS scalardb_native_n, \"id\" AS"
+                + " scalardb_native_w0)")
+        .contains("AND EXISTS (SELECT 1 FROM scalardb_native_keys c WHERE c.scalardb_native_m0 =")
+        .endsWith(
+            " SELECT w.scalardb_native_n, (SELECT count(*) FROM scalardb_native_s),"
+                + " k.scalardb_native_id, k.scalardb_native_version, w.scalardb_native_w0 FROM"
+                + " scalardb_native_w w LEFT JOIN scalardb_native_keys k ON k.scalardb_native_n ="
+                + " w.scalardb_native_n");
+    assertThat(m.stamps).isTrue();
+    // a created table's DELETE binds no stamp
+    Writes.Merge deletes =
+        Objects.requireNonNull(rcPlan(created(), "DELETE FROM t WHERE id = ?").fastMerge(noWait()));
+    assertThat(deletes.stamps).isFalse();
+    assertThat(deletes.sql(1))
+        .contains("DELETE FROM \"ns\".\"t_data\" AS t USING scalardb_native_e WHERE")
+        .contains("scalardb_native_s AS (DELETE FROM \"ns\".\"t_meta\" m USING");
+  }
+
+  @Test
+  void atReadCommitted_aDecoupledWriteBeyondTheKeyIsTheClearTableStatement() throws Exception {
+    Writes.KeyedPlan plan =
+        (Writes.KeyedPlan) rcPlan(created(), "UPDATE t SET x = ? WHERE id > ? -- note");
+    assertThat(plan.clearRc).isNull();
+    assertThat(Objects.requireNonNull(plan.predicateRc).sql)
+        .isEqualTo(
+            "WITH scalardb_native_before (scalardb_native_b) AS (SELECT EXISTS (SELECT 1 FROM"
+                + " (SELECT m.\"id\", m.\"before_x\" AS \"x\" FROM \"ns\".\"t_meta\" m"
+                + " WHERE m.\"tx_state\" IN (1, 2) AND (m.\"before_tx_id\" IS NOT NULL OR"
+                + " m.\"before_tx_version\" IS NOT NULL)) t WHERE id > ?)), scalardb_native_w AS"
+                + " (UPDATE \"ns\".\"t_data\" AS t SET x = ? WHERE (id > ?) RETURNING \"id\" AS"
+                + " scalardb_native_w0), scalardb_native_s AS (UPDATE \"ns\".\"t_meta\" m SET"
+                + " \"tx_id\" = ?, \"tx_prepared_at\" = ?, \"tx_committed_at\" = ?,"
+                + " \"tx_state\" = 3, \"tx_version\" = CASE WHEN \"tx_id\" IS NULL THEN 1 ELSE"
+                + " COALESCE(\"tx_version\", 0) + 1 END FROM scalardb_native_w w WHERE m.\"id\" ="
+                + " w.scalardb_native_w0 AND COALESCE(m.\"tx_state\", 3) = 3 AND EXISTS (SELECT 1"
+                + " FROM \"ns\".\"t_meta\" s WHERE s.\"id\" = m.\"id\" AND s.\"tx_id\" IS NOT"
+                + " DISTINCT FROM m.\"tx_id\" AND s.\"tx_version\" IS NOT DISTINCT FROM"
+                + " m.\"tx_version\") RETURNING 1) SELECT (SELECT count(*) FROM"
+                + " scalardb_native_w), (SELECT count(*) FROM scalardb_native_s), (SELECT"
+                + " scalardb_native_b FROM scalardb_native_before)");
+    // the predicate's placeholder for the before images, then the statement's
+    assertThat(plan.predicateRc.binds).containsExactly(2, 1, 2);
+    // the fused statement stays, for a transaction that recorded anchors of the table
+    assertThat(plan.fused).isNotNull();
+    // a predicate on another column keeps the fused statement and its zero-row rule: a row its
+    // snapshot matched can stop matching through that column before the DML writes it (finding
+    // 134); and so does an impure one
+    assertThat(((Writes.KeyedPlan) rcPlan(created(), "UPDATE t SET x = ? WHERE x = ?")).predicateRc)
+        .isNull();
+    assertThat(
+            ((Writes.KeyedPlan) rcPlan(created(), "UPDATE t SET x = ? WHERE id > random()"))
+                .predicateRc)
+        .isNull();
+  }
+
   @Test
   void update_readsKeysFromTheCommittedImages_andAddsTheKeyToItsPredicate() throws Exception {
     List<String> sql = plan("UPDATE t SET x = ? WHERE x = ? OR id > 3 -- note");

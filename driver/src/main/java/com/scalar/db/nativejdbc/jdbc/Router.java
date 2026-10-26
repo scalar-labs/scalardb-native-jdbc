@@ -1446,6 +1446,31 @@ final class Router {
     if (fastText != null) {
       fastRcStep = new Writes.Step(fastText.sql(), fastText.parameterSources());
     } else if (fastRc && !n.inline) {
+      // the lock as written over the rows as they are, its rows' keys appended and nothing else:
+      // no version lookups, which the second statement reads again, and no filter on rows in
+      // flight, so a row in flight the predicate matches, a prepared insert among them, is locked
+      // and shown in flight by the second statement, which aborts, as the inline layout's
+      // one-statement lock does (design 4.3, todo 336)
+      SqlAst.SplitText keysText =
+          SplitRead.emit(
+              engine,
+              read,
+              readSplit,
+              readDb,
+              new IdentityHashMap<>(),
+              Set.of(),
+              List.of(readRef),
+              (r, piece) ->
+                  new ArrayList<>(
+                      versions(anchoredRef, n, piece, false, true).subList(0, n.keyColumns.size())),
+              true,
+              true,
+              inner == null ? null : LOCK_MARK);
+      if (keysText == null) {
+        throw Errors.unsupported(
+            "the locking read cannot be rewritten onto the committed rows" + tables);
+      }
+      String keysLock = inner == null ? keysText.sql() : keysText.sql().replace(LOCK_MARK, inner);
       String x = exposed(readRef);
       // the predicate over the data table alone, in a derived table, as the user's columns are
       // unqualified and the metadata table has the key's too
@@ -1473,9 +1498,9 @@ final class Router {
               + n.meta
               + " m ON "
               + n.keyJoin("m", "d");
-      List<Integer> binds = new ArrayList<>(text.parameterSources());
+      List<Integer> binds = new ArrayList<>(keysText.parameterSources());
       binds.addAll(inWhere);
-      fastRcStep = new Writes.Step(lockSql + "; " + versions, binds);
+      fastRcStep = new Writes.Step(keysLock + "; " + versions, binds);
     }
     Writes.Plan plan =
         new Writes.LockPlan(

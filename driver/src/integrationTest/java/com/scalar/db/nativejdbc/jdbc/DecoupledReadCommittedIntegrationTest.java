@@ -46,8 +46,14 @@ import org.junit.jupiter.api.Test;
  * READ COMMITTED on a decoupled table" and "The write beyond the key ...").
  */
 @SuppressFBWarnings(
-    value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
-    justification = "statements written in the test sources, their names from the catalog")
+    value = {
+      "SQL_INJECTION_JDBC",
+      "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
+      "ODR_OPEN_DATABASE_RESOURCE"
+    },
+    justification =
+        "statements written in the test sources, their names from the catalog, closed with their"
+            + " connection")
 class DecoupledReadCommittedIntegrationTest {
 
   private static final Engines PG = Engines.POSTGRESQL;
@@ -426,6 +432,232 @@ class DecoupledReadCommittedIntegrationTest {
         } finally {
           held.rollback();
         }
+      }
+    }
+  }
+
+  /**
+   * Form 1: the locking read's first statement at READ COMMITTED on a decoupled table is the lock
+   * over the rows as they are with their keys appended and nothing else, the metadata table named
+   * only by the second statement; through the driver the rows come back with the user's columns
+   * alone, and a write of a locked row holds to the version the second statement read.
+   */
+  @Test
+  void form1_theLocksFirstStatementHasItsKeysOnly() throws Exception {
+    try (Connection v = PG.open()) {
+      Router router = new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+      for (TableInfo t : List.of(imp, made)) {
+        String lock = "SELECT x FROM " + NS + "." + t.table() + " WHERE id = ? FOR UPDATE";
+        Writes.LockPlan plan =
+            (Writes.LockPlan) Objects.requireNonNull(router.route(v, lock).write);
+        Writes.Step fast = Objects.requireNonNull(plan.fastRc, "the one-round-trip lock");
+        int split = fast.sql.indexOf("; ");
+        String first = fast.sql.substring(0, split);
+        String second = fast.sql.substring(split + 2);
+        System.out.println("[336] form 1, " + t.table() + ": " + first);
+        // the keys alone over the rows as they are: the metadata table named nowhere
+        assertThat(first)
+            .as(t.table() + ": the lock names no metadata table")
+            .doesNotContain(Objects.requireNonNull(t.metadataTable()))
+            .contains("FOR UPDATE");
+        assertThat(second).contains(Objects.requireNonNull(t.metadataTable()));
+      }
+    }
+    try (Connection d = PG.openDriver();
+        Connection other = PG.openDriver()) {
+      d.setAutoCommit(false);
+      for (TableInfo t : List.of(imp, made)) {
+        String sql = NS + "." + t.table();
+        try (PreparedStatement ps =
+                d.prepareStatement(
+                    "SELECT id, x FROM " + sql + " WHERE id IN (14, 15) FOR UPDATE");
+            ResultSet rs = ps.executeQuery()) {
+          assertThat(rs.getMetaData().getColumnCount()).as("the user's columns alone").isEqualTo(2);
+          assertThat(rows(rs)).hasSize(2);
+        }
+        assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 14")).hasSize(1);
+        try (PreparedStatement ps =
+            d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
+          ps.setString(1, "locked");
+          ps.setInt(2, 14);
+          assertThat(ps.executeUpdate()).isEqualTo(1);
+        }
+        d.commit();
+        assertThat(rows(other, "SELECT x FROM " + sql + " WHERE id = 14"))
+            .containsExactly("locked");
+      }
+    }
+  }
+
+  private static void assertAborts(Connection d, String sql, String message) {
+    org.assertj.core.api.Assertions.assertThatThrownBy(() -> d.createStatement().executeUpdate(sql))
+        .isInstanceOf(java.sql.SQLTransactionRollbackException.class)
+        .hasMessageContaining(message)
+        .extracting(e -> ((SQLException) e).getSQLState())
+        .isEqualTo("40001");
+  }
+
+  private static TwoPhaseCommitTransaction prepared(
+      TwoPhaseCommitTransactionManager tpc, TableInfo t, int id, String x) throws Exception {
+    String name = t.layout() == Layout.DECOUPLED_IMPORTED ? t.virtualTable() : t.table();
+    TwoPhaseCommitTransaction tx = tpc.begin();
+    tx.update(
+        Update.newBuilder()
+            .namespace(NS)
+            .table(Objects.requireNonNull(name))
+            .partitionKey(id(id))
+            .textValue("x", x)
+            .build());
+    tx.prepare();
+    return tx;
+  }
+
+  /**
+   * Form 2 through the driver, without a wait: a missing key counts 0; a key written counts 1 and
+   * ScalarDB reads it; an anchor moved since the read aborts; a row in flight aborts; a row moved
+   * between the statement's snapshot and its lock aborts (written, not stamped); a batch's entries
+   * go as the merged statement; with a wait configured the slim statement keeps the wait.
+   */
+  @Test
+  void form2_theKeyedWriteThroughTheDriver() throws Exception {
+    java.util.Properties waits = new java.util.Properties();
+    waits.setProperty("scalardbnative.inflightWaitMs", "10000");
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection d = PG.openDriver();
+        Connection other = PG.openDriver();
+        Connection waiting = PG.openDriver(waits);
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      d.setAutoCommit(false);
+      for (TableInfo t : List.of(imp, made)) {
+        String sql = NS + "." + t.table();
+        String what = t.table();
+        assertThat(
+                d.createStatement().executeUpdate("UPDATE " + sql + " SET x = 'z' WHERE id = 999"))
+            .isZero();
+        assertThat(
+                d.createStatement().executeUpdate("UPDATE " + sql + " SET x = 'w' WHERE id = 15"))
+            .isEqualTo(1);
+        d.commit();
+        assertThat(rows(other, "SELECT x FROM " + sql + " WHERE id = 15")).containsExactly("w");
+        // the anchor: read, changed by another connection, written
+        assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 16")).containsExactly("a");
+        assertThat(
+                other
+                    .createStatement()
+                    .executeUpdate("UPDATE " + sql + " SET x = 'o' WHERE id = 16"))
+            .isEqualTo(1);
+        assertAborts(
+            d, "UPDATE " + sql + " SET x = 'd' WHERE id = 16", "changed by another one since");
+        d.rollback();
+        // a row in flight
+        TwoPhaseCommitTransaction held = prepared(tpc, t, 17, "p");
+        try {
+          assertAborts(d, "UPDATE " + sql + " SET x = 'd' WHERE id = 17", "being written");
+          d.rollback();
+          assertThat(rows(other, "SELECT x FROM " + sql + " WHERE id = 17")).containsExactly("a");
+        } finally {
+          held.rollback();
+        }
+        // moved between the snapshot and the lock: another connection's keyed write holds the row
+        other.setAutoCommit(false);
+        assertThat(
+                other
+                    .createStatement()
+                    .executeUpdate("UPDATE " + sql + " SET x = 'o' WHERE id = 18"))
+            .isEqualTo(1);
+        Future<Object> raced =
+            pool.submit(
+                () -> {
+                  try {
+                    return d.createStatement()
+                        .executeUpdate("UPDATE " + sql + " SET x = 'd' WHERE id = 18");
+                  } catch (SQLException e) {
+                    return e;
+                  }
+                });
+        Thread.sleep(700);
+        assertThat(raced.isDone()).as(what + ": waits on the row").isFalse();
+        other.commit();
+        other.setAutoCommit(true);
+        Object got = raced.get(20, TimeUnit.SECONDS);
+        assertThat(got)
+            .as(what + ": raced")
+            .isInstanceOf(java.sql.SQLTransactionRollbackException.class);
+        assertThat(((SQLException) got).getMessage()).contains("changed after it was read");
+        d.rollback();
+        assertThat(rows(other, "SELECT x FROM " + sql + " WHERE id = 18")).containsExactly("o");
+        // a batch's entries, merged
+        try (PreparedStatement ps =
+            d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
+          for (int id = 5; id <= 7; id++) {
+            ps.setString(1, "b");
+            ps.setInt(2, id);
+            ps.addBatch();
+          }
+          assertThat(ps.executeBatch()).containsExactly(1, 1, 1);
+        }
+        d.commit();
+        assertThat(rows(other, "SELECT x FROM " + sql + " WHERE id BETWEEN 5 AND 7"))
+            .containsExactly("b", "b", "b");
+        // with a wait, the slim statement: the write waits on the row in flight and goes on
+        waiting.setAutoCommit(false);
+        TwoPhaseCommitTransaction wait = prepared(tpc, t, 19, "p");
+        Future<Integer> write =
+            pool.submit(
+                () ->
+                    waiting
+                        .createStatement()
+                        .executeUpdate("UPDATE " + sql + " SET x = 'f' WHERE id = 19"));
+        Thread.sleep(700);
+        assertThat(write.isDone()).as(what + ": waits on the row in flight").isFalse();
+        wait.rollback();
+        assertThat(write.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+        waiting.commit();
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * Form 3 through the driver: a write beyond the key counts its rows; a row in flight whose before
+   * image alone matches aborts; after a read that recorded anchors of the table the fused statement
+   * runs, with the same count.
+   */
+  @Test
+  void form3_theWriteBeyondTheKeyThroughTheDriver() throws Exception {
+    try (Connection d = PG.openDriver();
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      d.setAutoCommit(false);
+      for (TableInfo t : List.of(imp, made)) {
+        String sql = NS + "." + t.table();
+        assertThat(
+                d.createStatement()
+                    .executeUpdate("UPDATE " + sql + " SET v = 3 WHERE id BETWEEN 1 AND 3"))
+            .isEqualTo(3);
+        d.commit();
+        assertThat(rows(d, "SELECT SUM(v) FROM " + sql + " WHERE id BETWEEN 1 AND 3"))
+            .containsExactly("9");
+        d.commit();
+        PG.execute(d, "UPDATE " + sql + " SET x = 'pick2' WHERE id = 13");
+        d.commit();
+        TwoPhaseCommitTransaction held = prepared(tpc, t, 13, "moved");
+        try {
+          // a predicate on another column takes the fused statement, which aborts as well
+          assertAborts(d, "UPDATE " + sql + " SET v = 9 WHERE x = 'pick2'", "being written");
+          d.rollback();
+          // a key-only predicate over the row in flight: its stamp refused, an abort
+          assertAborts(d, "UPDATE " + sql + " SET v = 9 WHERE id BETWEEN 12 AND 13", "");
+          d.rollback();
+        } finally {
+          held.rollback();
+        }
+        assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 4")).containsExactly("a");
+        assertThat(
+                d.createStatement()
+                    .executeUpdate("UPDATE " + sql + " SET v = 4 WHERE id IN (4, 20)"))
+            .isEqualTo(2);
+        d.commit();
       }
     }
   }
