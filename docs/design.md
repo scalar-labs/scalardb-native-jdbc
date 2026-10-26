@@ -816,9 +816,14 @@ union as a derived table.
   instead of lookups (todo 329): a committed copy of an inline table its row's `tx_id` and
   `tx_version`, the copy kept to the rows whose own state is committed rather than probing the
   in-flight index per row; a decoupled table's by a left join to its metadata row; an in-flight
-  copy its before image's. A `*` or `t.*` over such a copy is spelled out as the table's columns,
-  which the copy would otherwise show; where it cannot be, a NATURAL or USING join, the lookups
-  stay. A statement prepared in the other mode is prepared again when it
+  copy its before image's. A key read of a decoupled table in a transaction then costs the vendor's
+  probe and the metadata row's, 8 against 5 µs warm, its in-flight arm a probe of an empty partial
+  index; a form reading both images from one join of `T` and `T_meta`, a `CASE` per non-key
+  column, measured the same and would hide those columns behind expressions (section 3), so there
+  is no cheaper anchored key read at this level (todo 337). A `*` or `t.*` over such a copy is
+  spelled out as the table's columns, which the copy would otherwise show; where it cannot be, a
+  NATURAL or USING join, the lookups stay. A statement prepared in the other mode is prepared
+  again when it
   runs; either text returns the same rows. A
   user `SELECT ... FOR UPDATE` or `FOR SHARE` of one table, read row by row, reads the **first arm
   alone**: the statement as written over the first arm's derived table, its locking clause, `NOWAIT`
@@ -1000,7 +1005,18 @@ union as a derived table.
   within 1.0-1.8x. A form with n + 1 copies through LATERAL was measured and rejected: a table after
   the in-flight one can be joined only through its unindexed before image.
   - **How a committed table excludes its rows in flight**, per engine: `NOT EXISTS (SELECT 1 FROM
-    T_meta q WHERE q.<pk> = t.<pk> AND q.tx_state IN (1, 2))` on PostgreSQL and Oracle; on MySQL and
+    T_meta q WHERE q.<pk> = t.<pk> AND q.tx_state IN (1, 2))` on PostgreSQL and Oracle, on
+    PostgreSQL behind one probe of the in-flight index per statement, `NOT EXISTS (SELECT 1 FROM
+    T_meta WHERE tx_state IN (1, 2)) OR NOT EXISTS (<the probe>)` (todo 337): the planner reads the
+    first once from the statement's snapshot, an InitPlan, and makes the second a hashed set of the
+    keys in flight, built only where the first found a row, and the probe per row again where the
+    set is estimated past `work_mem`, the EXISTS then kept as written (the state column at
+    SNAPSHOT rests on the same set, todo 329; the builder confirms both plans by EXPLAIN). The
+    inline layout's copy keeps the row's own state, a probe of nothing. Measured on StockLevel's
+    four copies, decoupled, prepared: execution at the vendor's, 623 against 616 µs mean, 262
+    against 284 min, 785 against 776 blocks, from 706, 296 and 800 with the probe per row;
+    planning 705 against the vendor's 125 µs a plan, from 1,091; a key read without an anchor,
+    autocommit or read-only, 6 against the vendor's 5 µs, from 8. On MySQL and
     MariaDB a left join to `(SELECT DISTINCT <pk> FROM T_meta WHERE tx_state IN (1, 2))` with the key
     NULL, which makes them build the in-flight keys once instead of probing the metadata per row (the
     set grows with the in-flight count, so a table the statement reaches through the first column
@@ -1522,8 +1538,15 @@ lock's re-read of a data row does not reach, the same locking read is two statem
 trip: the lock as written over the data table, the rows as they are, with its rows' keys appended
 and nothing else (todo 336: it locked the committed copy, one probe of the metadata table a row,
 and carried the anchored read's two version lookups a row, which the second statement reads
-again), then the keys, versions and states of the rows the predicate matches, read from the data
-table joined to its metadata table in a snapshot taken after the lock. So a row a ScalarDB prepare
+again), then the keys, versions and states of the rows the predicate matches, read from the
+metadata table alone in a snapshot taken after the lock (todo 337: the predicate names key columns
+only, which the metadata table has too, so the read is one probe of its primary key per key where
+the join from the data table made two; 7 against 9 µs a call warm, 3 against 8 blocks, beside the
+lock's 14 µs). A locked key the read does not show has no metadata row, a native insert after the
+backfill (4.4), and takes the NULL-metadata anchor the join's NULL row gave it, not the steps; a key
+the read shows that the lock did not return, a tombstone (4.5) or a row inserted and committed
+between the two snapshots, counts as any shown key: in flight with a before image it aborts, else
+it is nothing. So a row a ScalarDB prepare
 is inserting, in flight with no before image, which the committed copy left out and the read
 returned without, is locked and shown in flight among the locked rows, and the read aborts or
 fails as NOWAIT fails, as the inline layout's lock does with it: the two layouts agree, and the

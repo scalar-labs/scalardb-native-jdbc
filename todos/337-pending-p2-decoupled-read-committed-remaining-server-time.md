@@ -71,8 +71,69 @@ one-probe check of whether the table has any row in flight at all, inside the st
 `states` form of todo 329 does for its state column), might replace the per-row probe when the
 table is clear. Small per commit (StockLevel is 4% of the mix), large per call.
 
+## Decisions (the design, 2026-10-27)
+
+Measured on the laptop's `bb-pgss` container (TPC-C, decoupled, scale 4, nothing in flight),
+pgbench prepared mode, two clients, 8 s a variant, server time per statement from
+`pg_stat_statements` (mean / min µs, shared blocks a call); the variants are in the design
+session's scratchpad, `pgb4/`.
+
+| statement | as built | the form decided | vendor |
+|---|---|---|---|
+| the lock's versions read (1) | 9 / 5, 8 blocks | 7 / 3, 3 blocks | none |
+| the lock itself, for scale | 14 / 6, 5 blocks | unchanged | |
+| the item read (2) | 8 / 4, 7 blocks | 8 / 4, 6 blocks (not taken) | 5 / 2, 3 blocks |
+| the item read without an anchor (autocommit, read-only) | 8 / 4 | 6 / 3 by (3) | 5 / 2 |
+| StockLevel's count (3), execution | 706 / 296, 800 blocks | 623 / 262, 785 blocks | 616 / 284, 776 blocks |
+| StockLevel's count (3), planning, µs a plan | 1,091 | 705 | 125 |
+
+1. **Taken: the versions read from the metadata table alone** (design 4.3, the decoupled locking
+   read). `SELECT m.<key>, m.tx_id, m.tx_version, m.tx_state, (m.before_tx_id IS NOT NULL OR
+   m.before_tx_version IS NOT NULL) FROM T_meta m WHERE <P>`, the predicate as written, which names
+   key columns only and resolves against the metadata table's own. The argument is unchanged: a
+   prepare that has not committed cannot change the metadata row while the driver holds the data
+   row's lock, whichever table the read starts from. A locked key the read does not show has no
+   metadata row and takes the NULL-metadata anchor of 4.4, as the join's NULL row gave it today;
+   **not** the steps: the fallback in `applyFastRcDecoupled` becomes that anchor. A key shown that
+   the lock did not return (a tombstone, a row inserted and committed between the two snapshots)
+   keeps today's rule: in flight with a before image it aborts, else nothing. Gain: 2 µs a lock
+   warm, about 20 µs a NewOrder; the benchmark's state inflates every statement alike, so expect
+   the same share of the 15.7 there.
+2. **Not taken: the item read.** The gap is the metadata row's probe, which the anchor needs; the
+   in-flight arm costs a probe of an empty partial index, nothing. A one-copy form, `T LEFT JOIN
+   T_meta` with a `CASE` per non-key column choosing the before image for a row in flight, measured
+   the same 8 / 4 and would hide the non-key columns behind expressions, which section 3 rejected
+   for the view. So no cheaper anchored key read exists at this level; recorded in design 4.2. The
+   same one-copy form on StockLevel's two tables (no anchor there) measured 1,785 / 936 with 2,284
+   blocks: a probe of the metadata row for every row the range reads. Reads that take no anchor get
+   candidate 3's gate instead, 8 to 6 µs on a key read.
+3. **Taken: the per-row in-flight probe behind one probe of the index** (design 4.2, "How a
+   committed table excludes its rows in flight"). On PostgreSQL a committed copy that probes the
+   in-flight index per row, a decoupled table without own versions, takes `NOT EXISTS (SELECT 1
+   FROM T_meta WHERE tx_state IN (1, 2)) OR NOT EXISTS (SELECT 1 FROM T_meta q WHERE q.<pk> =
+   t.<pk> AND q.tx_state IN (1, 2))`. The planner reads the first once (InitPlan) and makes the
+   second a hashed set of the keys in flight, never built while the first finds nothing (EXPLAIN:
+   `(NOT $0) OR (NOT (hashed SubPlan n))`, the SubPlan "never executed"); past `work_mem` it keeps
+   the EXISTS as the probe per row, by its rule for EXISTS it can hash: the builder confirms both
+   plans. Spelled as EXISTS, not as `NOT IN` over the key list, for that fallback; the two measured
+   the same (623 against 623). Not the inline layout, whose copy reads the row's own state; not
+   Oracle, whose read side is todo 334's session's. In a read of several tables each copy carries
+   its own InitPlan, one block each.
+
+The builder's order, as the implementing session suggested: after todo 336's AWS cells. Tasks: (1)
+in `Router.lockingRead`'s versions statement and `applyFastRcDecoupled`'s missing-key branch, with
+a test locking a key that has no metadata row (an imported table after the setup, a native insert)
+and one with a tombstone under the predicate; (3) in `SplitRead.committed` for `Check.NOT_EXISTS`
+on PostgreSQL, the existing tests of rows in flight covering the set, plus an EXPLAIN check of the
+two plans in the log. Then the local TPC-C run at READ COMMITTED, decoupled, and the AWS cell.
+
 ## Log
 
 ### 2026-10-27: written up (Opus), sent to the design session
 
 From todo 336's local run (`faae2ed`, the after tree), at the user's request.
+
+### 2026-10-27: decided (the design session)
+
+As above. The item read closed; the versions read and the gated probe to build after the AWS
+cells.
