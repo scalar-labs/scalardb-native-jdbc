@@ -860,3 +860,14 @@ noise (the same todo 336 tree measured 0.80 a day earlier). The InitPlan's seque
 the small test table does not show here: TPC-C's metadata tables are large enough for the partial
 index (checked: `EXPLAIN` of the probe on `bb-pgss` gives `Index Only Scan using
 order_line_inflight on order_line_tx_metadata`). The AWS cells decide, with todo 336's.
+
+### 2026-10-27, night: `faae2ed` on AWS, decoupled at three levels
+
+Run `20261026-2334` (`SOURCE=faae2ed`, decoupled, TPC-C, fast and slow); "Eleventh run" in
+`docs/benchmarks/benchbase-postgresql-aws.md`. READ COMMITTED with todo 336's forms: 0.71 fast
+(+0.88 ms a transaction; tenth run +1.19), 0.88 slow (+1.04; tenth +1.48), statement time 970 →
+790 µs a commit; the lock 24.6 → 10.0 µs a call, its versions read 6.2 → 12.4 (todo 337's
+target), Delivery's lines 246 → 168, the merged batch 331 → 218. SNAPSHOT as before (0.79, 0.91).
+SERIALIZABLE: no SHOW left (`85f4adc`); slow 0.85 → 0.92, goodput 0.75 → 0.89, +1.39 → +0.74 ms;
+fast goodput 0.86 → 0.78 with the vendor's own retries up as much, the spread of SSI aborts between
+runs. Next: `cb16d83` (todo 337) for decoupled READ COMMITTED, when the user approves a run.

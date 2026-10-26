@@ -380,6 +380,46 @@ pgss-sum.py counts the lock's second statement as "read: before images of in-fli
 it names `before_tx_id`; it is the one-round-trip lock's version read (6.1 µs), not the step-by-step
 check. SAVEPOINT ran 632 times in a repetition, ROLLBACK 513, SHOW 640.
 
+## Eleventh run: decoupled at three levels from `faae2ed` (2026-10-27)
+
+Run `20261026-2334` (`SOURCE=faae2ed BENCHBASE=1 READS=0 BB_WORKLOADS=tpcc BB_LAYOUTS=decoupled
+BB_ISOLATIONS="READ_COMMITTED REPEATABLE_READ SERIALIZABLE" NET_DELAYS="0 250"`), TPC-C only, 3
+repetitions. `faae2ed` has todo 336's decoupled READ COMMITTED forms (the lock keys-only over the
+rows as they are; the keyed write and the write beyond the key as the clear-table statement with
+the CAS in its stamp) and `85f4adc` (a rollback keeps the workers setting: no SHOW per retried
+transaction), besides the Oracle session's work since `816f506`. A new cluster placement group.
+The last column is the earlier cell on other instances: READ COMMITTED against the tenth run,
+SNAPSHOT and SERIALIZABLE against the ninth.
+
+| level | (a)/s | (c)/s | (c)/(a) | goodput (c)/(a) | added | packets/commit (a) / (c) | active ms/commit (a) / (c) | server CPU ms/commit (a) / (c) | p95 ms (a) / (c) | earlier: (c)/(a), goodput, added | round trip µs |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **fast** | | | | | | | | | | | |
+| READ COMMITTED | 1,853 | 1,315 | **0.71** | 0.71 | +0.88 ms | 19.7 / 19.7 | 0.362 / 0.950 | 0.867 / 1.707 | 4.7 / 6.4 | 0.66, 0.66, +1.19 ms (tenth) | 68 |
+| SNAPSHOT | 1,882 | 1,480 | **0.79** | 0.78 | +0.58 ms | 19.7 / 19.7 | 0.381 / 0.799 | 0.900 / 1.352 | 4.6 / 5.6 | 0.78, 0.78, +0.61 ms (ninth) | 68 |
+| SERIALIZABLE | 1,597 | 1,276 | **0.80** | 0.78 | +0.63 ms | 25.6 / 25.9 | 0.579 / 1.061 | 1.205 / 1.832 | 6.9 / 9.2 | 0.79, 0.86, +0.67 ms (ninth) | 65 |
+| **slow** | | | | | | | | | | | |
+| READ COMMITTED | 548 | 480 | **0.88** | 0.87 | +1.04 ms | 19.5 / 19.5 | 0.424 / 0.968 | 0.991 / 1.797 | 14.6 / 16.5 | 0.83, 0.83, +1.48 ms (tenth) | 331 |
+| SNAPSHOT | 551 | 502 | **0.91** | 0.91 | +0.71 ms | 19.5 / 19.5 | 0.385 / 0.839 | 0.944 / 1.480 | 14.6 / 15.7 | 0.93, 0.92, +0.60 ms (ninth) | 329 |
+| SERIALIZABLE | 467 | 429 | **0.92** | 0.89 | +0.74 ms | 26.2 / 26.4 | 0.582 / 1.070 | 1.293 / 2.088 | 25.3 / 27.3 | 0.85, 0.75, +1.39 ms (ninth) | 332 |
+
+- **READ COMMITTED, decoupled:** +1.19 → +0.88 ms a transaction fast, +1.48 → +1.04 ms slow;
+  statement time 970 → 790 µs a commit (fast, one repetition). Per call against the tenth run: the
+  stock lock 24.6 → 10.0 µs, its versions read 6.2 → 12.4 µs (todo 337, `cb16d83`, reads the
+  metadata table alone: 14.8 → 12.0 µs locally), Delivery's `order_line` write 246 → 168 µs (the
+  `scalardb_native_before` form), the merged stock batch 331 → 218 µs, the new-order read 63 → 28
+  µs. What is left against SNAPSHOT (+0.58 ms) is about 0.3 ms a transaction.
+- **SNAPSHOT, decoupled:** as in the ninth run, within the two runs' spread: the changes since
+  `6c19378`, the Oracle work among them, cost PostgreSQL nothing visible.
+- **SERIALIZABLE, decoupled:** no `SHOW max_parallel_workers_per_gather` in any repetition (ninth
+  run: 111,003 in one fast repetition). At the long round trip the cell recovered: 0.85 → 0.92,
+  goodput 0.75 → 0.89, +1.39 → +0.74 ms; NewOrder's retries 90,394 → 69,467 against the vendor's
+  52,375 (ninth 45,735), completed 41,313 → 49,469 against 61,319. Fast, goodput fell from 0.86 to
+  0.78 while the throughput ratio stayed (0.79 → 0.80): the vendor's own retries moved as much
+  (NewOrder 142,320 → 174,272), so read the fast goodput as the spread of SSI aborts between runs.
+  Packets per commit equal the vendor's in both cells (25.9 against 25.6, 26.4 against 26.2).
+
+The raw output is in `bench-env/results/20261026-2334/` (git-ignored).
+
 ## Reports
 
 ### HEAD 93f5217
