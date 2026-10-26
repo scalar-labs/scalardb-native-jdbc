@@ -215,3 +215,31 @@ noise (the same todo 336 tree measured 0.80 a day earlier). The InitPlan's seque
 the small test table does not show here: TPC-C's metadata tables are large enough for the partial
 index (checked: `EXPLAIN` of the probe on `bb-pgss` gives `Index Only Scan using
 order_line_inflight on order_line_tx_metadata`). The AWS cells decide, with todo 336's.
+
+### 2026-10-27: cb16d83 reviewed (the design); one follow-up, the probe's spelling and the setup's ANALYZE
+
+The three changes match the design: the versions read under the exposed name with the predicate as
+written, a missing key the NULL-metadata anchor, the gate on PostgreSQL's decoupled copies only;
+the tests cover what was asked.
+
+The follow-up comes from the note that the 5,000-row test table's InitPlan was a sequential scan.
+On PostgreSQL the whole-table probe's plan depends on the metadata table's statistics. Measured on
+a 200,000-row metadata table with its partial index and nothing in flight: unanalyzed, as a table
+is from the setup's backfill until autoanalyze reaches it, `NOT EXISTS (SELECT 1 FROM T_meta WHERE
+tx_state IN (1, 2))` and the coarse check's `... LIMIT 1` are planned as a sequential scan, 13 ms a
+probe; after `ANALYZE`, the index, 0.05 ms; after a burst of 30% in flight was analyzed and then
+cleared, stale until the next autoanalyze, the sequential scan again, 23 ms. The READ COMMITTED
+gate pays that per statement and copy, the SNAPSHOT state and coarse check per transaction, the
+write gates per write. Spelled as the first row in the index's order, `SELECT 1 FROM T_meta WHERE
+tx_state IN (1, 2) ORDER BY <key> LIMIT 1`, the partial index is taken under every one of those
+statistics (0.02-0.05 ms; 3 ms with the burst's dead entries until vacuum), and inside the gate and
+the state the plan stays the InitPlan and the hashed SubPlan "never executed".
+
+Decided (design section 3 and 4.2): every whole-table probe of the in-flight index on PostgreSQL
+takes that spelling, alone as the coarse check, `(...) IS NULL` as a gate and in the state's CASE;
+and the setup on PostgreSQL runs `ANALYZE T_meta` after the backfill, as it gathers the histogram
+on MySQL and Oracle. Tasks for the builder: `Writes.inFlightCheck`, `Writes.clearGate`,
+`Router.versions` (the states form), `SplitRead.committed` (the gate), the Oracle branches
+untouched; `Setup.gatherHistogram`'s PostgreSQL branch, dry run included; tests: each probe's
+EXPLAIN on an unanalyzed metadata table shows the partial index (the 5,000-row test table's
+InitPlan goes from the sequential scan to the index), and the setup's plan lists the ANALYZE.

@@ -630,7 +630,11 @@ have online builds and on Oracle where the edition allows); on an imported table
 stamps `tx_id = 'scalardb-native-backfill'`; then the view, with `CREATE OR REPLACE` (`CREATE OR
 ALTER` on SQL Server); then, on Oracle and MySQL, a histogram on the metadata table's `tx_state`,
 without which both estimate `tx_state IN (1, 2)` as most of the table and scan it (Oracle 22x, MySQL
-12-69x on the split read). On MySQL it is gathered (`ANALYZE TABLE ... UPDATE HISTOGRAM ON
+12-69x on the split read); on PostgreSQL an `ANALYZE` of the metadata table the backfill has just
+filled, since until autoanalyze reaches it, about a minute, the planner estimates `tx_state IN (1,
+2)` by defaults, under which a probe of the whole in-flight index spelled without its order is a
+sequential scan of the table (4.2, todo 337: 13 ms a probe on 200,000 rows against 0.05 through the
+index). On MySQL it is gathered (`ANALYZE TABLE ... UPDATE HISTOGRAM ON
 tx_state`), and MySQL never regathers it by itself. On Oracle it is set, not gathered: a frequency
 histogram assuming 10,000 rows in flight (at most half the table), with the table's statistics then
 locked so that the nightly job does not replace it; one gathered while nothing is in flight cost up to
@@ -923,11 +927,24 @@ union as a derived table.
   its in-flight check included. Every statement of the transaction reads its one snapshot, so a
   later write's own read of its keys (4.3) finds the version the read would have recorded, and a
   version that moved after the snapshot fails the write with `40001`. Each table's piece then
-  appends only its state: `CASE WHEN NOT EXISTS (SELECT 1 FROM T_meta m WHERE m.tx_state IN (1,
-  2)) THEN 0 WHEN (<key>) IN (SELECT <key> FROM T_meta m WHERE m.tx_state IN (1, 2)) THEN 1 END`,
-  one probe of the in-flight index per statement, then, only where it found a row, one hashed set
-  of the keys in flight rather than a lookup per row; 0 for a row of a table with none in flight,
-  NULL for a committed row of a table with some. The key and the version lookups on the metadata
+  appends only its state: `CASE WHEN (SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) ORDER BY
+  <key> LIMIT 1) IS NULL THEN 0 WHEN (<key>) IN (SELECT <key> FROM T_meta m WHERE m.tx_state IN
+  (1, 2)) THEN 1 END`, one probe of the in-flight index per statement, then, only where it found a
+  row, one hashed set of the keys in flight rather than a lookup per row; 0 for a row of a table
+  with none in flight,
+  NULL for a committed row of a table with some. **Every probe of the whole in-flight index on
+  PostgreSQL is spelled so**, the first row in the index's order, `SELECT 1 FROM T_meta WHERE
+  tx_state IN (1, 2) ORDER BY <key> LIMIT 1`: alone as the coarse check below, under `IS NULL` as a
+  gate (4.3, and the committed copy's in the split read) and in the state above (todo 337). Spelled
+  `EXISTS` or `LIMIT 1` without the order, the probe is planned by the estimated share of rows in
+  flight, and under default statistics (before the table's first `ANALYZE`, section 3) or stale
+  ones (a burst in flight analyzed, then cleared, until the next autoanalyze) that share makes a
+  sequential scan of the metadata table the cheaper first row: measured on 200,000 rows with
+  nothing in flight, 13 ms a probe against 0.05 through the index, and 23 against 3 while the
+  burst's dead entries wait for vacuum. The ordered first row costs less than the scan under any
+  statistics, so the partial index is taken whatever they say, and inside the gate and the state
+  the plan stays the InitPlan and the hashed set never built. Oracle's probes carry the `INDEX`
+  hint instead (below). The key and the version lookups on the metadata
   primary key cost a 100-row range read 2.8x the vendor's execution time, and YCSB's scans 1.56x;
   the hashed state costs the scans 1.07x (measured in todo 329). MySQL and MariaDB keep the
   anchors: an UPDATE there reads the newest committed version.
@@ -944,8 +961,9 @@ union as a derived table.
   replayed as it becomes the one executed; a read of an inline table whole (`*`) keeps the
   rewritten text, which leaves the metadata columns out. A locking read on a table not yet found
   clear is sent after the table's coarse check, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2)
-  LIMIT 1`, in one round trip: a row found leaves the rows locked and asks the predicate's
-  in-flight check, which aborts for a row in flight the statement matches by either image; none
+  ORDER BY <key> LIMIT 1`, in one round trip: a row found leaves the rows locked and asks the
+  predicate's in-flight check, which aborts for a row in flight the statement matches by either
+  image; none
   found marks the table clear. A plain read on a table not yet found clear runs through the state
   column above, whose probe is what marks the table, or through the per-table checks, the pending
   ones as one statement. In autocommit nothing is remembered: each statement's snapshot is its
@@ -1006,8 +1024,9 @@ union as a derived table.
   the in-flight one can be joined only through its unindexed before image.
   - **How a committed table excludes its rows in flight**, per engine: `NOT EXISTS (SELECT 1 FROM
     T_meta q WHERE q.<pk> = t.<pk> AND q.tx_state IN (1, 2))` on PostgreSQL and Oracle, on
-    PostgreSQL behind one probe of the in-flight index per statement, `NOT EXISTS (SELECT 1 FROM
-    T_meta WHERE tx_state IN (1, 2)) OR NOT EXISTS (<the probe>)` (todo 337): the planner reads the
+    PostgreSQL behind one probe of the in-flight index per statement, `(SELECT 1 FROM T_meta WHERE
+    tx_state IN (1, 2) ORDER BY <key> LIMIT 1) IS NULL OR NOT EXISTS (<the probe>)` (todo 337, the
+    spelling of the READ COMMITTED bullet's state probe above): the planner reads the
     first once from the statement's snapshot, an InitPlan, and makes the second a hashed set of the
     keys in flight, built only where the first found a row, and the probe per row again where the
     set is estimated past `work_mem`, the EXISTS then kept as written (the state column at
@@ -1418,8 +1437,9 @@ table, the user's UPDATE or DELETE as written:
   yet (4.4) and a DELETE's tombstone (4.5). The statement returns how many rows the DML wrote and how
   many were stamped; fewer stamped than written is an abort, as a zero-row CAS is.
 
-For a table the transaction has not found clear yet, the same statement carries the gate, `AND NOT
-EXISTS (SELECT 1 FROM T_meta WHERE tx_state IN (1, 2))`, one probe of the in-flight index: a row
+For a table the transaction has not found clear yet, the same statement carries the gate, `AND
+(SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) ORDER BY <key> LIMIT 1) IS NULL` (spelled as 4.2's
+probes are, todo 337), one probe of the in-flight index: a row
 written proves the table clear, and the transaction remembers it; nothing written is either the
 predicate matching nothing or the gate closed, which the table's coarse check then tells, the
 statements above running in the latter case and telling which key is in flight. Nothing is
