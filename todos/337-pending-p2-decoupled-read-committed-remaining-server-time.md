@@ -249,3 +249,11 @@ InitPlan goes from the sequential scan to the index), and the setup's plan lists
 MySQL, MariaDB, SQL Server and Oracle from an export of HEAD (`2301048` and before it `cb16d83`),
 Testcontainers: 304 tests, 208 run, all passing (40 min); the changes are PostgreSQL's alone, as
 built.
+
+### 2026-10-27: the eleventh AWS run, from faae2ed (Opus)
+
+Run 20261026-2334 (3c13fa8, by the AWS session), decoupled TPC-C at READ COMMITTED, against the
+tenth run: the stock lock 24.6 → 10.0 µs and its versions read 6.2 → 12.4 µs, so the pair is
+30.8 → 22.4 µs. The second statement grew by less than the first shrank, so it needs no
+send-back. The versions read is this todo's target: cb16d83 reads it from T_meta alone (locally
+14.8 → 12.0 µs), and its AWS cell waits for the user's approval through the AWS session.
