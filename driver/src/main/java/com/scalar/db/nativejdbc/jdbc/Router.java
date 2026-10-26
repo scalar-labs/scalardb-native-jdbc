@@ -1389,6 +1389,7 @@ final class Router {
             && keysOnly(t, shape.whereColumns())
             && keysOnly(t, shape.orderByColumns());
     SqlAst.SplitText fastText = null;
+    String fastSql = null;
     if (fastRc && (n.inline || engine == Engine.ORACLE)) {
       fastText =
           SplitRead.emit(
@@ -1405,6 +1406,28 @@ final class Router {
               null,
               Set.of(readRef),
               true);
+      if (fastText != null && !n.inline) {
+        // the clause locks the data row alone, OF the derived table's first key column: a write
+        // block takes the data row before the metadata row, so a lock holding the metadata row
+        // while it waits for the data row would close a cycle with it, ORA-00060 (design 4.3 "The
+        // locking read on Oracle", todo 334); NOWAIT stays after it
+        String routed = fastText.sql();
+        SqlAst emitted = SqlAst.parse(routed, engine, true).orElse(null);
+        int update = emitted == null ? -1 : emitted.afterLast("UPDATE");
+        if (update < 0) {
+          throw Errors.unsupported(
+              "the locking read cannot be rewritten onto the committed rows" + tables);
+        }
+        if (!routed.substring(update).stripLeading().regionMatches(true, 0, "OF", 0, 2)) {
+          fastSql =
+              routed.substring(0, update)
+                  + " OF "
+                  + exposed(readRef)
+                  + "."
+                  + engine.quote(t.keyColumns().get(0))
+                  + routed.substring(update);
+        }
+      }
     }
     if (text == null || (where != null && span == null) || inWhere == null) {
       throw Errors.unsupported(
@@ -1444,7 +1467,8 @@ final class Router {
     // todo 329); the lock's own rows go to the application, the versions to the anchors
     Writes.Step fastRcStep = null;
     if (fastText != null) {
-      fastRcStep = new Writes.Step(fastText.sql(), fastText.parameterSources());
+      fastRcStep =
+          new Writes.Step(fastSql != null ? fastSql : fastText.sql(), fastText.parameterSources());
     } else if (fastRc && !n.inline) {
       // the lock as written over the rows as they are, its rows' keys appended and nothing else:
       // no version lookups, which the second statement reads again, and no filter on rows in

@@ -773,3 +773,24 @@ cleanup's statements built from the catalog's names (SQL_NONCONSTANT_STRING_PASS
 now suppressed with the class's SQL_INJECTION_JDBC; its one remaining finding,
 `InFlightCheckBenchmark.inFlightCheck` writing the static `metaTables` from an instance method, is
 the benchmark session's, reported to it.
+
+### 2026-10-27: the decoupled lock locks the data row alone (Opus)
+
+As decided in design 4.3 "The locking read on Oracle" (ed5a8ba) and todo 334's log, "the first
+Oracle BenchBase run read", point 1: at READ COMMITTED on a decoupled table, form 5's clause is
+now `FOR UPDATE OF t."ID"`, where `t` is the derived table's alias and `"ID"` its first key
+column. `NOWAIT` (and `WAIT n`) stay after it, and a clause the user wrote with OF is left alone.
+`Router.lockingRead` inserts the column after the last UPDATE token of the emitted text. The
+select list is unchanged, and the inline form keeps its clause. Tests:
+- OracleFormsIntegrationTest 6b `scopeOfTheDecoupledLock` (vendor): with the plain clause, both
+  rows are locked (ORA-00054 on each). With `OF t.k`, `NOWAIT` or not, the metadata row is free
+  and the data row locked.
+- Test 6 now uses the driver's derived-table spelling: the newest row after the restart, in both
+  layouts and both cases.
+- OracleOltpIntegrationTest `form5LocksTheDataRowAlone`: the routed text for both layouts, with
+  and without `NOWAIT`. Through the driver, a second connection's `FOR UPDATE NOWAIT` returns the
+  metadata row and fails on the data row with ORA-00054.
+- Form 5 and the rest of the Oracle OLTP class pass.
+
+On ofa-oracle: the Oracle integration suite (141 tests, 65 run, none failing), plus the unit
+tests (397) and SpotBugs. The proof is the YCSB decoupled READ COMMITTED cell on AWS.

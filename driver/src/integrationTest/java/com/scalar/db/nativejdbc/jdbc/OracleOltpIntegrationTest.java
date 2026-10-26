@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc.jdbc;
 
 import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.N;
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.Q;
 import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.id;
 import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.intType;
 import static com.scalar.db.nativejdbc.testing.Rows.rows;
@@ -1128,6 +1129,77 @@ class OracleOltpIntegrationTest {
     } finally {
       pool.shutdownNow();
     }
+  }
+
+  /**
+   * Form 5's scope on a decoupled table (design 4.3, "The locking read on Oracle", todo 334): the
+   * one-statement lock at READ COMMITTED locks the data row alone, {@code FOR UPDATE OF} the
+   * derived table's first key column, {@code NOWAIT} kept after it; the metadata row stays free for
+   * a write block, which takes the data row first, so a lock waiting on the data row holds nothing
+   * that block waits for (ORA-00060 otherwise). The inline form, one table, keeps its clause.
+   */
+  @Test
+  void form5LocksTheDataRowAlone() throws Exception {
+    try (Connection v = ORA.open()) {
+      Router router = new Router(Engine.ORACLE, catalog, new Session(Engine.ORACLE));
+      for (String table : List.of("t", "ti")) {
+        for (String wait : List.of("", " NOWAIT")) {
+          String lock = "SELECT x FROM " + NS + "." + table + " WHERE id = ? FOR UPDATE" + wait;
+          Writes.LockPlan plan =
+              (Writes.LockPlan) Objects.requireNonNull(router.route(v, lock).write);
+          String fast = Objects.requireNonNull(plan.fastRc, "the one-statement lock").sql;
+          log("form 5 scope (" + table + wait + "): " + fast);
+          assertThat(fast)
+              .endsWith(
+                  table.equals("t")
+                      ? " FOR UPDATE OF " + exposedKey(fast) + wait
+                      : " FOR UPDATE" + wait);
+        }
+      }
+    }
+    try (Connection d = ORA.openDriver();
+        Connection v = ORA.open()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(false);
+      v.setAutoCommit(false);
+      String meta = Objects.requireNonNull(tableInfo("t").metadataTable());
+      for (String wait : List.of("", " NOWAIT")) {
+        assertThat(rows(d, "SELECT x FROM " + NS + ".t WHERE id = 56 FOR UPDATE" + wait))
+            .containsExactly("a");
+        assertThat(
+                rows(
+                    v,
+                    "SELECT 1 FROM "
+                        + Q(N(NS))
+                        + "."
+                        + Q(meta)
+                        + " WHERE id = 56 FOR UPDATE NOWAIT"))
+            .as("the metadata row is free")
+            .hasSize(1);
+        v.rollback();
+        assertThatThrownBy(
+                () -> rows(v, "SELECT x FROM " + NS + ".t WHERE id = 56 FOR UPDATE NOWAIT"))
+            .as("the data row is locked")
+            .isInstanceOf(SQLException.class)
+            .satisfies(e -> assertThat(((SQLException) e).getErrorCode()).isEqualTo(54));
+        v.rollback();
+        d.rollback();
+      }
+      d.setAutoCommit(true);
+    }
+  }
+
+  /** The {@code x."k"} after the lock's {@code FOR UPDATE OF}, as the text spells it. */
+  private static String exposedKey(String sql) {
+    int of = sql.lastIndexOf(" FOR UPDATE OF ");
+    return of < 0 ? "(none)" : sql.substring(of + 15).split(" ")[0];
+  }
+
+  private static TableInfo tableInfo(String table) throws SQLException {
+    return catalog.scalarDbTables().stream()
+        .filter(t -> t.namespace().equals(N(NS)) && t.table().equals(N(table)))
+        .findFirst()
+        .orElseThrow();
   }
 
   /**

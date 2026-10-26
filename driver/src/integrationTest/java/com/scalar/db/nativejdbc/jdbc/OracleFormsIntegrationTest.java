@@ -611,9 +611,8 @@ class OracleFormsIntegrationTest {
       String inline =
           "SELECT t.k, t.x, t.tx_id, t.tx_version, t.tx_state FROM ofa.ri t WHERE t.k = 1"
               + " FOR UPDATE";
-      String decoupled =
-          "SELECT t.k, t.x, m.tx_id, m.tx_version, m.tx_state FROM ofa.rd t"
-              + " LEFT JOIN ofa.rd_meta m ON m.k = t.k WHERE t.k = 1 FOR UPDATE OF t.k";
+      // the driver's form: the join in a derived table, the data row alone locked through it
+      String decoupled = rdLock("FOR UPDATE OF t.k");
       List<String> unsound = new ArrayList<>();
       for (String[] change :
           List.of(
@@ -705,6 +704,52 @@ class OracleFormsIntegrationTest {
       assertThat(unsound).as("B's row after the restart").isEmpty();
     } finally {
       pool.shutdownNow();
+    }
+  }
+
+  /**
+   * 6b. The scope of the decoupled form's lock (todo 334, design 4.3 "The locking read on Oracle"):
+   * {@code FOR UPDATE} on the derived table of the join locks the metadata row with the data row,
+   * which a write block, taking the data row first, deadlocks against (ORA-00060); {@code FOR
+   * UPDATE OF t.k}, NOWAIT after it, locks the data row alone. Decides: the clause the driver emits
+   * on a decoupled table.
+   */
+  @Test
+  void scopeOfTheDecoupledLock() throws Exception {
+    try (Connection a = ORA.open();
+        Connection b = ORA.open()) {
+      a.setAutoCommit(false);
+      b.setAutoCommit(false);
+      for (String clause : List.of("FOR UPDATE", "FOR UPDATE OF t.k", "FOR UPDATE OF t.k NOWAIT")) {
+        assertThat(query(a, rdLock(clause))).containsExactly("1/a/T0/1/3");
+        boolean meta = locked(b, "SELECT k FROM ofa.rd_meta WHERE k = 1 FOR UPDATE NOWAIT");
+        boolean data = locked(b, "SELECT k FROM ofa.rd WHERE k = 1 FOR UPDATE NOWAIT");
+        log("6b " + clause + ": the metadata row locked " + meta + ", the data row " + data);
+        assertThat(data).as(clause + ": the data row").isTrue();
+        assertThat(meta).as(clause + ": the metadata row").isEqualTo(clause.equals("FOR UPDATE"));
+        a.rollback();
+        b.rollback();
+      }
+    }
+  }
+
+  /** The decoupled form of test 6 on {@code ofa.rd}, as the driver emits it, with a clause. */
+  private static String rdLock(String clause) {
+    return "SELECT k, x, v0, v1, v2 FROM (SELECT t.k, t.x, m.tx_id AS v0, m.tx_version AS v1,"
+        + " m.tx_state AS v2 FROM ofa.rd t LEFT JOIN ofa.rd_meta m ON m.k = t.k) t WHERE k = 1 "
+        + clause;
+  }
+
+  /** Whether a {@code FOR UPDATE NOWAIT} meets a lock: ORA-00054. */
+  private static boolean locked(Connection c, String sql) throws SQLException {
+    try {
+      query(c, sql);
+      return false;
+    } catch (SQLException e) {
+      if (e.getErrorCode() != 54) {
+        throw e;
+      }
+      return true;
     }
   }
 
