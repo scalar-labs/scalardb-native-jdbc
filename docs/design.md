@@ -1506,23 +1506,22 @@ the same three conditions, no stamp. The decoupled layout's UPDATE:
 DECLARE
   l_rows NUMBER := 0;  l_meta NUMBER := 0;  l_written NUMBER := 0;  l_stamped NUMBER := 0;
   l_id T_meta.tx_id%TYPE;  l_version T_meta.tx_version%TYPE;  l_state T_meta.tx_state%TYPE;
-  l_k T.k%TYPE;
-  TYPE t_k IS TABLE OF T.k%TYPE;  l_w t_k;                 -- the key the DML wrote
+  l_k T.k%TYPE;  l_m T_meta.k%TYPE;                        -- the key as each table holds it
 BEGIN
   BEGIN
-    SELECT 1, CASE WHEN m.k IS NULL THEN 0 ELSE 1 END, m.tx_id, m.tx_version, m.tx_state, t.k
-      INTO l_rows, l_meta, l_id, l_version, l_state, l_k
-      FROM T t LEFT JOIN T_meta m ON m.k = t.k WHERE P;     -- step 1, the data-anchored surface
+    SELECT 1, CASE WHEN m.k IS NULL THEN 0 ELSE 1 END, m.tx_id, m.tx_version, m.tx_state, d.k, m.k
+      INTO l_rows, l_meta, l_id, l_version, l_state, l_k, l_m
+      FROM (SELECT t.k AS k FROM T t WHERE P) d              -- step 1, the data-anchored surface
+      LEFT JOIN T_meta m ON m.k = d.k;
   EXCEPTION WHEN NO_DATA_FOUND THEN NULL;
   END;
   IF l_rows = 1 AND l_meta = 1 AND COALESCE(l_state, 3) = 3 THEN
-    UPDATE T t SET <the user's SET items> WHERE (P)         -- step 2, the user's DML
-      RETURNING t.k BULK COLLECT INTO l_w;
+    UPDATE T t SET <the user's SET items> WHERE (P);        -- step 2, the user's DML
     l_written := SQL%ROWCOUNT;
     IF l_written = 1 THEN
       UPDATE T_meta SET tx_id = ?, tx_prepared_at = ?, tx_committed_at = ?, tx_state = 3,
              tx_version = CASE WHEN tx_id IS NULL THEN 1 ELSE COALESCE(tx_version, 0) + 1 END
-       WHERE k = l_w(1) AND COALESCE(tx_state, 3) = 3       -- step 3, the CAS
+       WHERE k = l_m AND COALESCE(tx_state, 3) = 3           -- step 3, the CAS
          AND DECODE(tx_id, l_id, 1, 0) = 1
          AND COALESCE(tx_version, 0) = COALESCE(l_version, 0);
       l_stamped := SQL%ROWCOUNT;
@@ -1533,15 +1532,18 @@ BEGIN
 END;
 ```
 
-A decoupled DELETE runs `DELETE FROM T t WHERE (P) RETURNING t.k BULK COLLECT INTO l_w` as step 2
-and, on a created table, `DELETE FROM T_meta WHERE k = l_w(1) AND ...` with the CAS's three
-conditions as step 3; on an imported table step 3 is the stamp above, the tombstone of 4.5. The
+A decoupled DELETE runs `DELETE FROM T t WHERE (P)` as step 2 and, on a created table, `DELETE
+FROM T_meta WHERE k = l_m AND ...` with the CAS's three conditions as step 3; on an imported table
+step 3 is the stamp above, the tombstone of 4.5. The
 CAS compares as `Anchors.Version.is` does: `DECODE` takes two NULLs as equal, and a NULL version
 counts as 0, the NULL-metadata anchor of 4.4, whose stamp is version 1 by the `CASE`. The key is
 read as `Names.readColumns` spells it (a FLOAT key through `TO_BINARY_DOUBLE`), and the CAS matches
-the metadata row by the key the DML returned, as the data row spells it, which the other forms do
-too (CHAR(n) is varchar in the metadata table). The DML's text is the user's with the data table's
-name and the `RETURNING` appended before any trailing comment, as `onDataTable` places it. The
+the metadata row by its own key, `m.k` as step 1 read it from the joined row, not by the data
+row's: a CHAR(n) data key against the varchar metadata key is an unpadded comparison in a WHERE
+clause on Oracle and would stamp nothing where the join found the row; the steps match it by
+`row.metaKey` the same way. The read goes through a derived table of the key, since an unqualified
+key column in `P` is ambiguous across `T` and `T_meta`. The DML's text is the user's with the data
+table's name, as `onDataTable` places it. The
 driver's binds, in text order: `P`'s placeholders for the read; then, in the inline UPDATE, the
 stamp's three values, the user's SET placeholders and `P`'s again; in the decoupled block the SET
 placeholders, `P`'s again, and the stamp's three values after the DML where a stamp is written;
@@ -1683,6 +1685,7 @@ UPDATE, the stamp bound first into locals so that one text serves every statemen
 DECLARE
   l_i T_meta.tx_id%TYPE;  l_p T_meta.tx_prepared_at%TYPE;  l_c T_meta.tx_committed_at%TYPE;
   TYPE t_k IS TABLE OF T.k%TYPE;         l_k t_k;          -- the keys read, one per key column
+  TYPE t_m IS TABLE OF T_meta.k%TYPE;    l_m t_m;          -- the metadata rows' own keys
   TYPE t_n IS TABLE OF NUMBER;           l_nometa t_n;  l_version t_n;  l_state t_n;
   TYPE t_ix IS TABLE OF PLS_INTEGER INDEX BY PLS_INTEGER;  l_cnt t_ix;  l_do t_ix;
   TYPE t_id IS TABLE OF T_meta.tx_id%TYPE;  l_id t_id;
@@ -1691,8 +1694,8 @@ DECLARE
   n_id T_meta.tx_id%TYPE;  n_version NUMBER;  n_state NUMBER;  n_nometa NUMBER;
 BEGIN
   l_i := ?;  l_p := ?;  l_c := ?;
-  SELECT d.k, CASE WHEN m.k IS NULL THEN 1 ELSE 0 END, m.tx_id, m.tx_version, m.tx_state
-    BULK COLLECT INTO l_k, l_nometa, l_id, l_version, l_state
+  SELECT d.k, CASE WHEN m.k IS NULL THEN 1 ELSE 0 END, m.tx_id, m.tx_version, m.tx_state, m.k
+    BULK COLLECT INTO l_k, l_nometa, l_id, l_version, l_state, l_m
     FROM (SELECT t.k FROM rc_T t WHERE P) d LEFT JOIN T_meta m ON m.k = d.k;      -- step 1
   FOR i IN 1 .. l_k.COUNT LOOP
     IF l_state(i) IN (1, 2) THEN l_held := l_held + 1; END IF;
@@ -1725,12 +1728,12 @@ BEGIN
       END IF;
     END LOOP;
     IF l_abort = 0 AND l_do.COUNT > 0 THEN
-      FORALL j IN 1 .. l_do.COUNT                                                   -- step 3
+      FORALL i IN VALUES OF l_do                    -- step 3; a FORALL index subscripts directly
         UPDATE T_meta SET tx_id = l_i, tx_prepared_at = l_p, tx_committed_at = l_c, tx_state = 3,
                tx_version = CASE WHEN tx_id IS NULL THEN 1 ELSE COALESCE(tx_version, 0) + 1 END
-         WHERE k = l_k(l_do(j)) AND COALESCE(tx_state, 3) = 3
-           AND DECODE(tx_id, l_id(l_do(j)), 1, 0) = 1
-           AND COALESCE(tx_version, 0) = COALESCE(l_version(l_do(j)), 0);
+         WHERE k = l_m(i) AND COALESCE(tx_state, 3) = 3
+           AND DECODE(tx_id, l_id(i), 1, 0) = 1
+           AND COALESCE(tx_version, 0) = COALESCE(l_version(i), 0);
       l_stamped := SQL%ROWCOUNT;
     END IF;
   END IF;
@@ -1778,8 +1781,8 @@ many keys were skipped, and the abort code. What the driver does with it:
 
 | the row | the driver |
 |---|---|
+| `after` 1 (SNAPSHOT), decided first | nothing written; abort `40001`, "a row the statement writes is being written by a ScalarDB transaction": a row in flight that only its after image matches is `found` 0 with `after` 1, and aborts as the fused statement's CTE does on PostgreSQL |
 | `found` 0 | nothing matched: count 0, as the vendor's statement finds no row; no abort |
-| `after` 1 (SNAPSHOT) | nothing written; abort `40001`, "a row the statement writes is being written by a ScalarDB transaction" |
 | `held` above 0 | nothing written; at READ COMMITTED with `scalardbnative.inflightWaitMs` set, the bounded sleep of section 6 and the block again, which reads the keys afresh; otherwise, and at SNAPSHOT always, abort `40001` |
 | `missing` above 0 | nothing written; the steps one by one, which write the version-1 metadata rows (4.4) and then each key |
 | `abort` 1, 2, 3, 4 or 5 | abort `40001`: a key the DML skipped was deleted since it was read, went in flight, is still at its version (an image in flight showed), still matches the inline DELETE's predicate at another version, or matched several rows; the rows written before it stay until the rollback |
@@ -1951,8 +1954,9 @@ no `SKIP LOCKED`, no grouping, no wait configured:
   (section 6); no row in flight is matched by its before image alone, the images of a row
   differing in no key column;
 - the decoupled layout's: the same statement with the metadata row joined, `FROM T t LEFT JOIN
-  T_meta m ON m.k = t.k ... FOR UPDATE OF t.k`, the key named in `OF` so that only the data rows are
-  locked, the metadata row's `tx_id`, `tx_version` and `tx_state` in the select list, which
+  T_meta m ON m.k = t.k ... FOR UPDATE` on the derived table of the key, which locks the metadata
+  row joined to each data row beside it (a prepare of the row, which updates both, waits on either
+  lock alike), the metadata row's `tx_id`, `tx_version` and `tx_state` in the select list, which
   PostgreSQL could not do, its re-read not reaching a joined row. It is exact if, and only if,
   the restart runs the join again at the new point in time, so that a prepare that committed
   while the lock waited shows as state 1 or 2 in the row returned. Kyte describes the restart as
@@ -2158,9 +2162,10 @@ vendor's own statement, then on AWS with the rest.
   *The block of entries, where the write's form is a block.* The keyed write, the write beyond
   the key and the decoupled INSERT return their row through OUT binds, so ojdbc cannot batch
   them. Up to 16 consecutive parameter sets of one such write go as one anonymous block whose
-  body is the write's block body once per entry, in order, each entry's locals suffixed by its number, each
-  entry's placeholders its own binds, so that each entry sees the ones before it, as a batch's
-  statements do. The block stops at the first entry whose outcome is not final by its own rules:
+  body is the write's block body once per entry, in order, each entry's locals suffixed by its
+  number, each entry's placeholders its own binds and its stamp its own, its `tx_id` the entry's
+  as on PostgreSQL, so that each entry sees the ones before it, as a batch's statements do. The
+  block stops at the first entry whose outcome is not final by its own rules:
   for the keyed write a row in flight, a key without a metadata row, a committed row not written,
   a stamp short, several rows matched; for the write beyond the key a key in flight, missing or
   an after image matched, an abort code, a stamp short; for the INSERT a stamp short. A key
@@ -2212,7 +2217,7 @@ vendor's own statement, then on AWS with the rest.
   | `done` 0 | not reached: sent again after the stopping entry is settled |
   | an anchor moved (keyed write, from the rows returned) | abort `40001`; the batch fails with the counts before the entry, the transaction rollback-only |
   | two entries on one key | no case: the second sees the first's row, as the statements would; the merged form hands such entries to the block of entries before writing |
-  | a failure raised by the block | nothing of the block remains; the entries one by one, their counts and the failure as `BatchUpdateException` reports them; a timeout or a cancel ends the batch |
+  | a failure raised by the block | nothing of the block remains; a data error or a constraint (SQLState 22, 23, `undoable`), the entries one by one, their counts and the failure as `BatchUpdateException` reports them; a conflict, ORA-08177 (72000) or ORA-00060 (61000), ends the batch at the block, its counts those before the block, 8177 as `40001` and rollback-only; a timeout or a cancel ends the batch |
   | `executeBatch` on the vendor's batching, a count 0 under the gate | all 0: the coarse check, then the blocks or the table marked clear; some above 0: the table marked clear, the 0s the vendor's |
 
   What must keep holding on Oracle: `MoreWritesIntegrationTest.batches` (20 entries, entries that
@@ -2226,6 +2231,10 @@ vendor's own statement, then on AWS with the rest.
   NewOrder's stock updates (ten keyed entries) and `order_line` inserts (ten entries) against the
   vendor's `executeBatch`, round trips counted; the inline INSERT batch should match the vendor's
   by construction, and the block of entries is read against the merged form once that exists.
+  Built (todo 335): the block of entries for the keyed write and the decoupled INSERT, the
+  vendor's batching for the inline INSERT; deferred: the block of entries over the write beyond
+  the key, the gated inline statement through `executeBatch` at SNAPSHOT, the merged form, and
+  the one-round-trip autocommit of a raising block.
 - **Predicate shapes for the two-arm read.** `P` must reference one table, be deterministic (it is
   evaluated twice through `NOT COALESCE(P, false)` or its CASE form), and contain no subquery over `T`. `LIKE`, `IN`,
   ranges and `IS NULL` rewrite by column substitution, as ScalarDB's `convertConjunctionToBeforeImage`

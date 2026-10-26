@@ -525,3 +525,56 @@ OUT text plus the cursor, so the two texts never differ in anything but that lin
 confirmation test 3b an assertion for the nine types, registering by the declared type as the
 driver will; add a unit test of the check's three outcomes (equal, different, no key); log the
 round trips of the four blocks again, and the first write's extra one.
+
+### 2026-10-26: review (Fable): the result handling of the six forms against the design's tables
+
+Reviewed at b0b46ef the methods that read a block's row and decide: `KeyedPlan.applyBlock` and
+`decide`, `applyPredicateBlock`, `applyFast`'s Oracle branch, `InsertPlan.applyOracleBlock` and
+`entry`, `LockPlan.applyGated` and `applyFastRc` on Oracle, `Writes.applyOracleEntries` with its
+caller in `Proxies`, `applyVendorBatch`, `OutBindCheck`, `oracleKeyJdbcType`, `readOutKey`, and
+the block texts' row items and stop conditions (`keyedBody`, `oraclePredicateBlock`, the INSERT
+body). Every row of the keyed write's, the write beyond the key's, the INSERT's, the locking
+read's and the batches' tables has its branch, in the design's order, with the differences below.
+
+One finding to fix before merge:
+
+1. `KeyedPlan.applyBlock`, CHECK variant: the row is built from the OUT binds and `decide` is
+   told the cursor's key too, but its outcome is not used; when the two keys differ,
+   `decide(run, row)` checks the anchor with the OUT key, an anchor not found, "unchanged", on the
+   one write the check exists to protect. `InsertPlan.applyOracleBlock` and `applyOracleEntries`
+   take the cursor's key or row in that case; the keyed block must too: rebuild the `KeyedRow`
+   with the cursor's key when the outcome is `CURSOR`, and a cursor without a row where the OUT
+   binds show one is the block returning no row. A unit test: a mismatching pair on a table's
+   first keyed write, the anchor recorded under the cursor's key, the write aborting for a moved
+   version.
+
+Accepted, the design text amended to the built form:
+
+- the decoupled keyed block reads through a derived table of the key and its CAS matches the
+  metadata row by its own key read in step 1 (`l_m`), without the DML's `RETURNING`: a CHAR(n)
+  data key against the varchar metadata key compares unpadded in a WHERE clause; the same in the
+  write beyond the key (`l_m(i)`), whose CAS is `FORALL i IN VALUES OF l_do` (PLS-00430);
+- the write beyond the key decides `after` before `found`, as PostgreSQL's fused statement does;
+  the table's rows swapped;
+- the READ COMMITTED decoupled locking read's `FOR UPDATE` on the derived table, the metadata row
+  locked beside the data row, harmless since a prepare waits on either lock;
+- the block of entries binds a stamp per entry, each entry's `tx_id` its own;
+- the replay one by one after a failure of a block of entries is `undoable`'s, SQLState 22 and
+  23; Oracle's conflicts, 72000 and 61000, end the batch at the block with the counts before it,
+  8177 mapped `40001` and rollback-only by `asRetryable` and `endsTransaction`. The transaction's
+  outcome is the same; the table says so now rather than asking for the two states;
+- deferred, recorded in 4.4: the block of entries over the write beyond the key, the gated inline
+  statement through `executeBatch` at SNAPSHOT, the merged `FORALL` form, the one-round-trip
+  autocommit of a raising block.
+
+Noted, no change asked: `OutBindCheck`'s state is per qualified table name per process, so two
+data sources to one table name in a process share a verdict (a different ojdbc configuration per
+source would be unusual); after a block of entries stops, the stopping entry is sent again as the
+first of a new block before its single form runs, one block execution more per stop, not a
+semantic difference; the predicate block's step 1 would raise ORA-01422 on a predicate matching
+several rows of one key, which the full key excludes.
+
+Asked of the implementing session with the fix: a line per table row in todo 335's log naming the
+test that exercises it, or "none", so that the rows without one (the decoupled `written` 1
+`stamped` 0, the predicate block's abort codes 3 and 4, the INSERT's `meta` 0 `stamped` 0 look the
+likely ones) are known before the AWS run rather than found by it.
