@@ -661,7 +661,9 @@ a clear-table block of the warehouse's shape against the plain UPDATE):
 So a parse call costs the server 16 µs of CPU on a block (2 on a plain statement) and the client
 90 (36), and the nested statements' parse calls go with it. Decision: the driver turns on ojdbc's
 implicit statement cache for the connection it opens on Oracle unless the user set the property
-(`oracle.jdbc.implicitStatementCacheSize`, a size that holds the driver's texts, 64), noted in
+(`oracle.jdbc.implicitStatementCacheSize`, a size that holds the driver's texts, 128: the TPC-C
+cell ran 80 texts, one block text per batch row count among them; the measurement used 64 over
+two texts), noted in
 design 4.3's keyed-write paragraph. The application's own statements are cached by it too, which
 is a gain to users and a question of fairness in the benchmark: the vendor's run should get the
 same property for the comparison, or the harness its own statement cache. At 21–36 driver calls a
