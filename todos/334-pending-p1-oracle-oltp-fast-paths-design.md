@@ -711,3 +711,21 @@ host figures were unaffected). The cache cell needs no build: `BB_JVM_ARGS` pass
 system property (checked locally: `getImplicitCachingEnabled()` true, size 128), the vendor's parse
 calls in `V$SQL` the check. The `FOR UPDATE OF` fix's proof cell waits on a build and the user's
 approval; the batch item is sized again from a flushed run first.
+
+### 2026-10-27: d56e87d reviewed (the design), the FOR UPDATE OF fix
+
+Read from the commit. `Router.lockingRead`'s Oracle `fastRc` branch, on a decoupled table only,
+inserts ` OF <exposed alias>.<quoted first key column>` after the last `UPDATE` token of the
+emitted text and keeps `NOWAIT` or `WAIT n` after it; the select list and the inline form are
+untouched; no new binds. That is the design's clause. The tests decide what the design asked:
+`scopeOfTheDecoupledLock` in the vendor's spelling of the derived-table form (the plain clause
+locks both rows, `OF t.k` with or without `NOWAIT` leaves the metadata row free and the data row
+locked), test 6 on the new text in both layouts (the newest row after the restart for a prepare
+and for a write), and `form5LocksTheDataRowAlone` through `Router.route` and the driver for both
+layouts with and without `NOWAIT`. Matches; nothing to send back.
+
+One note for later, not a send-back: a clause the user wrote with `OF <column>` is left as
+written. On one table any `OF` column locks the same rows as the key column, so the key column
+could replace it, which would also spare the case of a user's `OF` column the derived table does
+not select (ORA-00904 on the decoupled form, as before this fix). The proof stays the YCSB
+decoupled READ COMMITTED cell on AWS.
