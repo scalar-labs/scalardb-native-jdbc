@@ -372,3 +372,16 @@ there, send it back to the design with the numbers.
 MySQL, MariaDB, SQL Server and Oracle, from an export of HEAD (`git archive`, other sessions'
 uncommitted edits left out), under Testcontainers: 298 tests, 204 run, all passing (40 min). The
 PostgreSQL-only branches changed nothing on the other engines, as built. Pending: the AWS cells.
+
+### 2026-10-27: first AWS cells from faae2ed (reported by the AWS session, preliminary)
+
+Run 20261026-2334, decoupled TPC-C, READ COMMITTED, from `faae2ed` (todo 336 without todo 337):
+
+| round trip | tenth run (816f506) | faae2ed |
+|---|---|---|
+| fast (about 70 µs) | 0.66 of the vendor, +1.19 ms a transaction | 0.71, +0.88 ms |
+| slow (+250 µs) | 0.83, +1.48 ms | 0.88, +1.04 ms |
+
+Packets per commit equal the vendor's. The per-statement write-up (and the versions-read item the
+design asked to watch) follows from the AWS session after the night's Oracle run. A `cb16d83`
+cell (todo 337 on top) needs another AWS apply, which the AWS session puts to the user.
