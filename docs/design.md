@@ -861,6 +861,40 @@ union as a derived table.
   it ahead of the read, which the versions read under the lock catch. On SQL Server any user locking
   clause is taken as the separate primary-key re-read of the SERIALIZABLE bullet. A user locking
   clause on a join or a subquery is refused for now.
+
+  **The read side on Oracle (todo 334).** Three things, the rest of Oracle's read costs being the
+  micro-benchmark session's (below). First, at READ COMMITTED the anchors as the copies' own columns,
+  as on PostgreSQL above: a committed copy of an inline table carries its row's `tx_id` and
+  `tx_version`, and is kept to the rows whose own state is committed, `COALESCE(t.tx_state, 3) =
+  3`, in place of a probe of the in-flight index per row; a decoupled table's committed copy
+  carries them from a left join to its metadata row, `LEFT JOIN T_meta m ON m.k = t.k` with
+  `COALESCE(m.tx_state, 3) = 3` in place of the `NOT EXISTS` per row, one access to the metadata row
+  where the lookups made two and the exclusion a third; an in-flight copy carries its before
+  image's. The argument is the engine's statement-level read consistency, which Oracle gives at
+  READ COMMITTED (section 1): the lookups and the columns read the same metadata row in the same
+  statement's snapshot, so they agree, and the join adds no row, the metadata row being at most
+  one per key. A `*` or `t.*` over such a copy is spelled out as the table's columns, which Oracle
+  already requires beside appended columns (section 5); a NATURAL or USING join keeps the lookups,
+  as on PostgreSQL. Second, the two probes the SNAPSHOT forms rest on, the state column's `NOT
+  EXISTS` and its hashed set over `T_meta WHERE tx_state IN (1, 2)`, the coarse check, and the
+  gate of 4.3's writes and locking read, carry the `INDEX` hint of the in-flight copies, `/*+
+  INDEX(m <T_inflight>) */`, on every Oracle text that reads the in-flight index: a plan for them
+  must not depend on the metadata table's statistics, whose fixed, locked form of todo 094 is
+  uncommitted and under review, and whose gathered form estimated `IN (1, 2)` at one row and then
+  took nested loops over 10,000 (`read-overhead.md`, "Statistics, open transactions and paging").
+  With the hint the probe is an index range scan that stops at its first row, and the set is read
+  once per statement. Third, the boundary: the forms of todo 334 change no copy's shape beyond the
+  two above, and the paging route of todo 296 (`VIEW_CASE` for key-ordered pages, decoupled
+  tables), the whole-table aggregates (CORR), the deep OFFSET of todo 117, the in-flight pairs
+  (built) and todo 094's decision stay with the session measuring Oracle's reads
+  (`form-matrix-aws.md`); that session must keep the probes hinted and the state column's two
+  branches as they are, which the SNAPSHOT forms of 4.3 read their table's clearness from. What
+  to measure, through the driver, (c) against (a): TPC-C's item read by key (0.8-1.0x in the
+  matrix), the customer read by last name (a non-key filter, 1.2x), OrderStatus's ordered read by
+  a foreign key with a limit (1.5x), StockLevel's join with `COUNT(DISTINCT)`, whose SNAPSHOT check
+  is the in-flight pairs; YCSB's key read and its scan, a key-ordered range with a limit, where the
+  copies with a table in flight are empty in run (c) and what remains is the executor's setup of
+  the union.
 - **SNAPSHOT**: the detector `P OR (tx_state IN (1,2) AND P_before)`: a row in flight that the read
   would return, by its after image or its before image, aborts the transaction (section 6). Where every
   ScalarDB table of the read returns rows, the tables the anchors of 4.2 cover, the read is the split

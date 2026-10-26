@@ -347,3 +347,35 @@ results summarize it (the page itself timed out twice).
 
 Left: form 6 (the read side's Oracle costs from the micro-benchmarks, with the session working on
 them).
+
+### 2026-10-26: form 6 designed (Fable), design 4.2 "The read side on Oracle"; all six forms designed
+
+The read side's OLTP work on Oracle is small beside the writes, since form 1 already gave the
+SNAPSHOT reads without anchors and the clear-table memory; what is left and decided here:
+
+- **READ COMMITTED anchors as the copies' own columns**, the PostgreSQL change of todo 329 ported
+  as it is: the inline copy's own `tx_id` and `tx_version` with its state condition on the row, the
+  decoupled copy's from a left join to its metadata row, the in-flight copy's before image's. The
+  argument is statement-level read consistency, which Oracle has at READ COMMITTED (section 1).
+  On Oracle this also replaces the decoupled copy's `NOT EXISTS` per row by the joined row's
+  state, one metadata access per data row instead of three.
+- **The probes carry the in-flight index hint**, so that no OLTP form depends on the metadata
+  table's statistics: todo 094's fixed, locked statistics are uncommitted and its review listed
+  reasons against committing them as they are, and the gathered statistics gave the 1654x plans
+  of `read-overhead.md`. The state column's two subqueries, the coarse check and the writes' and
+  locking read's gate all read `T_meta WHERE tx_state IN (1, 2)`; hinted, the probe is a range scan
+  stopped at its first row. This is the one thing the micro-benchmark session must keep.
+- **The boundary with the micro-benchmark session**: paging (todo 296), aggregates, the deep
+  OFFSET (todo 117), the in-flight pairs and todo 094 stay there; the forms of todo 334 change no
+  copy's shape beyond the two above.
+- **What to measure** on the OLTP read shapes, listed in the design with the matrix's figures.
+
+With this, every form of the brief has its paragraph in `docs/design.md` (4.2: "On Oracle both
+hold", "The read side on Oracle"; 4.3: "The keyed write on Oracle", "The write beyond the key on
+Oracle", "An INSERT on Oracle", "The locking read on Oracle"; 4.4: "Batches on Oracle"), each with
+its argument, its text, the row the driver reads back and its outcome table, and this log has the
+alternatives and the facts the implementing session confirms by test. Next, as the division of
+work says: the implementing session builds the forms in the brief's order, runs the Oracle suite,
+measures locally then on AWS once BenchBase has an Oracle build (after the PostgreSQL matrix), and
+sends any case the design leaves open back here; the semantics-bearing parts get one review pass
+on Fable against the design text before the forms merge.
