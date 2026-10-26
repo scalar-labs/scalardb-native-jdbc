@@ -105,8 +105,12 @@ The harness targets an external database through `-Dnativejdbc.<engine>.url`, `.
   open the host turns off the logon's write of its time into `SYS.USER$`
   (`_disable_last_successful_login_time`), as the tests' container does, since a hard parse at
   SERIALIZABLE reads it and now and then fails with ORA-08177. On Oracle BenchBase logs on as
-  `BBRUN` (DBA rights, a logon trigger setting `CURRENT_SCHEMA`); `serverStats` is PostgreSQL's
-  only so far. `bench-ora.tfvars` (git-ignored) holds the Oracle run's variables, the registry
+  `BBRUN` (DBA rights, a logon trigger setting `CURRENT_SCHEMA`). With `serverStats` Oracle's
+  columns are "user commits", DB time as the active time, redo as the WAL, the host's busy time
+  (`V$OSSTAT`) as the server's CPU, DB CPU as the backends', and SQL*Net round trips as the
+  packets; `server.txt` holds the run's growth of `V$SQL` per statement (calls, elapsed and CPU ms,
+  parse calls, rows) and of `V$SYSTEM_EVENT`'s non-idle waits. BenchBase uses ojdbc without its
+  statement cache, so both runs parse every execution. `bench-ora.tfvars` (git-ignored) holds the Oracle run's variables, the registry
   token among them. Tier A also runs SQL Server
   (`sqlserver`): the tests' image, `mcr.microsoft.com/mssql/server:2022-latest`, in Developer
   edition, free for testing. The setup makes the database `appdb` as the tests make it, with

@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -230,9 +231,9 @@ class BenchBaseBenchmark {
     }
   }
 
-  /** Whether the run reads the server's own account of it: PostgreSQL's views so far. */
+  /** Whether the run reads the server's own account of it: PostgreSQL's or Oracle's views. */
   private static boolean stats(Engines e) {
-    return SERVER_STATS && e.engine() == Engine.POSTGRESQL;
+    return SERVER_STATS && (e.engine() == Engine.POSTGRESQL || e.engine() == Engine.ORACLE);
   }
 
   /**
@@ -323,7 +324,7 @@ class BenchBaseBenchmark {
           e.engine() == Engine.ORACLE
               ? "BEGIN DBMS_STATS.GATHER_SCHEMA_STATS('" + ns + "'); END;"
               : "ANALYZE");
-      if (stats(e)) {
+      if (stats(e) && e.engine() == Engine.POSTGRESQL) {
         Server.reset(st);
       }
       // -Dnativejdbc.benchbase.beforeExecute=SELECT pg_stat_statements_reset(): a statement run
@@ -333,9 +334,11 @@ class BenchBaseBenchmark {
         st.execute(before);
       }
     }
+    boolean oracle = e.engine() == Engine.ORACLE;
     long[] roundTrip = stats(e) ? Server.roundTrip(e) : null;
-    Server.@Nullable Snapshot start = stats(e) ? Server.snapshot(e) : null;
-    Sampler sampler = stats(e) ? new Sampler(e) : null;
+    Server.@Nullable Snapshot start = stats(e) && !oracle ? Server.snapshot(e) : null;
+    OracleStats.@Nullable Counters oracleStart = stats(e) && oracle ? OracleStats.read(e) : null;
+    Sampler sampler = stats(e) && !oracle ? new Sampler(e) : null;
     Path histograms = dir.resolve("histograms.json");
     try {
       benchBase(
@@ -353,9 +356,13 @@ class BenchBaseBenchmark {
       }
     }
     Server server =
-        start == null || roundTrip == null
+        roundTrip == null
             ? null
-            : Server.since(e, start, sampler, roundTrip, dir.resolve("server.txt"));
+            : oracleStart != null
+                ? OracleStats.since(e, oracleStart, roundTrip, dir.resolve("server.txt"))
+                : start == null
+                    ? null
+                    : Server.since(e, start, sampler, roundTrip, dir.resolve("server.txt"));
     return Result.read(run, dir, histograms, imported, plain, server);
   }
 
@@ -378,13 +385,15 @@ class BenchBaseBenchmark {
       long roundTripP99Micros) {
 
     /**
-     * The network's round trip from this JVM, the client's: a prepared {@code SELECT 1} 2,000 times
-     * after 200 to warm it, its median and 99th percentile in microseconds.
+     * The network's round trip from this JVM, the client's: a prepared {@code SELECT 1} (from
+     * {@code dual} on Oracle) 2,000 times after 200 to warm it, its median and 99th percentile in
+     * microseconds.
      */
     static long[] roundTrip(Engines e) throws SQLException {
       long[] times = new long[2000];
       try (Connection c = e.open();
-          PreparedStatement ps = c.prepareStatement("SELECT 1")) {
+          PreparedStatement ps =
+              c.prepareStatement(e.engine() == Engine.ORACLE ? "SELECT 1 FROM dual" : "SELECT 1")) {
         for (int i = -200; i < times.length; i++) {
           long t = System.nanoTime();
           try (ResultSet rs = ps.executeQuery()) {
@@ -522,6 +531,175 @@ class BenchBaseBenchmark {
 
     double perCommit(double v) {
       return commits == 0 ? Double.NaN : v / commits;
+    }
+  }
+
+  /**
+   * What Oracle counted over a run's execute phase, in {@link Server}'s columns: commits ("user
+   * commits"), DB time as the active time, redo as the WAL, the host's busy CPU ({@code V$OSSTAT},
+   * the whole host, which runs Oracle alone), DB CPU as the backends', the rest of the host's as
+   * the other processes', and SQL*Net round trips to and from clients as the packets. Oracle keeps
+   * no idle-in-transaction time: -1. server.txt holds the run's statements from {@code V$SQL} (its
+   * counters' growth over the run, by SQL_ID) and its non-idle waits from {@code V$SYSTEM_EVENT}.
+   */
+  static final class OracleStats {
+
+    private OracleStats() {}
+
+    /** The counters at one moment; per statement and per wait event, their own counters. */
+    record Counters(
+        long commits,
+        double dbTimeUs,
+        long redo,
+        double dbCpuUs,
+        long busyCs,
+        long roundTrips,
+        Map<String, double[]> sql,
+        Map<String, String> sqlText,
+        Map<String, double[]> waits) {}
+
+    static Counters read(Engines e) throws SQLException {
+      try (Connection c = e.open();
+          Statement st = c.createStatement()) {
+        Map<String, Long> sys = new HashMap<>();
+        try (ResultSet rs =
+            st.executeQuery(
+                "SELECT name, value FROM v$sysstat WHERE name IN ('user commits', 'redo size',"
+                    + " 'SQL*Net roundtrips to/from client')")) {
+          while (rs.next()) {
+            sys.put(rs.getString(1), rs.getLong(2));
+          }
+        }
+        Map<String, Double> time = new HashMap<>();
+        try (ResultSet rs =
+            st.executeQuery(
+                "SELECT stat_name, value FROM v$sys_time_model"
+                    + " WHERE stat_name IN ('DB time', 'DB CPU')")) {
+          while (rs.next()) {
+            time.put(rs.getString(1), rs.getDouble(2));
+          }
+        }
+        long busy = -1;
+        try (ResultSet rs =
+            st.executeQuery("SELECT value FROM v$osstat WHERE stat_name = 'BUSY_TIME'")) {
+          if (rs.next()) {
+            busy = rs.getLong(1);
+          }
+        }
+        Map<String, double[]> sql = new HashMap<>();
+        Map<String, String> text = new HashMap<>();
+        // the benchmark's statements: those its runner parsed
+        try (PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT sql_id, SUM(executions), SUM(elapsed_time), SUM(cpu_time),"
+                    + " SUM(parse_calls), SUM(rows_processed), MAX(SUBSTR(sql_text, 1, 400))"
+                    + " FROM v$sql WHERE parsing_user_id ="
+                    + " (SELECT user_id FROM all_users WHERE username = ?) GROUP BY sql_id")) {
+          ps.setString(1, ORACLE_RUNNER);
+          try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+              sql.put(
+                  rs.getString(1),
+                  new double[] {
+                    rs.getDouble(2),
+                    rs.getDouble(3),
+                    rs.getDouble(4),
+                    rs.getDouble(5),
+                    rs.getDouble(6)
+                  });
+              text.put(rs.getString(1), rs.getString(7));
+            }
+          }
+        }
+        Map<String, double[]> waits = new HashMap<>();
+        try (ResultSet rs =
+            st.executeQuery(
+                "SELECT event, total_waits, time_waited_micro FROM v$system_event"
+                    + " WHERE wait_class <> 'Idle'")) {
+          while (rs.next()) {
+            waits.put(rs.getString(1), new double[] {rs.getDouble(2), rs.getDouble(3)});
+          }
+        }
+        return new Counters(
+            sys.getOrDefault("user commits", 0L),
+            time.getOrDefault("DB time", 0.0),
+            sys.getOrDefault("redo size", 0L),
+            time.getOrDefault("DB CPU", 0.0),
+            busy,
+            sys.getOrDefault("SQL*Net roundtrips to/from client", -1L),
+            sql,
+            text,
+            waits);
+      }
+    }
+
+    static Server since(Engines e, Counters start, long[] roundTrip, Path to) throws Exception {
+      Thread.sleep(1000);
+      Counters end = read(e);
+      StringBuilder out =
+          new StringBuilder("calls\telapsed ms\tcpu ms\tparse calls\trows\tquery\n");
+      List<Map.Entry<String, double[]>> grown = new ArrayList<>();
+      end.sql()
+          .forEach(
+              (id, v) -> {
+                double[] b = start.sql().getOrDefault(id, new double[5]);
+                double[] d = new double[5];
+                for (int i = 0; i < 5; i++) {
+                  d[i] = v[i] - b[i];
+                }
+                if (d[0] > 0) {
+                  grown.add(Map.entry(id, d));
+                }
+              });
+      grown.sort((x, y) -> Double.compare(y.getValue()[1], x.getValue()[1]));
+      for (Map.Entry<String, double[]> g : grown.subList(0, Math.min(80, grown.size()))) {
+        double[] d = g.getValue();
+        out.append(
+            String.format(
+                Locale.ROOT,
+                "%.0f\t%.1f\t%.1f\t%.0f\t%.0f\t%s%n",
+                d[0],
+                d[1] / 1000,
+                d[2] / 1000,
+                d[3],
+                d[4],
+                String.valueOf(end.sqlText().get(g.getKey())).replaceAll("\\s+", " ")));
+      }
+      out.append("\nwait event\twaits\tms\n");
+      List<Map.Entry<String, double[]>> waited = new ArrayList<>();
+      end.waits()
+          .forEach(
+              (ev, v) -> {
+                double[] b = start.waits().getOrDefault(ev, new double[2]);
+                if (v[1] - b[1] > 0) {
+                  waited.add(Map.entry(ev, new double[] {v[0] - b[0], v[1] - b[1]}));
+                }
+              });
+      waited.sort((x, y) -> Double.compare(y.getValue()[1], x.getValue()[1]));
+      for (Map.Entry<String, double[]> w : waited.subList(0, Math.min(20, waited.size()))) {
+        out.append(
+            String.format(
+                Locale.ROOT,
+                "%s\t%.0f\t%.1f%n",
+                w.getKey(),
+                w.getValue()[0],
+                w.getValue()[1] / 1000));
+      }
+      Files.writeString(to, out);
+      double dbCpuMs = (end.dbCpuUs() - start.dbCpuUs()) / 1000;
+      long busyUs =
+          end.busyCs() < 0 || start.busyCs() < 0 ? -1 : (end.busyCs() - start.busyCs()) * 10_000;
+      return new Server(
+          end.commits() - start.commits(),
+          (end.dbTimeUs() - start.dbTimeUs()) / 1000,
+          -1,
+          end.redo() - start.redo(),
+          busyUs,
+          end.roundTrips() < 0 ? -1 : end.roundTrips() - start.roundTrips(),
+          dbCpuMs,
+          busyUs < 0 ? -1 : Math.max(0, busyUs / 1000.0 - dbCpuMs),
+          roundTrip[0],
+          roundTrip[1]);
     }
   }
 
@@ -1054,11 +1232,16 @@ class BenchBaseBenchmark {
             out.append(
                 String.format(
                     Locale.ROOT,
-                    "| (%s) | %.0f | %.3f | %.3f | %.1f | %s | %s | %s | %s | %.0f / %.0f |%n",
+                    "| (%s) | %.0f | %.3f | %s | %.1f | %s | %s | %s | %s | %.0f / %.0f |%n",
                     run,
                     median(ss.stream().map(x -> (double) x.commits()).toList()),
                     median(ss.stream().map(x -> x.perCommit(x.activeMs())).toList()),
-                    median(ss.stream().map(x -> x.perCommit(x.idleInTxMs())).toList()),
+                    ss.stream().anyMatch(x -> x.idleInTxMs() < 0)
+                        ? "n/a"
+                        : String.format(
+                            Locale.ROOT,
+                            "%.3f",
+                            median(ss.stream().map(x -> x.perCommit(x.idleInTxMs())).toList())),
                     median(
                         ss.stream().map(x -> x.perCommit((double) x.walBytes()) / 1024).toList()),
                     ss.stream().anyMatch(x -> x.cpuMicros() < 0)
