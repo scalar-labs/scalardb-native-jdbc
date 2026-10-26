@@ -127,6 +127,10 @@ class BenchBaseBenchmark {
 
   private static final String TIER = System.getProperty("nativejdbc.bench.tier", "local");
 
+  // -Dnativejdbc.bench.netDelayUs: the delay run.sh's NET_DELAY_US added to each round trip, for
+  // the report
+  private static final String NET_DELAY_US = System.getProperty("nativejdbc.bench.netDelayUs", "0");
+
   // -Dnativejdbc.benchbase.serverStats=true: per run, PostgreSQL's account of it (pg_stat_database,
   // pg_stat_wal, pg_stat_statements if loaded, the server's CPU and packets where it can read
   // them),
@@ -179,7 +183,9 @@ class BenchBaseBenchmark {
           .append(REPS)
           .append(" repetition(s), layout ")
           .append(DECOUPLED ? "decoupled" : "inline")
-          .append(".\n");
+          .append(", ")
+          .append(NET_DELAY_US)
+          .append(" µs added to each round trip.\n");
     }
     for (String workload : WORKLOADS) {
       Map<String, List<Result>> results = new LinkedHashMap<>();

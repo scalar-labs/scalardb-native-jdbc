@@ -14,7 +14,7 @@
 # b is the driver with every table plain), BB_JVM_ARGS the execute phase's JVM options ({dir}, the
 # run's directory: -XX:StartFlightRecording:...,filename={dir}/execute.jfr), BB_LAYOUTS the layouts of
 # run (c)'s tables (decoupled by default; "decoupled inline" runs both, inline's reports prefixed
-# with -inline).
+# with -inline). NET_DELAY_US, the delay run.sh added to each round trip, goes into the reports.
 set -uo pipefail
 tier=$1; shift
 tasks=(); wtasks=(); btasks=(); props=()
@@ -74,7 +74,7 @@ if [ -n "${BENCHBASE:-}" ]; then
       "-Dnativejdbc.benchbase.runs=${BB_RUNS:-a,c}" "-Dnativejdbc.benchbase.reps=${REPS:-3}" \
       ${BB_JVM_ARGS:+"-Dnativejdbc.benchbase.jvmArgs=$BB_JVM_ARGS"} \
       "-Dnativejdbc.benchbase.time=${BB_TIME:-120}" -Dnativejdbc.benchbase.scale.tpcc=4 \
-      "-Dnativejdbc.benchbase.layout=$layout" \
+      "-Dnativejdbc.benchbase.layout=$layout" "-Dnativejdbc.bench.netDelayUs=${NET_DELAY_US:-0}" \
       -Dnativejdbc.benchbase.weights.ycsb=50,5,15,10,0,20 -Dnativejdbc.benchbase.serverStats=true \
       "-Dnativejdbc.bench.tier=$tier" --continue -Pnativejdbc.parallelEngines=1 "$@" 2>&1 | grep -E 'BUILD|FAILED'
     for f in driver/build/bench/benchbase-*.md; do
