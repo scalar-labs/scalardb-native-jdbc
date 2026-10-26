@@ -911,6 +911,38 @@ union as a derived table.
   column above, whose probe is what marks the table, or through the per-table checks, the pending
   ones as one statement. In autocommit nothing is remembered: each statement's snapshot is its
   own.
+
+  **On Oracle both hold, at its SERIALIZABLE, the driver's SNAPSHOT, in a transaction** (todo 334).
+  The argument above needs two things of the engine: one snapshot for every statement of the
+  transaction, and a write to a row changed after it that fails before the write's CAS could match.
+  Oracle's SERIALIZABLE gives both. Its snapshot is taken at the transaction's first statement, a
+  read included, every later statement reads it with the transaction's own writes added, and an
+  UPDATE, a DELETE or a `FOR UPDATE` of a row that another transaction changed and committed after
+  that point fails with ORA-08177, raised by the statement that meets the row: the user's DML
+  meeting the data row, or the CAS meeting the metadata row where only that moved (the backfill of
+  section 1 stamps metadata rows alone). The failure is conservative, never permissive: Oracle
+  raises it too where a block's transaction list cannot tell whether the row changed (an
+  `INITRANS` too small), an abort where none was needed, never a write where one was; and a
+  ScalarDB prepare rolled back after the snapshot has changed the row twice, so the write of a row
+  that is back at the version read aborts the same way, where PostgreSQL may write it (todo 134).
+  So no read records an anchor at SNAPSHOT on Oracle, by the same state column as on PostgreSQL in
+  Oracle's spelling, `CASE WHEN NOT EXISTS (SELECT 1 FROM T_meta WHERE tx_state IN (1, 2)) THEN 0
+  WHEN (<key>) IN (SELECT <key> FROM T_meta WHERE tx_state IN (1, 2)) THEN 1 END`, both subqueries
+  reading the in-flight index `(tx_state, <pk>)` under the `INDEX` hint the split read's in-flight
+  copies carry, since the fixed statistics of todo 094 would send the optimizer elsewhere, the
+  first uncorrelated and evaluated once by the scalar subquery cache; a `SKIP LOCKED` read keeps
+  its versions, as on PostgreSQL; and a transaction remembers each table it found clear, by the
+  same four ways, the coarse check in its Oracle form, `SELECT 1 FROM dual WHERE EXISTS (SELECT 1
+  FROM T_meta WHERE tx_state IN (1, 2))`, and runs on it the vendor's statements: a read of any
+  shape as written on the data tables, a locking read likewise after the coarse check, whose own
+  Oracle form is a later form of todo 334, and a write as written with its stamp (4.3). What
+  differs from PostgreSQL is how the failure surfaces and what it leaves. ORA-08177 fails the
+  statement alone and Oracle keeps the transaction open; the driver reports it as `40001` and
+  marks the transaction rollback-only, as it does already (section 5), and nothing of the failed
+  statement remains, a PL/SQL block included (4.3). In autocommit the session runs at READ
+  COMMITTED on Oracle (section 5), so nothing is remembered and reads keep their anchors, as at that
+  level elsewhere; the transaction an autocommit read shares with its checks (todo 283) runs that
+  one statement and remembers nothing either. READ COMMITTED's own forms are 4.3's.
 - **Why one statement, not two.** Under READ COMMITTED every statement has its own snapshot. A row in
   flight with `x = x2` and `before_x = x1` fails the `P` arm; if its writer rolls back before a second
   statement runs, the row is committed with `x = x1` and no before image, and fails the in-flight arm
@@ -1366,6 +1398,185 @@ the lock's re-read does not reach, the locking read keeps its steps and savepoin
 The other engines still run the steps one by one, each write under a savepoint of its own. They have
 no data-modifying CTEs; their single-round-trip forms are a multi-statement batch on MySQL and
 MariaDB, a T-SQL batch on SQL Server, and an anonymous PL/SQL block on Oracle (todo 328).
+
+**The keyed write on Oracle, one PL/SQL block (todo 334).** An UPDATE or DELETE by the table's full
+key, each key column equal to a placeholder or a literal and nothing else, at READ COMMITTED and at
+SNAPSHOT, in both layouts, on a created or an imported table, without a locking clause. The steps
+above are three statements with two decisions between them: after step 1, whether to go on (the
+data row exists, has a metadata row, and is committed; at READ COMMITTED, otherwise wait), and after
+step 2, whether the DML wrote its row. Each decision is a function of the earlier statements' own
+results and of nothing the client knows that the server cannot be told, with one exception: the
+version the transaction read earlier, whose comparison needs no decision before the write, since
+its failure is an abort, which undoes the write with the transaction, as the fused statement on
+PostgreSQL already has it. So the three statements and the two decisions run as one anonymous
+block, and the driver decides the rest from the one row the block returns. The block is the
+protocol, not a new one: every statement in it is the step's statement, run by the same engine at
+the same level in the same order, the data row before the metadata row, and the only change is
+where the decision is made. What Oracle adds is the block's atomicity as the client's statement: an
+unhandled exception in it, ORA-08177, ORA-00060 or any other, fails the block as one statement and
+undoes everything it wrote, so the write needs no savepoint of its own and the transaction after an
+error is as it was before the block; the errors are mapped as they are today, ORA-08177 and
+ORA-08176 to `40001` rollback-only. The block raises nothing of its own. It returns before writing
+on every outcome the driver may wait on or count as nothing written, and writes only when the row
+it read is committed, so an outcome returned after a write is one the driver aborts on, the DML it
+left applied undone with the rollback, as on PostgreSQL. Two more things it gets right by
+construction. At SNAPSHOT its read is in the transaction's snapshot and no read recorded an anchor
+(4.2 on Oracle), so the version it reads is the anchor the level wants, and a row changed since
+fails the DML with ORA-08177 before the CAS; at READ COMMITTED its read is a read now, step 1's
+anchor for a key the transaction never read, and for a key it read before the driver compares the
+version returned with the recorded one afterwards and aborts (`Anchors.unchanged`), which
+`committedWhileItWaits` checks. And the wait of section 6 holds no lock: the block reads without
+locking and writes nothing while the row is in flight.
+
+The text, for a table `T` with key `k` (every key column where `k` stands), the user's WHERE
+clause `P` under the name the statement exposes for the table, its placeholders where `P` stands,
+and `?` where the driver binds: the inline layout's UPDATE first.
+
+```plsql
+DECLARE
+  l_rows NUMBER := 0;  l_written NUMBER := 0;
+  l_id T.tx_id%TYPE;  l_version T.tx_version%TYPE;  l_state T.tx_state%TYPE;
+  l_k T.k%TYPE;
+BEGIN
+  BEGIN
+    SELECT 1, t.tx_id, t.tx_version, t.tx_state, t.k
+      INTO l_rows, l_id, l_version, l_state, l_k
+      FROM T t WHERE P;                                    -- step 1, without a lock
+  EXCEPTION WHEN NO_DATA_FOUND THEN NULL;
+  END;
+  IF l_rows = 1 AND COALESCE(l_state, 3) = 3 THEN          -- the gate: a committed row
+    UPDATE T t SET tx_id = ?, tx_prepared_at = ?, tx_committed_at = ?, tx_state = 3,
+           tx_version = CASE WHEN t.tx_id IS NULL THEN 1 ELSE COALESCE(t.tx_version, 0) + 1 END,
+           <the user's SET items>                           -- steps 2 and 3 in one row
+     WHERE (P) AND COALESCE(t.tx_state, 3) = 3
+       AND DECODE(t.tx_id, l_id, 1, 0) = 1
+       AND COALESCE(t.tx_version, 0) = COALESCE(l_version, 0);
+    l_written := SQL%ROWCOUNT;
+  END IF;
+  OPEN ? FOR SELECT l_rows, 1, l_id, l_version, l_state, l_written, l_written, l_k FROM dual;
+END;
+```
+
+An inline DELETE is the same block with `DELETE FROM T t WHERE (P) AND ...` in the UPDATE's place,
+the same three conditions, no stamp. The decoupled layout's UPDATE:
+
+```plsql
+DECLARE
+  l_rows NUMBER := 0;  l_meta NUMBER := 0;  l_written NUMBER := 0;  l_stamped NUMBER := 0;
+  l_id T_meta.tx_id%TYPE;  l_version T_meta.tx_version%TYPE;  l_state T_meta.tx_state%TYPE;
+  l_k T.k%TYPE;
+  TYPE t_k IS TABLE OF T.k%TYPE;  l_w t_k;                 -- the key the DML wrote
+BEGIN
+  BEGIN
+    SELECT 1, CASE WHEN m.k IS NULL THEN 0 ELSE 1 END, m.tx_id, m.tx_version, m.tx_state, t.k
+      INTO l_rows, l_meta, l_id, l_version, l_state, l_k
+      FROM T t LEFT JOIN T_meta m ON m.k = t.k WHERE P;     -- step 1, the data-anchored surface
+  EXCEPTION WHEN NO_DATA_FOUND THEN NULL;
+  END;
+  IF l_rows = 1 AND l_meta = 1 AND COALESCE(l_state, 3) = 3 THEN
+    UPDATE T t SET <the user's SET items> WHERE (P)         -- step 2, the user's DML
+      RETURNING t.k BULK COLLECT INTO l_w;
+    l_written := SQL%ROWCOUNT;
+    IF l_written = 1 THEN
+      UPDATE T_meta SET tx_id = ?, tx_prepared_at = ?, tx_committed_at = ?, tx_state = 3,
+             tx_version = CASE WHEN tx_id IS NULL THEN 1 ELSE COALESCE(tx_version, 0) + 1 END
+       WHERE k = l_w(1) AND COALESCE(tx_state, 3) = 3       -- step 3, the CAS
+         AND DECODE(tx_id, l_id, 1, 0) = 1
+         AND COALESCE(tx_version, 0) = COALESCE(l_version, 0);
+      l_stamped := SQL%ROWCOUNT;
+    END IF;
+  END IF;
+  OPEN ? FOR SELECT l_rows, l_meta, l_id, l_version, l_state, l_written, l_stamped, l_k FROM dual;
+END;
+```
+
+A decoupled DELETE runs `DELETE FROM T t WHERE (P) RETURNING t.k BULK COLLECT INTO l_w` as step 2
+and, on a created table, `DELETE FROM T_meta WHERE k = l_w(1) AND ...` with the CAS's three
+conditions as step 3; on an imported table step 3 is the stamp above, the tombstone of 4.5. The
+CAS compares as `Anchors.Version.is` does: `DECODE` takes two NULLs as equal, and a NULL version
+counts as 0, the NULL-metadata anchor of 4.4, whose stamp is version 1 by the `CASE`. The key is
+read as `Names.readColumns` spells it (a FLOAT key through `TO_BINARY_DOUBLE`), and the CAS matches
+the metadata row by the key the DML returned, as the data row spells it, which the other forms do
+too (CHAR(n) is varchar in the metadata table). The DML's text is the user's with the data table's
+name and the `RETURNING` appended before any trailing comment, as `onDataTable` places it. The
+driver's binds, in text order: `P`'s placeholders for the read; then, in the inline UPDATE, the
+stamp's three values, the user's SET placeholders and `P`'s again; in the decoupled block the SET
+placeholders, `P`'s again, and the stamp's three values after the DML where a stamp is written;
+last the cursor, the block's one OUT bind, a `SYS_REFCURSOR` the driver registers as
+`OracleTypes.CURSOR` on a `CallableStatement` and reads as a result set. Its one row is
+`rows, meta, tx_id, tx_version, tx_state, written, stamped, k...`: whether a data row was found,
+whether it has a metadata row (1 always in the inline layout), the version and state read, how
+many rows the DML wrote and the CAS stamped (equal in the inline layout, one statement), and the
+key as read, through `readKey`, the code that recorded the anchor, so the two agree on every key
+type without a mapping of its own. The cursor is opened over `dual` on the block's variables,
+bound as it opens, so it outlives the block. What the driver does with the row:
+
+| the row | the driver |
+|---|---|
+| `rows` 0 | nothing written; the count is 0, as the vendor's statement finds no row; no abort (a tombstone's metadata row, 4.5, is not looked at) |
+| `rows` 1, `meta` 0 (an imported table before its backfill) | nothing written; the steps one by one, which write the version-1 metadata row (4.4) and then the DML |
+| `tx_state` 1 or 2 | nothing written; at READ COMMITTED with `scalardbnative.inflightWaitMs` set, the bounded sleep of section 6 and the block again, which reads the row afresh; otherwise, and at SNAPSHOT always, abort `40001` |
+| `tx_state` neither 1, 2, 3 nor NULL | nothing written, count 0, no committed image, as the fused statement counts it on PostgreSQL |
+| the version read is not the one the transaction read for the key (`Anchors.unchanged` false, READ COMMITTED) | abort `40001`, whatever else the row says; a write left applied is undone with the rollback |
+| `written` 1, `stamped` 1 | the key is written: count 1, `anchors.wrote(tx_id)` |
+| `written` 1, `stamped` 0 (decoupled) | abort `40001`, "a row the statement writes changed after it was read": the metadata row moved, went in flight or lost its metadata between the read and the CAS; the DML's row and its lock on `T` stay until the rollback, as in the steps |
+| `written` 0 after a committed row was read | abort `40001`: the row moved under the lock (the inline CAS), went in flight, or was deleted and committed between the read and the DML; at SNAPSHOT ORA-08177 comes first for a row changed or deleted |
+| `written` above 1 | abort, "a key matched n rows", as the steps; impossible with the key alone |
+| ORA-08177, ORA-08176 (SNAPSHOT) | `40001`, rollback-only, as today; nothing of the block remains |
+| ORA-00060, any other error | as today, the error's own; nothing of the block remains, no savepoint to undo to |
+| a duplicate in a batch, two entries on one key | not this form: a batch runs its entries one by one, each this block, until the batch form of todo 334 |
+
+An entry of a batch is this block, an outcome each; the merged and together forms of 4.4 are the
+batch form, a later form of todo 334, and so is the write beyond the key, the same block over the
+predicate's keys. A write the block does not take, a locking clause among them, keeps the steps.
+In autocommit the write runs as 4.4 says, autocommit off around the block and a commit after it;
+ojdbc sends a commit with an execute when autocommit is on, so a block that raised on every
+aborting outcome could run under autocommit in one round trip, a measured follow-up and not this
+form. A gate on the metadata row inside the decoupled DML, `EXISTS (SELECT 1 FROM T_meta m WHERE
+m.k = t.k AND COALESCE(m.tx_state, 3) = 3)`, would leave nothing written when the row went in flight
+under the DML's wait, since Oracle restarts a statement whose row changed under it; that restart is
+what the locking read's Oracle form has to verify, and this form does not rely on it.
+
+**The vendor's statement with the stamp on Oracle**, at SNAPSHOT, in the inline layout, when the
+transaction recorded no anchor of the table and the statement has no locking clause: the user's
+UPDATE or DELETE as written, the stamp in its SET list ahead of the user's items, on a table the
+transaction found clear, and with the gate on one it has not, exactly as on PostgreSQL. Why it is
+exact there: on a table clear in the snapshot every row the predicate matches is committed at the
+version the statement itself reads, which is the anchor since no read recorded one, the stamp
+raises it, a row changed after the snapshot fails the statement with ORA-08177 before anything is
+written, and the after-image arm matches nothing.
+
+```sql
+UPDATE T t SET tx_id = ?, tx_prepared_at = ?, tx_committed_at = ?, tx_state = 3,
+       tx_version = CASE WHEN t.tx_id IS NULL THEN 1 ELSE COALESCE(t.tx_version, 0) + 1 END,
+       <the user's SET items>
+ WHERE (P) AND NOT EXISTS (SELECT /*+ INDEX(m <T_inflight>) */ 1 FROM T m WHERE m.tx_state IN (1, 2))
+```
+
+A DELETE is the statement as written with the gate; a found-clear table drops the `AND NOT EXISTS`.
+The driver reads `executeUpdate`'s count and tells a zero-row result apart as `applyFast` does on
+PostgreSQL: on a table found clear, 0 is the vendor's 0; on a table not yet found clear, 0 asks the
+coarse check (4.2): a row found means the gate was closed, and the block above runs and tells which
+row is in flight; none found marks the table clear and the count is 0. A count above 0 is that many
+rows written and stamped at once, the table marked clear, since the gate was open, and
+`anchors.wrote(tx_id)`. The decoupled layout's statement with the stamp is the block without its
+read, the DML returning its keys and a `FORALL` stamp over them; its gain over the block above is
+the one read inside it, and it comes with the write beyond the key, where it is needed.
+
+What must keep holding on Oracle, in `./gradlew :driver:integrationTestOracle`:
+`MoreWritesIntegrationTest`'s `committedWhileItWaits` by key, `inFlightWait`, `lockingReads`,
+`batches` and `timeoutMidWrite`, whose expectation for the keyed write becomes the one-statement
+one as it did for PostgreSQL in todo 328; `InlineIntegrationTest`;
+`WriteIntegrationTest.readsItsOwnWrites_withinTheTransaction`; `SnapshotIntegrationTest`'s Oracle
+branches. To add: a row changed by another connection after the snapshot aborts the block with
+`40001` and leaves the transaction rollback-only; a block that wrote and then met an error leaves
+the row as it was, the statement-level atomicity the form rests on, as a test of the engine; and,
+for each key type the driver supports on Oracle, the anchor found after a read and a keyed write
+of the same key, the CHAR key of `reviewOf8d1` the hard case. Measured through the driver on the
+local container first, round trips counted and the block beside the vendor's UPDATE and the steps
+on the same container, since the container runs under emulation and its times mean nothing
+absolute; then on AWS once BenchBase has an Oracle build, after the PostgreSQL matrix, the time
+added per transaction against the vendor on plain tables, both layouts, both levels.
 
 ### 4.4 Builder notes
 

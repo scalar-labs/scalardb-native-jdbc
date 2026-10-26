@@ -128,3 +128,83 @@ the design text.
   dialect.
 - `driver/src/testFixtures/java/com/scalar/db/nativejdbc/testing/Engines.java` (the Oracle
   container), `./gradlew :driver:integrationTestOracle`.
+
+## Work Log
+
+### 2026-10-26: forms 1 and 2 designed (Fable), design 4.2 and 4.3, Oracle paragraphs
+
+**Form 1, reads without anchors at SNAPSHOT and the clear-table memory.** The PostgreSQL argument
+rests on one snapshot per transaction and on a write to a row changed after it failing before the
+CAS. Oracle's SERIALIZABLE gives both: the snapshot is fixed at the transaction's first statement,
+a read included, and an UPDATE, a DELETE or a FOR UPDATE of a row changed and committed since
+raises ORA-08177 at the statement that meets the row. Checked case by case which statement meets
+the change: a ScalarDB prepare, commit of a delete, or another driver write changes the data row,
+so the DML fails; a record commit, a rollback or a lazy recovery changes only the metadata row of a
+row the snapshot shows in flight, so the gate stops before any write; the backfill of section 1
+changes a metadata row alone, so the CAS fails, with ORA-08177 rather than zero rows. Two
+differences from PostgreSQL, both conservative: Oracle raises ORA-08177 also when a block's ITL
+cannot tell whether the row changed, and for a row a ScalarDB prepare rolled back after the
+snapshot (changed twice, back at the version read), which PostgreSQL may write (todo 134). The
+state column, the coarse check and the four ways of finding a table clear port as they are; the
+probes read the in-flight index under the same hint the split read uses, since the fixed
+statistics of todo 094 would send the optimizer elsewhere. Autocommit stays at READ COMMITTED on
+Oracle (section 5), where nothing is remembered: unchanged.
+
+**Form 2, the keyed write as one PL/SQL block.** The block is the three steps of 4.3 with the two
+decisions between them moved to the server; the exactness argument is that each decision depends
+on the earlier statements' results alone, except the comparison with an anchor the transaction
+read earlier, which can come after the write because its failure is an abort (as on PostgreSQL's
+fused statement). Decisions taken, and the alternatives weighed:
+
+- **The block returns before writing and never raises on its own.** The alternative, raising an
+  application error on every aborting outcome so that the block's statement-level rollback
+  undoes the DML and autocommit could run in one round trip (ojdbc sends the commit with the
+  execute), was set aside for the first version: the driver's abort handling stays the
+  PostgreSQL one (mark rollback-only, the DML undone with the rollback), one code path, and the
+  wait at READ COMMITTED needs a returned outcome anyway. Listed as a measured follow-up.
+- **The anchor is compared by the driver after the block, from the version the block read**, not
+  passed in. Passing it in needs the key from the statement's bound values, whose Java types need
+  not equal the key as read (an Integer bound, a BigDecimal read), a silent miss; comparing after
+  reuses `Anchors.unchanged` as the PostgreSQL forms do.
+- **The row comes back as a `SYS_REFCURSOR` over `dual`**, not as scalar OUT binds. OUT binds
+  for the key columns would need a JDBC type per column that agrees with what `readKey` recorded
+  from a result set, the one place a mistake is a lost update (an anchor not found means
+  `unchanged` is true); a cursor row goes through `readKey` itself. `DBMS_SQL.RETURN_RESULT`
+  (12.1) would give the same row without a CallableStatement; the ref cursor is the older,
+  certain mechanism, and the implementing session may switch if it measures the same.
+- **The block's read is `T LEFT JOIN T_meta` by the key at both levels** (step 1's data-anchored
+  surface), the row itself in the inline layout; a data row without a metadata row (an imported
+  table before its backfill) returns to the steps, as PostgreSQL's gate does, rather than
+  inserting the version-1 row inside the block with a DUP_VAL_ON_INDEX handler.
+- **No savepoint around the block.** An unhandled exception fails the block as the client's one
+  statement and undoes its work (statement-level atomicity, Oracle Concepts "Transactions";
+  Kyte, Expert Oracle Database Architecture, ch. 8, the anonymous-block demonstration); the
+  implementing session confirms it with a test on the container before dropping `Writes.apply`'s
+  savepoint for this plan on Oracle.
+- **The decoupled DML keeps no gate of its own** (`EXISTS` over the committed metadata row inside
+  the UPDATE), which would rely on Oracle's statement restart re-evaluating a subquery after a
+  lock wait: the thing form 5 must verify. Both are exact; the gate would only leave less locked
+  on an abort.
+- **The clear-table statement with the stamp is given for the inline layout only**; the
+  decoupled one is the block without its read and comes with form 3, which needs the `FORALL`
+  stamp over returned keys anyway.
+- **The one-statement autocommit, and the cost of PL/SQL's context switches**, are measured, not
+  designed: the local container's times are not absolute (emulation); round trips and the block
+  beside the vendor's UPDATE on the same container, then AWS.
+
+Oracle facts the two forms rest on, to be confirmed by the implementing session's tests rather
+than assumed: (1) a block's statement-level atomicity; (2) ORA-08177 out of a PL/SQL block reaches
+ojdbc with error code 8177 and SQLState 72000, which `oracleSerialization` matches; (3) a ref
+cursor opened over `dual` on the block's variables is fetchable after the block ends; (4) `?`
+placeholders bound twice in one block (the WHERE in the read and in the DML) and the cursor as the
+last OUT bind on a `CallableStatement`. Facts relied on and not in question: the snapshot at the
+first statement, ORA-08177 on a changed row at SERIALIZABLE, `RETURNING ... BULK COLLECT INTO` on a
+multi-row DML, `SQL%ROWCOUNT`, `DECODE` as the NULL-safe comparison (already in the driver).
+
+Left for the next design turns, in the todo's order: form 3 (the write beyond the key: the same
+block with the keys read into collections, the `FORALL` CAS and `SQL%BULK_ROWCOUNT`, the rows back
+through the cursor; the anchor check needs per-key rows, which a cursor over a local collection
+would give and which needs `TABLE()` of a local type, 12.1, to be checked, or the keys' versions
+re-read from the metadata table by the stamp's `tx_id`), form 4 (batches), form 5 (the locking
+read, with the statement-restart verification), form 6 (the read side with the micro-benchmark
+session). Nothing in `bench-env/` or `BenchBaseBenchmark` was touched.
