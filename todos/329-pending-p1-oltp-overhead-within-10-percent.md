@@ -858,4 +858,5 @@ The two changed statements move as the design measured with pgbench (the version
 a call, StockLevel 7%); the throughput difference, 3 points, is inside the laptop's run-to-run
 noise (the same todo 336 tree measured 0.80 a day earlier). The InitPlan's sequential scan seen on
 the small test table does not show here: TPC-C's metadata tables are large enough for the partial
-index. The AWS cells decide, with todo 336's.
+index (checked: `EXPLAIN` of the probe on `bb-pgss` gives `Index Only Scan using
+order_line_inflight on order_line_tx_metadata`). The AWS cells decide, with todo 336's.
