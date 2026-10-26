@@ -1424,7 +1424,10 @@ key's metadata row as the snapshot read it beside it:
 WITH scalardb_native_keys (scalardb_native_m0, ..., scalardb_native_id, scalardb_native_version,
                            scalardb_native_state) AS
        (SELECT s.k, s.tx_id, s.tx_version, s.tx_state FROM T_meta s WHERE <the key as written>),
-     scalardb_native_w AS (<the user's UPDATE or DELETE as written on T> RETURNING k AS scalardb_native_w0, ...),
+     scalardb_native_w AS (<the user's UPDATE or DELETE as written on T, its WHERE extended by>
+                           AND NOT EXISTS (SELECT 1 FROM scalardb_native_keys
+                                           WHERE COALESCE(scalardb_native_state, 3) <> 3)
+                           RETURNING k AS scalardb_native_w0, ...),
      scalardb_native_s AS (<the stamp of the clear-table statement from scalardb_native_w: a created
                             table's UPDATE T_meta ... FROM scalardb_native_w, which a DELETE removes
                             instead; an imported table's INSERT ... ON CONFLICT (k) DO UPDATE>
@@ -1451,36 +1454,49 @@ without a metadata row):
 
 | the statement returns | the driver |
 |---|---|
-| `written` 0 | 0 rows, as the vendor: the key does not exist, or its row stopped matching; nothing is stamped |
+| `written` 0, `tx_state` 1 or 2 | abort `40001`, "being written by a ScalarDB transaction" (section 6; no wait is configured); nothing was written |
+| `written` 0, `tx_state` neither 1, 2, 3 nor NULL | 0 rows, nothing written: no committed image, as the fused statement counts it |
+| `written` 0, otherwise | 0 rows, as the vendor: the key does not exist, or its row stopped matching; nothing is stamped |
 | `written` 1, `stamped` 1, the anchor unchanged (`Anchors.unchanged` on the snapshot's `tx_id` and `tx_version`, which holds for a row the transaction wrote before) | the write; the anchors told of it |
 | `written` 1, `stamped` 1, the anchor moved | abort `40001`, "a row this transaction read was changed by another one since"; the data row written is undone with the transaction |
 | `written` 1, `stamped` 0, `tx_state` 1 or 2 | abort `40001`, "being written by a ScalarDB transaction" (section 6; no wait is configured) |
 | `written` 1, `stamped` 0, otherwise | abort `40001`, "changed after it was read": the row moved between the snapshot and the lock, or a created table's metadata row is gone |
 
-No gate: its purpose was to write nothing while a key is in flight so that the level's bounded wait
-holds no lock, and without a wait the abort undoes the data write with the transaction; a key in
-flight is told by its stamp, which `COALESCE(tx_state, 3) = 3` refuses. A key without a metadata
-row, an imported table's before its backfill, is stamped by the upsert's insert, as the clear-table
-statement stamps it (4.4). The DML locks the data row and the stamp the metadata row after it, the
-steps' order. With a wait configured the slim statement stays, its gate keeping the data unwritten
-through the wait. A batch's entries by key take the same statement over the entries of
+The gate is the one `NOT EXISTS` over the CTE, an InitPlan evaluated once from the snapshot (timed
+at nothing measurable over the ungated statement, 11 µs at the least and 18 to 21 on average
+against the clear-table statement's 9 and 18): it keeps the data row unwritten for a key in flight,
+and for the abnormal state neither in flight nor committed, which the fused statement counts as no
+committed image, so the two statements agree on every outcome; a key with no row passes it. A key
+without a metadata row, an imported table's before its backfill, is stamped by the upsert's insert,
+as the clear-table statement stamps it (4.4). The DML locks the data row and the stamp the metadata
+row after it, the steps' order. With a wait configured the slim statement stays, whose gate the
+wait's retries rely on. A batch's entries by key take the same statement over the entries of
 `scalardb_native_e` as the clear-table batch form does (4.4), the key's metadata read per entry by a
 lateral subquery and the CAS and the row returned per entry.
 
 **The write beyond the key at READ COMMITTED on a decoupled table (todo 336).** The same
-statement, the keys the predicate matches in place of the one key, when the transaction recorded no
+statement, the keys the predicate matches in place of the one key, for a predicate on key columns
+only (as the locking read at this level is scoped, `keysOnly`), when the transaction recorded no
 anchor of the table (`Anchors.recorded`), which is Delivery's case: its order lines are read by an
-aggregate, which records none (to be confirmed by a test; a transaction that read the table's rows
-keeps the fused statement, whose rows carry each key's version for the anchors). The DML as written
-over the data table, returning its keys; the stamp from them with the CAS as above, the subquery on
-`T_meta` by the stamped row's key in place of the CTE, one probe per key; and the rule of 4.2 for
-this level that a row in flight whose before image alone the predicate matches aborts, as a column:
-`EXISTS (SELECT 1 FROM <the before images of T, 4.2> WHERE <the predicate>)`, one probe of the
-in-flight index. The driver: that column true, abort "being written by a ScalarDB transaction";
-`stamped` below `written`, abort "changed after it was read"; else the count written. Timed on the
-laptop over an order's ten lines, server time, the fused statement 56 µs at the least and 127 on
-average, the clear-table statement 28 and 70, this one 34 and 85; on AWS the fused statement was
-239 µs a call against the clear-table statement's 143.
+aggregate, which records none (confirmed, todo 336), and its predicate names the order's key prefix.
+A transaction that read the table's rows keeps the fused statement, whose rows carry each key's
+version for the anchors; so does a predicate on any other column, since a row the snapshot matched
+can stop matching before the DML writes it only through such a column (a ScalarDB prepare between
+the snapshot and the lock, as finding 134's test stages it, the images of a row differing in no key
+column), and that is the case the steps' zero-row rule of step 2 and the fused statement's keys read
+tell apart from a row that never matched, which this statement, with no keys read, cannot. The DML
+as written over the data table, returning its keys; the stamp from them with the CAS as above, the
+subquery on `T_meta` by the stamped row's key in place of the CTE, one probe per key; and the rule
+of 4.2 for this level that a row in flight whose before image alone the predicate matches aborts,
+as a column: `EXISTS (SELECT 1 FROM <the before images of T, 4.2> WHERE <the predicate>)`, one probe
+of the in-flight index. The driver: that column true, abort "being written by a ScalarDB
+transaction"; `stamped` below `written`, abort "changed after it was read", which covers a row in
+flight by its after image, a row moved between the snapshot and the lock, and the abnormal state
+neither in flight nor committed, which the fused statement skips and this statement, with no
+metadata read per row, aborts on, a divergence accepted for a state ScalarDB writes to no record;
+else the count written. Timed on the laptop over an order's ten lines, server time, the fused
+statement 56 µs at the least and 127 on average, the clear-table statement 28 and 70, this one 34
+and 85; on AWS the fused statement was 239 µs a call against the clear-table statement's 143.
 
 An INSERT on PostgreSQL is the user's INSERT, returning its keys, and their metadata rows inserted from
 those keys (`ON CONFLICT DO NOTHING`), in one statement. A tombstone the insert skips is taken over by
