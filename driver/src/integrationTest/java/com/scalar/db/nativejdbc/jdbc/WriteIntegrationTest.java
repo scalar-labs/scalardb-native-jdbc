@@ -1203,4 +1203,106 @@ class WriteIntegrationTest {
     tx.commit();
     return r.map(x -> x.getText(N("x")));
   }
+
+  /**
+   * A transaction reads its own writes before its commit, at each level and on both layouts (design
+   * 4.2): a write is a statement of the native transaction, stamped committed, so every later read
+   * of the transaction returns it, by the key, by a predicate, under a lock, through a join, and
+   * after a batch that writes one key twice; a row it deleted is gone; and another connection sees
+   * none of it until the commit.
+   */
+  @ParameterizedTest
+  @MethodSource("engines")
+  void readsItsOwnWrites_withinTheTransaction(Engines e) throws Exception {
+    ScalarDbNames.on(e);
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          e.createSchema("ryw"),
+          "CREATE TABLE ryw.imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
+          "CREATE TABLE ryw.impi (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))");
+    }
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace(N("ryw"), true);
+      admin.importTable(N("ryw"), N("imp"), DECOUPLED, Map.of());
+      admin.importTable(N("ryw"), N("impi"), Map.of(), Map.of());
+    }
+    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(N("ryw")),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    List<Integer> levels =
+        e.engine() == Engine.ORACLE || e.engine() == Engine.SQLSERVER
+            ? List.of(Connection.TRANSACTION_READ_COMMITTED)
+            : List.of(
+                Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ);
+    try (Connection d = e.openDriver();
+        Connection other = e.openDriver()) {
+      for (String table : List.of("ryw.imp", "ryw.impi")) {
+        for (int level : levels) {
+          readsItsOwnWrites(d, other, table, level);
+        }
+      }
+    }
+  }
+
+  private static void readsItsOwnWrites(Connection d, Connection other, String t, int level)
+      throws SQLException {
+    // the rows as the transaction starts: 1 a, 2 b, 3 c
+    d.setAutoCommit(true);
+    d.createStatement().executeUpdate("DELETE FROM " + t + " WHERE id IN (1, 2, 3, 4)");
+    d.createStatement()
+        .executeUpdate("INSERT INTO " + t + " (id, x) VALUES (1, 'a'), (2, 'b'), (3, 'c')");
+    d.setTransactionIsolation(level);
+    d.setAutoCommit(false);
+    try (Statement st = d.createStatement()) {
+      assertThat(st.executeUpdate("UPDATE " + t + " SET x = 'a1' WHERE id = 1")).isEqualTo(1);
+      assertThat(st.executeUpdate("INSERT INTO " + t + " (id, x) VALUES (4, 'd')")).isEqualTo(1);
+      // by the key, by a predicate, under a lock, through a join
+      assertThat(rows(d, "SELECT x FROM " + t + " WHERE id = 1")).containsExactly("a1");
+      assertThat(rows(d, "SELECT x FROM " + t + " WHERE id = 4")).containsExactly("d");
+      assertThat(rows(d, "SELECT id FROM " + t + " WHERE x IN ('a1', 'd') ORDER BY id"))
+          .containsExactly("1", "4");
+      assertThat(rows(d, "SELECT x FROM " + t + " WHERE id = 1 FOR UPDATE")).containsExactly("a1");
+      assertThat(
+              rows(
+                  d,
+                  "SELECT a.x, b.x FROM " + t + " a JOIN " + t + " b ON b.id = 4 WHERE a.id = 1"))
+          .containsExactly("a1/d");
+      // a write after the transaction's own write and read of the row: accepted, and read back
+      assertThat(st.executeUpdate("UPDATE " + t + " SET x = 'a2' WHERE id = 1")).isEqualTo(1);
+      assertThat(rows(d, "SELECT x FROM " + t + " WHERE id = 1")).containsExactly("a2");
+      // a batch writing one key twice: the second entry sees the first's write
+      try (PreparedStatement ps = d.prepareStatement("UPDATE " + t + " SET x = ? WHERE id = ?")) {
+        for (String x : List.of("b1", "b2")) {
+          ps.setString(1, x);
+          ps.setInt(2, 2);
+          ps.addBatch();
+        }
+        assertThat(ps.executeBatch()).containsExactly(1, 1);
+      }
+      assertThat(rows(d, "SELECT x FROM " + t + " WHERE id = 2")).containsExactly("b2");
+      // a row the transaction deleted is gone from its reads
+      assertThat(st.executeUpdate("DELETE FROM " + t + " WHERE id = 3")).isEqualTo(1);
+      assertThat(rows(d, "SELECT x FROM " + t + " WHERE id = 3")).isEmpty();
+      assertThat(rows(d, "SELECT id FROM " + t + " WHERE id <= 4 ORDER BY id"))
+          .containsExactly("1", "2", "4");
+      // nothing of it is visible elsewhere before the commit
+      assertThat(rows(other, "SELECT x FROM " + t + " WHERE id = 1")).containsExactly("a");
+      assertThat(rows(other, "SELECT x FROM " + t + " WHERE id = 4")).isEmpty();
+    }
+    d.commit();
+    assertThat(rows(other, "SELECT id, x FROM " + t + " WHERE id <= 4 ORDER BY id"))
+        .containsExactly("1/a2", "2/b2", "4/d");
+    d.setAutoCommit(true);
+  }
 }
