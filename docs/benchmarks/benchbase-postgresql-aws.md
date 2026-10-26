@@ -257,6 +257,88 @@ seventh and eighth runs' 0.82 and 0.94 come from the longer round trip, which th
 well (time added per TPC-C transaction 1.23 ms then 1.75 ms). Both runs had both instances in one
 subnet (us-east-1a) and no placement group.
 
+## Ninth run: three levels, both layouts, two round trips (2026-10-26)
+
+Run `20261026-1433` (`BENCHBASE=1 READS=0 BB_LAYOUTS="decoupled inline" BB_ISOLATIONS="READ_COMMITTED
+REPEATABLE_READ SERIALIZABLE" NET_DELAYS="0 250"`): `6c19378` (the driver as of `86e16ee`), runs (a)
+and (c), TPC-C scale 4 and YCSB, 4 terminals, 3 repetitions of 120 s, the median shown. For the first
+time with `placement_strategy = "cluster"`: both instances in one placement group, a `SELECT 1`
+round trip of 68-84 µs. The second half ran on the same instances with `net-delay.sh` adding 250 µs
+to every packet the client sent to the database (TCP connect 119 → 382 µs), a 327-332 µs round
+trip, the seventh and eighth runs' (354-365 µs). Each level's two layouts ran back to back. "Added"
+is 4/(c) − 4/(a): per transaction for TPC-C, per operation for YCSB. SNAPSHOT is the driver's
+REPEATABLE_READ, PostgreSQL's REPEATABLE READ in run (a); SERIALIZABLE is SERIALIZABLE on both sides.
+
+TPC-C, fast (about 70 µs):
+
+| level | layout | (a)/s | (c)/s | (c)/(a) | goodput (c)/(a) | added | p95 (a) / (c) ms | packets/commit (a) / (c) | server CPU ms/commit (a) / (c) | WAL KB/commit (a) / (c) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| READ COMMITTED | decoupled | 1,769 | 676 | 0.38 | 0.38 | +3.66 ms | 4.8 / 14.4 | 19.7 / 44.5 | 0.877 / 2.608 | 8.0 / 18.3 |
+| READ COMMITTED | inline | 1,797 | 1,393 | 0.78 | 0.77 | +0.65 ms | 4.8 / 5.8 | 19.7 / 20.1 | 0.883 / 1.408 | 7.7 / 15.0 |
+| SNAPSHOT | decoupled | 1,808 | 1,414 | 0.78 | 0.78 | +0.61 ms | 4.8 / 5.9 | 19.6 / 19.6 | 0.877 / 1.315 | 7.6 / 20.3 |
+| SNAPSHOT | inline | 1,763 | 1,531 | 0.87 | 0.86 | +0.34 ms | 4.8 / 5.5 | 19.7 / 19.7 | 0.886 / 1.100 | 7.6 / 15.3 |
+| SERIALIZABLE | decoupled | 1,597 | 1,261 | 0.79 | 0.86 | +0.67 ms | 6.9 / 9.6 | 25.8 / 23.7 | 1.137 / 1.629 | 7.5 / 21.2 |
+| SERIALIZABLE | inline | 1,635 | 1,520 | 0.93 | 1.05 | +0.19 ms | 6.7 / 5.6 | 25.0 / 19.8 | 1.130 / 1.171 | 7.9 / 14.7 |
+
+TPC-C, slow (about 330 µs):
+
+| level | layout | (a)/s | (c)/s | (c)/(a) | goodput (c)/(a) | added | p95 (a) / (c) ms | packets/commit (a) / (c) | server CPU ms/commit (a) / (c) | WAL KB/commit (a) / (c) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| READ COMMITTED | decoupled | 546 | 229 | 0.42 | 0.42 | +10.12 ms | 14.7 / 43.1 | 19.5 / 43.6 | 0.925 / 2.654 | 7.6 / 23.3 |
+| READ COMMITTED | inline | 551 | 492 | 0.89 | 0.89 | +0.87 ms | 14.6 / 15.8 | 19.5 / 20.0 | 0.934 / 1.489 | 8.7 / 15.2 |
+| SNAPSHOT | decoupled | 542 | 502 | 0.93 | 0.92 | +0.60 ms | 14.8 / 15.7 | 19.6 / 19.5 | 0.938 / 1.394 | 8.2 / 19.5 |
+| SNAPSHOT | inline | 553 | 523 | 0.95 | 0.94 | +0.41 ms | 14.5 / 15.2 | 19.5 / 19.6 | 0.930 / 1.173 | 8.2 / 16.3 |
+| SERIALIZABLE | decoupled | 495 | 423 | 0.85 | 0.75 | +1.39 ms | 23.2 / 27.8 | 24.3 / 30.0 | 1.240 / 2.191 | 9.0 / 24.7 |
+| SERIALIZABLE | inline | 483 | 516 | 1.07 | 1.15 | -0.52 ms | 24.9 / 15.5 | 24.4 / 19.6 | 1.157 / 1.302 | 9.3 / 16.5 |
+
+YCSB, fast:
+
+| level | layout | (a)/s | (c)/s | (c)/(a) | goodput (c)/(a) | added | p95 (a) / (c) ms | packets/commit (a) / (c) | server CPU ms/commit (a) / (c) | WAL KB/commit (a) / (c) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| READ COMMITTED | decoupled | 10,000 | 3,266 | 0.33 | 0.33 | +824.87 µs | 1.6 / 5.9 | 11.8 / 13.3 | 0.191 / 0.839 | 0.4 / 0.5 |
+| READ COMMITTED | inline | 9,780 | 8,438 | 0.86 | 0.86 | +65.05 µs | 1.6 / 2.0 | 11.7 / 12.3 | 0.191 / 0.227 | 0.4 / 0.4 |
+| SNAPSHOT | decoupled | 9,750 | 8,273 | 0.85 | 0.85 | +73.25 µs | 1.6 / 1.9 | 11.8 / 11.8 | 0.196 / 0.248 | 0.4 / 0.5 |
+| SNAPSHOT | inline | 9,738 | 8,612 | 0.88 | 0.88 | +53.74 µs | 1.6 / 1.9 | 11.8 / 11.9 | 0.197 / 0.228 | 0.4 / 0.4 |
+| SERIALIZABLE | decoupled | 9,213 | 7,902 | 0.86 | 0.86 | +72.02 µs | 1.7 / 2.0 | 11.8 / 11.9 | 0.212 / 0.267 | 0.4 / 0.5 |
+| SERIALIZABLE | inline | 9,300 | 8,283 | 0.89 | 0.89 | +52.78 µs | 1.7 / 1.9 | 11.8 / 11.8 | 0.218 / 0.246 | 0.4 / 0.4 |
+
+YCSB, slow:
+
+| level | layout | (a)/s | (c)/s | (c)/(a) | goodput (c)/(a) | added | p95 (a) / (c) ms | packets/commit (a) / (c) | server CPU ms/commit (a) / (c) | WAL KB/commit (a) / (c) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| READ COMMITTED | decoupled | 4,169 | 2,333 | 0.56 | 0.56 | +755.19 µs | 2.1 / 4.7 | 11.7 / 13.3 | 0.193 / 0.571 | 0.4 / 0.5 |
+| READ COMMITTED | inline | 4,102 | 3,873 | 0.94 | 0.94 | +57.59 µs | 2.1 / 2.5 | 11.7 / 12.3 | 0.190 / 0.218 | 0.4 / 0.4 |
+| SNAPSHOT | decoupled | 4,216 | 3,889 | 0.92 | 0.92 | +79.73 µs | 2.1 / 2.3 | 11.8 / 11.9 | 0.184 / 0.227 | 0.4 / 0.5 |
+| SNAPSHOT | inline | 4,122 | 3,915 | 0.95 | 0.95 | +51.24 µs | 2.2 / 2.3 | 11.8 / 11.9 | 0.203 / 0.218 | 0.4 / 0.4 |
+| SERIALIZABLE | decoupled | 4,017 | 3,711 | 0.92 | 0.92 | +82.30 µs | 2.3 / 2.6 | 11.8 / 11.9 | 0.216 / 0.268 | 0.4 / 0.5 |
+| SERIALIZABLE | inline | 4,005 | 3,897 | 0.97 | 0.97 | +27.55 µs | 2.3 / 2.3 | 11.8 / 11.8 | 0.217 / 0.225 | 0.4 / 0.4 |
+
+- **The driver adds a time per transaction that hardly depends on the round trip**, wherever it
+  sends as many packets as the vendor: SNAPSHOT decoupled +0.61 then +0.60 ms, SNAPSHOT inline +0.34
+  then +0.41 ms, READ COMMITTED inline +0.65 then +0.87 ms. The ratio moves with the vendor's own
+  rate: SNAPSHOT inline is 0.87 fast and 0.95 slow. At about 330 µs SNAPSHOT on both layouts,
+  SERIALIZABLE inline and READ COMMITTED inline's YCSB are within 10%; READ COMMITTED inline's TPC-C
+  is 0.89.
+- **READ COMMITTED on decoupled tables** sent 44.5 packets a TPC-C commit against 19.7, so its added
+  time grew with the round trip: +3.66 ms fast, +10.1 ms slow. Its locking read was still the
+  step-by-step one (the one-statement lock at that level was inline-only); in `pg_stat_statements`
+  the before-image check ran 1.63 million times in a repetition against none on inline. `816f506`
+  gives decoupled tables a one-round-trip locking read at that level; its own run follows.
+- **SERIALIZABLE on decoupled tables at the long round trip** lost more transactions to
+  serialization failures than the vendor: NewOrder retried 90,394 times against 45,735 (completed
+  41,313 against 66,807), goodput 0.75, 30.0 packets a commit against 24.3. Fast, the same cell's
+  goodput was 0.86. The driver's inline tables at SERIALIZABLE had far fewer retries than the vendor
+  (NewOrder 2,406 against 59,130 slow; Payment 12,312 against 30,149), hence goodput above 1.
+- **A `SHOW max_parallel_workers_per_gather` per transaction at SERIALIZABLE on decoupled tables**:
+  111,003 calls in one fast TPC-C repetition (about 0.76 a commit), 37,500 slow, 15,520 in YCSB,
+  against about 1,200 on inline and a few hundred at the other levels. `Router.switchWorkers` reads
+  the setting again whenever it no longer knows it, as after a rollback; each read is a round trip.
+- Statement time, fast TPC-C, one repetition, (a) then (c) (`pgss-sum.py`): SNAPSHOT decoupled 81.5
+  then 102.8 s with 1.1 then 2.5 s planning; READ COMMITTED inline 82.8 then 98.2 s, of which the inline write beyond the key (Delivery) 28.2 s over 140,831
+  calls, 200 µs a call.
+
+The raw output is in `bench-env/results/20261026-1433/` (git-ignored).
+
 ## Reports
 
 ### HEAD 93f5217

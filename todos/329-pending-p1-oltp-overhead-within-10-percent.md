@@ -704,3 +704,35 @@ copy of its tree and the fix from the working tree, minutes apart:
 
 The integration suite passes (92 tests). What is left on this layout at this level is the second
 row per write and the slim write's keys CTE, as on inline, plus StockLevel's join (1.84 at p95).
+
+### 2026-10-26, evening: the AWS matrix, three levels, both layouts, two round trips
+
+Run `20261026-1433` from `6c19378`: PostgreSQL, (a) and (c), TPC-C and YCSB, both layouts, READ
+COMMITTED, SNAPSHOT and SERIALIZABLE, at a cluster placement group's ~70 µs round trip and again on
+the same instances with 250 µs added by netem (~330 µs). Tables in
+`docs/benchmarks/benchbase-postgresql-aws.md`, "Ninth run". The bench-env knobs it needed:
+`placement_strategy` (`49900d5`), `NET_DELAYS` and `BB_ISOLATIONS` (`24b80ee`, `6c19378`), and
+`SOURCE=<commit>` for run.sh (`84df1e3`), since this checkout's working tree carries other sessions'
+edits.
+
+TPC-C (c)/(a), added per transaction, fast then slow:
+
+| | decoupled | inline |
+|---|---|---|
+| READ COMMITTED | 0.38 (+3.66 ms), 0.42 (+10.1 ms) | 0.78 (+0.65 ms), 0.89 (+0.87 ms) |
+| SNAPSHOT | 0.78 (+0.61 ms), 0.93 (+0.60 ms) | 0.87 (+0.34 ms), 0.95 (+0.41 ms) |
+| SERIALIZABLE | 0.79 (+0.67 ms), 0.85 (+1.39 ms; goodput 0.75) | 0.93, 1.07 (goodput 1.05, 1.15) |
+
+YCSB, slow: 0.56, 0.94; 0.92, 0.95; 0.92, 0.97 (fast 0.33, 0.86; 0.85, 0.88; 0.86, 0.89).
+
+Open after it, for the driver sessions:
+
+- Decoupled READ COMMITTED: `816f506`'s run follows (decoupled, READ COMMITTED, both round trips,
+  from that commit alone).
+- Decoupled SERIALIZABLE at the long round trip: NewOrder's serialization failures doubled against
+  the vendor's (90,394 retries against 45,735), goodput 0.75; inline had far fewer than the vendor.
+- `SHOW max_parallel_workers_per_gather` at SERIALIZABLE on decoupled tables, about 0.76 a TPC-C
+  commit (111,003 in a fast repetition, 37,500 slow), a round trip each: `Router.switchWorkers`
+  reads the setting again whenever `workersOff` is unknown, as after a rollback.
+- With round trips equal to the vendor's, what is left is server time per statement: e.g. the
+  inline write beyond the key, 200 µs a call (28.2 s of 98.2 s in a fast READ COMMITTED repetition).
