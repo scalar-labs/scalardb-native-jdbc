@@ -871,3 +871,14 @@ target), Delivery's lines 246 → 168, the merged batch 331 → 218. SNAPSHOT as
 SERIALIZABLE: no SHOW left (`85f4adc`); slow 0.85 → 0.92, goodput 0.75 → 0.89, +1.39 → +0.74 ms;
 fast goodput 0.86 → 0.78 with the vendor's own retries up as much, the spread of SSI aborts between
 runs. Next: `cb16d83` (todo 337) for decoupled READ COMMITTED, when the user approves a run.
+
+### 2026-10-27, night: Oracle on AWS, both layouts, two levels
+
+Run `20261027-0133` (`SOURCE=71e53d5`, REPS 2, fast and slow); `docs/benchmarks/benchbase-oracle-aws.md`.
+TPC-C (c)/(a), fast/slow: READ COMMITTED decoupled 0.41/0.58, inline 0.47/0.65; SNAPSHOT decoupled
+0.47/0.61, inline 0.69/0.74. The gap is the database host's CPU (4.6 ms a commit against 2.1 for
+SNAPSHOT decoupled; statements' own CPU 1.8 against 0.41 ms, the per-row metadata writes and the lock
+and versions reads of NewOrder's stock rows leading), not round trips. YCSB's vendor rate drifted
+cell to cell (6973 → 2905/s), so its ratios are indicative; but decoupled READ COMMITTED waited on
+row locks for 316 s of 480 terminal-seconds (813 waits of about 390 ms), its 0.20, which is the
+driver's own. Next: hand the lock waits and the CPU breakdown to the Oracle design session.
