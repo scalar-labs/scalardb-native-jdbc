@@ -284,3 +284,43 @@ above SNAPSHOT where statement time is 0.18, so part of the excess lies outside 
 execution: planning, or the second message of each lock pair. Asked the AWS session for the keyed
 writes' and StockLevel's per-commit figures and the repetition's planning time at both levels;
 whether a design item beyond this todo exists waits on them.
+
+### 2026-10-27: the three figures; nothing of this todo's size is left at READ COMMITTED (the design)
+
+From the AWS session, run 20261026-2334 fast, repetition 2 of each cell, READ COMMITTED against
+SNAPSHOT on the decoupled layout, per commit over each cell's median commits:
+
+- The keyed writes (district, customer, warehouse), the keys-CTE form at READ COMMITTED against
+  the clear-table form at SNAPSHOT: 88.0 against 81.9 µs a commit, +6 (the tenth run's write-up
+  had put them about 125 apart). Closed; the form stays as todo 336 decided it for anchored
+  tables. The oorder and new_order keyed writes add 14.5 and 12.1 a commit at READ COMMITTED.
+- StockLevel, the derived-table form: 1,093 µs executing and 776 planning a call against
+  SNAPSHOT's 974 and 117 on the vendor's text (the vendor 819 and 116); 45.1 + 31.8 against 38.4 +
+  4.6 a commit. Both levels plan on nearly every call (5,530 plans in 6,593 calls: the plancache
+  keeps custom plans for the ranged predicate); the split form's plan costs 7× the vendor's.
+  `cb16d83`'s gate takes the execution to the vendor's (706 → 623 against 616 locally) and the plan
+  from 1,091 to 705 µs against the vendor's 125 (the table above): the four copies of a two-table
+  split read are still planned, their probes merely not executed. About 15 µs a commit of planning
+  stay above SNAPSHOT after the gate. A generic plan would remove them, but forcing one is a session
+  setting that reaches every statement; not taken at this size.
+- Planning a repetition: the vendor 1.21 s (5.4 µs a commit), SNAPSHOT 2.80 (15.6), READ COMMITTED
+  7.13 (44.6), of which StockLevel 5.11 s; the keys-CTE statements plan alike at both levels (1.20
+  against 1.29 s). So READ COMMITTED's extra planning, 29 µs a commit, is StockLevel's, and about
+  half of it goes with `cb16d83`.
+- Execution a commit: READ COMMITTED 745, SNAPSHOT 630, the vendor 360–368 (the 790 of the entry
+  above was execution with planning).
+
+The ledger after `cb16d83`, against SNAPSHOT: about 100 µs of execution a commit, of which the
+lock pair's anchor probe 45 (accepted, the second decision), Delivery's `order_line` write 10, the
+new-order read 7, the keyed writes 6, the batch 5, the rest in single digits across the remaining
+statements; about 15 of planning (StockLevel); and, outside `pg_stat_statements`, the lock pair's
+second message, 4.5 a commit, where server CPU a commit exceeds statement time by 0.2 ms. Folding
+the versions read into the lock's statement would need a read that takes its snapshot after the
+lock inside one statement, which only a VOLATILE function evaluated above a locking subquery gives
+(`SELECT l.*, f(l.key) FROM (... FOR UPDATE) l`): a function the setup would create, a per-row call
+dearer than the message it saves on a one-row lock, and a PL/pgSQL body since an inlined SQL body
+would take the statement's snapshot again; not taken. Nothing of todo 336's or this todo's size is
+left at READ COMMITTED on the decoupled layout: its cell should land near SNAPSHOT's, about 0.1–0.15
+ms a transaction above it at the fast round trip. What remains to the vendor from there is the
+layout's own cost, shared with SNAPSHOT (0.79 fast; execution 630 against 365 µs a commit, server
+CPU 1.35 against 0.87 ms), a question for todo 329, not this one.
