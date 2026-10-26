@@ -578,3 +578,29 @@ Asked of the implementing session with the fix: a line per table row in todo 335
 test that exercises it, or "none", so that the rows without one (the decoupled `written` 1
 `stamped` 0, the predicate block's abort codes 3 and 4, the INSERT's `meta` 0 `stamped` 0 look the
 likely ones) are known before the AWS run rather than found by it.
+
+### 2026-10-26: the fix verified (Fable); the mismatch warning carries classes, not values
+
+02727ae read from the committed revision: `KeyedPlan.applyBlock`'s CHECK variant takes the cursor's
+whole row where the check says `CURSOR`, and a cursor without a row where the OUT binds show one
+is the block returning none; the INSERT block and the block of entries do the same; the unit test
+drives `KeyedPlan.apply` through fakes with a String OUT key against a NUMBER cursor key, and
+fails without the fix. The review's item 1 is closed. The review itself had read `Writes.java`
+from the working tree, which held the implementing session's fix in progress, so it took the
+INSERT block and the entries for already taking the cursor's value; in a shared checkout a review
+reads `git show <rev>:<path>`, not the tree.
+
+Decided, on the implementing session's question: the WARN line of `OutBindCheck.decide` names
+the table and the two keys' classes per column, never their values; the values go to DEBUG. A
+key may be a person's identifier, and a driver's default-level log reaches aggregators the
+operator did not choose for row data; the classes tell the typing mismatches the check exists for
+(a `String` against a `BigDecimal`, a `java.sql.Date` against a `LocalDateTime`), and the
+value-level ones, a padded `CHAR` or a scale, are for the driver's developers, who reproduce them
+on the column type with the confirmation test. The design text's "both values with their classes"
+becomes "their classes, the values at DEBUG".
+
+The row-to-test map in todo 335's log lists the rows without a test; the ones to add first, since
+a mistake there is silent: the decoupled `written` 1 `stamped` 0 (a metadata row moved between
+the read and the CAS), and the INSERT's `meta` 0 `stamped` 0 on an imported table. The predicate
+block's codes 3 and 4 are asserted as `40001` by `form3`'s moved key, which is the outcome that
+matters; the rest are error paths the engine's own mapping covers.
