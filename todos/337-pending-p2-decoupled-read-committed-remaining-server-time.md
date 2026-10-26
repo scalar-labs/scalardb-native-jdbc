@@ -257,3 +257,30 @@ tenth run: the stock lock 24.6 → 10.0 µs and its versions read 6.2 → 12.4 �
 30.8 → 22.4 µs. The second statement grew by less than the first shrank, so it needs no
 send-back. The versions read is this todo's target: cb16d83 reads it from T_meta alone (locally
 14.8 → 12.0 µs), and its AWS cell waits for the user's approval through the AWS session.
+
+### 2026-10-27: the eleventh run's lock pair read against the tenth (the design)
+
+The versions read's text is the same in both runs: `816f506` (tenth) and `faae2ed` (eleventh)
+build it alike, the data table's predicate in a derived table left-joined to the metadata table
+(`git diff 816f506 faae2ed -- Router.java`: the hunk changes the lock from the version-looking-up
+form to the keys-only form and leaves the versions statement as it was). So 6.2 → 12.4 µs is not
+the statement growing: the metadata row's first touch moved out of the lock, whose correlated
+subqueries into `stock_tx_metadata` read it in the tenth run (24.6 µs), into the second statement,
+which read it warm there (6.2) and cold here (12.4). The pair is what counts, 30.8 → 22.4 µs,
+against SNAPSHOT's lock alone at 10. `cb16d83` drops the second statement's probe of the data table,
+the part the lock has just warmed, so its cell should show the second statement near 9–10 µs and
+the pair near 20; the 10 µs that stays above SNAPSHOT is the anchor's metadata probe (the second
+decision above: no cheaper anchored key read at this level), about 45 µs a commit over 4.5 calls.
+
+What remains between READ COMMITTED's 790 µs of statement time a commit and SNAPSHOT decoupled's
+613 (the ninth run's figure) is 177 µs. The write-up's items account for about half: the lock pair
+101 against 45 a commit (about 90 with `cb16d83`), Delivery's `order_line` write 168 against 143 a
+call (about 10 a commit), the merged stock batch 218 a call against SNAPSHOT's 207 (closed), the
+new-order read 63 → 28. About 100 µs a commit is not in the write-up: the keyed writes (district,
+customer, warehouse), which the tenth run put at about 125 a commit against the vendor's statements
+at SNAPSHOT and todo 336 moved onto the clear-table statement with the CAS in its stamp, and
+StockLevel (77 against 40 a commit in the tenth; `cb16d83`'s gate). Server CPU a commit is 0.36 ms
+above SNAPSHOT where statement time is 0.18, so part of the excess lies outside the statements'
+execution: planning, or the second message of each lock pair. Asked the AWS session for the keyed
+writes' and StockLevel's per-commit figures and the repetition's planning time at both levels;
+whether a design item beyond this todo exists waits on them.
