@@ -357,3 +357,12 @@ the lock nearly halved in its first statement (part of that moved to the version
 reads the metadata pages first), but on the laptop the throughput is the same: the run is bound by
 round trips and client time (idle in transaction 4.50 and 4.79 ms a commit), not by the server.
 The AWS cells decide.
+
+### 2026-10-26: the design's review of faae2ed (Fable, recorded by Opus)
+
+The three forms' outcome handling matches the design's tables (`applyClearRc`, `applyPredicateRc`,
+`clearMergedRc`/`mergedRc`, the selection); nothing to change. One item for the AWS reading: the
+lock's versions read rose from 5.4 to 15.7 µs locally as its first statement fell from 31.6 to
+16.4 (the design's guess: the metadata rows no longer warmed by the first statement). If the AWS
+cell shows the same, note it here; if the second statement grows more than the first shrinks
+there, send it back to the design with the numbers.
