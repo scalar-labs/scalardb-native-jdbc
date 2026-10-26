@@ -94,11 +94,13 @@ class UnparsedIntegrationTest {
       e.execute(
           c,
           e.createSchema("upp"),
-          "CREATE TABLE upp.p (id " + e.intType() + " PRIMARY KEY, x " + e.intType() + ")",
-          "INSERT INTO upp.p VALUES (1, 1)",
-          "INSERT INTO upp.p VALUES (2, 2)");
+          // a name no ScalarDB table of the suite shares: the unparsed check refuses a statement
+          // naming one in any schema (design 4.1), and WriteIntegrationTest imports aj.p
+          "CREATE TABLE upp.plain (id " + e.intType() + " PRIMARY KEY, x " + e.intType() + ")",
+          "INSERT INTO upp.plain VALUES (1, 1)",
+          "INSERT INTO upp.plain VALUES (2, 2)");
       if (e.engine() == Engine.ORACLE) {
-        e.execute(c, "CREATE SYNONYM upp.syn_s FOR up.s", "CREATE SYNONYM upp.syn_p FOR upp.p");
+        e.execute(c, "CREATE SYNONYM upp.syn_s FOR up.s", "CREATE SYNONYM upp.syn_p FOR upp.plain");
       }
       assertThat(
               Setup.run(
@@ -129,22 +131,22 @@ class UnparsedIntegrationTest {
       }
       if (e.engine() == Engine.SQLSERVER) {
         // T-SQL needs no ; between statements: nothing unparsed is sent there
-        assertRefused(() -> st.executeQuery(read(e, "upp.p")), "0AN01", "without a ;");
-        assertRefused(() -> st.executeUpdate(write(e, "upp.p", 10)), "0AN01", "without a ;");
+        assertRefused(() -> st.executeQuery(read(e, "upp.plain")), "0AN01", "without a ;");
+        assertRefused(() -> st.executeUpdate(write(e, "upp.plain", 10)), "0AN01", "without a ;");
         return;
       }
       // in autocommit
-      assertThat(count(st, read(e, "upp.p"))).isEqualTo(2);
+      assertThat(count(st, read(e, "upp.plain"))).isEqualTo(2);
       // in a transaction, with a write of a ScalarDB table: rolled back, then committed, together
       d.setAutoCommit(false);
-      assertThat(st.executeUpdate(write(e, "upp.p", 10))).isPositive();
+      assertThat(st.executeUpdate(write(e, "upp.plain", 10))).isPositive();
       assertThat(st.executeUpdate("UPDATE up.s SET x = 2 WHERE id = 1")).isEqualTo(1);
       d.rollback();
-      assertThat(count(st, "SELECT x FROM upp.p")).isEqualTo(2);
-      int n = st.executeUpdate(write(e, "upp.p", 10));
+      assertThat(count(st, "SELECT x FROM upp.plain")).isEqualTo(2);
+      int n = st.executeUpdate(write(e, "upp.plain", 10));
       assertThat(st.executeUpdate("UPDATE up.s SET x = 2 WHERE id = 1")).isEqualTo(1);
       d.commit();
-      assertThat(count(st, "SELECT x FROM upp.p")).isEqualTo(2 + n);
+      assertThat(count(st, "SELECT x FROM upp.plain")).isEqualTo(2 + n);
       assertThat(count(st, "SELECT x FROM up.s WHERE x = 2")).isEqualTo(1);
       d.commit();
 
@@ -153,9 +155,9 @@ class UnparsedIntegrationTest {
       assertRefused(() -> st.executeUpdate(write(e, "up.s", 10)), "0AN01", "ScalarDB manages");
       // nor its namespace, nor the setup's read view of it
       assertRefused(
-          () -> st.execute(read(e, "upp.p") + " -- " + N("up")), "0AN01", "ScalarDB manages");
+          () -> st.execute(read(e, "upp.plain") + " -- " + N("up")), "0AN01", "ScalarDB manages");
       assertRefused(
-          () -> st.execute(read(e, "upp.p") + " -- " + e.engine().readViewName(N("s"))),
+          () -> st.execute(read(e, "upp.plain") + " -- " + e.engine().readViewName(N("s"))),
           "0AN01",
           "ScalarDB manages");
       // transaction control the parser cannot read is not sent
@@ -165,7 +167,7 @@ class UnparsedIntegrationTest {
       d.rollback();
 
       // a prepared one is decided again where the level changes what it must do
-      try (PreparedStatement ps = d.prepareStatement(read(e, "upp.p"))) {
+      try (PreparedStatement ps = d.prepareStatement(read(e, "upp.plain"))) {
         try (ResultSet rs = ps.executeQuery()) {
           assertThat(rs.next()).isTrue();
         }
@@ -176,10 +178,10 @@ class UnparsedIntegrationTest {
           // at SERIALIZABLE the driver locks every read, which it cannot do unparsed
           d.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
           assertRefused(ps::executeQuery, "0AN01", "locks every read");
-          assertRefused(() -> st.executeQuery(read(e, "upp.p")), "0AN01", "locks every read");
+          assertRefused(() -> st.executeQuery(read(e, "upp.plain")), "0AN01", "locks every read");
           d.rollback();
           d.setReadOnly(true);
-          assertRefused(() -> st.executeQuery(read(e, "upp.p")), "25006", "");
+          assertRefused(() -> st.executeQuery(read(e, "upp.plain")), "25006", "");
           d.rollback();
           d.setReadOnly(false);
           d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);

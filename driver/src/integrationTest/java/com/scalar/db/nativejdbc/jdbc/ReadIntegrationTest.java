@@ -409,7 +409,9 @@ class ReadIntegrationTest {
           assertThat(sql).contains("scalardb_native_x");
           if (engine == Engine.SQLSERVER) {
             assertThat(sql).contains("FORCESEEK");
-          } else if (engine != Engine.POSTGRESQL) {
+          } else if (engine != Engine.POSTGRESQL && engine != Engine.ORACLE) {
+            // on PostgreSQL and Oracle the anchors are the copies' own columns, through a left
+            // join with COALESCE on the metadata row's state (todos 329 and 334)
             assertThat(sql.contains("COALESCE")).isEqualTo(perRow);
           }
         }

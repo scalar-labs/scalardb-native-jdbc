@@ -914,12 +914,14 @@ class WriteIntegrationTest {
             .doesNotContain("scalardb_native_meta")
             .doesNotContain("scalardb_native_v0");
         // prepared in autocommit, run in a transaction: prepared again, it anchors: on PostgreSQL
-        // by each copy's own version columns (todo 329)
+        // and Oracle by each copy's own version columns (todos 329 and 334)
         try (PreparedStatement ps = d.prepareStatement(join + "?")) {
           d.setAutoCommit(false);
           assertThat(d.nativeSQL(join + "1"))
               .contains(
-                  e.engine() == Engine.POSTGRESQL ? "scalardb_native_v0" : "scalardb_native_meta");
+                  e.engine() == Engine.POSTGRESQL || e.engine() == Engine.ORACLE
+                      ? "scalardb_native_v0"
+                      : "scalardb_native_meta");
           ps.setInt(1, 6);
           try (ResultSet rs = ps.executeQuery()) {
             assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);

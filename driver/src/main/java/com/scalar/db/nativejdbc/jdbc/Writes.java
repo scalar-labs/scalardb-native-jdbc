@@ -9,6 +9,7 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.sql.BatchUpdateException;
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -69,6 +70,12 @@ final class Writes {
 
   private Writes() {}
 
+  /**
+   * {@code oracle.jdbc.OracleTypes.CURSOR}, the JDBC type of a {@code SYS_REFCURSOR} OUT bind,
+   * written out since the vendor's driver is the application's, not a dependency (todo 334).
+   */
+  static final int ORACLE_CURSOR = -10;
+
   /** What a run needs from the statement that runs it. */
   interface Context {
     /**
@@ -109,6 +116,12 @@ final class Writes {
     void inserted(Keys keys);
 
     /**
+     * Whether the application asked for the generated keys, which {@link #returned} reads back by
+     * the keys recorded: a write that learns its keys only at a cost reads them then alone.
+     */
+    boolean wantsKeys();
+
+    /**
      * Hands over the statement's rows, their statement closed with them, the last {@code hidden}
      * columns the driver's own.
      */
@@ -133,6 +146,10 @@ final class Writes {
     // the stamp's three values bound before the binds, not after: a statement on a table in the
     // inline layout whose stamp is in its SET list, ahead of its predicate's placeholders
     final boolean stampFirst;
+    // how many of the binds the stamp's three values come after in the text, -1 for a stamp bound
+    // after them all by the plan itself, or none: an Oracle block binds the stamp between its read
+    // and its DML (todo 334); 0 is stampFirst
+    final int stampAfter;
 
     Step(String sql, List<Integer> binds) {
       this(sql, binds, Set.of());
@@ -143,10 +160,20 @@ final class Writes {
     }
 
     Step(String sql, List<Integer> binds, Set<Integer> floatKeys, boolean stampFirst) {
+      this(sql, binds, floatKeys, stampFirst ? 0 : -1);
+    }
+
+    Step(String sql, List<Integer> binds, Set<Integer> floatKeys, int stampAfter) {
       this.sql = sql;
       this.binds = List.copyOf(binds);
       this.floatKeys = Set.copyOf(floatKeys);
-      this.stampFirst = stampFirst;
+      this.stampAfter = stampAfter;
+      this.stampFirst = stampAfter == 0;
+    }
+
+    /** The placeholders the step binds itself: its binds and, where it has one, the stamp. */
+    int parameters() {
+      return binds.size() + (stampAfter >= 0 ? 3 : 0);
     }
   }
 
@@ -173,6 +200,17 @@ final class Writes {
       return true;
     }
 
+    /**
+     * Whether the plan runs under a savepoint of its own: where a failed statement leaves the
+     * transaction open, a write that fails part way is undone to its start, as the engine undoes a
+     * statement of its own; not on PostgreSQL, where a failed statement aborts the transaction, and
+     * not for a write that is one statement, an Oracle block included, which the engine undoes
+     * whole (todo 334).
+     */
+    boolean savepointed() {
+      return n.engine != Engine.POSTGRESQL;
+    }
+
     abstract long apply(Run run) throws SQLException;
 
     /**
@@ -196,6 +234,28 @@ final class Writes {
      * plan has none.
      */
     @Nullable Merge merge() {
+      return null;
+    }
+
+    /** On Oracle, the write's block over a batch's entries (design 4.4, todo 334), or null. */
+    @Nullable Entries entries() {
+      return null;
+    }
+
+    /**
+     * What one entry's row of {@link #entries()} means, from column {@code from}: its count when
+     * final, recorded; null when its outcome is the single form's to make, which the caller runs
+     * for that entry; an abort thrown where the row says so.
+     */
+    @Nullable Long entry(Run run, ResultSet rs, int from) throws SQLException {
+      throw new IllegalStateException("no block of entries");
+    }
+
+    /**
+     * On Oracle, the one plain statement a batch's entries of this write go as through the vendor's
+     * own batching (design 4.4, todo 334), or null.
+     */
+    @Nullable Step vendorBatch() {
       return null;
     }
 
@@ -701,14 +761,39 @@ final class Writes {
                 ? slimKeyedInline(n, ast, t, exposed, span, inWhere, delete, from, end)
                 : slimKeyed(n, ast, t, exposed, span, inWhere, all, delete, imported, from, end);
     // at SNAPSHOT and SERIALIZABLE on PostgreSQL, the vendor's statement with the stamp, for a
-    // table the snapshot holds no row in flight of (todo 329)
+    // table the snapshot holds no row in flight of (todo 329); on Oracle at SNAPSHOT in the inline
+    // layout, the same statement with the gate hinted (todo 334; the decoupled layout's is a block
+    // of its own, a later form)
     boolean plain =
-        engine == Engine.POSTGRESQL
+        (engine == Engine.POSTGRESQL || engine == Engine.ORACLE)
             && snapshot
             && !locks
             && from >= 0
             && ast.tableRefs().size() == 1
             && !shape.returning();
+    // on Oracle a write by the key as one PL/SQL block (design 4.3 "The keyed write on Oracle",
+    // todo 334), and a write beyond the key as the same block over the predicate's keys ("The
+    // write beyond the key on Oracle"), for a transaction without recorded anchors of the table
+    boolean oracle =
+        engine == Engine.ORACLE
+            && !locks
+            && from >= 0
+            && ast.tableRefs().size() == 1
+            && !shape.returning();
+    Step block =
+        oracle && byKey && span != null
+            ? oracleKeyedBlock(n, ast, t, exposed, span, inWhere, all, delete, imported, from, end)
+            : null;
+    Entries entries =
+        block == null
+            ? null
+            : oracleKeyedEntries(
+                n, ast, t, exposed, span, inWhere, all, delete, imported, from, end);
+    Step predicateBlock =
+        oracle && !byKey
+            ? oraclePredicateBlock(
+                n, ast, t, exposed, span, inWhere, all, delete, imported, snapshot, from, end)
+            : null;
     Step fast = plain ? fastKeyed(n, ast, t, span, all, delete, imported, from, end, true) : null;
     Step fastClear =
         fast == null ? null : fastKeyed(n, ast, t, span, all, delete, imported, from, end, false);
@@ -740,14 +825,1033 @@ final class Writes {
         fast,
         fastClear,
         fastMerge,
-        fastMergeClear);
+        fastMergeClear,
+        block,
+        predicateBlock,
+        entries);
+  }
+
+  /**
+   * The write beyond the key on Oracle as one block (design 4.3 "The write beyond the key on
+   * Oracle", todo 334): the keys the predicate matches by its committed image, with their metadata
+   * (the read view joined to the metadata table, or in the inline layout the committed rows and the
+   * before images in flight), the gate on none in flight, none without metadata and, at SNAPSHOT,
+   * no after image matching; past it the user's DML once per key by {@code FORALL}, step 2's
+   * zero-row rule for a key it skipped (codes 1 to 5), and the CAS once per key written, {@code
+   * FORALL i IN VALUES OF} the keys written. The inline UPDATE folds its CAS into the version it
+   * writes, -1 where the row moved, a stamp short; the inline DELETE keeps its CAS in its WHERE
+   * clause and re-reads the predicate on a skipped row (code 4). The stamp's three values are bound
+   * first into locals, so that one text serves every statement inside. One cursor row of counts
+   * comes back: {@code found, held, missing, after, written, stamped, skipped, abort}. The binds,
+   * in text order: the stamp; the predicate's placeholders in the keys read; at SNAPSHOT the
+   * predicate's again in the after-image check; the user's SET placeholders and the predicate's in
+   * step 2; the predicate's again in an inline DELETE's zero-row rule; the cursor last. Null when
+   * the text cannot be rewritten.
+   */
+  private static @Nullable Step oraclePredicateBlock(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int @Nullable [] span,
+      List<Integer> inWhere,
+      List<Integer> all,
+      boolean delete,
+      boolean imported,
+      boolean snapshot,
+      int from,
+      int end) {
+    Engine engine = n.engine;
+    String source = ast.source();
+    String predicate = span == null ? null : source.substring(span[0], span[1]);
+    String where = predicate == null ? "" : " WHERE " + predicate;
+    boolean inline = t.layout() == Layout.INLINE;
+    int width = n.keyColumns.size();
+    String x = exposed;
+    String metaTable = inline ? n.data : n.meta;
+    StringBuilder b = new StringBuilder("DECLARE l_i ");
+    b.append(metaTable)
+        .append(".")
+        .append(n.txId)
+        .append("%TYPE; l_p ")
+        .append(metaTable)
+        .append(".")
+        .append(n.preparedAt)
+        .append("%TYPE; l_c ")
+        .append(metaTable)
+        .append(".")
+        .append(n.committedAt)
+        .append("%TYPE;");
+    List<String> keyLocals = new ArrayList<>();
+    List<String> metaLocals = new ArrayList<>();
+    List<String> byKeyNow = new ArrayList<>(); // t.k = l_k(i), the key as the data row holds it
+    List<String> byMetaKey = new ArrayList<>(); // k = l_m(i), as the metadata row holds it
+    for (int i = 0; i < width; i++) {
+      String k = engine.quote(n.keyColumns.get(i));
+      b.append(" TYPE t_k")
+          .append(i)
+          .append(" IS TABLE OF ")
+          .append(n.data)
+          .append(".")
+          .append(k)
+          .append("%TYPE; l_k")
+          .append(i)
+          .append(" t_k")
+          .append(i)
+          .append(";");
+      keyLocals.add("l_k" + i);
+      byKeyNow.add(x + "." + k + " = l_k" + i + "(i)");
+      if (!inline) {
+        b.append(" TYPE t_m")
+            .append(i)
+            .append(" IS TABLE OF ")
+            .append(n.meta)
+            .append(".")
+            .append(k)
+            .append("%TYPE; l_m")
+            .append(i)
+            .append(" t_m")
+            .append(i)
+            .append(";");
+        metaLocals.add("l_m" + i);
+        byMetaKey.add(k + " = l_m" + i + "(i)");
+      }
+    }
+    b.append(" TYPE t_n IS TABLE OF NUMBER; l_nometa t_n; l_version t_n; l_state t_n;")
+        .append(inline && !delete ? " l_v t_n;" : "")
+        .append(" TYPE t_ix IS TABLE OF PLS_INTEGER INDEX BY PLS_INTEGER; l_cnt t_ix; l_do t_ix;")
+        .append(" TYPE t_id IS TABLE OF ")
+        .append(metaTable)
+        .append(".")
+        .append(n.txId)
+        .append("%TYPE; l_id t_id; l_found NUMBER := 0; l_held NUMBER := 0; l_missing NUMBER := 0;")
+        .append(" l_after NUMBER := 0; l_written NUMBER := 0; l_stamped NUMBER := 0;")
+        .append(" l_skipped NUMBER := 0; l_abort NUMBER := 0; n_id ")
+        .append(metaTable)
+        .append(".")
+        .append(n.txId)
+        .append("%TYPE; n_version NUMBER; n_state NUMBER; n_nometa NUMBER; n_matches NUMBER;")
+        .append(" BEGIN l_i := ?; l_p := ?; l_c := ?;");
+    // step 1, the keys read
+    List<Integer> binds = new ArrayList<>(inWhere);
+    if (inline) {
+      b.append(" SELECT ")
+          .append(n.columns(x))
+          .append(", 0, ")
+          .append(x)
+          .append(".")
+          .append(n.txId)
+          .append(", ")
+          .append(x)
+          .append(".")
+          .append(n.txVersion)
+          .append(", ")
+          .append(x)
+          .append(".")
+          .append(n.txState)
+          .append(" BULK COLLECT INTO ")
+          .append(String.join(", ", keyLocals))
+          .append(", l_nometa, l_id, l_version, l_state FROM (SELECT ")
+          .append(n.columns(x))
+          .append(", ")
+          .append(x)
+          .append(".")
+          .append(n.txId)
+          .append(", ")
+          .append(x)
+          .append(".")
+          .append(n.txVersion)
+          .append(", ")
+          .append(x)
+          .append(".")
+          .append(n.txState)
+          .append(" FROM ")
+          .append(n.data)
+          .append(" ")
+          .append(x)
+          .append(" WHERE ")
+          .append(predicate == null ? "" : "(" + predicate + ") AND ")
+          .append("COALESCE(")
+          .append(x)
+          .append(".")
+          .append(n.txState)
+          .append(", 3) = 3 UNION ALL SELECT ")
+          .append(n.columns(x))
+          .append(", NULL, NULL, 1 FROM ")
+          .append(SplitRead.inFlight(engine, t, t.dataColumns(), true))
+          .append(" ")
+          .append(x)
+          .append(where)
+          .append(") ")
+          .append(x)
+          .append(";");
+      binds.addAll(inWhere);
+    } else {
+      List<String> picked = new ArrayList<>();
+      for (String k : n.keyColumns) {
+        picked.add(x + "." + engine.quote(k) + " AS " + engine.quote(k));
+      }
+      b.append(" SELECT ")
+          .append(n.columns("d"))
+          .append(", CASE WHEN m.")
+          .append(engine.quote(n.keyColumns.get(0)))
+          .append(" IS NULL THEN 1 ELSE 0 END, m.")
+          .append(n.txId)
+          .append(", m.")
+          .append(n.txVersion)
+          .append(", m.")
+          .append(n.txState)
+          .append(", ")
+          .append(n.columns("m"))
+          .append(" BULK COLLECT INTO ")
+          .append(String.join(", ", keyLocals))
+          .append(", l_nometa, l_id, l_version, l_state, ")
+          .append(String.join(", ", metaLocals))
+          .append(" FROM (SELECT ")
+          .append(String.join(", ", picked))
+          .append(" FROM ")
+          .append(n.view)
+          .append(" ")
+          .append(x)
+          .append(where)
+          .append(") d LEFT JOIN ")
+          .append(n.meta)
+          .append(" m ON ")
+          .append(n.keyJoin("m", "d"))
+          .append(";");
+    }
+    b.append(" l_found := l_k0.COUNT; FOR i IN 1 .. l_found LOOP IF l_state(i) IN (1, 2) THEN")
+        .append(
+            " l_held := l_held + 1; END IF; IF l_nometa(i) = 1 THEN l_missing := l_missing + 1;")
+        .append(" END IF; END LOOP;");
+    if (snapshot) {
+      // a row in flight that only its after image matches
+      b.append(" SELECT COUNT(*) INTO l_after FROM dual WHERE EXISTS (SELECT 1 FROM ")
+          .append(SplitRead.afterImages(engine, t, t.dataColumns(), true))
+          .append(" ")
+          .append(x)
+          .append(where)
+          .append(");");
+      binds.addAll(inWhere);
+    }
+    b.append(" IF l_held = 0 AND l_missing = 0 AND l_after = 0 AND l_found > 0 THEN");
+    // step 2, the user's DML once per key
+    String keyNow = String.join(" AND ", byKeyNow);
+    String committedNow = "COALESCE(" + x + "." + n.txState + ", 3) = 3";
+    String sameVersion =
+        "DECODE("
+            + x
+            + "."
+            + n.txId
+            + ", l_id(i), 1, 0) = 1 AND COALESCE("
+            + x
+            + "."
+            + n.txVersion
+            + ", 0) = COALESCE(l_version(i), 0)";
+    String text;
+    if (inline && !delete) {
+      int set = ast.afterFirst("SET");
+      if (set < 0 || (span != null && set > span[0]) || set > from) {
+        return null;
+      }
+      String stamp =
+          n.txId
+              + " = l_i, "
+              + n.preparedAt
+              + " = l_p, "
+              + n.committedAt
+              + " = l_c, "
+              + n.txState
+              + " = 3, "
+              + n.txVersion
+              + " = CASE WHEN "
+              + sameVersion
+              + " THEN CASE WHEN "
+              + x
+              + "."
+              + n.txId
+              + " IS NULL THEN 1 ELSE COALESCE("
+              + x
+              + "."
+              + n.txVersion
+              + ", 0) + 1 END ELSE -1 END";
+      text =
+          source.substring(0, set)
+              + " "
+              + stamp
+              + ","
+              + source.substring(set, span == null ? from : span[0])
+              + (span == null ? " WHERE " : "(" + predicate + ") AND ")
+              + keyNow
+              + " AND "
+              + committedNow
+              + (span == null ? "" : source.substring(span[1], end))
+              + " RETURNING "
+              + x
+              + "."
+              + n.txVersion
+              + " BULK COLLECT INTO l_v";
+    } else if (inline) {
+      text =
+          source.substring(0, span == null ? from : span[0])
+              + (span == null ? " WHERE " : "(" + predicate + ") AND ")
+              + keyNow
+              + " AND "
+              + committedNow
+              + " AND "
+              + sameVersion
+              + (span == null ? "" : source.substring(span[1], end));
+    } else {
+      text =
+          source.substring(0, span == null ? from : span[0])
+              + (span == null ? " WHERE " : "(" + predicate + ") AND ")
+              + keyNow
+              + (span == null ? "" : source.substring(span[1], end));
+    }
+    String dml = onDataTable(engine, ast, t, true, text, from);
+    if (dml == null) {
+      return null;
+    }
+    binds.addAll(all);
+    b.append(" FORALL i IN 1 .. l_found ")
+        .append(dml)
+        .append("; FOR i IN 1 .. l_found LOOP l_cnt(i) := SQL%BULK_ROWCOUNT(i); END LOOP;")
+        .append(" FOR i IN 1 .. l_found LOOP IF l_cnt(i) = 1 THEN l_written := l_written + 1;")
+        .append(
+            " l_do(l_do.COUNT + 1) := i; ELSIF l_cnt(i) > 1 THEN l_abort := 5; EXIT; ELSE BEGIN");
+    // step 2's zero-row rule: the row read again by its key, as it is now
+    if (inline) {
+      b.append(" SELECT 0, ")
+          .append(x)
+          .append(".")
+          .append(n.txId)
+          .append(", ")
+          .append(x)
+          .append(".")
+          .append(n.txVersion)
+          .append(", ")
+          .append(x)
+          .append(".")
+          .append(n.txState)
+          .append(" INTO n_nometa, n_id, n_version, n_state FROM ")
+          .append(n.data)
+          .append(" ")
+          .append(x)
+          .append(" WHERE ")
+          .append(keyNow)
+          .append(";");
+    } else {
+      b.append(" SELECT CASE WHEN m.")
+          .append(engine.quote(n.keyColumns.get(0)))
+          .append(" IS NULL THEN 1 ELSE 0 END, m.")
+          .append(n.txId)
+          .append(", m.")
+          .append(n.txVersion)
+          .append(", m.")
+          .append(n.txState)
+          .append(" INTO n_nometa, n_id, n_version, n_state FROM ")
+          .append(n.data)
+          .append(" ")
+          .append(x)
+          .append(" LEFT JOIN ")
+          .append(n.meta)
+          .append(" m ON ")
+          .append(n.keyJoin("m", x))
+          .append(" WHERE ")
+          .append(keyNow)
+          .append(";");
+    }
+    b.append(" EXCEPTION WHEN NO_DATA_FOUND THEN l_abort := 1; EXIT; END;")
+        .append(" IF n_state IN (1, 2) THEN l_abort := 2; EXIT; END IF;")
+        .append(
+            " IF n_nometa = l_nometa(i) AND ((n_id IS NULL AND l_id(i) IS NULL) OR n_id = l_id(i))")
+        .append(" AND COALESCE(n_version, 0) = COALESCE(l_version(i), 0) THEN l_abort := 3; EXIT;")
+        .append(" END IF;");
+    if (inline && delete && predicate != null) {
+      // a row that moved and still matches: the DELETE's CAS in its WHERE clause missed it
+      b.append(" SELECT COUNT(*) INTO n_matches FROM ")
+          .append(n.data)
+          .append(" ")
+          .append(x)
+          .append(" WHERE (")
+          .append(predicate)
+          .append(") AND ")
+          .append(keyNow)
+          .append("; IF n_matches > 0 THEN l_abort := 4; EXIT; END IF;");
+      binds.addAll(inWhere);
+    }
+    b.append(" l_skipped := l_skipped + 1; END IF; END LOOP;");
+    // step 3, the CAS once per key written
+    if (inline && !delete) {
+      b.append(
+              " IF l_abort = 0 THEN FOR i IN 1 .. l_v.COUNT LOOP IF l_v(i) <> -1 THEN l_stamped :=")
+          .append(" l_stamped + 1; END IF; END LOOP; END IF;");
+    } else if (inline) {
+      b.append(" IF l_abort = 0 THEN l_stamped := l_written; END IF;");
+    } else {
+      String metaCas =
+          String.join(" AND ", byMetaKey)
+              + " AND COALESCE("
+              + n.txState
+              + ", 3) = 3 AND DECODE("
+              + n.txId
+              + ", l_id(i), 1, 0) = 1 AND COALESCE("
+              + n.txVersion
+              + ", 0) = COALESCE(l_version(i), 0)";
+      b.append(" IF l_abort = 0 AND l_do.COUNT > 0 THEN FORALL i IN VALUES OF l_do ")
+          .append(
+              delete && !imported
+                  ? "DELETE FROM " + n.meta + " WHERE " + metaCas
+                  : "UPDATE "
+                      + n.meta
+                      + " SET "
+                      + n.txId
+                      + " = l_i, "
+                      + n.preparedAt
+                      + " = l_p, "
+                      + n.committedAt
+                      + " = l_c, "
+                      + n.txState
+                      + " = 3, "
+                      + n.txVersion
+                      + " = CASE WHEN "
+                      + n.txId
+                      + " IS NULL THEN 1 ELSE COALESCE("
+                      + n.txVersion
+                      + ", 0) + 1 END WHERE "
+                      + metaCas)
+          .append("; l_stamped := SQL%ROWCOUNT; END IF;");
+    }
+    b.append(
+            " END IF; OPEN ? FOR SELECT l_found, l_held, l_missing, l_after, l_written, l_stamped,")
+        .append(" l_skipped, l_abort FROM dual; END;");
+    return new Step(b.toString(), binds, Set.of(), 0);
+  }
+
+  /**
+   * The decoupled layout's clear-table form on Oracle (design 4.3, todo 334): the user's DML with
+   * the gate, returning the keys it wrote, and the stamp over them as a {@code FORALL}, a created
+   * table's DELETE removing the metadata rows, an imported table's stamp a {@code MERGE} per key,
+   * which also writes the row a key had none of yet and a DELETE's tombstone; two counts back. The
+   * stamp's three values are the block's first binds.
+   */
+  private static Step oracleClearTableBlock(
+      Names n, String dml, List<Integer> all, boolean delete, boolean imported) {
+    Engine engine = n.engine;
+    int width = n.keyColumns.size();
+    StringBuilder b =
+        new StringBuilder("DECLARE l_i ")
+            .append(n.meta)
+            .append(".")
+            .append(n.txId)
+            .append("%TYPE; l_p ")
+            .append(n.meta)
+            .append(".")
+            .append(n.preparedAt)
+            .append("%TYPE; l_c ")
+            .append(n.meta)
+            .append(".")
+            .append(n.committedAt)
+            .append("%TYPE;");
+    List<String> returned = new ArrayList<>();
+    List<String> into = new ArrayList<>();
+    List<String> byKey = new ArrayList<>();
+    List<String> keyed = new ArrayList<>();
+    for (int i = 0; i < width; i++) {
+      String k = engine.quote(n.keyColumns.get(i));
+      b.append(" TYPE t_w")
+          .append(i)
+          .append(" IS TABLE OF ")
+          .append(n.data)
+          .append(".")
+          .append(k)
+          .append("%TYPE; l_w")
+          .append(i)
+          .append(" t_w")
+          .append(i)
+          .append(";");
+      returned.add(k);
+      into.add("l_w" + i);
+      byKey.add(k + " = l_w" + i + "(i)");
+      keyed.add("l_w" + i + "(i) AS " + k);
+    }
+    b.append(" l_written NUMBER := 0; l_stamped NUMBER := 0; BEGIN l_i := ?; l_p := ?; l_c := ?; ")
+        .append(dml)
+        .append(" RETURNING ")
+        .append(String.join(", ", returned))
+        .append(" BULK COLLECT INTO ")
+        .append(String.join(", ", into))
+        .append("; l_written := SQL%ROWCOUNT; FORALL i IN 1 .. l_w0.COUNT ");
+    String stamp =
+        n.txId
+            + " = l_i, "
+            + n.preparedAt
+            + " = l_p, "
+            + n.committedAt
+            + " = l_c, "
+            + n.txState
+            + " = 3, "
+            + n.txVersion
+            + " = CASE WHEN "
+            + n.txId
+            + " IS NULL THEN 1 ELSE COALESCE("
+            + n.txVersion
+            + ", 0) + 1 END";
+    if (imported) {
+      List<String> on = new ArrayList<>();
+      for (String k : n.keyColumns) {
+        on.add("m." + engine.quote(k) + " = s." + engine.quote(k));
+      }
+      List<String> sk = new ArrayList<>();
+      for (String k : n.keyColumns) {
+        sk.add("s." + engine.quote(k));
+      }
+      b.append("MERGE INTO ")
+          .append(n.meta)
+          .append(" m USING (SELECT ")
+          .append(String.join(", ", keyed))
+          .append(" FROM dual) s ON (")
+          .append(String.join(" AND ", on))
+          .append(") WHEN MATCHED THEN UPDATE SET m.")
+          .append(n.txId)
+          .append(" = l_i, m.")
+          .append(n.preparedAt)
+          .append(" = l_p, m.")
+          .append(n.committedAt)
+          .append(" = l_c, m.")
+          .append(n.txState)
+          .append(" = 3, m.")
+          .append(n.txVersion)
+          .append(" = CASE WHEN m.")
+          .append(n.txId)
+          .append(" IS NULL THEN 1 ELSE COALESCE(m.")
+          .append(n.txVersion)
+          .append(", 0) + 1 END")
+          .append(" WHERE COALESCE(m.")
+          .append(n.txState)
+          .append(", 3) = 3 WHEN NOT MATCHED THEN INSERT (")
+          .append(n.columns(""))
+          .append(", ")
+          .append(n.txId)
+          .append(", ")
+          .append(n.txState)
+          .append(", ")
+          .append(n.txVersion)
+          .append(", ")
+          .append(n.preparedAt)
+          .append(", ")
+          .append(n.committedAt)
+          .append(") VALUES (")
+          .append(String.join(", ", sk))
+          .append(", l_i, 3, 1, l_p, l_c)");
+    } else if (delete) {
+      b.append("DELETE FROM ")
+          .append(n.meta)
+          .append(" WHERE ")
+          .append(String.join(" AND ", byKey))
+          .append(" AND COALESCE(")
+          .append(n.txState)
+          .append(", 3) = 3");
+    } else {
+      b.append("UPDATE ")
+          .append(n.meta)
+          .append(" SET ")
+          .append(stamp)
+          .append(" WHERE ")
+          .append(String.join(" AND ", byKey))
+          .append(" AND COALESCE(")
+          .append(n.txState)
+          .append(", 3) = 3");
+    }
+    b.append("; l_stamped := SQL%ROWCOUNT; OPEN ? FOR SELECT l_written, l_stamped FROM dual; END;");
+    return new Step(b.toString(), all, Set.of(), 0);
+  }
+
+  /** The parts of an Oracle block's body for one write (todo 334), its locals suffixed. */
+  private static final class OracleBody {
+    final String declare; // the DECLARE items
+    final String body; // the statements, the cursor aside
+    final String row; // the cursor row's items
+    final String stop; // over the locals: the outcome is not final, a block of entries stops
+
+    OracleBody(String declare, String body, String row, String stop) {
+      this.declare = declare;
+      this.body = body;
+      this.row = row;
+      this.stop = stop;
+    }
+
+    /** The body as a block of its own, the cursor its last bind. */
+    String block() {
+      return "DECLARE "
+          + declare
+          + " BEGIN "
+          + body
+          + " OPEN ? FOR SELECT "
+          + row
+          + " FROM dual; END;";
+    }
+  }
+
+  /** At most this many entries of a batch go as one Oracle block of entries (design 4.4). */
+  static final int ENTRIES_MAX = 16;
+
+  /**
+   * An Oracle block over a batch's entries of one write (design 4.4 "Batches on Oracle", todo 334):
+   * the write's body once per entry, in order, each entry's locals suffixed by its number and its
+   * placeholders its own binds, every entry under {@code IF l_stop = 0}, which the first entry
+   * whose outcome is not final sets; the cursor returns one row per entry, {@code n, done} and then
+   * the write's own row, {@code done} 0 for an entry not reached.
+   */
+  static final class Entries {
+    private final IntFunction<OracleBody> body;
+    final List<Integer> binds; // each entry's, in text order
+    final int stampAfter; // where the stamp's three values sit among an entry's binds
+    private final Map<Integer, String> texts = new ConcurrentHashMap<>();
+
+    Entries(IntFunction<OracleBody> body, List<Integer> binds, int stampAfter) {
+      this.body = body;
+      this.binds = List.copyOf(binds);
+      this.stampAfter = stampAfter;
+    }
+
+    /** The block for {@code entries} entries. */
+    String sql(int entries) {
+      return texts.computeIfAbsent(
+          entries,
+          k -> {
+            StringBuilder declare = new StringBuilder("DECLARE");
+            StringBuilder run = new StringBuilder(" BEGIN");
+            StringBuilder rows = new StringBuilder(" OPEN ? FOR ");
+            for (int i = 1; i <= k; i++) {
+              OracleBody b = body.apply(i);
+              declare
+                  .append(" ")
+                  .append(b.declare)
+                  .append(" l_done_")
+                  .append(i)
+                  .append(" NUMBER := 0;");
+              run.append(" IF l_stop = 0 THEN l_done_")
+                  .append(i)
+                  .append(" := 1; ")
+                  .append(b.body)
+                  .append(" IF ")
+                  .append(b.stop)
+                  .append(" THEN l_stop := 1; END IF; END IF;");
+              rows.append(i == 1 ? "" : " UNION ALL ")
+                  .append("SELECT ")
+                  .append(i)
+                  .append(", l_done_")
+                  .append(i)
+                  .append(", ")
+                  .append(b.row)
+                  .append(" FROM dual");
+            }
+            return declare + " l_stop NUMBER := 0;" + run + rows + " ORDER BY 1; END;";
+          });
+    }
+
+    /** The placeholders one entry binds, its stamp included. */
+    int parameters() {
+      return binds.size() + (stampAfter >= 0 ? 3 : 0);
+    }
+  }
+
+  /** Where the stamp's three values sit among the keyed block's binds. */
+  private static int keyedStampAfter(
+      boolean inline, boolean delete, boolean imported, int inWhere, int all) {
+    if (inline) {
+      return delete ? -1 : inWhere;
+    }
+    return delete && !imported ? -1 : inWhere + all;
+  }
+
+  /**
+   * The keyed write on Oracle as one anonymous block (design 4.3, todo 334): the three steps of 4.3
+   * with the two decisions between them made in the block, which returns before writing on every
+   * outcome the driver waits on or counts as nothing written, and writes only a committed row. Its
+   * read is the data row with its metadata, the row itself in the inline layout; in the decoupled
+   * layout the metadata row's own key is read beside the data row's and matches the CAS, as the
+   * steps match it (a CHAR(n) key is varchar in the metadata table). Its one cursor row is {@code
+   * rows, meta, tx_id, tx_version, tx_state, written, stamped, k...}, the key as the data row reads
+   * it. The binds, in text order: the predicate's placeholders for the read; then in the inline
+   * UPDATE the stamp, the user's SET placeholders and the predicate's; in the decoupled block the
+   * user's placeholders and, where a stamp is written, the stamp's values; the cursor last. Null
+   * when the text cannot be rewritten.
+   */
+  private static @Nullable Step oracleKeyedBlock(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      List<Integer> inWhere,
+      List<Integer> all,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end) {
+    OracleBody b = keyedBody(n, ast, t, exposed, span, delete, imported, from, end, "");
+    if (b == null) {
+      return null;
+    }
+    List<Integer> binds = new ArrayList<>(inWhere);
+    binds.addAll(all);
+    boolean inline = t.layout() == Layout.INLINE;
+    return new Step(
+        b.block(),
+        binds,
+        Set.of(),
+        keyedStampAfter(inline, delete, imported, inWhere.size(), all.size()));
+  }
+
+  /** The keyed block over a batch's entries (design 4.4), null where the block cannot be built. */
+  private static @Nullable Entries oracleKeyedEntries(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      List<Integer> inWhere,
+      List<Integer> all,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end) {
+    if (keyedBody(n, ast, t, exposed, span, delete, imported, from, end, "_1") == null) {
+      return null;
+    }
+    List<Integer> binds = new ArrayList<>(inWhere);
+    binds.addAll(all);
+    boolean inline = t.layout() == Layout.INLINE;
+    return new Entries(
+        i ->
+            Objects.requireNonNull(
+                keyedBody(n, ast, t, exposed, span, delete, imported, from, end, "_" + i)),
+        binds,
+        keyedStampAfter(inline, delete, imported, inWhere.size(), all.size()));
+  }
+
+  /** The keyed block's body, its locals suffixed by {@code sfx}; see {@link #oracleKeyedBlock}. */
+  private static @Nullable OracleBody keyedBody(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end,
+      String sfx) {
+    Engine engine = n.engine;
+    String source = ast.source();
+    String predicate = source.substring(span[0], span[1]);
+    String tail = source.substring(span[1], end);
+    boolean inline = t.layout() == Layout.INLINE;
+    String lRows = "l_rows" + sfx;
+    String lWritten = "l_written" + sfx;
+    String lMeta = "l_meta" + sfx;
+    String lStamped = "l_stamped" + sfx;
+    String lId = "l_id" + sfx;
+    String lVersion = "l_version" + sfx;
+    String lState = "l_state" + sfx;
+    // the locals: the row's version and state, and the key as the data row holds it
+    StringBuilder declare =
+        new StringBuilder(lRows + " NUMBER := 0; " + lWritten + " NUMBER := 0;");
+    String metaTable = inline ? n.data : n.meta;
+    declare
+        .append(inline ? "" : " " + lMeta + " NUMBER := 0; " + lStamped + " NUMBER := 0;")
+        .append(" ")
+        .append(lId)
+        .append(" ")
+        .append(metaTable)
+        .append(".")
+        .append(n.txId)
+        .append("%TYPE; ")
+        .append(lVersion)
+        .append(" ")
+        .append(metaTable)
+        .append(".")
+        .append(n.txVersion)
+        .append("%TYPE; ")
+        .append(lState)
+        .append(" ")
+        .append(metaTable)
+        .append(".")
+        .append(n.txState)
+        .append("%TYPE;");
+    List<String> keyLocals = new ArrayList<>();
+    List<String> metaLocals = new ArrayList<>();
+    List<String> keyExprs = new ArrayList<>();
+    for (int i = 0; i < n.keyColumns.size(); i++) {
+      String k = engine.quote(n.keyColumns.get(i));
+      String lk = "l_k" + i + sfx;
+      keyLocals.add(lk);
+      declare
+          .append(" ")
+          .append(lk)
+          .append(" ")
+          .append(n.data)
+          .append(".")
+          .append(k)
+          .append("%TYPE;");
+      if (!inline) {
+        String lm = "l_m" + i + sfx;
+        metaLocals.add(lm);
+        declare
+            .append(" ")
+            .append(lm)
+            .append(" ")
+            .append(n.meta)
+            .append(".")
+            .append(k)
+            .append("%TYPE;");
+      }
+      keyExprs.add(n.keyExpr(lk, n.keyColumns.get(i)));
+    }
+    String x = exposed;
+    StringBuilder block = new StringBuilder("BEGIN SELECT 1, ");
+    String committed;
+    if (inline) {
+      block
+          .append(x)
+          .append(".")
+          .append(n.txId)
+          .append(", ")
+          .append(x)
+          .append(".")
+          .append(n.txVersion)
+          .append(", ")
+          .append(x)
+          .append(".")
+          .append(n.txState)
+          .append(", ")
+          .append(n.columns(x))
+          .append(" INTO ")
+          .append(lRows)
+          .append(", ")
+          .append(lId)
+          .append(", ")
+          .append(lVersion)
+          .append(", ")
+          .append(lState)
+          .append(", ")
+          .append(String.join(", ", keyLocals))
+          .append(" FROM ")
+          .append(n.data)
+          .append(" ")
+          .append(x)
+          .append(" WHERE ")
+          .append(predicate);
+      committed = lRows + " = 1 AND COALESCE(" + lState + ", 3) = 3";
+    } else {
+      List<String> picked = new ArrayList<>();
+      for (String k : n.keyColumns) {
+        picked.add(x + "." + engine.quote(k) + " AS " + engine.quote(k));
+      }
+      block
+          .append("CASE WHEN m.")
+          .append(engine.quote(n.keyColumns.get(0)))
+          .append(" IS NULL THEN 0 ELSE 1 END, m.")
+          .append(n.txId)
+          .append(", m.")
+          .append(n.txVersion)
+          .append(", m.")
+          .append(n.txState)
+          .append(", ")
+          .append(n.columns("d"))
+          .append(", ")
+          .append(n.columns("m"))
+          .append(" INTO ")
+          .append(lRows)
+          .append(", ")
+          .append(lMeta)
+          .append(", ")
+          .append(lId)
+          .append(", ")
+          .append(lVersion)
+          .append(", ")
+          .append(lState)
+          .append(", ")
+          .append(String.join(", ", keyLocals))
+          .append(", ")
+          .append(String.join(", ", metaLocals))
+          .append(" FROM (SELECT ")
+          .append(String.join(", ", picked))
+          .append(" FROM ")
+          .append(n.data)
+          .append(" ")
+          .append(x)
+          .append(" WHERE ")
+          .append(predicate)
+          .append(") d LEFT JOIN ")
+          .append(n.meta)
+          .append(" m ON ")
+          .append(n.keyJoin("m", "d"));
+      committed = lRows + " = 1 AND " + lMeta + " = 1 AND COALESCE(" + lState + ", 3) = 3";
+    }
+    block
+        .append("; EXCEPTION WHEN NO_DATA_FOUND THEN NULL; END; IF ")
+        .append(committed)
+        .append(" THEN ");
+    // the user's DML on the row read: in the inline layout with the stamp in its SET list and the
+    // CAS in its WHERE clause, steps 2 and 3 in one row
+    String cas =
+        "COALESCE("
+            + x
+            + "."
+            + n.txState
+            + ", 3) = 3 AND DECODE("
+            + x
+            + "."
+            + n.txId
+            + ", "
+            + lId
+            + ", 1, 0) = 1 AND COALESCE("
+            + x
+            + "."
+            + n.txVersion
+            + ", 0) = COALESCE("
+            + lVersion
+            + ", 0)";
+    String text;
+    if (inline) {
+      if (delete) {
+        text = source.substring(0, span[0]) + "(" + predicate + ") AND " + cas + tail;
+      } else {
+        int set = ast.afterFirst("SET");
+        if (set < 0 || set > span[0]) {
+          return null;
+        }
+        text =
+            source.substring(0, set)
+                + " "
+                + inlineStampSets(n)
+                + ","
+                + source.substring(set, span[0])
+                + "("
+                + predicate
+                + ") AND "
+                + cas
+                + tail;
+      }
+    } else {
+      text = source.substring(0, span[0]) + "(" + predicate + ")" + tail;
+    }
+    String dml = onDataTable(engine, ast, t, true, text, from);
+    if (dml == null) {
+      return null;
+    }
+    block.append(dml).append("; ").append(lWritten).append(" := SQL%ROWCOUNT;");
+    if (!inline) {
+      List<String> byMetaKey = new ArrayList<>();
+      for (int i = 0; i < n.keyColumns.size(); i++) {
+        byMetaKey.add(engine.quote(n.keyColumns.get(i)) + " = " + metaLocals.get(i));
+      }
+      String metaCas =
+          String.join(" AND ", byMetaKey)
+              + " AND COALESCE("
+              + n.txState
+              + ", 3) = 3 AND DECODE("
+              + n.txId
+              + ", "
+              + lId
+              + ", 1, 0) = 1 AND COALESCE("
+              + n.txVersion
+              + ", 0) = COALESCE("
+              + lVersion
+              + ", 0)";
+      block
+          .append(" IF ")
+          .append(lWritten)
+          .append(" = 1 THEN ")
+          .append(
+              delete && !imported
+                  ? "DELETE FROM " + n.meta + " WHERE " + metaCas
+                  : "UPDATE " + n.meta + " SET " + inlineStampSets(n) + " WHERE " + metaCas)
+          .append("; ")
+          .append(lStamped)
+          .append(" := SQL%ROWCOUNT; END IF;");
+    }
+    block.append(" END IF;");
+    String row =
+        lRows
+            + ", "
+            + (inline ? "1" : lMeta)
+            + ", "
+            + lId
+            + ", "
+            + lVersion
+            + ", "
+            + lState
+            + ", "
+            + lWritten
+            + ", "
+            + (inline ? lWritten : lStamped)
+            + ", "
+            + String.join(", ", keyExprs);
+    // final: no row, a state that is no image, or written and stamped
+    String stop =
+        "NOT ("
+            + lRows
+            + " = 0 OR ("
+            + (inline ? "" : lMeta + " = 1 AND ")
+            + lState
+            + " IS NOT NULL AND "
+            + lState
+            + " NOT IN (1, 2, 3)) OR ("
+            + lWritten
+            + " = 1"
+            + (inline ? "" : " AND " + lStamped + " = 1")
+            + "))";
+    return new OracleBody(declare.toString(), block.toString(), row, stop);
   }
 
   /**
    * The gate of {@link #fastKeyed}: no row of the table is in flight, one probe of the in-flight
    * index.
    */
+  /**
+   * On Oracle at SNAPSHOT, a locking read as written with the write's gate in its WHERE clause
+   * (design 4.3 "The locking read on Oracle", todo 334): the predicate parenthesized and the gate
+   * added, or a WHERE clause of the gate alone before the locking clause of a statement without
+   * one, which has no ORDER BY nor GROUP BY to place it before; null where it cannot be written.
+   */
+  static @Nullable String gatedLock(
+      Engine engine, SqlAst ast, TableInfo t, Names n, int @Nullable [] span) {
+    String source = ast.source();
+    String gated;
+    if (span != null) {
+      gated =
+          source.substring(0, span[0])
+              + "("
+              + source.substring(span[0], span[1])
+              + ") AND "
+              + clearGate(n)
+              + source.substring(span[1]);
+    } else {
+      int at = ast.afterLast("FOR");
+      if (at < 0 || ast.afterLast("ORDER") >= 0 || ast.afterLast("GROUP") >= 0) {
+        return null;
+      }
+      at -= "FOR".length();
+      gated = source.substring(0, at) + "WHERE " + clearGate(n) + " " + source.substring(at);
+    }
+    return onDataTable(engine, ast, t, true, gated, -1);
+  }
+
   private static String clearGate(Names n) {
+    if (n.engine == Engine.ORACLE) {
+      // hinted to the in-flight index (design 4.2 on Oracle, todo 334)
+      return "NOT EXISTS (SELECT "
+          + n.inflightHint("m")
+          + "1 FROM "
+          + n.meta
+          + " m WHERE m."
+          + n.txState
+          + " IN (1, 2))";
+    }
     return "NOT EXISTS (SELECT 1 FROM " + n.meta + " WHERE " + n.txState + " IN (1, 2))";
   }
 
@@ -993,6 +2097,9 @@ final class Writes {
     }
     if (inline) {
       return new Step(dml, all, Set.of(), !delete);
+    }
+    if (engine == Engine.ORACLE) {
+      return oracleClearTableBlock(n, dml, all, delete, imported);
     }
     String w = "scalardb_native_w";
     String sql =
@@ -1766,6 +2873,21 @@ final class Writes {
    */
   private static @Nullable InlineInsert inlineInsert(
       Names n, SqlAst ast, TableInfo t, @Nullable Expression row, int end, boolean savepoint) {
+    return inlineInsert(n, ast, t, row, end, savepoint, true);
+  }
+
+  /**
+   * As {@link #inlineInsert(Names, SqlAst, TableInfo, Expression, int, boolean)}; without {@code
+   * returns}, the one statement alone, no keys returned and no merged text (Oracle, todo 334).
+   */
+  private static @Nullable InlineInsert inlineInsert(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      @Nullable Expression row,
+      int end,
+      boolean savepoint,
+      boolean returns) {
     if (!(row instanceof ParenthesedExpressionList)
         || ((ParenthesedExpressionList<?>) row).isEmpty()) {
       return null;
@@ -1814,7 +2936,7 @@ final class Writes {
             + n.preparedAt
             + ", "
             + n.committedAt;
-    String returned = " RETURNING " + n.aliased("", "scalardb_native_k");
+    String returned = returns ? " RETURNING " + n.aliased("", "scalardb_native_k") : "";
     String one =
         onDataTable(
             n.engine,
@@ -1828,6 +2950,9 @@ final class Writes {
                 + source.substring(close, end)
                 + returned,
             -1);
+    if (!returns) {
+      return one == null ? null : new InlineInsert(one, null);
+    }
     // each row reads the stamp from the CTE before it, so that the rows bind only their own
     String upToRows = source.substring(0, columns) + metadata + source.substring(columns, open);
     String stampedRow =
@@ -1868,9 +2993,9 @@ final class Writes {
   /** {@link #inlineInsert}'s statement for one entry, and for a batch's entries. */
   private static final class InlineInsert {
     final String one;
-    final Merge merge;
+    final @Nullable Merge merge;
 
-    InlineInsert(String one, Merge merge) {
+    InlineInsert(String one, @Nullable Merge merge) {
       this.one = one;
       this.merge = merge;
     }
@@ -2278,6 +3403,19 @@ final class Writes {
         engine == Engine.POSTGRESQL && n.inline && returning == null
             ? inlineInsert(n, ast, t, shape.insertRow(), end, inFlight != null)
             : null;
+    // on Oracle too, as the one statement it is; and a decoupled table's INSERT of one row with
+    // its metadata row as one block (todo 334)
+    Step oracleInline = null;
+    Step oracleBlock = null;
+    if (engine == Engine.ORACLE && returning == null && shape.insertRow() != null) {
+      if (n.inline) {
+        InlineInsert one = inlineInsert(n, ast, t, shape.insertRow(), end, false, false);
+        // the stamp's three values after the row's own, where the statement names them
+        oracleInline = one == null ? null : new Step(one.one, all, Set.of(), all.size());
+      } else {
+        oracleBlock = oracleInsertBlock(n, ast, t, all, end);
+      }
+    }
     return new InsertPlan(
         n,
         inline != null ? inline.merge : merge,
@@ -2291,7 +3429,164 @@ final class Writes {
         repeats,
         returning,
         Router.exposed(ref),
-        type(engine, tableColumns, t.keyColumns().get(0)).endsWith(" generated"));
+        type(engine, tableColumns, t.keyColumns().get(0)).endsWith(" generated"),
+        oracleBlock,
+        oracleInline,
+        oracleBlock == null ? null : oracleInsertEntries(n, ast, t, all, end));
+  }
+
+  /**
+   * The decoupled INSERT on Oracle as one block (design 4.3 "An INSERT on Oracle", todo 334): the
+   * user's INSERT returning its key into locals, an IDENTITY key's included; the metadata row under
+   * {@code IGNORE_ROW_ON_DUPKEY_INDEX}; and the row that hint skipped taken over, the stamp under
+   * the deemed-committed condition. The stamp's three values are the first binds, the cursor the
+   * last; its row is {@code meta, stamped, k...}. Null when the text cannot be rewritten.
+   */
+  private static @Nullable Step oracleInsertBlock(
+      Names n, SqlAst ast, TableInfo t, List<Integer> all, int end) {
+    OracleBody b = insertBody(n, ast, t, end, "");
+    return b == null ? null : new Step(b.block(), all, Set.of(), 0);
+  }
+
+  /** The INSERT block over a batch's entries (design 4.4), null where it cannot be built. */
+  private static @Nullable Entries oracleInsertEntries(
+      Names n, SqlAst ast, TableInfo t, List<Integer> all, int end) {
+    if (insertBody(n, ast, t, end, "_1") == null) {
+      return null;
+    }
+    return new Entries(i -> Objects.requireNonNull(insertBody(n, ast, t, end, "_" + i)), all, 0);
+  }
+
+  /**
+   * The INSERT block's body, its locals suffixed by {@code sfx}; see {@link #oracleInsertBlock}.
+   */
+  private static @Nullable OracleBody insertBody(
+      Names n, SqlAst ast, TableInfo t, int end, String sfx) {
+    Engine engine = n.engine;
+    String insert = onDataTable(engine, ast, t, false, ast.source().substring(0, end), -1);
+    if (insert == null) {
+      return null;
+    }
+    String lI = "l_i" + sfx;
+    String lP = "l_p" + sfx;
+    String lC = "l_c" + sfx;
+    String lMeta = "l_meta" + sfx;
+    String lStamped = "l_stamped" + sfx;
+    StringBuilder declare =
+        new StringBuilder(lI)
+            .append(" ")
+            .append(n.meta)
+            .append(".")
+            .append(n.txId)
+            .append("%TYPE; ")
+            .append(lP)
+            .append(" ")
+            .append(n.meta)
+            .append(".")
+            .append(n.preparedAt)
+            .append("%TYPE; ")
+            .append(lC)
+            .append(" ")
+            .append(n.meta)
+            .append(".")
+            .append(n.committedAt)
+            .append("%TYPE;");
+    List<String> locals = new ArrayList<>();
+    List<String> byKey = new ArrayList<>();
+    List<String> keyExprs = new ArrayList<>();
+    for (int i = 0; i < n.keyColumns.size(); i++) {
+      String k = engine.quote(n.keyColumns.get(i));
+      String lk = "l_k" + i + sfx;
+      declare
+          .append(" ")
+          .append(lk)
+          .append(" ")
+          .append(n.data)
+          .append(".")
+          .append(k)
+          .append("%TYPE;");
+      locals.add(lk);
+      byKey.add(k + " = " + lk);
+      keyExprs.add(n.keyExpr(lk, n.keyColumns.get(i)));
+    }
+    declare
+        .append(" ")
+        .append(lMeta)
+        .append(" NUMBER := 0; ")
+        .append(lStamped)
+        .append(" NUMBER := 0;");
+    String body =
+        lI
+            + " := ?; "
+            + lP
+            + " := ?; "
+            + lC
+            + " := ?; "
+            + insert
+            + " RETURNING "
+            + n.columns("")
+            + " INTO "
+            + String.join(", ", locals)
+            + "; INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x ("
+            + n.columns("")
+            + ")) */ INTO "
+            + n.meta
+            + " x ("
+            + n.columns("")
+            + ", "
+            + n.txId
+            + ", "
+            + n.txState
+            + ", "
+            + n.txVersion
+            + ", "
+            + n.preparedAt
+            + ", "
+            + n.committedAt
+            + ") VALUES ("
+            + String.join(", ", locals)
+            + ", "
+            + lI
+            + ", 3, 1, "
+            + lP
+            + ", "
+            + lC
+            + "); "
+            + lMeta
+            + " := SQL%ROWCOUNT; IF "
+            + lMeta
+            + " = 0 THEN UPDATE "
+            + n.meta
+            + " SET "
+            + n.txId
+            + " = "
+            + lI
+            + ", "
+            + n.preparedAt
+            + " = "
+            + lP
+            + ", "
+            + n.committedAt
+            + " = "
+            + lC
+            + ", "
+            + n.txState
+            + " = 3, "
+            + n.txVersion
+            + " = CASE WHEN "
+            + n.txId
+            + " IS NULL THEN 1 ELSE COALESCE("
+            + n.txVersion
+            + ", 0) + 1 END WHERE "
+            + String.join(" AND ", byKey)
+            + " AND COALESCE("
+            + n.txState
+            + ", 3) = 3; "
+            + lStamped
+            + " := SQL%ROWCOUNT; END IF;";
+    String row = lMeta + ", " + lStamped + ", " + String.join(", ", keyExprs);
+    return new OracleBody(
+        declare.toString(), body, row, "NOT (" + lMeta + " = 1 OR " + lStamped + " = 1)");
   }
 
   /** The savepoint a duplicate is told under on PostgreSQL, set in the INSERT's own round trip. */
@@ -2658,6 +3953,103 @@ final class Writes {
     return counts;
   }
 
+  /** Records a batch entry's count as it becomes final, in order. */
+  interface Finalized {
+    void record(int entry, long count) throws SQLException;
+  }
+
+  /**
+   * Applies consecutive entries of a batch of one write as its block of entries on Oracle (design
+   * 4.4, todo 334): the entries' outcomes in order, each recorded as it is final, until the first
+   * whose outcome is the single form's to make. Returns how many were finalized, 0 when the first
+   * entry is that one, which the caller then runs alone; -1 when the block failed with an error of
+   * its own, after which nothing of it remains and the caller runs the entries one by one; an abort
+   * an entry's row says is thrown, the entries before it recorded.
+   */
+  static int applyOracleEntries(
+      Connection vendor, Plan plan, List<Context> contexts, Finalized finalized)
+      throws SQLException {
+    Entries e = Objects.requireNonNull(plan.entries());
+    List<Run> runs = new ArrayList<>();
+    for (Context c : contexts) {
+      runs.add(new Run(vendor, c));
+    }
+    Run lead = runs.get(0);
+    int from = 3;
+    try (CallableStatement cs = lead.callEntries(e, runs)) {
+      try {
+        cs.execute();
+      } catch (SQLException ex) {
+        if (undoable(ex)) {
+          return -1; // nothing of the block remains: the entries one by one
+        }
+        throw ex;
+      }
+      int done = 0;
+      try (ResultSet rs = Run.cursor(cs, e, contexts.size())) {
+        while (rs.next()) {
+          int i = rs.getInt(1) - 1;
+          if (i != done || rs.getInt(2) == 0) {
+            break; // not reached: after the entry that stopped the block
+          }
+          Long count = plan.entry(runs.get(i), rs, from);
+          if (count == null) {
+            break;
+          }
+          finalized.record(i, count);
+          done++;
+        }
+      }
+      return done;
+    } finally {
+      lead.context.running(null);
+    }
+  }
+
+  /**
+   * Applies consecutive entries of a batch of one write through the vendor's own batching on Oracle
+   * (design 4.4, todo 334): the one plain statement with each entry's binds and its stamp, one
+   * {@code executeBatch}. Every entry's count is recorded; a failure, ORA-00001 among them, leaves
+   * the entries before the failing one written and counted, as ojdbc reports them, and is thrown
+   * classified as the single form classifies it.
+   */
+  static void applyVendorBatch(
+      Connection vendor, Plan plan, List<Context> contexts, Finalized finalized)
+      throws SQLException {
+    Step step = Objects.requireNonNull(plan.vendorBatch());
+    List<Run> runs = new ArrayList<>();
+    for (Context c : contexts) {
+      runs.add(new Run(vendor, c));
+    }
+    Run lead = runs.get(0);
+    try (PreparedStatement ps = lead.prepare(step.sql)) {
+      for (Run r : runs) {
+        r.bindStep(ps, step, null);
+        ps.addBatch();
+      }
+      long[] counts;
+      try {
+        counts = ps.executeLargeBatch();
+      } catch (BatchUpdateException b) {
+        long[] before = b.getLargeUpdateCounts();
+        for (int i = 0; i < before.length && i < runs.size(); i++) {
+          finalized.record(i, before[i]);
+        }
+        int failed = Math.min(before.length, runs.size() - 1);
+        SQLException cause = b.getNextException() != null ? b.getNextException() : b;
+        throw plan instanceof InsertPlan
+            ? ((InsertPlan) plan).duplicateOf(runs.get(failed), cause)
+            : cause;
+      }
+      for (int i = 0; i < counts.length && i < runs.size(); i++) {
+        runs.get(i).context.anchors().wrote(runs.get(i).txId);
+        finalized.record(i, counts[i]);
+      }
+    } finally {
+      lead.context.running(null);
+    }
+  }
+
   /**
    * Applies entries of a batch of one plan as its {@link Plan#merge()} statement (todo 329), under
    * the savepoint of entries sent together, released first as {@link #applyTogether} does. Null
@@ -2757,10 +4149,8 @@ final class Writes {
 
   /** Applies a plan in the transaction {@link #within} keeps. */
   static long apply(Connection vendor, Plan plan, Context context) throws SQLException {
-    // where a failed statement leaves the transaction open, a write that fails part way is undone
-    // to its start, as the engine undoes a statement of its own
     // ponytail: two round trips per write on MySQL and MariaDB
-    Savepoint sp = plan.n.engine == Engine.POSTGRESQL ? null : vendor.setSavepoint();
+    Savepoint sp = plan.savepointed() ? vendor.setSavepoint() : null;
     try {
       long count = plan.apply(new Run(vendor, context));
       if (sp != null) {
@@ -2918,6 +4308,11 @@ final class Writes {
                   : generated.length == 0
                       ? v.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)
                       : v.prepareStatement(sql, generated);
+      return track(ps);
+    }
+
+    /** Gives a driver statement what is left of the timeout, and makes it reachable by cancel. */
+    private <S extends Statement> S track(S ps) throws SQLException {
       try {
         if (deadline != 0) {
           long left = deadline - System.nanoTime();
@@ -2932,6 +4327,28 @@ final class Writes {
         ps.close();
         throw e;
       }
+    }
+
+    /**
+     * An Oracle block as a callable statement, bound as {@link #prepare(Step, Object[])} binds a
+     * step, its ref cursor registered as the OUT bind after them (design 4.3 on Oracle, todo 334).
+     */
+    CallableStatement call(Step step) throws SQLException {
+      checkCancelled();
+      CallableStatement cs = track(v.prepareCall(step.sql));
+      try {
+        bindStep(cs, step, null);
+        cs.registerOutParameter(step.parameters() + 1, ORACLE_CURSOR);
+        return cs;
+      } catch (SQLException | RuntimeException e) {
+        cs.close();
+        throw e;
+      }
+    }
+
+    /** The ref cursor a block of {@link #call} opened, as a result set. */
+    static ResultSet cursor(CallableStatement cs, Step step) throws SQLException {
+      return (ResultSet) cs.getObject(step.parameters() + 1);
     }
 
     /** A step prepared and bound: its binds, then the key's values, if any. */
@@ -2949,17 +4366,66 @@ final class Writes {
         throws SQLException {
       PreparedStatement ps = prepare(step.sql, scrollable, generated);
       try {
-        int i = step.stampFirst ? stamp(ps, 1) : 1;
-        for (int b : step.binds) {
-          context.bind(ps, i++, b, step.floatKeys.contains(b));
-        }
-        if (key != null) {
-          bind(ps, i, key);
-        }
+        bindStep(ps, step, key);
         return ps;
       } catch (SQLException | RuntimeException e) {
         ps.close();
         throw e;
+      }
+    }
+
+    /**
+     * A block of entries as a callable statement, each entry bound by its own run (its stamp its
+     * own), the cursor registered after them all.
+     */
+    CallableStatement callEntries(Entries e, List<Run> runs) throws SQLException {
+      checkCancelled();
+      CallableStatement cs = track(v.prepareCall(e.sql(runs.size())));
+      try {
+        cs.setFetchSize(runs.size() + 1); // one row per entry and their end in one fetch
+        int at = 1;
+        for (Run r : runs) {
+          for (int j = 0; j <= e.binds.size(); j++) {
+            if (j == e.stampAfter) {
+              at = r.stamp(cs, at);
+            }
+            if (j < e.binds.size()) {
+              r.context.bind(cs, at++, e.binds.get(j), false);
+            }
+          }
+        }
+        cs.registerOutParameter(at, ORACLE_CURSOR);
+        return cs;
+      } catch (SQLException | RuntimeException ex) {
+        cs.close();
+        throw ex;
+      }
+    }
+
+    /**
+     * The ref cursor a block of entries opened, its rows fetched with their end in one round trip:
+     * ojdbc prefetches ten, and a row past them would be asked for in a second one.
+     */
+    static ResultSet cursor(CallableStatement cs, Entries e, int entries) throws SQLException {
+      ResultSet rs = (ResultSet) cs.getObject(entries * e.parameters() + 1);
+      rs.setFetchSize(entries + 1);
+      return rs;
+    }
+
+    /** A step's binds, the stamp among them where the step places it, then the key's values. */
+    void bindStep(PreparedStatement ps, Step step, Object @Nullable [] key) throws SQLException {
+      int i = 1;
+      for (int at = 0; at <= step.binds.size(); at++) {
+        if (at == step.stampAfter) {
+          i = stamp(ps, i);
+        }
+        if (at < step.binds.size()) {
+          int b = step.binds.get(at);
+          context.bind(ps, i++, b, step.floatKeys.contains(b));
+        }
+      }
+      if (key != null) {
+        bind(ps, i, key);
       }
     }
 
@@ -3038,13 +4504,24 @@ final class Writes {
 
   /**
    * The coarse check of a table for rows in flight, one probe of the in-flight index of its
-   * metadata table {@code meta}: a row means the transaction's snapshot holds a row in flight of
-   * the table. Its text is the key under which a transaction remembers that it found none (design
-   * 4.2, todo 329).
+   * metadata table: a row means the transaction's snapshot holds a row in flight of the table. Its
+   * text is the key under which a transaction remembers that it found none (design 4.2, todo 329).
    */
-  static String inFlightCheck(Engine engine, String meta) {
-    return anyRow(
-        engine, "SELECT 1 FROM " + meta + " WHERE " + engine.quote("tx_state") + " IN (1, 2)");
+  static String inFlightCheck(Names n) {
+    Engine engine = n.engine;
+    if (engine == Engine.ORACLE) {
+      // hinted to the in-flight index (design 4.2 on Oracle, todo 334)
+      return anyRow(
+          engine,
+          "SELECT "
+              + n.inflightHint("m")
+              + "1 FROM "
+              + n.meta
+              + " m WHERE m."
+              + n.txState
+              + " IN (1, 2)");
+    }
+    return anyRow(engine, "SELECT 1 FROM " + n.meta + " WHERE " + n.txState + " IN (1, 2)");
   }
 
   /** At most this many keys are bound in one statement, under PostgreSQL's 65,535 parameters. */
@@ -3199,6 +4676,12 @@ final class Writes {
     final @Nullable Merge fastMergeClear;
     // the coarse check the gate stands for, under which the transaction remembers a clear table
     final String check;
+    // on Oracle, the write by the key as one PL/SQL block, whose cursor row the driver decides
+    // from, and the write beyond the key as the same block over the predicate's keys (todo 334)
+    final @Nullable Step block;
+    final @Nullable Step predicateBlock;
+    // the keyed block over a batch's entries (design 4.4, todo 334)
+    final @Nullable Entries entries;
 
     KeyedPlan(
         Names n,
@@ -3217,8 +4700,14 @@ final class Writes {
         @Nullable Step fast,
         @Nullable Step fastClear,
         @Nullable Merge fastMerge,
-        @Nullable Merge fastMergeClear) {
+        @Nullable Merge fastMergeClear,
+        @Nullable Step block,
+        @Nullable Step predicateBlock,
+        @Nullable Entries entries) {
       super(n);
+      this.block = block;
+      this.predicateBlock = predicateBlock;
+      this.entries = entries;
       this.delete = delete;
       this.imported = imported;
       this.inline = inline;
@@ -3235,18 +4724,36 @@ final class Writes {
       this.fastClear = fastClear;
       this.fastMerge = fastMerge;
       this.fastMergeClear = fastMergeClear;
-      this.check = inFlightCheck(n.engine, n.meta);
+      this.check = inFlightCheck(n);
     }
 
     @Override
     List<String> sql() {
       List<String> out = new ArrayList<>();
-      for (Step s : Arrays.asList(afterImages, locked, keys, dml, fused, slim, fast, fastClear)) {
+      for (Step s :
+          Arrays.asList(
+              afterImages,
+              locked,
+              keys,
+              dml,
+              fused,
+              slim,
+              fast,
+              fastClear,
+              block,
+              predicateBlock)) {
         if (s != null) {
           out.add(s.sql);
         }
       }
       return out;
+    }
+
+    @Override
+    boolean savepointed() {
+      // an Oracle block is undone whole by the engine; the steps it may fall back to take their
+      // own savepoint
+      return block == null && predicateBlock == null && super.savepointed();
     }
 
     @Override
@@ -3258,6 +4765,30 @@ final class Writes {
         Long written = applyFast(run, passed ? fastClear : fast, passed);
         if (written != null) {
           return written;
+        }
+      }
+      if (block != null || predicateBlock != null) {
+        // a write beyond the key on a table the transaction recorded anchors of keeps the steps,
+        // which compare each key with its anchor
+        Long written =
+            block != null
+                ? applyBlock(run)
+                : run.context.anchors().recorded(n.table) ? null : applyPredicateBlock(run);
+        if (written != null) {
+          return written;
+        }
+        Savepoint sp = run.v.setSavepoint();
+        try {
+          long count = applySteps(run);
+          release(n.engine, run.v, sp);
+          return count;
+        } catch (SQLException | RuntimeException e) {
+          try {
+            run.v.rollback(sp);
+          } catch (SQLException r) {
+            e.addSuppressed(r);
+          }
+          throw e;
         }
       }
       if (slim != null) {
@@ -3336,6 +4867,203 @@ final class Writes {
     }
 
     /**
+     * The keyed write on Oracle as one block (design 4.3 "The keyed write on Oracle", todo 334),
+     * and what the driver does with the row it returns, in the design's order: no data row, count
+     * 0; a data row without a metadata row, null, the steps one by one, which stamp it; a row in
+     * flight, the bounded wait and the block again at READ COMMITTED with a wait set, else an
+     * abort; a state that is no image, count 0; the version read not the one the transaction read
+     * for the key, an abort; written and stamped, count 1; written and not stamped, or not written
+     * after a committed row was read, or several rows written, an abort. The block raises nothing
+     * of its own; an engine error, ORA-08177 among them, undoes it whole and is mapped as today.
+     */
+    private @Nullable Long applyBlock(Run run) throws SQLException {
+      Step step = Objects.requireNonNull(block);
+      int width = n.keyColumns.size();
+      long until = System.nanoTime() + run.context.inflightWait().toNanos();
+      while (true) {
+        int rows;
+        int meta;
+        String txId;
+        Object version;
+        Object state;
+        long written;
+        long stamped;
+        Object[] key;
+        try (CallableStatement cs = run.call(step)) {
+          cs.execute();
+          try (ResultSet rs = Run.cursor(cs, step)) {
+            if (!rs.next()) {
+              throw new SQLException("the write's block returned no row", "XX000");
+            }
+            rows = rs.getInt(1);
+            meta = rs.getInt(2);
+            txId = rs.getString(3);
+            version = rs.getObject(4);
+            state = rs.getObject(5);
+            written = rs.getLong(6);
+            stamped = rs.getLong(7);
+            key = readKey(rs, 8, width);
+          }
+        }
+        Long count = decide(run, rows, meta, txId, version, state, written, stamped, key);
+        if (count != null) {
+          return count;
+        }
+        if (meta == 0) {
+          return null; // an imported table's row before its backfill: the steps stamp it
+        }
+        if (afterImages != null) {
+          // SNAPSHOT: the snapshot shows the row in flight, and would until the transaction ends
+          throw new Aborted(
+              "a row the statement writes is being written by a ScalarDB transaction");
+        }
+        run.sleep(until, "a row the statement writes is being written by a ScalarDB transaction");
+      }
+    }
+
+    /**
+     * What the keyed block's row means, as the design's table has it: the count where the outcome
+     * is final, null for a row in flight or without a metadata row, which the caller waits on or
+     * sends to the steps, and an abort thrown for the rest.
+     */
+    private @Nullable Long decide(
+        Run run,
+        int rows,
+        int meta,
+        @Nullable String txId,
+        @Nullable Object version,
+        @Nullable Object state,
+        long written,
+        long stamped,
+        Object @Nullable [] key)
+        throws SQLException {
+      if (rows == 0 || key == null) {
+        return 0L; // no row for the key, as the vendor's statement finds none
+      }
+      if (meta == 0 || inFlight(state)) {
+        return null;
+      }
+      if (state != null && ((Number) state).intValue() != 3) {
+        return 0L; // no committed image, as the fused statement counts it on PostgreSQL
+      }
+      Anchors anchors = run.context.anchors();
+      if (!anchors.unchanged(n.table, key, txId, version)) {
+        throw new Aborted("a row this transaction read was changed by another one since");
+      }
+      if (written == 1 && stamped == 1) {
+        anchors.wrote(run.txId);
+        return 1L;
+      }
+      if (written > 1) {
+        throw new Aborted("a key matched " + written + " rows");
+      }
+      // the row moved, went in flight, lost its metadata or was deleted between the read and
+      // the DML or the CAS
+      throw new Aborted("a row the statement writes changed after it was read");
+    }
+
+    @Override
+    @Nullable Entries entries() {
+      return entries;
+    }
+
+    @Override
+    @Nullable Long entry(Run run, ResultSet rs, int from) throws SQLException {
+      int width = n.keyColumns.size();
+      return decide(
+          run,
+          rs.getInt(from),
+          rs.getInt(from + 1),
+          rs.getString(from + 2),
+          rs.getObject(from + 3),
+          rs.getObject(from + 4),
+          rs.getLong(from + 5),
+          rs.getLong(from + 6),
+          readKey(rs, from + 7, width));
+    }
+
+    /**
+     * The write beyond the key on Oracle as one block (design 4.3 "The write beyond the key on
+     * Oracle", todo 334), and what the driver does with its row of counts, in the design's order:
+     * nothing matched, count 0; an after image matched (SNAPSHOT), an abort; a key in flight, the
+     * bounded wait and the block again at READ COMMITTED with a wait set, else an abort; a key
+     * without a metadata row, null, the steps; an abort code, an abort (a key the DML skipped was
+     * deleted, went in flight, is still at its version, still matches the inline DELETE's
+     * predicate, or matched several rows); a stamp short of the rows written, an abort; else the
+     * rows written, the skipped keys counting for nothing.
+     */
+    private @Nullable Long applyPredicateBlock(Run run) throws SQLException {
+      Step step = Objects.requireNonNull(predicateBlock);
+      long until = System.nanoTime() + run.context.inflightWait().toNanos();
+      while (true) {
+        long found;
+        long held;
+        long missing;
+        long after;
+        long written;
+        long stamped;
+        int abort;
+        try (CallableStatement cs = run.call(step)) {
+          cs.execute();
+          try (ResultSet rs = Run.cursor(cs, step)) {
+            if (!rs.next()) {
+              throw new SQLException("the write's block returned no row", "XX000");
+            }
+            found = rs.getLong(1);
+            held = rs.getLong(2);
+            missing = rs.getLong(3);
+            after = rs.getLong(4);
+            written = rs.getLong(5);
+            stamped = rs.getLong(6);
+            abort = rs.getInt(8);
+          }
+        }
+        if (after > 0) {
+          // a row in flight only its after image matches, whether or not a committed image did:
+          // the fused statement on PostgreSQL checks it first too
+          throw new Aborted(
+              "a row the statement writes is being written by a ScalarDB transaction");
+        }
+        if (found == 0) {
+          return 0L; // nothing matched, as the vendor's statement finds none
+        }
+        if (held > 0) {
+          if (afterImages != null) {
+            throw new Aborted(
+                "a row the statement writes is being written by a ScalarDB transaction");
+          }
+          run.sleep(until, "a row the statement writes is being written by a ScalarDB transaction");
+          continue;
+        }
+        if (missing > 0) {
+          return null; // an imported table's rows before its backfill: the steps stamp them
+        }
+        switch (abort) {
+          case 1:
+            throw new Aborted("a row the statement writes was deleted after it was read");
+          case 2:
+            throw new Aborted(
+                "a row the statement writes went in flight in a ScalarDB transaction");
+          case 3:
+            throw new Aborted("a row the statement writes showed a value in flight");
+          case 4:
+            throw new Aborted("a row the statement deletes changed after it was read");
+          case 5:
+            throw new Aborted("a key matched several rows");
+          default:
+            break;
+        }
+        if (stamped < written) {
+          throw new Aborted("a row the statement writes changed after it was read");
+        }
+        if (written > 0) {
+          run.context.anchors().wrote(run.txId);
+        }
+        return written;
+      }
+    }
+
+    /**
      * The vendor's statement with the stamp (todo 329): what it wrote, or null when it wrote
      * nothing and the table has a row in flight in the snapshot, which closed the gate, or may
      * have: the statements below then tell which row, and wait or abort. A write that stamped fewer
@@ -3345,18 +5073,30 @@ final class Writes {
     private @Nullable Long applyFast(Run run, Step step, boolean passed) throws SQLException {
       long written;
       long stamped;
-      try (PreparedStatement ps = run.prepare(step, null)) {
-        if (inline) {
-          written = ps.executeUpdate();
-          stamped = written;
-        } else {
-          if (imported || !delete) {
-            run.stamp(ps, step.binds.size() + 1); // a created table's DELETE stamps nothing
-          }
-          try (ResultSet rs = ps.executeQuery()) {
+      if (n.engine == Engine.ORACLE && !inline) {
+        // the clear-table block, its two counts through its cursor (todo 334)
+        try (CallableStatement cs = run.call(step)) {
+          cs.execute();
+          try (ResultSet rs = Run.cursor(cs, step)) {
             rs.next();
             written = rs.getLong(1);
             stamped = rs.getLong(2);
+          }
+        }
+      } else {
+        try (PreparedStatement ps = run.prepare(step, null)) {
+          if (inline) {
+            written = ps.executeUpdate();
+            stamped = written;
+          } else {
+            if (imported || !delete) {
+              run.stamp(ps, step.binds.size() + 1); // a created table's DELETE stamps nothing
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+              rs.next();
+              written = rs.getLong(1);
+              stamped = rs.getLong(2);
+            }
           }
         }
       }
@@ -3827,6 +5567,12 @@ final class Writes {
     final String exposed;
     // a batch's single-row entries of this plan as one INSERT (todo 329)
     private final @Nullable Merge merge;
+    // on Oracle, a decoupled table's INSERT and its metadata row as one block, and an inline
+    // table's INSERT with its stamp columns as the one statement it is (todo 334)
+    final @Nullable Step oracleBlock;
+    final @Nullable Step oracleInline;
+    // the INSERT block over a batch's entries (design 4.4, todo 334)
+    final @Nullable Entries entries;
 
     InsertPlan(
         Names n,
@@ -3839,8 +5585,14 @@ final class Writes {
         @Nullable Step repeats,
         @Nullable String returning,
         String exposed,
-        boolean generatedKey) {
+        boolean generatedKey,
+        @Nullable Step oracleBlock,
+        @Nullable Step oracleInline,
+        @Nullable Entries entries) {
       super(n);
+      this.oracleBlock = oracleBlock;
+      this.oracleInline = oracleInline;
+      this.entries = entries;
       this.merge = merge;
       this.generatedKey = generatedKey;
       this.insert = insert;
@@ -3864,7 +5616,7 @@ final class Writes {
       for (Step s : readBack) {
         out.add(s.sql);
       }
-      for (Step s : Arrays.asList(inFlight, committed, repeats, fused)) {
+      for (Step s : Arrays.asList(inFlight, committed, repeats, fused, oracleBlock, oracleInline)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -3873,8 +5625,111 @@ final class Writes {
     }
 
     @Override
+    boolean savepointed() {
+      // one statement on Oracle, which the engine undoes whole on a failure
+      return oracleBlock == null && oracleInline == null && super.savepointed();
+    }
+
+    @Override
+    @Nullable Entries entries() {
+      return entries;
+    }
+
+    /** An entry's row: written, or a metadata row in flight, which is an abort at once. */
+    @Override
+    @Nullable Long entry(Run run, ResultSet rs, int from) throws SQLException {
+      if (rs.getInt(from) == 0 && rs.getInt(from + 1) == 0) {
+        throw new Aborted("a key the statement inserts is being written by ScalarDB");
+      }
+      Keys keys = new Keys();
+      keys.read(rs, from + 2, n.keyColumns.size());
+      run.context.anchors().wrote(run.txId);
+      run.context.inserted(keys);
+      return 1L;
+    }
+
+    @Override
+    @Nullable Step vendorBatch() {
+      return oracleInline;
+    }
+
+    /** A duplicate out of a vendor batch, classified as the single form classifies it. */
+    SQLException duplicateOf(Run run, SQLException e) throws SQLException {
+      return n.engine.isDuplicateKey(e) && inFlight != null ? duplicate(run, e) : e;
+    }
+
+    @Override
     long apply(Run run) throws SQLException {
+      if (oracleBlock != null) {
+        return applyOracleBlock(run, oracleBlock);
+      }
+      if (oracleInline != null) {
+        return applyOracleInline(run, oracleInline);
+      }
       return fused != null ? applyFused(run, fused) : applySteps(run);
+    }
+
+    /**
+     * The decoupled INSERT on Oracle as one block (design 4.3 "An INSERT on Oracle", todo 334): the
+     * row, its metadata row under the hint that skips a key with one, and that row taken over when
+     * it was skipped; the key back through the cursor. {@code meta} 1, or {@code stamped} 1 over a
+     * tombstone or an orphan, is the row written; neither is a metadata row in flight, an abort,
+     * the data row left until the rollback. ORA-00001 undoes the block whole and is classified as
+     * the steps classify it.
+     */
+    private long applyOracleBlock(Run run, Step step) throws SQLException {
+      int width = n.keyColumns.size();
+      Keys keys = new Keys();
+      try (CallableStatement cs = run.call(step)) {
+        try {
+          cs.execute();
+        } catch (SQLException e) {
+          if (!n.engine.isDuplicateKey(e) || inFlight == null) {
+            throw e;
+          }
+          throw duplicate(run, e);
+        }
+        try (ResultSet rs = Run.cursor(cs, step)) {
+          if (!rs.next()) {
+            throw new SQLException("the INSERT's block returned no row", "XX000");
+          }
+          if (rs.getInt(1) == 0 && rs.getInt(2) == 0) {
+            throw new Aborted("a key the statement inserts is being written by ScalarDB");
+          }
+          keys.read(rs, 3, width);
+        }
+      }
+      run.context.anchors().wrote(run.txId);
+      run.context.inserted(keys);
+      return 1;
+    }
+
+    /**
+     * The inline INSERT on Oracle as the one statement it is (todo 334), with its stamp columns:
+     * its key read back by the row's ROWID only when the application asks for the generated keys.
+     */
+    private long applyOracleInline(Run run, Step step) throws SQLException {
+      Keys keys = new Keys();
+      try (PreparedStatement ps = run.prepare(step, null, false, new String[0])) {
+        try {
+          ps.executeUpdate();
+        } catch (SQLException e) {
+          if (!n.engine.isDuplicateKey(e) || inFlight == null) {
+            throw e;
+          }
+          throw duplicate(run, e);
+        }
+        if (run.context.wantsKeys()) {
+          try (ResultSet k = ps.getGeneratedKeys()) {
+            while (k.next()) {
+              keysByRowid(run, k.getObject(1), keys);
+            }
+          }
+        }
+      }
+      run.context.anchors().wrote(run.txId);
+      run.context.inserted(keys);
+      return 1;
     }
 
     /**
@@ -4421,8 +6276,13 @@ final class Writes {
     final @Nullable Step checked;
     final String check;
     // at READ COMMITTED on PostgreSQL, a table in the inline layout: the statement as written over
-    // the rows as they are, each with its key, version and state, one statement (todo 329)
+    // the rows as they are, each with its key, version and state, one statement (todo 329); on
+    // Oracle in both layouts (todo 334)
     final @Nullable Step fastRc;
+    // on Oracle at SNAPSHOT: the statement as written with the write's gate, for a table not yet
+    // found clear, and as written alone for one found clear (todo 334)
+    final @Nullable Step oracleGated;
+    final @Nullable Step oraclePlain;
 
     LockPlan(
         Names n,
@@ -4433,9 +6293,13 @@ final class Writes {
         @Nullable Step snapshot,
         boolean fuse,
         @Nullable Step plain,
-        @Nullable Step fastRc) {
+        @Nullable Step fastRc,
+        @Nullable Step oracleGated,
+        @Nullable Step oraclePlain) {
       super(n);
       this.fastRc = fastRc;
+      this.oracleGated = oracleGated;
+      this.oraclePlain = oraclePlain;
       this.lock = lock;
       this.inFlight = inFlight;
       this.noWait = noWait;
@@ -4448,7 +6312,7 @@ final class Writes {
       }
       this.fused =
           fuse && inFlight != null ? new Step(inFlight.sql + "; " + lock.sql, binds) : null;
-      this.check = inFlightCheck(n.engine, n.meta);
+      this.check = inFlightCheck(n);
       Step p = fuse && inFlight != null ? plain : null;
       this.plain = p;
       this.checked = p == null ? null : new Step(check + "; " + p.sql, p.binds);
@@ -4481,16 +6345,99 @@ final class Writes {
     }
 
     @Override
+    boolean savepointed() {
+      // the Oracle forms are one statement each, which the engine undoes whole on a failure; the
+      // steps they may fall back to take a savepoint per attempt of their own
+      return oracleGated == null && fastRc == null && super.savepointed();
+    }
+
+    @Override
     long apply(Run run) throws SQLException {
       if (plain != null && checked != null) {
         return run.context.passed(check)
             ? applyPlain(run, plain, false)
             : applyPlain(run, checked, true);
       }
+      if (oracleGated != null && oraclePlain != null) {
+        return run.context.passed(check)
+            ? applyGated(run, oraclePlain, false)
+            : applyGated(run, oracleGated, true);
+      }
       if (fastRc != null && run.context.inflightWait().isZero()) {
-        return n.inline ? applyFastRc(run, fastRc) : applyFastRcDecoupled(run, fastRc);
+        return n.inline || n.engine == Engine.ORACLE
+            ? applyFastRc(run, fastRc)
+            : applyFastRcDecoupled(run, fastRc);
       }
       return fused != null ? applyFused(run, fused) : applySteps(run);
+    }
+
+    /**
+     * The locking read on Oracle at SNAPSHOT (design 4.3 "The locking read on Oracle", todo 334):
+     * the statement as written on the data table, with the write's gate in its WHERE clause on a
+     * table the transaction has not found clear; a row returned proves the gate open and marks the
+     * table clear; none returned is the predicate matching nothing or the gate closed, which the
+     * coarse check then tells: none found marks the table clear and the empty result is the
+     * vendor's; a row found runs the predicate's in-flight check, an abort for a row in flight the
+     * statement matches by either image, NOWAIT or not, else the lock over the committed copy as
+     * the steps take it, without versions, savepoint or second check, one snapshot making them
+     * vacuous. ORA-08177 from the lock is the engine's conflict, mapped as today.
+     */
+    @SuppressFBWarnings(
+        value = "OBL_UNSATISFIED_OBLIGATION",
+        justification = "the rows are handed to the application, closed with their statement")
+    private long applyGated(Run run, Step step, boolean gated) throws SQLException {
+      PreparedStatement ps = run.prepare(step, null, true);
+      try {
+        ResultSet rs = ps.executeQuery();
+        int rows = 0;
+        while (rs.next()) {
+          rows++;
+        }
+        if (rows > 0 || !gated) {
+          if (gated) {
+            run.context.pass(check); // the gate was open: no row of the table is in flight
+          }
+          rs.beforeFirst();
+          ps.closeOnCompletion();
+          run.context.rows(rs, 0);
+          return rows;
+        }
+        boolean held;
+        try (PreparedStatement c = run.prepare(check);
+            ResultSet found = c.executeQuery()) {
+          held = found.next();
+        }
+        if (!held) {
+          run.context.pass(check);
+          rs.beforeFirst();
+          ps.closeOnCompletion();
+          run.context.rows(rs, 0);
+          return 0;
+        }
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
+        throw e;
+      }
+      ps.close();
+      if (inFlight != null && matchesInFlight(run)) {
+        throw new Aborted("a row the statement locks is being written by a ScalarDB transaction");
+      }
+      // the committed copy's lock, its rows the application's
+      PreparedStatement locked = run.prepare(lock, null, true);
+      try {
+        ResultSet rs = locked.executeQuery();
+        int rows = 0;
+        while (rs.next()) {
+          rows++;
+        }
+        rs.beforeFirst();
+        locked.closeOnCompletion();
+        run.context.rows(rs, 0);
+        return rows;
+      } catch (SQLException | RuntimeException e) {
+        locked.close();
+        throw e;
+      }
     }
 
     /**
@@ -4948,6 +6895,8 @@ final class Writes {
     // the metadata in the row: the table is its own metadata table (milestone 10)
     final boolean inline;
     final List<String> dataColumns;
+    // the in-flight index of the metadata table, quoted, which Oracle's probes are hinted to
+    final String inflightIndex;
 
     Names(Engine engine, TableInfo t) {
       this.engine = engine;
@@ -4967,6 +6916,7 @@ final class Writes {
       this.committedAt = engine.quote("tx_committed_at");
       this.inline = t.layout() == Layout.INLINE;
       this.dataColumns = t.dataColumns();
+      this.inflightIndex = engine.quote(t.inflightIndex(engine));
     }
 
     // SQL Server: the data table's primary key index, quoted, read once
@@ -5060,11 +7010,15 @@ final class Writes {
      * they send with all its digits, where a float's six can name another float (todo 215).
      */
     String key(String q, String k) {
-      String c = (q.isEmpty() ? "" : q + ".") + engine.quote(k);
+      return keyExpr((q.isEmpty() ? "" : q + ".") + engine.quote(k), k);
+    }
+
+    /** {@code expr}, a value of key column {@code k}, read as {@link #key} reads the column. */
+    String keyExpr(String expr, String k) {
       if (engine == Engine.POSTGRESQL || !floatKeys.contains(k)) {
-        return c;
+        return expr;
       }
-      return engine == Engine.ORACLE ? "TO_BINARY_DOUBLE(" + c + ")" : "(" + c + " + 0E0)";
+      return engine == Engine.ORACLE ? "TO_BINARY_DOUBLE(" + expr + ")" : "(" + expr + " + 0E0)";
     }
 
     /** {@code k1 = ? AND k2 = ?}. */
@@ -5245,6 +7199,15 @@ final class Writes {
         default:
           return "NOT (" + column + " <=> ?)";
       }
+    }
+
+    /**
+     * On Oracle, the hint that sends a probe of the metadata table, aliased {@code m} as the SQL
+     * writes it (quoted where the SQL quotes it), to the in-flight index: a probe's plan must not
+     * depend on the metadata table's statistics (design 4.2, todo 334). Elsewhere nothing.
+     */
+    String inflightHint(String m) {
+      return engine == Engine.ORACLE ? "/*+ INDEX(" + m + " " + inflightIndex + ") */ " : "";
     }
 
     /** A committed metadata row, NULL state included (the deemed-committed rule). */

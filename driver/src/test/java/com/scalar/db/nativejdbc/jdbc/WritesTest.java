@@ -483,6 +483,292 @@ class WritesTest {
         .endsWith("FROM scalardb_native_inserted; RELEASE SAVEPOINT scalardb_native_write");
   }
 
+  private static List<String> oracle(TableInfo t, String sql, boolean snapshot) throws Exception {
+    StatementShape shape =
+        StatementShape.of(SqlAst.parse(sql, Engine.ORACLE).orElseThrow()).orElseThrow();
+    return Writes.plan(Engine.ORACLE, shape, t, "", snapshot, false, null).sql();
+  }
+
+  @Test
+  void onOracle_aKeyedWriteIsOneBlock() throws Exception {
+    String stamp =
+        "\"tx_id\" = ?, \"tx_prepared_at\" = ?, \"tx_committed_at\" = ?, \"tx_state\" = 3,"
+            + " \"tx_version\" = CASE WHEN \"tx_id\" IS NULL THEN 1 ELSE"
+            + " COALESCE(\"tx_version\", 0) + 1 END";
+    // the key is quoted in the texts: unquoted it would fold to ID, not the fixture's id
+    // the inline layout: the row read with its version and state, then the user's statement with
+    // the stamp in its SET list and the CAS in its WHERE clause, steps 2 and 3 in one row; the row
+    // back through a cursor over dual; a trailing comment left out, which would run on in a block
+    String inlineHead =
+        "DECLARE l_rows NUMBER := 0; l_written NUMBER := 0; l_id \"ns\".\"t\".\"tx_id\"%TYPE;"
+            + " l_version \"ns\".\"t\".\"tx_version\"%TYPE; l_state \"ns\".\"t\".\"tx_state\"%TYPE;"
+            + " l_k0 \"ns\".\"t\".\"id\"%TYPE; BEGIN BEGIN SELECT 1, t.\"tx_id\", t.\"tx_version\","
+            + " t.\"tx_state\", t.\"id\" INTO l_rows, l_id, l_version, l_state, l_k0 FROM"
+            + " \"ns\".\"t\" t WHERE \"id\" = ?; EXCEPTION WHEN NO_DATA_FOUND THEN NULL; END;"
+            + " IF l_rows = 1 AND COALESCE(l_state, 3) = 3 THEN ";
+    String inlineCas =
+        " AND COALESCE(t.\"tx_state\", 3) = 3 AND DECODE(t.\"tx_id\", l_id, 1, 0) = 1 AND"
+            + " COALESCE(t.\"tx_version\", 0) = COALESCE(l_version, 0); l_written := SQL%ROWCOUNT;"
+            + " END IF; OPEN ? FOR SELECT l_rows, 1, l_id, l_version, l_state, l_written,"
+            + " l_written, l_k0 FROM dual; END;";
+    List<String> update =
+        oracle(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ? -- note", false);
+    assertThat(update.get(update.size() - 1))
+        .isEqualTo(
+            inlineHead + "UPDATE t SET " + stamp + ", x = x || ? WHERE (\"id\" = ?)" + inlineCas);
+    List<String> delete = oracle(inline(), "DELETE FROM t WHERE \"id\" = ?", false);
+    assertThat(delete.get(delete.size() - 1))
+        .isEqualTo(inlineHead + "DELETE FROM t WHERE (\"id\" = ?)" + inlineCas);
+    // a decoupled table: the data row with its metadata row, the metadata row's own key read
+    // beside the data row's for the CAS; the user's DML on the data table, then the CAS on the
+    // metadata row where it wrote one; a created table's DELETE removes the metadata row, an
+    // imported table's stamps it as a tombstone
+    String decoupledHead =
+        "DECLARE l_rows NUMBER := 0; l_written NUMBER := 0; l_meta NUMBER := 0; l_stamped NUMBER"
+            + " := 0; l_id \"ns\".\"t_meta\".\"tx_id\"%TYPE; l_version"
+            + " \"ns\".\"t_meta\".\"tx_version\"%TYPE; l_state \"ns\".\"t_meta\".\"tx_state\"%TYPE;"
+            + " l_k0 \"ns\".\"%DATA%\".\"id\"%TYPE; l_m0 \"ns\".\"t_meta\".\"id\"%TYPE; BEGIN BEGIN"
+            + " SELECT 1, CASE WHEN m.\"id\" IS NULL THEN 0 ELSE 1 END, m.\"tx_id\","
+            + " m.\"tx_version\", m.\"tx_state\", d.\"id\", m.\"id\" INTO l_rows, l_meta, l_id,"
+            + " l_version, l_state, l_k0, l_m0 FROM (SELECT t.\"id\" AS \"id\" FROM"
+            + " \"ns\".\"%DATA%\" t WHERE \"id\" = ?) d LEFT JOIN \"ns\".\"t_meta\" m ON m.\"id\" ="
+            + " d.\"id\"; EXCEPTION WHEN NO_DATA_FOUND THEN NULL; END; IF l_rows = 1 AND l_meta = 1"
+            + " AND COALESCE(l_state, 3) = 3 THEN ";
+    String metaCas =
+        " WHERE \"id\" = l_m0 AND COALESCE(\"tx_state\", 3) = 3 AND DECODE(\"tx_id\", l_id, 1, 0)"
+            + " = 1 AND COALESCE(\"tx_version\", 0) = COALESCE(l_version, 0); l_stamped :="
+            + " SQL%ROWCOUNT; END IF; END IF; OPEN ? FOR SELECT l_rows, l_meta, l_id, l_version,"
+            + " l_state, l_written, l_stamped, l_k0 FROM dual; END;";
+    List<String> created = oracle(created(), "UPDATE t SET x = ? WHERE \"id\" = ?", false);
+    assertThat(created.get(created.size() - 1))
+        .isEqualTo(
+            decoupledHead.replace("%DATA%", "t_data")
+                + "UPDATE \"ns\".\"t_data\" t SET x = ? WHERE (\"id\" = ?); l_written := SQL%ROWCOUNT;"
+                + " IF l_written = 1 THEN UPDATE \"ns\".\"t_meta\" SET "
+                + stamp
+                + metaCas);
+    List<String> createdDelete = oracle(created(), "DELETE FROM t WHERE \"id\" = ?", false);
+    assertThat(createdDelete.get(createdDelete.size() - 1))
+        .isEqualTo(
+            decoupledHead.replace("%DATA%", "t_data")
+                + "DELETE FROM \"ns\".\"t_data\" t WHERE (\"id\" = ?); l_written := SQL%ROWCOUNT;"
+                + " IF l_written = 1 THEN DELETE FROM \"ns\".\"t_meta\""
+                + metaCas);
+    List<String> imported = oracle(table(), "DELETE FROM t WHERE \"id\" = ?", false);
+    assertThat(imported.get(imported.size() - 1))
+        .isEqualTo(
+            decoupledHead.replace("%DATA%", "t")
+                + "DELETE FROM t WHERE (\"id\" = ?); l_written := SQL%ROWCOUNT;"
+                + " IF l_written = 1 THEN UPDATE \"ns\".\"t_meta\" SET "
+                + stamp
+                + metaCas);
+    // at SNAPSHOT the inline layout has the vendor's statement with the stamp first, gated on the
+    // in-flight index under its hint, then the same for a table found clear, then the block; the
+    // decoupled layout has no PostgreSQL text, its clear-table block a later form
+    String index = Engine.ORACLE.quote(Engine.ORACLE.inflightIndexName("t"));
+    List<String> fast = oracle(inline(), "UPDATE t SET x = ? WHERE \"id\" = ?", true);
+    assertThat(fast.subList(fast.size() - 3, fast.size() - 1))
+        .containsExactly(
+            "UPDATE t SET "
+                + stamp
+                + ", x = ? WHERE (\"id\" = ?) AND NOT EXISTS (SELECT /*+ INDEX(m "
+                + index
+                + ") */ 1 FROM \"ns\".\"t\" m WHERE m.\"tx_state\" IN (1, 2))",
+            "UPDATE t SET " + stamp + ", x = ? WHERE (\"id\" = ?)");
+    assertThat(fast.get(fast.size() - 1)).startsWith("DECLARE");
+    assertThat(oracle(created(), "UPDATE t SET x = ? WHERE \"id\" = ?", true))
+        .noneMatch(sql -> sql.startsWith("WITH"))
+        .last()
+        .asString()
+        .startsWith("DECLARE");
+  }
+
+  @Test
+  void onOracle_aWriteBeyondTheKeyIsOneBlock() throws Exception {
+    // the decoupled layout: the keys read from the read view with their metadata rows, the gate,
+    // the DML once per key by FORALL, the zero-row rule, the CAS once per key written; counts back
+    List<String> update = oracle(created(), "UPDATE t SET x = ? WHERE x = ? -- note", false);
+    String block = update.get(update.size() - 1);
+    assertThat(block)
+        .startsWith("DECLARE l_i \"ns\".\"t_meta\".\"tx_id\"%TYPE;")
+        .contains(" BEGIN l_i := ?; l_p := ?; l_c := ?;")
+        .contains(
+            "BULK COLLECT INTO l_k0, l_nometa, l_id, l_version, l_state, l_m0 FROM (SELECT"
+                + " t.\"id\" AS \"id\" FROM \"ns\".\"RC_t\" t WHERE x = ?) d LEFT JOIN"
+                + " \"ns\".\"t_meta\" m ON m.\"id\" = d.\"id\";")
+        .contains(
+            " IF l_held = 0 AND l_missing = 0 AND l_after = 0 AND l_found > 0 THEN FORALL i IN"
+                + " 1 .. l_found UPDATE \"ns\".\"t_data\" t SET x = ? WHERE (x = ?) AND t.\"id\" ="
+                + " l_k0(i); FOR i IN 1 .. l_found LOOP l_cnt(i) := SQL%BULK_ROWCOUNT(i); END LOOP;")
+        .contains("EXCEPTION WHEN NO_DATA_FOUND THEN l_abort := 1; EXIT; END;")
+        .contains("FORALL i IN VALUES OF l_do UPDATE \"ns\".\"t_meta\" SET \"tx_id\" = l_i,")
+        .contains(
+            "WHERE \"id\" = l_m0(i) AND COALESCE(\"tx_state\", 3) = 3 AND DECODE(\"tx_id\","
+                + " l_id(i), 1, 0) = 1 AND COALESCE(\"tx_version\", 0) = COALESCE(l_version(i), 0);"
+                + " l_stamped := SQL%ROWCOUNT; END IF;")
+        .endsWith(
+            " END IF; OPEN ? FOR SELECT l_found, l_held, l_missing, l_after, l_written,"
+                + " l_stamped, l_skipped, l_abort FROM dual; END;")
+        .doesNotContain("l_after FROM dual WHERE EXISTS")
+        .doesNotContain("-- note");
+    // at SNAPSHOT the after-image check, hinted, before the gate; and the clear-table block ahead
+    // of it: the DML with the gate returning its keys, the stamp over them as a FORALL
+    List<String> snapshot = oracle(created(), "UPDATE t SET x = ? WHERE x = ?", true);
+    assertThat(snapshot.get(snapshot.size() - 1))
+        .contains(
+            " SELECT COUNT(*) INTO l_after FROM dual WHERE EXISTS (SELECT 1 FROM (SELECT /*+"
+                + " INDEX(m ");
+    String index = Engine.ORACLE.quote(Engine.ORACLE.inflightIndexName("t"));
+    assertThat(snapshot.get(snapshot.size() - 3))
+        .isEqualTo(
+            "DECLARE l_i \"ns\".\"t_meta\".\"tx_id\"%TYPE; l_p \"ns\".\"t_meta\".\"tx_prepared_at\"%TYPE;"
+                + " l_c \"ns\".\"t_meta\".\"tx_committed_at\"%TYPE; TYPE t_w0 IS TABLE OF"
+                + " \"ns\".\"t_data\".\"id\"%TYPE; l_w0 t_w0; l_written NUMBER := 0; l_stamped NUMBER"
+                + " := 0; BEGIN l_i := ?; l_p := ?; l_c := ?; UPDATE \"ns\".\"t_data\" t SET x = ?"
+                + " WHERE (x = ?) AND NOT EXISTS (SELECT /*+ INDEX(m "
+                + index
+                + ") */ 1 FROM \"ns\".\"t_meta\" m WHERE m.\"tx_state\" IN (1, 2)) RETURNING \"id\""
+                + " BULK COLLECT INTO l_w0; l_written := SQL%ROWCOUNT; FORALL i IN 1 .. l_w0.COUNT"
+                + " UPDATE \"ns\".\"t_meta\" SET \"tx_id\" = l_i, \"tx_prepared_at\" = l_p,"
+                + " \"tx_committed_at\" = l_c, \"tx_state\" = 3, \"tx_version\" = CASE WHEN \"tx_id\""
+                + " IS NULL THEN 1 ELSE COALESCE(\"tx_version\", 0) + 1 END WHERE \"id\" = l_w0(i) AND"
+                + " COALESCE(\"tx_state\", 3) = 3; l_stamped := SQL%ROWCOUNT; OPEN ? FOR SELECT"
+                + " l_written, l_stamped FROM dual; END;");
+    // a created table's DELETE removes the metadata rows; an imported table's stamp is a MERGE
+    // per key, which writes the row a key had none of yet
+    List<String> createdDelete = oracle(created(), "DELETE FROM t WHERE x = ?", true);
+    assertThat(createdDelete.get(createdDelete.size() - 3))
+        .contains(
+            "FORALL i IN 1 .. l_w0.COUNT DELETE FROM \"ns\".\"t_meta\" WHERE \"id\" = l_w0(i)"
+                + " AND COALESCE(\"tx_state\", 3) = 3;");
+    List<String> importedDelete = oracle(table(), "DELETE FROM t WHERE x = ?", true);
+    assertThat(importedDelete.get(importedDelete.size() - 3))
+        .contains(
+            "FORALL i IN 1 .. l_w0.COUNT MERGE INTO \"ns\".\"t_meta\" m USING (SELECT l_w0(i)"
+                + " AS \"id\" FROM dual) s ON (m.\"id\" = s.\"id\") WHEN MATCHED THEN UPDATE SET m.\"tx_id\""
+                + " = l_i, m.\"tx_prepared_at\" = l_p, m.\"tx_committed_at\" = l_c, m.\"tx_state\" = 3,"
+                + " m.\"tx_version\" = CASE WHEN m.\"tx_id\" IS NULL THEN 1 ELSE COALESCE(m.\"tx_version\","
+                + " 0) + 1 END WHERE COALESCE(m.\"tx_state\", 3) = 3 WHEN NOT MATCHED THEN INSERT (\"id\","
+                + " \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\", \"tx_committed_at\") VALUES"
+                + " (s.\"id\", l_i, 3, 1, l_p, l_c); l_stamped := SQL%ROWCOUNT;");
+    // the inline layout: the committed rows and the before images in flight as the keys read, the
+    // UPDATE with the CAS folded into the version it writes (-1 where the row moved), returning
+    // the versions; the DELETE with its CAS in its WHERE clause and the predicate re-read on a
+    // skipped row
+    List<String> inlineUpdate = oracle(inline(), "UPDATE t SET x = ? WHERE x = ?", false);
+    assertThat(inlineUpdate.get(inlineUpdate.size() - 1))
+        .contains("UNION ALL SELECT t.\"id\", NULL, NULL, 1 FROM (SELECT /*+ INDEX(m ")
+        .contains(
+            "FORALL i IN 1 .. l_found UPDATE t SET \"tx_id\" = l_i, \"tx_prepared_at\" = l_p,"
+                + " \"tx_committed_at\" = l_c, \"tx_state\" = 3, \"tx_version\" = CASE WHEN"
+                + " DECODE(t.\"tx_id\", l_id(i), 1, 0) = 1 AND COALESCE(t.\"tx_version\", 0) ="
+                + " COALESCE(l_version(i), 0) THEN CASE WHEN t.\"tx_id\" IS NULL THEN 1 ELSE"
+                + " COALESCE(t.\"tx_version\", 0) + 1 END ELSE -1 END, x = ? WHERE (x = ?) AND t.\"id\" ="
+                + " l_k0(i) AND COALESCE(t.\"tx_state\", 3) = 3 RETURNING t.\"tx_version\" BULK COLLECT"
+                + " INTO l_v;")
+        .contains(
+            " IF l_abort = 0 THEN FOR i IN 1 .. l_v.COUNT LOOP IF l_v(i) <> -1 THEN l_stamped"
+                + " := l_stamped + 1; END IF; END LOOP; END IF;");
+    List<String> inlineDelete = oracle(inline(), "DELETE FROM t WHERE x = ?", false);
+    assertThat(inlineDelete.get(inlineDelete.size() - 1))
+        .contains(
+            "FORALL i IN 1 .. l_found DELETE FROM t WHERE (x = ?) AND t.\"id\" = l_k0(i) AND"
+                + " COALESCE(t.\"tx_state\", 3) = 3 AND DECODE(t.\"tx_id\", l_id(i), 1, 0) = 1 AND"
+                + " COALESCE(t.\"tx_version\", 0) = COALESCE(l_version(i), 0);")
+        .contains(
+            " SELECT COUNT(*) INTO n_matches FROM \"ns\".\"t\" t WHERE (x = ?) AND t.\"id\" ="
+                + " l_k0(i); IF n_matches > 0 THEN l_abort := 4; EXIT; END IF;")
+        .contains(" IF l_abort = 0 THEN l_stamped := l_written; END IF;");
+  }
+
+  @Test
+  void onOracle_anInsertIsOneStatement() throws Exception {
+    // a decoupled table: the row, its key into locals, the metadata row under the hint that skips
+    // a key with one, and that row taken over when skipped; the key back through the cursor
+    List<String> created = oracle(created(), "INSERT INTO t (id, x) VALUES (?, ?) -- c", false);
+    assertThat(created.get(created.size() - 1))
+        .isEqualTo(
+            "DECLARE l_i \"ns\".\"t_meta\".\"tx_id\"%TYPE; l_p \"ns\".\"t_meta\".\"tx_prepared_at\"%TYPE;"
+                + " l_c \"ns\".\"t_meta\".\"tx_committed_at\"%TYPE; l_k0 \"ns\".\"t_data\".\"id\"%TYPE;"
+                + " l_meta NUMBER := 0; l_stamped NUMBER := 0; BEGIN l_i := ?; l_p := ?; l_c := ?;"
+                + " INSERT INTO \"ns\".\"t_data\" (id, x) VALUES (?, ?) RETURNING \"id\" INTO l_k0;"
+                + " INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (\"id\")) */ INTO \"ns\".\"t_meta\" x"
+                + " (\"id\", \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+                + " \"tx_committed_at\") VALUES (l_k0, l_i, 3, 1, l_p, l_c); l_meta := SQL%ROWCOUNT;"
+                + " IF l_meta = 0 THEN UPDATE \"ns\".\"t_meta\" SET \"tx_id\" = l_i, \"tx_prepared_at\""
+                + " = l_p, \"tx_committed_at\" = l_c, \"tx_state\" = 3, \"tx_version\" = CASE WHEN"
+                + " \"tx_id\" IS NULL THEN 1 ELSE COALESCE(\"tx_version\", 0) + 1 END WHERE \"id\" ="
+                + " l_k0 AND COALESCE(\"tx_state\", 3) = 3; l_stamped := SQL%ROWCOUNT; END IF; OPEN ?"
+                + " FOR SELECT l_meta, l_stamped, l_k0 FROM dual; END;");
+    // an inline table: the statement with the stamp's columns, the one statement it is
+    List<String> inline = oracle(inline(), "INSERT INTO t (id, x) VALUES (?, ?)", false);
+    assertThat(inline.get(inline.size() - 1))
+        .isEqualTo(
+            "INSERT INTO t (id, x, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+                + " \"tx_committed_at\") VALUES (?, ?, ?, 3, 1, ?, ?)");
+    // several rows keep the steps
+    assertThat(oracle(created(), "INSERT INTO t (id, x) VALUES (1, 'a'), (2, 'b')", false))
+        .noneMatch(sql -> sql.startsWith("DECLARE"));
+  }
+
+  @Test
+  void onOracle_aBatchsEntriesGoAsOneBlock() throws Exception {
+    // the keyed block's body once per entry, each entry's locals suffixed, every entry under
+    // IF l_stop = 0, which an entry whose outcome is not final sets; one cursor row per entry
+    StatementShape shape =
+        StatementShape.of(
+                SqlAst.parse("UPDATE t SET x = ? WHERE \"id\" = ?", Engine.ORACLE).orElseThrow())
+            .orElseThrow();
+    Writes.Entries entries =
+        Writes.plan(Engine.ORACLE, shape, inline(), "", false, false, null).entries();
+    assertThat(entries).isNotNull();
+    assertThat(entries.binds).containsExactly(2, 1, 2); // the key for the read, then x and the key
+    assertThat(entries.stampAfter).isEqualTo(1);
+    String two = entries.sql(2);
+    assertThat(two)
+        .startsWith("DECLARE l_rows_1 NUMBER := 0; l_written_1 NUMBER := 0; l_id_1")
+        .contains(" l_k0_1 \"ns\".\"t\".\"id\"%TYPE; l_done_1 NUMBER := 0; l_rows_2 NUMBER := 0;")
+        .contains(
+            " l_done_2 NUMBER := 0; l_stop NUMBER := 0; BEGIN IF l_stop = 0 THEN l_done_1 :="
+                + " 1; BEGIN SELECT 1, t.\"tx_id\", t.\"tx_version\", t.\"tx_state\", t.\"id\" INTO"
+                + " l_rows_1, l_id_1, l_version_1, l_state_1, l_k0_1 FROM \"ns\".\"t\" t WHERE \"id\" = ?;")
+        .contains(
+            " IF NOT (l_rows_1 = 0 OR (l_state_1 IS NOT NULL AND l_state_1 NOT IN (1, 2, 3))"
+                + " OR (l_written_1 = 1)) THEN l_stop := 1; END IF; END IF; IF l_stop = 0 THEN l_done_2"
+                + " := 1;")
+        .endsWith(
+            " OPEN ? FOR SELECT 1, l_done_1, l_rows_1, 1, l_id_1, l_version_1, l_state_1,"
+                + " l_written_1, l_written_1, l_k0_1 FROM dual UNION ALL SELECT 2, l_done_2, l_rows_2,"
+                + " 1, l_id_2, l_version_2, l_state_2, l_written_2, l_written_2, l_k0_2 FROM dual ORDER"
+                + " BY 1; END;");
+    assertThat(entries.parameters()).isEqualTo(6);
+    // the decoupled INSERT block's entries, each entry's stamp its own; the inline INSERT goes
+    // through the vendor's batching instead
+    StatementShape insert =
+        StatementShape.of(
+                SqlAst.parse("INSERT INTO t (id, x) VALUES (?, ?)", Engine.ORACLE).orElseThrow())
+            .orElseThrow();
+    Writes.Plan created = Writes.plan(Engine.ORACLE, insert, created(), "", false, false, null);
+    Writes.Entries inserts = created.entries();
+    assertThat(inserts).isNotNull();
+    assertThat(inserts.sql(2))
+        .contains(
+            " BEGIN IF l_stop = 0 THEN l_done_1 := 1; l_i_1 := ?; l_p_1 := ?; l_c_1 := ?;"
+                + " INSERT INTO \"ns\".\"t_data\" (id, x) VALUES (?, ?) RETURNING \"id\" INTO l_k0_1;")
+        .contains(" IF NOT (l_meta_1 = 1 OR l_stamped_1 = 1) THEN l_stop := 1; END IF; END IF;")
+        .endsWith(
+            " OPEN ? FOR SELECT 1, l_done_1, l_meta_1, l_stamped_1, l_k0_1 FROM dual UNION ALL"
+                + " SELECT 2, l_done_2, l_meta_2, l_stamped_2, l_k0_2 FROM dual ORDER BY 1; END;");
+    assertThat(created.vendorBatch()).isNull();
+    Writes.Plan inlined = Writes.plan(Engine.ORACLE, insert, inline(), "", false, false, null);
+    assertThat(inlined.entries()).isNull();
+    assertThat(inlined.vendorBatch()).isNotNull();
+    assertThat(inlined.vendorBatch().sql)
+        .isEqualTo(
+            "INSERT INTO t (id, x, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+                + " \"tx_committed_at\") VALUES (?, ?, ?, 3, 1, ?, ?)");
+  }
+
   @Test
   void createdTable_isWrittenThroughItsDataTable_underItsName() throws Exception {
     List<String> sql = plan(created(), "UPDATE ns.t SET x = 1 WHERE t.id = ?");

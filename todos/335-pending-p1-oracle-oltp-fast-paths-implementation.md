@@ -255,3 +255,308 @@ results, as the tests print them under `[335]`:
 Nothing in `bench-env/` or `BenchBaseBenchmark` touched; the counting proxy is a private class of
 the test. Next: form 1 (`Router.versionless` and the clear-table memory on Oracle at SNAPSHOT), then
 form 2 with the row read back as the design answers.
+
+### 2026-10-26: form 1 built, reads without anchors at SNAPSHOT and the clear-table memory on Oracle
+
+By translation of 4.2 "On Oracle both hold": `Router.versionless()` holds on Oracle at SNAPSHOT as
+on PostgreSQL, so a read in a transaction records no anchor and appends the state column instead;
+the state column's two probes, the coarse check (`Writes.inFlightCheck`, now built from `Names`,
+whose text is the `passed` key) and the writes' gate (`clearGate`) carry `/*+ INDEX(m <T_inflight>)
+*/` on Oracle, the alias written as the SQL writes it (the hint report resolves
+`INDEX("scalardb_native_meta" ...)` for the quoted alias and leaves `INDEX(scalardb_native_meta
+...)` unresolved, checked on the container with `DBMS_XPLAN ... +HINT_REPORT`); the pending
+per-table checks go as one statement, `SELECT CASE WHEN EXISTS (...) THEN 1 ELSE 0 END, ... FROM
+dual`; and `withPlain` gives an Oracle read its statement as written over the data tables once
+every table is found clear (`Proxies` switches to it as on PostgreSQL, nothing engine-specific
+there). The locking read keeps its versions on Oracle until form 5 (`lockingRead`'s `versioned`),
+since its steps read them. Nothing else gated on PostgreSQL moved. `SnapshotIntegrationTest`'s
+"reads record no versions" branch runs on Oracle too (a DELETE and an UPDATE by predicate of a row
+ScalarDB changed after the snapshot, and one a prepare rolled back, all ORA-08177 as `40001`; a row
+locked then written). The in-flight copies of the split read are not hinted (form 6's and the
+micro-benchmark session's shape); the probes the SNAPSHOT forms rest on are.
+
+Measured through the driver (`OracleOltpIntegrationTest.form1...`, `SQL*Net roundtrips` of the
+driver's session), a 20-row ScalarDB table, both layouts, in a transaction at SNAPSHOT:
+
+| read | round trips |
+|---|---|
+| `SELECT COUNT(*) ... WHERE id <= 20`, the table not yet found clear (the check, then the read) | 2 |
+| the same again, the table found clear (the statement as written, no check) | 1 |
+| `SELECT x ... WHERE id = 1`, the state column in the statement | 1 |
+| the aggregate after that key read (its state 0 marked the table clear) | 1 |
+| the aggregate in autocommit, each time (todo 283's own transaction: autocommit off, the level, the check, the read, the commit) | 5 |
+
+The autocommit figure is not form 1's (nothing is remembered there by design) but is worth the
+design's eye: a checked read in autocommit on Oracle costs five round trips. Unit tests unchanged
+but for PostgreSQL's gate text, kept as it was; the Oracle suite run in full after the change (its
+result below).
+
+The full Oracle suite after form 1: 53 tests, all passing (10 min 40 s on the container).
+
+### 2026-10-26: form 2 built, the keyed write on Oracle as one PL/SQL block
+
+By translation of 4.3 "The keyed write on Oracle, one PL/SQL block": `Writes.oracleKeyedBlock`
+builds the block for an UPDATE or DELETE by the full key without a locking clause, in both
+layouts, created or imported, at both levels; `KeyedPlan.block` holds it and
+`KeyedPlan.applyBlock` decides from its cursor row in the design's order (no row: 0; a row without
+metadata: the steps, under a savepoint of their own; in flight: the bounded wait and the block
+again at READ COMMITTED with a wait set, else an abort; a state that is no image: 0; the anchor
+moved: abort; written and stamped: 1; else abort, "a key matched n rows" for several). The row
+comes back through a `SYS_REFCURSOR` registered as `OracleTypes.CURSOR` on a `CallableStatement`
+(`Run.call`, `Run.cursor`), the key through `readKey` and `Names.keyExpr` (a FLOAT key through
+`TO_BINARY_DOUBLE`, as the reads record it). A `Step` now carries where the stamp's three values
+sit among its binds (`stampAfter`; the block binds them between its read and its DML), and a plan
+says whether it runs under a savepoint (`Plan.savepointed`): the block plan does not, the engine
+undoing a failed block whole (fact 1). At SNAPSHOT in the inline layout the vendor's statement with
+the stamp and the hinted gate (`fastKeyed`, `applyFast`) runs first, as on PostgreSQL; the
+decoupled clear-table block comes with form 3. The builders are in `Writes` beside the PostgreSQL
+ones; unit tests of the texts in `WritesTest.onOracle_aKeyedWriteIsOneBlock` (both layouts,
+UPDATE and DELETE, created and imported, the gated statement at SNAPSHOT, a write beyond the key
+left to the steps).
+
+Two things for the review of the semantics-bearing parts, both deliberate:
+
+1. **The decoupled CAS matches the metadata row by the metadata row's own key, read in step 1
+   (`l_m0`), not by the key the DML returns.** The design text has `WHERE k = l_w(1)` from
+   `RETURNING ... BULK COLLECT`, "as the data row spells it, which the other forms do too". On
+   Oracle a CHAR(n) data key compared with the metadata table's VARCHAR2 key is a non-padded
+   comparison ('a    ' against 'a'), so the design's form would stamp nothing for a CHAR key and
+   abort every write of it; the steps match by `row.metaKey`, the key as the metadata row holds it,
+   and the block does the same. The RETURNING is then not needed in the keyed block and is left
+   out (`SQL%ROWCOUNT` gives the count); it stays in the clear-table block, which reads nothing
+   first. The CHAR key case is in `form2AnchorsOfEveryKeyType`.
+2. **The decoupled read is the data table joined to its metadata table through a derived table of
+   the key**, `FROM (SELECT t.k AS k FROM T t WHERE P) d LEFT JOIN T_meta m ON m.k = d.k`, as the
+   steps' keys read is, rather than the design's `FROM T t LEFT JOIN T_meta m ON ... WHERE P`: an
+   unqualified key column in `P` would be ambiguous between the two tables (ORA-00918). Same rows.
+
+What it gave (`OracleOltpIntegrationTest.form2KeyedWriteAsOneBlock`, `SQL*Net roundtrips` of the
+driver's session, each layout):
+
+| keyed write, in a transaction | before (the steps) | after |
+|---|---|---|
+| UPDATE or DELETE by the key at READ COMMITTED (decoupled and inline) | 4: the savepoint, the keys read, the DML, the CAS | 2: the block, and the fetch of its cursor row |
+| a write of a missing key | 2 (savepoint, keys read) | 2 |
+| at SNAPSHOT, decoupled | 4 | 2 |
+| at SNAPSHOT, inline, a table clear or not yet known (the vendor's statement with the stamp) | 4 | 1 |
+| in autocommit, at READ COMMITTED | 5 | 3: the block, the fetch, the commit |
+
+The "before" column is measured on the same run as a write by the key written as a predicate,
+`WHERE id IN (8)`, which still takes the steps until form 3. The second round trip is the ref
+cursor's fetch (fact 8), the open case sent to the design: with OUT binds the block would be one
+round trip in a transaction and two in autocommit. Outcomes checked on both layouts: a missing key
+0; the anchor of a row read then changed by another connection, `40001`; a row in flight, `40001`
+at once, and with `scalardbnative.inflightWaitMs` a wait that ends with the write once the row
+settles; at SNAPSHOT a row changed after the snapshot, `40001` with error code 8177 and the
+transaction rollback-only; ScalarDB reads what the driver wrote. And for each key type ScalarDB
+imports on Oracle (NUMBER(10), NUMBER(15), VARCHAR2, CHAR(5), BINARY_FLOAT, BINARY_DOUBLE, DATE,
+TIMESTAMP at millisecond precision; not RAW, which ScalarDB takes no key of on Oracle, nor
+NUMBER(19), which it does not import), the anchor a read records is the one the block reads back:
+a change in between aborts, the unchanged row is written. `timeoutMidWrite`'s statement is a
+predicate write (`id IN (80, 81)`), so its expectation moves with form 3, not here. The full
+Oracle suite after form 2: run next, its result below.
+
+The full Oracle suite after form 2: 55 tests (the 53 and the two form tests), all passing, 11 min
+42 s on a fresh container.
+
+### 2026-10-26: form 3 built, the write beyond the key on Oracle as one block, and the decoupled clear-table block
+
+By translation of 4.3 "The write beyond the key on Oracle": `Writes.oraclePredicateBlock` builds
+the block for an UPDATE or DELETE whose predicate is not the full key, both layouts, both levels;
+`KeyedPlan.predicateBlock` holds it and `KeyedPlan.applyPredicateBlock` decides from its row of
+counts in the design's order (found 0: count 0; after 1: abort; held: the wait and the block again
+at READ COMMITTED with a wait set, else abort; missing: the steps; the abort codes 1 to 5 with the
+steps' messages; stamped short of written: abort; else the count). It runs only when the
+transaction recorded no anchor of the table, as the design says; with anchors the steps run, under
+their savepoint. The decoupled clear-table block (`oracleClearTableBlock`, the DML with the gate
+returning its keys, the stamp as a `FORALL`, a created table's DELETE removing the metadata rows,
+an imported table's `MERGE` per key) is `fastKeyed`'s Oracle text for the decoupled layout and runs
+through `applyFast` by the cursor's two counts, at SNAPSHOT, for the keyed and the predicate
+forms alike; the inline layout's clear-table statement is form 2's. Unit tests of the texts in
+`WritesTest.onOracle_aWriteBeyondTheKeyIsOneBlock`. `timeoutMidWrite`'s expectation moves to the
+one-statement one on Oracle.
+
+Three text-level choices, beside form 2's two, for the review:
+
+1. **`FORALL i IN VALUES OF l_do`** for the CAS over the keys written, in place of the paragraph's
+   `FORALL j IN 1 .. l_do.COUNT ... l_k(l_do(j))`: a FORALL index may only subscript a collection
+   directly (PLS-00430 otherwise), and `VALUES OF` iterates the positions `l_do` holds, so the
+   statement subscripts `l_m0(i)`, `l_id(i)`, `l_version(i)` with the index itself.
+2. **The collection's `.COUNT` goes through a NUMBER local** (`l_found`), as noted in task 1.
+3. **The decoupled CAS matches by the metadata row's own key** (`l_m0`, read in step 1 beside the
+   data key), as in form 2 and for the same reason.
+
+What it gave (`OracleOltpIntegrationTest.form3WriteBeyondTheKeyAsOneBlock`, each layout):
+
+| write beyond the key, in a transaction | before (the steps) | after |
+|---|---|---|
+| UPDATE over two keys at READ COMMITTED (`id IN (9, 10)`) | 6: the savepoint, the keys read, and a DML and a CAS per key | 2: the block, and the fetch of its cursor row |
+| one matching nothing | 2 | 2 |
+| at SNAPSHOT, decoupled, the table not yet found clear, then found clear | 7 (the after-image check too), then 7 | 2, then 2 |
+| at SNAPSHOT, inline, likewise | 7, then 7 | 1, then 1 (the vendor's statement with the stamp) |
+| at SNAPSHOT, an imported table, three keys one of which has no metadata row | 7 | 2, the `MERGE` writing the missing row at version 1 and stamping the two others at version 2 |
+
+Outcomes checked on both layouts: a key the predicate matched that another connection moves under
+the block's wait so that it stops matching is skipped, count 1, the other key written and stamped
+(the vendor's own skip); one moved that still matches aborts with `40001` (the decoupled CAS short
+of the DML, the inline UPDATE's version -1); a predicate matching nothing counts 0; ScalarDB reads
+what the block wrote and sees a block's DELETE gone. The full Oracle suite after form 3: run next.
+
+### 2026-10-26: form 4, first part: the INSERT on Oracle as one statement
+
+By translation of 4.3 "An INSERT on Oracle, one block": `Writes.oracleInsertBlock` builds the
+decoupled table's block for an INSERT of one row by `VALUES` without a RETURNING (the user's
+INSERT returning its key into locals, an IDENTITY key included; the metadata row under
+`IGNORE_ROW_ON_DUPKEY_INDEX`; the row that hint skipped taken over by the stamp under the
+deemed-committed condition; `meta, stamped, k...` back through the cursor), and
+`InsertPlan.applyOracleBlock` decides from its row as the design's table says (`meta` 1 or
+`stamped` 1: written; neither: an abort, the metadata row in flight; ORA-00001 out of the block,
+which leaves nothing of it, classified as the steps classify it, no savepoint). The inline table's
+INSERT runs as the one statement it is with its stamp columns (`inlineInsert` without PostgreSQL's
+RETURNING and merged text, `InsertPlan.applyOracleInline`), prepared with `RETURN_GENERATED_KEYS`
+so that its ROWID comes back with the execute, and its key is read by that ROWID only when the
+application asked for the generated keys (`Context.wantsKeys`, which `Proxies` sets from the
+statement's request), as `returned` then reads them back by the keys recorded. Several rows and an
+`INSERT ... SELECT` keep the steps. Unit tests of the texts in
+`WritesTest.onOracle_anInsertIsOneStatement`.
+
+What it gave (`OracleOltpIntegrationTest.form4InsertAsOneStatement`, the execute alone on a
+connection with a catalog TTL, since an INSERT's plan reads the table's columns and triggers once
+at prepare and the fixture's TTL of 0 would repeat that at every execute):
+
+| INSERT of one row, in a transaction | before (the steps) | after |
+|---|---|---|
+| decoupled | 4: the savepoint, the INSERT, the key read back, the metadata row | 2: the block, and the fetch of its cursor row |
+| inline | 3: the savepoint, the INSERT, the stamp of the row | 1 |
+| either, with the generated keys asked for | 5 or 4 | 3: the write, the key by ROWID where the statement did not return it, and the read-back of the rows asked for, as today |
+
+Checked on both layouts: the application's duplicate is reported as such (SQLState 23000), the
+transaction open and usable; a key a ScalarDB prepare holds aborts with `40001`; ScalarDB reads
+the rows written; on an imported table a DELETE's tombstone is taken over inside the block, the
+metadata row at the next version; an IDENTITY key comes back through the block and is read back
+when asked for.
+
+The full Oracle suite after forms 3 and 4's INSERT: 55 passing, 2 failing, both
+`SnapshotIntegrationTest`'s "an update in flight that only its after image matches" (todo 166): the
+predicate block's row of counts was decided in the table's order, `found` 0 before `after` 1, and a
+row in flight whose before image matches nothing is `found` 0 with `after` 1, so the write counted
+0 where it must abort. `applyPredicateBlock` now reads `after` first, as PostgreSQL's fused
+statement does; the paragraph's table may be reordered, a note for the review. Green after that.
+
+### 2026-10-26: form 4, second part: batches on Oracle
+
+By translation of 4.4 "Batches on Oracle". **The block of entries** (`Writes.Entries`,
+`Run.callEntries`, `Writes.applyOracleEntries`): the keyed block and the INSERT block are built
+from a body whose locals carry a suffix (`keyedBody`, `insertBody`), and a batch's consecutive
+parameter sets of one such write, up to 16, go as one block: each entry's body under `IF l_stop =
+0`, `l_done_n` set as it is reached, the entry's own binds and its own stamp (the design binds one
+stamp per block; one per entry keeps each entry's `tx_id` its own, as the batch forms on PostgreSQL
+do, at three binds more per entry), and a stop after an entry whose outcome is not final, which
+for the keyed write is anything but no row, a state that is no image, or written and stamped, and
+for the INSERT anything but written or stamped; the cursor returns `n, done` and the write's row
+per entry, `ORDER BY 1`, fetched with its end in one round trip (`setFetchSize(entries + 1)`,
+without which ojdbc's prefetch of ten costs a second fetch for ten entries). The driver records the
+entries' counts in order until the first that is not final (`KeyedPlan.entry`, `InsertPlan.entry`,
+through the single forms' `decide`), and `Proxies.runBatch` then runs that entry by its single
+form (the wait and the block again, or the steps, or the abort) and the entries after it as a new
+block; a failure the block raises of the undoable kinds (SQLState 22, 23, 40, 42) leaves nothing of
+it and the entries run one by one, as PostgreSQL's replay. An entry's abort, an anchor moved among
+them, fails the batch with the counts before it. **The vendor's batching** (`Plan.vendorBatch`,
+`Writes.applyVendorBatch`): a batch's inline INSERTs go as one `executeBatch` of the statement with
+the stamp columns, each entry's binds and stamp, unless the application asked for the generated
+keys; a `BatchUpdateException` records the counts ojdbc reports for the entries before the failing
+one and is classified for that entry as the single form classifies a duplicate. The predicate
+block's entries, the inline statement with the stamp at SNAPSHOT through `executeBatch`, and the
+merged `FORALL` block are not built: the first two are rare in a batch, the third is measured
+against the block of entries once it exists, and the block of entries already makes the batch one
+round trip of execution plus the fetch. Unit tests of the texts in
+`WritesTest.onOracle_aBatchsEntriesGoAsOneBlock`.
+
+What it gave (`OracleOltpIntegrationTest.form4BatchesAsOneBlock`):
+
+| a prepared batch in a transaction at READ COMMITTED | before | after |
+|---|---|---|
+| ten keyed UPDATEs, decoupled or inline | 20: each the block and its fetch (40 by the steps) | 2 |
+| ten INSERTs, decoupled | 20 | 2 |
+| ten INSERTs, inline | 10 | 1 |
+
+Checked on both layouts: an entry in flight stops the block, the entry's own wait settles it and
+the rest go on, every count 1; at SNAPSHOT such an entry fails the batch with `40001` and the
+counts before it; a duplicate as the third of five INSERTs fails the batch with the counts `[1, 1]`
+and the application's duplicate, the vendor's own counts on the inline table and the replay's on
+the decoupled one; `MoreWritesIntegrationTest.batches` holds (20 entries, entries that see the ones
+before, a tombstone taken over in a batch, a duplicate as the 19th entry reported with 18 counts).
+
+### 2026-10-26: form 5 built, the locking read on Oracle
+
+By translation of 4.3 "The locking read on Oracle". At SNAPSHOT the statement as written on the
+data table with the write's gate in its WHERE clause (`Writes.gatedLock`, the predicate
+parenthesized and the gate added, or a WHERE clause of the gate alone before the locking clause of
+a statement without one, left to the steps when an ORDER BY would stand in the way) for a table
+not yet found clear, and as written alone for one found clear; `LockPlan.applyGated` hands the
+rows over and marks the table clear when rows came back, sends the coarse check after an empty
+result on a table not yet clear, marks it clear when none is found, and otherwise runs the
+predicate's in-flight check, an abort for a match by either image, else the committed copy's lock
+as the steps take it, without versions. The lock's own text reads no versions at SNAPSHOT on
+Oracle now (`lockingRead`'s `versioned`); `SKIP LOCKED` and an inline table read whole keep the
+steps. At READ COMMITTED the one statement of PostgreSQL's inline form on both layouts
+(`fastRc`, `applyFastRc`): the decoupled table's copy carries its metadata row's columns through
+the left join (`SplitRead`'s `Versions` with `Check.NONE`), which the restart after a lock wait
+re-reads at the new point in time (fact 6). One thing for the review: the statement's `FOR UPDATE`
+stays as written on the derived table, so Oracle locks the metadata row joined in beside the data
+row, where the design named `OF t.k` to lock the data rows alone; a prepare of that key blocks on
+the data row anyway, and the lock goes with the transaction. No savepoint around either form.
+
+What it gave (`OracleOltpIntegrationTest.form5LockingReadAsOneStatement`, each layout):
+
+| `SELECT ... WHERE id = ? FOR UPDATE`, in a transaction | before (the steps) | after |
+|---|---|---|
+| at READ COMMITTED | 5: the in-flight check, the savepoint, the lock with its version lookups, the check again, the versions under the lock | 1 |
+| at SNAPSHOT, the table not yet found clear, rows returned | 5 | 1, and the table found clear by it (an aggregate after it 1) |
+| at SNAPSHOT, the table found clear, no row matched | 5 | 1 |
+| at SNAPSHOT, the table not yet clear, no row matched | 5 | 2: the gated statement, the coarse check |
+
+Checked on both layouts: a row in flight aborts with `40001`, or fails with the driver's ORA-00054
+under NOWAIT; a lock that waited on another connection's keyed write returns the row as that write
+left it and the write of it after goes through (the restart's anchor); at SNAPSHOT a row in flight
+the predicate matches aborts and one it does not match leaves the lock to the committed copy;
+`MoreWritesIntegrationTest.lockingReads`, `largeLockingRead`, `inFlightWait`, `timeoutMidWrite`
+and `committedWhileItWaits` hold.
+
+### 2026-10-26: form 6 built, the read side on Oracle
+
+By translation of 4.2 "The read side on Oracle": at READ COMMITTED a read's anchors are the copies'
+own columns on Oracle as on PostgreSQL (`Router`'s `own` set, `SplitRead`'s `Versions`): the inline
+copy's `tx_id` and `tx_version` with its state condition on the row, the decoupled copy's from a
+left join to its metadata row with `COALESCE(m.tx_state, 3) NOT IN (1, 2)` in place of the `NOT
+EXISTS` per row, the in-flight copy's its before image's. The probes' hints are form 1's. The
+copies' shapes are otherwise untouched, the micro-benchmark session's.
+
+What it gave (`OracleOltpIntegrationTest.form6ReadSideAnchorsAsOwnColumns`): a key read at READ
+COMMITTED in a transaction is one round trip on both layouts, its text without the two lookups per
+row; the write of a row read then holds to the version read (a change in between aborts with
+`40001`, an unchanged row is written).
+
+Every form of the brief is built. The full Oracle suite after all six: run next, its result below.
+Then the design's review pass of the result handling and the outcome rules (`applyBlock`/`decide`,
+`applyPredicateBlock`, `applyFast`'s Oracle branch, `applyOracleBlock`, `applyGated`, `entry`,
+`applyOracleEntries`, `applyVendorBatch`) against the paragraphs' tables, and the Oracle BenchBase
+build in `matrix.sh` once the PostgreSQL matrix is done (not touched here).
+
+The full Oracle suite after all six forms: 57 passing, 3 failing, all three expectations of the
+read side's text pinned to the lookups per row (`ReadIntegrationTest`'s key read with `COALESCE`
+taken as the per-row form, `WriteIntegrationTest.anchorsFromJoins` expecting `scalardb_native_meta`
+rather than the copies' own columns on Oracle); both now take Oracle as PostgreSQL, the own-column
+form being form 6's. Run again on a fresh container, and the PostgreSQL suite after it, since the
+shared code changed (`Step`'s stamp position, `Plan.savepointed`, `Context.wantsKeys`,
+`lockingRead`'s order of computation).
+
+The full Oracle suite after that: 59 passing, 1 failing, `UnparsedIntegrationTest` on Oracle,
+which is a test-order interaction and not the forms': it reads a plain table named `p` as written,
+and `WriteIntegrationTest` imports a ScalarDB table named `p` in another schema, which the unparsed
+name check then refuses by design (4.1, a name in any schema); the class order shifted with the new
+test class, and the test fails alone on a database where `aj.p` exists and passed in every earlier
+run where it came first. The plain table is renamed so that no ScalarDB table shares its name.
+The PostgreSQL suite after all six forms: 77 tests, all passing (6 min 12 s under Testcontainers),
+so the shared code that moved (`Step`'s stamp position, `Plan.savepointed`, `Context.wantsKeys`,
+`lockingRead`'s order of computation, `inFlightCheck` from `Names`) changed nothing there.

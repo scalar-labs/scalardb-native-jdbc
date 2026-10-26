@@ -1173,7 +1173,7 @@ public final class Proxies {
       closeCurrentResult();
       Writes.Keys inserted = new Writes.Keys();
       Out out = new Out();
-      Writes.Context context = writeContext(bound ? parameters : null, inserted, out);
+      Writes.Context context = writeContext(bound ? parameters : null, inserted, out, keys != null);
       long[] count = {0};
       try {
         Writes.within(
@@ -1244,7 +1244,10 @@ public final class Proxies {
      * inserts added to {@code inserted}, the rows it returns handed to {@code out}.
      */
     private Writes.Context writeContext(
-        @Nullable Map<Integer, Call> parameters, Writes.Keys inserted, @Nullable Out out) {
+        @Nullable Map<Integer, Call> parameters,
+        Writes.Keys inserted,
+        @Nullable Out out,
+        boolean wantsKeys) {
       // a locking read anchors its rows as an anchored read does, in a transaction only
       boolean recording;
       boolean open;
@@ -1323,6 +1326,11 @@ public final class Proxies {
         }
 
         @Override
+        public boolean wantsKeys() {
+          return wantsKeys;
+        }
+
+        @Override
         public void rows(ResultSet rows, int hidden) {
           if (out == null) {
             throw new IllegalStateException("rows from a batch entry");
@@ -1377,6 +1385,52 @@ public final class Proxies {
               for (int i = 0; i < size; ) {
                 // the next entries of one plan with a merged form, as one statement (todo 329)
                 Writes.Plan first = routes.apply(i).write;
+                // on Oracle, consecutive parameter sets of one write as one block of entries, or
+                // through the vendor's own batching where the write is one plain statement and no
+                // generated keys are asked for (design 4.4 "Batches on Oracle", todo 334)
+                if (i >= unmerged
+                    && first != null
+                    && (first.entries() != null || (first.vendorBatch() != null && keys == null))) {
+                  boolean block = first.entries() != null;
+                  int max = block ? Writes.ENTRIES_MAX : Writes.MERGE_MAX;
+                  int same = i;
+                  while (same < size
+                      && same - i < max
+                      && Objects.equals(routes.apply(same).write, first)) {
+                    same++;
+                  }
+                  if (same - i > 1) {
+                    List<Writes.Context> contexts = new ArrayList<>();
+                    for (int j = i; j < same; j++) {
+                      contexts.add(writeContext(parameters.apply(j), inserted, null, keys != null));
+                    }
+                    int at = i;
+                    Writes.Finalized finalized =
+                        (j, count) -> {
+                          counts[at + j] = count;
+                          owner.ran(routes.apply(at + j));
+                          done[0]++;
+                        };
+                    if (block) {
+                      int finalizedCount =
+                          Writes.applyOracleEntries(owner.vendor, first, contexts, finalized);
+                      if (finalizedCount > 0) {
+                        last[0] = first;
+                        i += finalizedCount;
+                        continue;
+                      }
+                      if (finalizedCount < 0) {
+                        unmerged = same; // the block failed, undone whole: one by one from here
+                      }
+                      // 0: the first entry's outcome is the single form's to make, below
+                    } else {
+                      Writes.applyVendorBatch(owner.vendor, first, contexts, finalized);
+                      last[0] = first;
+                      i = same;
+                      continue;
+                    }
+                  }
+                }
                 Writes.Plan merging =
                     sendsTogether && i >= unmerged && first != null && first.merge() != null
                         ? first
@@ -1392,7 +1446,7 @@ public final class Proxies {
                 if (merging != null && same - i > 1) {
                   List<Writes.Context> contexts = new ArrayList<>();
                   for (int j = i; j < same; j++) {
-                    contexts.add(writeContext(parameters.apply(j), inserted, null));
+                    contexts.add(writeContext(parameters.apply(j), inserted, null, keys != null));
                   }
                   long[] got =
                       Writes.applyMerged(
@@ -1428,7 +1482,7 @@ public final class Proxies {
                   List<Writes.Context> contexts = new ArrayList<>();
                   for (int j = i; j < end; j++) {
                     plans.add(Objects.requireNonNull(routes.apply(j).write));
-                    contexts.add(writeContext(parameters.apply(j), inserted, null));
+                    contexts.add(writeContext(parameters.apply(j), inserted, null, keys != null));
                   }
                   long[] got =
                       Writes.applyTogether(
@@ -1459,7 +1513,7 @@ public final class Proxies {
                           Writes.apply(
                               owner.vendor,
                               route.write,
-                              writeContext(parameters.apply(i), inserted, null));
+                              writeContext(parameters.apply(i), inserted, null, keys != null));
                     } finally {
                       owner.ran(route); // as runWrite (todo 231)
                     }

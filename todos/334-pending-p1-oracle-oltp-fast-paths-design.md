@@ -415,3 +415,32 @@ with `[1, 1]` and the two rows before the duplicate kept. Two items for the desi
    277), with the cursor kept for a type outside that table (TIMESTAMP WITH TIME ZONE, INTERVAL,
    NCHAR, a type the setup did not record). The implementing session builds form 1 meanwhile and
    form 2's result handling behind one method that reads the row, so either answer is a local change.
+
+### 2026-10-26: from the implementing session: forms 1 and 2 built, two choices for the review
+
+Form 1 (reads without anchors at SNAPSHOT, the clear-table memory, the hinted probes) and form 2
+(the keyed block) are built and measured (todo 335's log: a keyed write 4 round trips to 2 in a
+transaction, the second the cursor's fetch; the inline layout's clear-table statement 1). Two
+choices in form 2's block differ from the paragraph's text and are for the review pass: the
+decoupled CAS matches the metadata row by its own key read in step 1 rather than by `l_w(1)` from
+the DML's RETURNING, since on Oracle a CHAR(n) data key against the VARCHAR2 metadata key is a
+non-padded comparison and the design's form would stamp nothing for CHAR keys (the steps match by
+`row.metaKey` too); and the block's read goes through a derived table of the key, as the steps'
+keys read does, since an unqualified key column in `P` is ambiguous across `T` and `T_meta`.
+
+### 2026-10-26: from the implementing session: all six forms built, the review items
+
+Forms 3 to 6 are built and measured (todo 335's log). The items that differ from the paragraphs,
+for the review pass: (1) `FORALL i IN VALUES OF l_do` for the CAS over the keys written, since a
+FORALL index may only subscript a collection directly (PLS-00430 for `l_k(l_do(j))`); (2) a
+collection's `.COUNT` through a NUMBER local before the cursor's SELECT; (3) the predicate block's
+row is decided with `after` before `found`, as PostgreSQL's fused statement checks it: a row in
+flight whose before image matches nothing is `found` 0 with `after` 1 and must abort
+(`SnapshotIntegrationTest`, todo 166), so the table's first two rows swap; (4) the decoupled CAS
+matches the metadata row by its own key read in step 1; (5) the block of entries binds a stamp per
+entry rather than once, each entry's `tx_id` its own as on PostgreSQL; (6) the READ COMMITTED
+locking read's `FOR UPDATE` stays on the derived table, so the metadata row joined in is locked
+beside the data row, where the paragraph named `OF t.k`; (7) not built, as low-value or dependent:
+the predicate block's entries, the inline SNAPSHOT statement through `executeBatch`, the merged
+`FORALL` block (the block of entries already makes a batch one execution and one fetch), and the
+one-round-trip autocommit of a raising block (the open case of the row read back stands).

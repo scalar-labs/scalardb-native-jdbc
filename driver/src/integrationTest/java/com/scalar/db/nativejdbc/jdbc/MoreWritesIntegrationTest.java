@@ -293,7 +293,7 @@ class MoreWritesIntegrationTest {
         inFlightWait(e, tpc, t);
         lockingReads(e, tm, tpc, t);
         reviewFindings(e, tpc, t);
-        timeoutMidWrite(e, tpc, t, e.engine() == Engine.POSTGRESQL);
+        timeoutMidWrite(e, tpc, t, e.engine() == Engine.POSTGRESQL || e.engine() == Engine.ORACLE);
         committedWhileItWaits(e, t);
         readOnlyWrite(e, t);
       }
@@ -310,7 +310,7 @@ class MoreWritesIntegrationTest {
         inFlightWait(e, tpc, t);
         lockingReads(e, tm, tpc, t);
         reviewFindings(e, tpc, t);
-        timeoutMidWrite(e, tpc, t, e.engine() == Engine.POSTGRESQL);
+        timeoutMidWrite(e, tpc, t, e.engine() == Engine.POSTGRESQL || e.engine() == Engine.ORACLE);
         committedWhileItWaits(e, t);
         readOnlyWrite(e, t);
       }
@@ -1761,9 +1761,9 @@ class MoreWritesIntegrationTest {
       d.setAutoCommit(false);
       st.setQueryTimeout(2);
       if (oneStatement) {
-        // a write is one statement on PostgreSQL, decoupled (todo 328) or inline (todo 329): no
-        // point between a key's DML and its stamp, and the statement ends within the time the
-        // vendor statement was given
+        // a write is one statement on PostgreSQL, decoupled (todo 328) or inline (todo 329), and
+        // one block on Oracle (todo 334): no point between a key's DML and its stamp, and the
+        // statement ends within the time the vendor statement was given
         assertThat(st.executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id IN (80, 81)"))
             .isEqualTo(2);
         settle.get(5, TimeUnit.SECONDS);

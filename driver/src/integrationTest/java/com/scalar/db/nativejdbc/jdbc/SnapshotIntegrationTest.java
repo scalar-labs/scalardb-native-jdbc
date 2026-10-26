@@ -665,9 +665,9 @@ class SnapshotIntegrationTest {
               .isEqualTo("40001");
           d.rollback();
         }
-        if (pg) {
-          // reads record no versions here (todo 329): a write's own read of its keys, in the same
-          // snapshot, and PostgreSQL's conflict on the row stand in for them
+        if (pg || oracle) {
+          // reads record no versions here (todo 329, on Oracle todo 334): a write's own read of
+          // its keys, in the same snapshot, and the engine's conflict on the row stand in for them
           rows(d, "SELECT x FROM " + SN + ".t WHERE id = 4");
           scalarDbSet(tm, 4, "d");
           assertConflict(d, "DELETE FROM " + SN + ".t WHERE id = 4", at + ": a delete");

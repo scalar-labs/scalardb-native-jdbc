@@ -1055,11 +1055,13 @@ final class Router {
    * Whether reads take no versions (todo 329): at SNAPSHOT and SERIALIZABLE on PostgreSQL every
    * statement of the transaction reads its one snapshot, so a later write's own read of its keys
    * (4.3) finds the version a read would have recorded, and a version that moved after the snapshot
-   * fails the write with PostgreSQL's serialization failure. Elsewhere an UPDATE reads the newest
-   * committed version, which the recorded anchor has to catch.
+   * fails the write with PostgreSQL's serialization failure. The same on Oracle, whose SERIALIZABLE
+   * is snapshot isolation and fails a write to a row changed since the snapshot with ORA-08177
+   * (design 4.2 "On Oracle both hold", todo 334). Elsewhere an UPDATE reads the newest committed
+   * version, which the recorded anchor has to catch.
    */
   private boolean versionless() {
-    return engine == Engine.POSTGRESQL && snapshot();
+    return (engine == Engine.POSTGRESQL || engine == Engine.ORACLE) && snapshot();
   }
 
   /**
@@ -1129,7 +1131,9 @@ final class Router {
         }
         String held = m + "." + engine.quote("tx_state") + " IN (1, 2)";
         out.add(
-            "CASE WHEN NOT EXISTS (SELECT 1 FROM "
+            "CASE WHEN NOT EXISTS (SELECT "
+                + n.inflightHint(m)
+                + "1 FROM "
                 + n.meta
                 + " "
                 + m
@@ -1138,6 +1142,7 @@ final class Router {
                 + ") THEN 0 WHEN ("
                 + String.join(", ", keys)
                 + ") IN (SELECT "
+                + n.inflightHint(m)
                 + String.join(", ", inFlight)
                 + " FROM "
                 + n.meta
@@ -1312,8 +1317,42 @@ final class Router {
       readDb.put(readRef, t);
     }
     SqlAst.TableRef anchoredRef = readRef;
-    // the lock sent with its in-flight check in one round trip reads no versions (LockPlan)
-    boolean versioned = !versionless() || shape.skipLocked();
+    Expression where = shape.where();
+    int[] span = where == null ? null : ast.span(where);
+    List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
+    // at SNAPSHOT and SERIALIZABLE on PostgreSQL, and at SNAPSHOT on Oracle, the statement as
+    // written, on the data table: the rows it locks are the committed rows where the table has
+    // none in flight (todo 329, todo 334); not for an inline table whose rows it reads whole,
+    // which would show the metadata columns. Marked, so that its text differs from the
+    // application's own prepared statement of the same text: pgjdbc's statement cache holds one
+    // entry per text, and two statements borrowing it in turn would drop each other's
+    // server-side plan at every call
+    List<Integer> all = ast.placeholdersIn(0, ast.source().length());
+    String plainSql =
+        (engine == Engine.POSTGRESQL || engine == Engine.ORACLE)
+                && snapshot()
+                && all != null
+                && (!n.inline || ast.columnsReadFrom(readRef) != null)
+            ? Writes.onDataTable(engine, ast, t, true, ast.source(), -1)
+            : null;
+    if (plainSql != null) {
+      plainSql = "/* scalardb_native_lock */ " + plainSql;
+    }
+    // on Oracle at SNAPSHOT, the same statement with the write's gate in its WHERE clause, for a
+    // table the transaction has not found clear yet (design 4.3 "The locking read on Oracle",
+    // todo 334); SKIP LOCKED keeps the steps and their versions
+    String gatedSql =
+        engine == Engine.ORACLE && plainSql != null && !shape.skipLocked()
+            ? Writes.gatedLock(engine, ast, t, n, span)
+            : null;
+    if (gatedSql != null) {
+      gatedSql = "/* scalardb_native_lock */ " + gatedSql;
+    }
+    boolean oracleSnapshot = gatedSql != null;
+    // the lock sent with its in-flight check in one round trip reads no versions (LockPlan), nor
+    // does the Oracle form at SNAPSHOT; the steps on Oracle keep theirs
+    boolean versioned =
+        !versionless() || shape.skipLocked() || (engine == Engine.ORACLE && !oracleSnapshot);
     SqlAst.Split readSplit = read.split(r -> r == anchoredRef ? t.keyColumns() : null);
     SqlAst.SplitText text =
         SplitRead.emit(
@@ -1333,8 +1372,11 @@ final class Router {
     // lock returns each row's newest version, the anchor the level wants, and a row in flight
     // shows its state; the images of a row differ in no column the statement matches or orders
     // by, so no row in flight is matched by its before image alone (design 4.2, todo 329)
+    // on Oracle too, in both layouts, the decoupled one's metadata row joined, whose restart after
+    // a lock wait runs the join again at the new point in time (design 4.3 "The locking read on
+    // Oracle", todo 334, its test 6)
     boolean fastRc =
-        engine == Engine.POSTGRESQL
+        (engine == Engine.POSTGRESQL || engine == Engine.ORACLE)
             && !snapshot()
             && !shape.skipLocked()
             && !shape.grouped()
@@ -1343,7 +1385,7 @@ final class Router {
             && keysOnly(t, shape.whereColumns())
             && keysOnly(t, shape.orderByColumns());
     SqlAst.SplitText fastText = null;
-    if (fastRc && n.inline) {
+    if (fastRc && (n.inline || engine == Engine.ORACLE)) {
       fastText =
           SplitRead.emit(
               engine,
@@ -1360,9 +1402,6 @@ final class Router {
               Set.of(readRef),
               true);
     }
-    Expression where = shape.where();
-    int[] span = where == null ? null : ast.span(where);
-    List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
     if (text == null || (where != null && span == null) || inWhere == null) {
       throw Errors.unsupported(
           "the locking read cannot be rewritten onto the committed rows" + tables);
@@ -1392,23 +1431,6 @@ final class Router {
         shape.skipLocked()
             ? null // a row in flight is a locked row, skipped
             : inFlightStep(t, ref, ast, span, inWhere);
-    // at SNAPSHOT and SERIALIZABLE on PostgreSQL the statement as written, on the data table: the
-    // rows it locks are the committed rows where the table has none in flight (todo 329); not for
-    // an inline table whose rows it reads whole, which would show the metadata columns. Marked,
-    // so that its text differs from the application's own prepared statement of the same text:
-    // pgjdbc's statement cache holds one entry per text, and two statements borrowing it in turn
-    // would drop each other's server-side plan at every call
-    List<Integer> all = ast.placeholdersIn(0, ast.source().length());
-    String plainSql =
-        engine == Engine.POSTGRESQL
-                && snapshot()
-                && all != null
-                && (!n.inline || ast.columnsReadFrom(readRef) != null)
-            ? Writes.onDataTable(engine, ast, t, true, ast.source(), -1)
-            : null;
-    if (plainSql != null) {
-      plainSql = "/* scalardb_native_lock */ " + plainSql;
-    }
     // at SNAPSHOT and SERIALIZABLE a row in flight aborts the transaction (section 6), NOWAIT or
     // not
     // the same at READ COMMITTED on a decoupled table, whose state is in its metadata row, which
@@ -1464,7 +1486,11 @@ final class Router {
                 : null,
             engine == Engine.POSTGRESQL && snapshot(),
             plainSql == null || all == null ? null : new Writes.Step(plainSql, all),
-            fastRcStep);
+            fastRcStep,
+            gatedSql == null || all == null ? null : new Writes.Step(gatedSql, all),
+            gatedSql == null || plainSql == null || all == null
+                ? null
+                : new Writes.Step(plainSql, all));
     return new Route(
         sql,
         sql,
@@ -1687,8 +1713,8 @@ final class Router {
     boolean versioned = !versionless();
     List<SqlAst.TableRef> anchored = (anchoring && versioned) || states ? anchorable : List.of();
     Set<SqlAst.TableRef> own = Collections.newSetFromMap(new IdentityHashMap<>());
-    if (engine == Engine.POSTGRESQL && versioned) {
-      own.addAll(anchored);
+    if ((engine == Engine.POSTGRESQL || engine == Engine.ORACLE) && versioned) {
+      own.addAll(anchored); // on Oracle, design 4.2 "The read side on Oracle" (todo 334)
     }
     IdentityHashMap<SqlAst.TableRef, Writes.Names> anchorNames = new IdentityHashMap<>();
     List<String> anchorTables = new ArrayList<>();
@@ -1699,7 +1725,7 @@ final class Router {
       anchorNames.put(r, n);
       anchorTables.add(n.table);
       keys.add(versioned ? n.keyColumns.size() : 0); // without versions, no key either
-      anchorChecks.add(inFlightCheck(engine, n.meta));
+      anchorChecks.add(Writes.inFlightCheck(n));
     }
     SqlAst.SplitText text =
         SplitRead.emit(
@@ -2054,19 +2080,18 @@ final class Router {
                   // which the filtered index then does not match (Msg 8622); RECOMPILE keeps it
                   // (todo 271)
                   + (hint ? " OPTION (RECOMPILE)" : " LOCK IN SHARE MODE")
-              : inFlightCheck(engine, SplitRead.meta(engine, t)));
+              : inFlightCheck(t));
     }
     return List.copyOf(out);
   }
 
   /**
    * The coarse check of a table for rows in flight, one probe of the in-flight index of its
-   * metadata table {@code meta}: a row means the transaction's snapshot holds a row in flight of
-   * the table. Its text is the key under which a transaction remembers that it found none (design
-   * 4.2, todo 329).
+   * metadata table: a row means the transaction's snapshot holds a row in flight of the table. Its
+   * text is the key under which a transaction remembers that it found none (design 4.2, todo 329).
    */
-  static String inFlightCheck(Engine engine, String meta) {
-    return Writes.inFlightCheck(engine, meta);
+  String inFlightCheck(TableInfo t) {
+    return Writes.inFlightCheck(new Writes.Names(engine, t));
   }
 
   /**
@@ -2344,7 +2369,8 @@ final class Router {
       justification = "the driver's own statements, built from the catalog's quoted names")
   void check(Connection vendor, Route route, int timeout, @Nullable Binder binder)
       throws SQLException {
-    // the checks still to run, in one round trip on PostgreSQL as one statement (todo 329)
+    // the checks still to run, in one round trip on PostgreSQL and Oracle as one statement (todo
+    // 329, todo 334)
     List<String> pending = new ArrayList<>();
     lock.lock();
     try {
@@ -2357,12 +2383,18 @@ final class Router {
       lock.unlock();
     }
     Map<String, Boolean> results = new HashMap<>();
-    if (engine == Engine.POSTGRESQL && pending.size() > 1) {
+    boolean oracle = engine == Engine.ORACLE;
+    if ((engine == Engine.POSTGRESQL || oracle) && pending.size() > 1) {
       List<String> columns = new ArrayList<>();
       for (String check : pending) {
-        columns.add("EXISTS (" + check + ")");
+        columns.add(
+            oracle
+                ? "CASE WHEN EXISTS (" + check + ") THEN 1 ELSE 0 END"
+                : "EXISTS (" + check + ")");
       }
-      try (PreparedStatement st = vendor.prepareStatement("SELECT " + String.join(", ", columns))) {
+      try (PreparedStatement st =
+          vendor.prepareStatement(
+              "SELECT " + String.join(", ", columns) + (oracle ? " FROM dual" : ""))) {
         st.setQueryTimeout(timeout);
         try (ResultSet rs = st.executeQuery()) {
           rs.next();
@@ -2493,14 +2525,17 @@ final class Router {
 
   /**
    * The statement as written over the data tables, which a transaction at SNAPSHOT or SERIALIZABLE
-   * on PostgreSQL runs once it found every ScalarDB table of the read clear (design 4.2, todo 329):
-   * no row of those tables is in flight in its snapshot, so the rows the data tables show are the
-   * committed ones, as the rewritten read would return them. Null where it cannot be: an inline
-   * table read whole, whose metadata columns would show, or a text the names cannot be replaced in.
+   * on PostgreSQL or Oracle runs once it found every ScalarDB table of the read clear (design 4.2,
+   * todos 329 and 334): no row of those tables is in flight in its snapshot, so the rows the data
+   * tables show are the committed ones, as the rewritten read would return them. Null where it
+   * cannot be: an inline table read whole, whose metadata columns would show, or a text the names
+   * cannot be replaced in.
    */
   private Route withPlain(
       Route r, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
-    if (engine != Engine.POSTGRESQL || !snapshot() || ast.hasLockingOrIntoClause()) {
+    if ((engine != Engine.POSTGRESQL && engine != Engine.ORACLE)
+        || !snapshot()
+        || ast.hasLockingOrIntoClause()) {
       return r;
     }
     Set<String> cleared = new TreeSet<>();
@@ -2509,7 +2544,7 @@ final class Router {
       if (t.layout() == Layout.INLINE && ast.columnsReadFrom(e.getKey()) == null) {
         return r;
       }
-      cleared.add(inFlightCheck(engine, SplitRead.meta(engine, t)));
+      cleared.add(inFlightCheck(t));
     }
     String plain =
         ast.joinTokens(
