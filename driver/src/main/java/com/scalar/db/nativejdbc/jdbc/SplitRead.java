@@ -381,7 +381,18 @@ final class SplitRead {
     switch (check) {
       case NOT_EXISTS:
       case SEEK:
-        sql.append(" WHERE NOT EXISTS (SELECT 1 FROM ")
+        sql.append(" WHERE ");
+        if (engine == Engine.POSTGRESQL && t.layout() != Layout.INLINE) {
+          // one probe of the in-flight index for the whole statement first: while the table has
+          // no row in flight the planner never builds the set the per-row probe reads, and past
+          // work_mem it keeps the EXISTS as that probe (design 4.2, todo 337)
+          sql.append("NOT EXISTS (SELECT 1 FROM ")
+              .append(meta(engine, t))
+              .append(" WHERE ")
+              .append(txState)
+              .append(" IN (1, 2)) OR ");
+        }
+        sql.append("NOT EXISTS (SELECT 1 FROM ")
             .append(meta(engine, t))
             .append(check == Check.SEEK ? " q WITH (FORCESEEK) WHERE " : " q WHERE ")
             .append(keyJoin(engine, t, "q"))

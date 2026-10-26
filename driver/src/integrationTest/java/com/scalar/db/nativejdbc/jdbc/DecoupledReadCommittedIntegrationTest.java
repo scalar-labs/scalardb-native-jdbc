@@ -49,7 +49,8 @@ import org.junit.jupiter.api.Test;
     value = {
       "SQL_INJECTION_JDBC",
       "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
-      "ODR_OPEN_DATABASE_RESOURCE"
+      "ODR_OPEN_DATABASE_RESOURCE",
+      "OBL_UNSATISFIED_OBLIGATION"
     },
     justification =
         "statements written in the test sources, their names from the catalog, closed with their"
@@ -73,7 +74,7 @@ class DecoupledReadCommittedIntegrationTest {
     factory = PG.scalarDb();
     try (DistributedTransactionAdmin admin = factory.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
-      for (String table : List.of("imp", "made")) {
+      for (String table : List.of("imp", "made", "big")) {
         if (admin.namespaceExists(NS) && admin.tableExists(NS, table)) {
           admin.dropTable(NS, table);
         }
@@ -88,11 +89,14 @@ class DecoupledReadCommittedIntegrationTest {
           "DROP SCHEMA IF EXISTS " + NS + " CASCADE",
           "CREATE SCHEMA " + NS,
           "CREATE TABLE " + NS + ".imp (id INT PRIMARY KEY, x TEXT, v INT)",
-          "INSERT INTO " + NS + ".imp SELECT g, 'a', 0 FROM generate_series(1, 20) g");
+          "INSERT INTO " + NS + ".imp SELECT g, 'a', 0 FROM generate_series(1, 20) g",
+          "CREATE TABLE " + NS + ".big (id INT PRIMARY KEY, x TEXT)",
+          "INSERT INTO " + NS + ".big SELECT g, 'a' FROM generate_series(1, 5000) g");
     }
     try (DistributedTransactionAdmin admin = factory.getTransactionAdmin()) {
       admin.createNamespace(NS, true);
       admin.importTable(NS, "imp", DECOUPLED, Map.of());
+      admin.importTable(NS, "big", DECOUPLED, Map.of());
       admin.createTable(
           NS,
           "made",
@@ -660,6 +664,110 @@ class DecoupledReadCommittedIntegrationTest {
         d.commit();
       }
     }
+  }
+
+  /**
+   * Todo 337, candidate 1: the lock's versions read from the metadata table alone. A key locked
+   * without a metadata row (a row the application inserted after the setup) takes the NULL-metadata
+   * anchor, and its write after the lock goes through, the metadata row inserted at version 1; a
+   * tombstone under the predicate (an imported table's DELETE keeps its metadata row, 4.5) is shown
+   * by the read and not locked, and changes nothing.
+   */
+  @Test
+  void todo337_theLocksVersionsReadFromTheMetadataTableAlone() throws Exception {
+    try (Connection v = PG.open()) {
+      Router router = new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+      Writes.LockPlan plan =
+          (Writes.LockPlan)
+              Objects.requireNonNull(
+                  router.route(v, "SELECT x FROM " + NS + ".imp WHERE id = ? FOR UPDATE").write);
+      String second = Objects.requireNonNull(plan.fastRc).sql;
+      second = second.substring(second.indexOf("; ") + 2);
+      System.out.println("[337] the versions read: " + second);
+      assertThat(second)
+          .contains("FROM " + "\"" + NS + "\".\"" + imp.metadataTable() + "\" imp WHERE id = ?")
+          .doesNotContain("\"" + NS + "\".\"imp\" ");
+      PG.execute(v, "INSERT INTO " + NS + ".imp VALUES (40, 'a', 0), (41, 'a', 0), (42, 'a', 0)");
+    }
+    try (Connection d = PG.openDriver();
+        Connection v = PG.open()) {
+      d.setAutoCommit(false);
+      String table = new Writes.Names(Engine.POSTGRESQL, imp).table;
+      // a key without a metadata row, locked
+      assertThat(metaRow(v, imp, 40)).isEmpty();
+      assertThat(rows(d, "SELECT x FROM " + NS + ".imp WHERE id = 40 FOR UPDATE"))
+          .containsExactly("a");
+      assertThat(anchors(d).recorded(table)).isTrue();
+      assertThat(anchors(d).unchanged(table, new Object[] {40}, null, null)).isTrue();
+      assertThat(
+              d.createStatement().executeUpdate("UPDATE " + NS + ".imp SET x = 'l' WHERE id = 40"))
+          .isEqualTo(1);
+      d.commit();
+      assertThat(rows(v, "SELECT tx_version, tx_state FROM " + meta(imp) + " WHERE id = 40"))
+          .containsExactly("1/3");
+      // a tombstone under the predicate: 41 deleted through the driver keeps its metadata row
+      assertThat(d.createStatement().executeUpdate("DELETE FROM " + NS + ".imp WHERE id = 41"))
+          .isEqualTo(1);
+      d.commit();
+      assertThat(metaRow(v, imp, 41)).hasSize(1);
+      assertThat(rows(d, "SELECT id FROM " + NS + ".imp WHERE id BETWEEN 41 AND 42 FOR UPDATE"))
+          .containsExactly("42");
+      assertThat(
+              d.createStatement().executeUpdate("UPDATE " + NS + ".imp SET x = 'm' WHERE id = 42"))
+          .isEqualTo(1);
+      d.commit();
+      assertThat(rows(v, "SELECT x FROM " + NS + ".imp WHERE id = 42")).containsExactly("m");
+    }
+  }
+
+  /**
+   * Todo 337, candidate 3: on PostgreSQL a decoupled table's committed copy probes the in-flight
+   * index once for the statement before its per-row probe. With nothing in flight the per-row set
+   * is never built; with rows in flight the gate is kept and the count is right. The plans as
+   * EXPLAIN shows them, printed for the log.
+   */
+  @Test
+  void todo337_thePerRowProbeBehindOneProbeOfTheIndex() throws Exception {
+    try (Connection v = PG.open()) {
+      Router router = new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+      String read = "SELECT COUNT(*) FROM " + NS + ".big WHERE id BETWEEN 100 AND 4000";
+      String routed = router.route(v, read).sql;
+      String metaTable = "\"" + NS + "\".\"" + big().metadataTable() + "\"";
+      System.out.println("[337] the routed read: " + routed);
+      assertThat(routed)
+          .contains(
+              "NOT EXISTS (SELECT 1 FROM "
+                  + metaTable
+                  + " WHERE \"tx_state\" IN (1, 2)) OR NOT EXISTS");
+      assertThat(rows(v, read)).containsExactly("3901");
+      // nothing in flight: the set the per-row probe reads is never built
+      String clear = String.join("\n", rows(v, "EXPLAIN (ANALYZE, COSTS OFF) " + routed));
+      System.out.println("[337] nothing in flight:\n" + clear);
+      assertThat(clear).contains("never executed");
+      // thousands in flight, work_mem small: the per-row probe, not a hashed set
+      v.setAutoCommit(false);
+      try {
+        PG.execute(
+            v,
+            "UPDATE " + metaTable + " SET tx_state = 2 WHERE id <= 3000",
+            "ANALYZE " + metaTable,
+            "SET LOCAL work_mem = '64kB'");
+        String held = String.join("\n", rows(v, "EXPLAIN (COSTS OFF) " + routed));
+        System.out.println("[337] 3000 in flight, work_mem 64kB:\n" + held);
+        // the gate kept; whether the set is hashed or probed per row is the planner's by size (a
+        // 50,000-row table with 30,000 in flight probes per row, todo 337's log)
+        assertThat(held).contains("(NOT $0) OR (NOT ");
+        assertThat(rows(v, routed)).containsExactly("1000");
+      } finally {
+        v.rollback();
+        v.setAutoCommit(true);
+        PG.execute(v, "ANALYZE " + metaTable);
+      }
+    }
+  }
+
+  private static TableInfo big() throws SQLException {
+    return catalog.lookup(List.of(), NS, "big");
   }
 
   /** The anchors of a driver connection, the transaction's versions read (design 4.2). */

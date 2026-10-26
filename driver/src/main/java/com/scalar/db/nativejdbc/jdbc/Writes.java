@@ -7579,12 +7579,10 @@ final class Writes {
           }
         }
         for (Object[] key : keys) {
+          // a locked key the read does not show has no metadata row: the NULL-metadata anchor of
+          // 4.4, as a read of such a row records it (design 4.3, todo 337)
           Anchors.Version v = versions.get(Anchors.key(key));
-          if (v == null) {
-            ps.close();
-            return applySteps(run);
-          }
-          run.context.anchor(n.table, key, v);
+          run.context.anchor(n.table, key, v != null ? v : new Anchors.Version(null, null));
         }
         ps.closeOnCompletion();
         run.context.rows(rs, width);

@@ -137,3 +137,58 @@ From todo 336's local run (`faae2ed`, the after tree), at the user's request.
 
 As above. The item read closed; the versions read and the gated probe to build after the AWS
 cells.
+
+### 2026-10-27: built (Opus), at the user's request before the AWS cells
+
+**(1) The lock's versions read from the metadata table alone.** `Router.lockingRead`'s decoupled
+READ COMMITTED versions statement reads `T_meta` under the name the statement exposes, its
+predicate as written:
+
+```sql
+SELECT imp."id", imp."tx_id", imp."tx_version", imp."tx_state",
+       (imp."before_tx_id" IS NOT NULL OR imp."before_tx_version" IS NOT NULL)
+FROM "rcd"."imp_tx_metadata" imp WHERE id = ?
+```
+
+`LockPlan.applyFastRcDecoupled` gives a locked key the read does not show the NULL-metadata anchor
+(`Anchors.Version(null, null)`) in place of the steps. Tests,
+`DecoupledReadCommittedIntegrationTest.todo337_theLocksVersionsReadFromTheMetadataTableAlone`: the
+text; a key the application inserted after the setup, locked, its anchor equal to NULLs, its write
+after the lock 1 and its metadata row then at version 1, state 3; a tombstone under the predicate
+(an imported table's DELETE through the driver keeps the metadata row), the lock returning the
+other key alone and its write going through.
+
+**(3) The per-row in-flight probe behind one probe of the index.** `SplitRead.committed`, for
+`Check.NOT_EXISTS` on PostgreSQL and a decoupled table: `WHERE NOT EXISTS (SELECT 1 FROM T_meta
+WHERE tx_state IN (1, 2)) OR NOT EXISTS (<the per-row probe as before>)`. The plans,
+`todo337_thePerRowProbeBehindOneProbeOfTheIndex` on a 5,000-row imported table:
+
+```
+-- nothing in flight, EXPLAIN ANALYZE
+Bitmap Heap Scan on big t  Filter: ((NOT $0) OR (NOT (hashed SubPlan 3)))
+  InitPlan 1 (returns $0) -> Seq Scan on big_tx_metadata (rows=0)
+  SubPlan 3 -> Bitmap Heap Scan on big_tx_metadata q (never executed)
+-- 3,000 in flight, work_mem 64kB: still (NOT $0) OR (NOT (hashed SubPlan 3)), the set fits
+```
+
+and on a throwaway PostgreSQL 16, a 50,000-row table:
+
+```
+-- nothing in flight
+Index Only Scan using p337_pkey on p337 t  Filter: ((NOT $0) OR (NOT (hashed SubPlan 3)))
+  InitPlan 1 -> Index Only Scan using p337_if on p337_m
+-- 30,000 in flight, work_mem 64kB: the per-row probe
+Index Only Scan using p337_pkey on p337 t  Filter: ((NOT $0) OR (NOT (SubPlan 2)))
+  SubPlan 2 -> Index Only Scan using p337_if on p337_m q  Index Cond: (id = t.id)
+-- the old text there: Hash Anti Join over a Seq Scan of p337_m
+```
+
+So both plans of the design hold: the set never built while the table is clear, the probe per row
+by key once the set passes work_mem. One observation: on the 5,000-row test table the InitPlan
+reads `big_tx_metadata` by a sequential scan (5,000 rows filtered, 0.28 ms), not by the partial
+in-flight index, which the planner takes on the 50,000-row table; a small table's cost, to watch in
+the benchmark's `server.txt`. The test asserts the gate and the count with rows in flight.
+
+Gates: unit tests 397; the PostgreSQL suite 139 tests, 88 run, all passing; SpotBugs main clean,
+the integration tests' remaining findings the benchmark classes'. The other engines' suites and the
+local measurement next.

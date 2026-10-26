@@ -1472,32 +1472,37 @@ final class Router {
       }
       String keysLock = inner == null ? keysText.sql() : keysText.sql().replace(LOCK_MARK, inner);
       String x = exposed(readRef);
-      // the predicate over the data table alone, in a derived table, as the user's columns are
-      // unqualified and the metadata table has the key's too
+      // the metadata table alone, under the name the statement exposes, its predicate as written:
+      // the predicate names key columns only, which the metadata table has too (design 4.3,
+      // todo 337); a locked key without a metadata row is one this read does not show
       String versions =
           "SELECT "
-              + n.readColumns("d")
-              + ", m."
-              + n.txId
-              + ", m."
-              + n.txVersion
-              + ", m."
-              + n.txState
-              + ", (m."
-              + engine.quote("before_tx_id")
-              + " IS NOT NULL OR m."
-              + engine.quote("before_tx_version")
-              + " IS NOT NULL) FROM (SELECT "
               + n.readColumns(x)
-              + " FROM "
-              + n.data
+              + ", "
+              + x
+              + "."
+              + n.txId
+              + ", "
+              + x
+              + "."
+              + n.txVersion
+              + ", "
+              + x
+              + "."
+              + n.txState
+              + ", ("
+              + x
+              + "."
+              + engine.quote("before_tx_id")
+              + " IS NOT NULL OR "
+              + x
+              + "."
+              + engine.quote("before_tx_version")
+              + " IS NOT NULL) FROM "
+              + n.meta
               + " "
               + x
-              + (span == null ? "" : " WHERE " + ast.source().substring(span[0], span[1]))
-              + ") d LEFT JOIN "
-              + n.meta
-              + " m ON "
-              + n.keyJoin("m", "d");
+              + (span == null ? "" : " WHERE " + ast.source().substring(span[0], span[1]));
       List<Integer> binds = new ArrayList<>(keysText.parameterSources());
       binds.addAll(inWhere);
       fastRcStep = new Writes.Step(keysLock + "; " + versions, binds);
