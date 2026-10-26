@@ -604,3 +604,14 @@ a mistake there is silent: the decoupled `written` 1 `stamped` 0 (a metadata row
 the read and the CAS), and the INSERT's `meta` 0 `stamped` 0 on an imported table. The predicate
 block's codes 3 and 4 are asserted as `40001` by `form3`'s moved key, which is the outcome that
 matters; the rest are error paths the engine's own mapping covers.
+
+### 2026-10-26: review closed (Fable) at 9f69337
+
+Read from the committed revision: the WARN line names the table and the two keys' classes per
+column (`OutBindCheck.classes`), the values and classes on a DEBUG line (`describe`), the unit
+test asserting the WARN text carries no value; the two silent rows have their tests
+(`form2RowMovedBetweenTheReadAndTheCas`, both layouts, through a lock wait on a row another
+connection's keyed write holds, which lands on `stamped` 0 and the inline `written` 0 rather than
+on the anchor; `form4InsertOverAMetadataRowInFlight` on the imported table). Nothing is open on
+the design side for the six forms. What follows is the measurement: the Oracle BenchBase build and
+the AWS run after the PostgreSQL matrix, against the figures of todo 335's log.
