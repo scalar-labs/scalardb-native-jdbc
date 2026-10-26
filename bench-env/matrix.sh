@@ -14,10 +14,14 @@
 # b is the driver with every table plain), BB_JVM_ARGS the execute phase's JVM options ({dir}, the
 # run's directory: -XX:StartFlightRecording:...,filename={dir}/execute.jfr), BB_LAYOUTS the layouts of
 # run (c)'s tables (decoupled by default; "decoupled inline" runs both, inline's reports prefixed
-# with -inline). NET_DELAY_US, the delay run.sh added to each round trip, goes into the reports.
+# with -inline), BB_ISOLATIONS the driver's levels (REPEATABLE_READ by default; READ_COMMITTED's
+# reports prefixed -rc, SERIALIZABLE's -ser; run (a) gets the vendor's matching level). NET_DELAYS,
+# microseconds added to each round trip to the databases (net-delay.sh, sudo), runs BenchBase's whole
+# set once per delay on the same instances, the reports prefixed -d<delay> (none by default: the
+# network as it is). Order: delay, tree, level, layout, so a level's two layouts run back to back.
 set -uo pipefail
 tier=$1; shift
-tasks=(); wtasks=(); btasks=(); props=()
+tasks=(); wtasks=(); btasks=(); props=(); targets=()
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do
   # engine=url=user; a URL can hold '=', so the user is after the last one
   engine=${1%%=*}; user=${1##*=}; url=${1#*=}; url=${url%=*}
@@ -25,6 +29,8 @@ while [ $# -gt 0 ] && [ "$1" != "--" ]; do
   tasks+=(":driver:integrationTest$task" --rerun --tests '*ReadOverheadBenchmark*')
   wtasks+=(":driver:integrationTest$task" --rerun --tests '*InFlightCheckBenchmark*')
   btasks+=(":driver:integrationTest$task" --rerun --tests '*BenchBaseBenchmark*')
+  # host:port, for net-delay.sh
+  targets+=("$(python3 -c 'import re, sys; print(re.search(r"(?://|@)([^:/;]+):(\d+)", sys.argv[1]).expand(r"\1:\2"))' "$url")")
   props+=("-Dnativejdbc.$engine.url=$url" "-Dnativejdbc.$engine.username=$user"
     "-Dnativejdbc.$engine.password=$BENCH_DB_PASSWORD")
   shift
@@ -65,16 +71,26 @@ if [ -n "${BENCHBASE:-}" ]; then
       echo "=== $tier BenchBase build FAILED"
   fi
   results=$PWD/results
-  for tree in . ${BASE_DIR:-}; do for layout in ${BB_LAYOUTS:-decoupled}; do
+  for delay in ${NET_DELAYS:-none}; do
+  if [ "$delay" != none ]; then
+    echo "=== $tier network delay $delay µs $(date +%T)"
+    sudo bash bench-env/net-delay.sh "$delay" "${targets[@]}" 2>&1 | tee "results/net-delay-$delay.txt" ||
+      { echo "=== $tier network delay $delay FAILED"; continue; }
+  fi
+  for tree in . ${BASE_DIR:-}; do for isolation in ${BB_ISOLATIONS:-REPEATABLE_READ}; do for layout in ${BB_LAYOUTS:-decoupled}; do
     prefix=bb; [ "$tree" = . ] || prefix=base
     [ "$layout" = decoupled ] || prefix=$prefix-$layout
+    case $isolation in READ_COMMITTED) prefix=$prefix-rc ;; SERIALIZABLE) prefix=$prefix-ser ;; esac
+    [ "$delay" = none ] || prefix=$prefix-d$delay
     echo "=== $tier $prefix $(date +%T)"
-    (cd "$tree" && ./gradlew "${btasks[@]}" "${props[@]}" -Dnativejdbc.bench=true \
+    # this invocation's runs alone in the archive below
+    (cd "$tree" && rm -rf driver/build/bench && ./gradlew "${btasks[@]}" "${props[@]}" -Dnativejdbc.bench=true \
       "-Dnativejdbc.benchbase=$bb" "-Dnativejdbc.benchbase.workloads=${BB_WORKLOADS:-tpcc,ycsb}" \
       "-Dnativejdbc.benchbase.runs=${BB_RUNS:-a,c}" "-Dnativejdbc.benchbase.reps=${REPS:-3}" \
       ${BB_JVM_ARGS:+"-Dnativejdbc.benchbase.jvmArgs=$BB_JVM_ARGS"} \
       "-Dnativejdbc.benchbase.time=${BB_TIME:-120}" -Dnativejdbc.benchbase.scale.tpcc=4 \
-      "-Dnativejdbc.benchbase.layout=$layout" "-Dnativejdbc.bench.netDelayUs=${NET_DELAY_US:-0}" \
+      "-Dnativejdbc.benchbase.layout=$layout" "-Dnativejdbc.benchbase.isolation=$isolation" \
+      "-Dnativejdbc.bench.netDelayUs=${delay/none/0}" \
       -Dnativejdbc.benchbase.weights.ycsb=50,5,15,10,0,20 -Dnativejdbc.benchbase.serverStats=true \
       "-Dnativejdbc.bench.tier=$tier" --continue -Pnativejdbc.parallelEngines=1 "$@" 2>&1 | grep -E 'BUILD|FAILED'
     for f in driver/build/bench/benchbase-*.md; do
@@ -86,7 +102,9 @@ if [ -n "${BENCHBASE:-}" ]; then
     for f in $(grep -l '<failure' driver/build/test-results/*/*.xml 2>/dev/null); do
       cp "$f" "$results/$prefix-$(basename "$f")"
     done)
-  done; done
+  done; done; done
+  done
+  [ "${NET_DELAYS:-none}" = none ] || sudo bash bench-env/net-delay.sh 0 "${targets[@]}" > /dev/null
 fi
 if [ -n "${WRITERS:-}" ]; then for rep in $(seq 1 "${REPS:-3}"); do
   echo "=== $tier writers-$rep $(date +%T)"

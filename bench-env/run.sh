@@ -21,9 +21,9 @@
 # Environment: BENCH_DB_PASSWORD, SSH_KEY (the private key of bench.tfvars' public one), BENCH_BUCKET,
 # MAX_RUN_MINUTES (default 480, below a login session of 12 hours, with room for the destroy);
 # matrix.sh's REPS, INFLIGHT, CHANGED, WRITERS, READS, BENCHBASE, BB_WORKLOADS, BB_TIME, BB_RUNS,
-# BB_JVM_ARGS and BB_LAYOUTS; BASELINE,
-# a commit whose tree BENCHBASE runs too; NET_DELAY_US (default 0), a delay added to each round trip
-# from the client to the databases (net-delay.sh), for a slower network than the placement gives.
+# BB_JVM_ARGS, BB_LAYOUTS, BB_ISOLATIONS and NET_DELAYS (a slower network than the placement gives,
+# one tier at a time: the delays are the client's); BASELINE,
+# a commit whose tree BENCHBASE runs too.
 # Arguments after `run` go to matrix.sh (and from there to Gradle).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -105,15 +105,8 @@ until ssh_ 'test -x /usr/lib/jvm/temurin-25-jdk-amd64/bin/java && test -x /snap/
 urls=$(tf output -json urls)
 out="${RESULTS_DIR:-$here/results}/$(date +%Y%m%d-%H%M)"
 mkdir -p "$out"
-if [ "${NET_DELAY_US:-0}" != 0 ]; then
-  # each database's host:port, from its JDBC URL
-  targets=$(python3 -c '
-import json, re, sys
-for url in json.loads(sys.argv[1]).values():
-    print(re.search(r"(?://|@)([^:/;]+):(\d+)", url).expand(r"\1:\2"))
-' "$urls")
-  echo "=== network delay $NET_DELAY_US µs"
-  ssh_ "sudo bash -s -- $NET_DELAY_US $(echo $targets)" < "$here/net-delay.sh" | tee "$out/net-delay.txt"
+if [ -n "${NET_DELAYS:-}" ] && python3 -c 'import json, sys; sys.exit(len({k[0] for k in json.loads(sys.argv[1])}) < 2)' "$urls"; then
+  echo "NET_DELAYS with one tier only: each tier's matrix.sh sets the client's delay" >&2; exit 2
 fi
 pids=(); cmds=()
 for tier in a b; do
@@ -137,7 +130,7 @@ for key, url in urls.items():
   if [ -n "${BASELINE:-}" ]; then
     (cd "$repo" && git archive "$BASELINE") | ssh_ "rm -rf $tier-base && mkdir $tier-base && tar -x -C $tier-base"
   fi
-  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-1}' BENCHBASE='${BENCHBASE:-}' BB_WORKLOADS='${BB_WORKLOADS:-}' BB_TIME='${BB_TIME:-}' BB_RUNS='${BB_RUNS:-}' BB_JVM_ARGS='${BB_JVM_ARGS:-}' BB_LAYOUTS='${BB_LAYOUTS:-}' NET_DELAY_US='${NET_DELAY_US:-0}' BASE_DIR='${BASELINE:+../$tier-base}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
+  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-1}' BENCHBASE='${BENCHBASE:-}' BB_WORKLOADS='${BB_WORKLOADS:-}' BB_TIME='${BB_TIME:-}' BB_RUNS='${BB_RUNS:-}' BB_JVM_ARGS='${BB_JVM_ARGS:-}' BB_LAYOUTS='${BB_LAYOUTS:-}' BB_ISOLATIONS='${BB_ISOLATIONS:-}' NET_DELAYS='${NET_DELAYS:-}' BASE_DIR='${BASELINE:+../$tier-base}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
   if [ -n "${BENCH_BUCKET:-}" ]; then cmds+=("$cmd"); continue; fi
   (
     ssh_ "$cmd" > "$out/$tier.log" 2>&1 || echo "tier $tier failed, see $out/$tier.log"

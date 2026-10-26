@@ -1,8 +1,9 @@
 #!/bin/bash
-# Runs as root on the client, from run.sh's NET_DELAY_US: every packet the client sends to the
+# Runs as root on the client, from matrix.sh's NET_DELAYS: every packet the client sends to the
 # databases waits DELAY_US more (Linux's netem), so each round trip to them is DELAY_US longer; other
-# traffic (ssh, S3, packages) is not delayed. Prints each database's TCP connect time, median of 50,
-# before and after, and fails if a round trip grew by less than three quarters of DELAY_US.
+# traffic (ssh, S3, packages) is not delayed. A delay set before is removed first; 0 leaves none.
+# Prints each database's TCP connect time, median of 50, without a delay and with it, and fails if a
+# round trip grew by less than three quarters of DELAY_US.
 #
 # Usage: net-delay.sh DELAY_US host:port...
 set -euo pipefail
@@ -33,8 +34,13 @@ print(round(statistics.median(times)))
 }
 first=$(ip_of "${1%:*}")
 dev=$(ip -o route get "$first" | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+tc qdisc del dev "$dev" root 2>/dev/null || true
 declare -A before
 for target in "$@"; do before[$target]=$(connect_us "$(ip_of "${target%:*}")" "${target##*:}"); done
+if [ "$delay" = 0 ]; then
+  for target in "$@"; do echo "$target: TCP connect median ${before[$target]} µs, no delay"; done
+  exit
+fi
 # a fourth band that only the filters below reach (prio's priomap uses the first three), delayed
 tc qdisc replace dev "$dev" root handle 1: prio bands 4
 tc qdisc replace dev "$dev" parent 1:4 handle 40: netem delay "${delay}us" limit 100000

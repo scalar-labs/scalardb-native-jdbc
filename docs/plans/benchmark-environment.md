@@ -228,11 +228,14 @@ second (round trips of 105 to 364 µs). `placement_strategy = "cluster"` in `ben
 client and tier A's hosts in one placement group, for a short round trip that stays the same from
 run to run; the default, `""`, leaves the placement to EC2. The role needs `iam-policy.json`'s
 placement-group actions (re-run `setup-account.sh` once). For a slower network on the same
-placement, `NET_DELAY_US=250 run.sh run ...` has the client delay each packet it sends to the
-databases by that much (`net-delay.sh`, Linux's netem; ssh and S3 are not delayed), so each round
-trip is that much longer for the vendor's runs and the driver's alike. It checks the TCP connect
-time before and after (`net-delay.txt` with the reports), and the BenchBase reports state the delay
-beside the round trip they measure. With `profiling = true`, tier A's database hosts get perf, and `perf-tier-a.sh OUT RUN...`,
+placement, `NET_DELAYS="0 250" run.sh run ...` runs BenchBase's whole set once per delay on the same
+instances: the client delays each packet it sends to the databases by that many microseconds
+(`net-delay.sh`, Linux's netem; ssh and S3 are not delayed), so each round trip is that much longer
+for the vendor's runs and the driver's alike. It checks the TCP connect time without the delay and
+with it (`net-delay-<delay>.txt` with the reports); the reports are prefixed `-d<delay>` and state
+the delay beside the round trip they measure. One tier at a time. `BB_ISOLATIONS="READ_COMMITTED
+REPEATABLE_READ SERIALIZABLE"` runs each of the driver's levels (run (a) at the vendor's matching
+one), the reports prefixed `-rc` and `-ser` beside REPEATABLE_READ's. With `profiling = true`, tier A's database hosts get perf, and `perf-tier-a.sh OUT RUN...`,
 run from the laptop beside a run, records 45 s of each named BenchBase run on the host (through the
 client, which alone reaches it) and fetches the backends' profiles, by function and with what each
 calls. About 4 minutes a run with loading: TPC-C and YCSB, (a) and (c), 3 repetitions, about
