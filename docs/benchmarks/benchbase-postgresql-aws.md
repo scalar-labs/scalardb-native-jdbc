@@ -403,11 +403,16 @@ SNAPSHOT and SERIALIZABLE against the ninth.
 | SERIALIZABLE | 467 | 429 | **0.92** | 0.89 | +0.74 ms | 26.2 / 26.4 | 0.582 / 1.070 | 1.293 / 2.088 | 25.3 / 27.3 | 0.85, 0.75, +1.39 ms (ninth) | 332 |
 
 - **READ COMMITTED, decoupled:** +1.19 → +0.88 ms a transaction fast, +1.48 → +1.04 ms slow;
-  statement time 970 → 790 µs a commit (fast, one repetition). Per call against the tenth run: the
-  stock lock 24.6 → 10.0 µs, its versions read 6.2 → 12.4 µs (todo 337, `cb16d83`, reads the
-  metadata table alone: 14.8 → 12.0 µs locally), Delivery's `order_line` write 246 → 168 µs (the
+  statement time 970 → 790 µs a commit (fast, one repetition, execution and planning). Per call
+  against the tenth run: the lock pair 30.8 → 22.4 µs a stock row (the lock 24.6 → 10.0; its
+  versions read 6.2 → 12.4, the same text, now the metadata row's first touch, which the lock's
+  subqueries paid before), Delivery's `order_line` write 246 → 168 µs (the
   `scalardb_native_before` form), the merged stock batch 331 → 218 µs, the new-order read 63 → 28
-  µs. What is left against SNAPSHOT (+0.58 ms) is about 0.3 ms a transaction.
+  µs. Against SNAPSHOT in this run, per commit: the keyed writes (district, customer, warehouse)
+  88.0 against 81.9 µs; StockLevel 45 µs executing and 32 planning against 38 and 5 (planned 5,530
+  times in 6,593 calls, 776 µs a plan against 117); planning in all 7.13 s a repetition against
+  2.80 (vendor 1.21), StockLevel 5.11 s of it. What is left against SNAPSHOT (+0.58 ms) is about
+  0.3 ms a transaction; todo 337 (`cb16d83`) takes part of the lock pair and of StockLevel.
 - **SNAPSHOT, decoupled:** as in the ninth run, within the two runs' spread: the changes since
   `6c19378`, the Oracle work among them, cost PostgreSQL nothing visible.
 - **SERIALIZABLE, decoupled:** no `SHOW max_parallel_workers_per_gather` in any repetition (ninth
