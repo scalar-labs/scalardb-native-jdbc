@@ -1,6 +1,8 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import static com.scalar.db.nativejdbc.jdbc.ScalarDbNames.N;
 import static com.scalar.db.nativejdbc.testing.Rows.rows;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionAdmin;
@@ -19,6 +21,7 @@ import com.scalar.db.nativejdbc.testing.Engines;
 import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -455,6 +458,65 @@ class ReviewFindingsIntegrationTest {
         out.add(String.join("|", labels));
         out.addAll(rows(rs));
         return out;
+      }
+    }
+  }
+
+  /**
+   * A tool walking the schema's tables asks {@code getIndexInfo} of each with exact statistics, as
+   * BenchBase does at startup; on Oracle ojdbc then gathers the statistics first, naming the table
+   * unquoted, which fails with ORA-20000 for the driver's metadata tables, created quoted in lower
+   * case. The driver answers from the dictionary alone for such names (the Oracle metadata proxy);
+   * elsewhere the call just works.
+   */
+  @ParameterizedTest
+  @MethodSource("engines")
+  void indexInfo_withExactStatistics_onScalarDbTables(Engines e) throws Exception {
+    ScalarDbNames.on(e);
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          e.createSchema("ix"),
+          "CREATE TABLE ix.t (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))");
+    }
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace(N("ix"), true);
+      admin.importTable(
+          N("ix"), N("t"), Map.of("transaction-metadata-decoupling", "true"), Map.of());
+    }
+    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog, c, t -> t.namespace().equals(N("ix")), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    String schema = e.storedSchema("ix");
+    try (Connection d = e.openDriver()) {
+      DatabaseMetaData md = d.getMetaData();
+      List<String> tables = new ArrayList<>();
+      try (ResultSet rs = md.getTables(null, schema, "%", new String[] {"TABLE"})) {
+        while (rs.next()) {
+          tables.add(rs.getString("TABLE_NAME"));
+        }
+      }
+      assertThat(tables)
+          .anyMatch(name -> name.toLowerCase(java.util.Locale.ROOT).endsWith("_tx_metadata"));
+      for (String table : tables) {
+        List<String> indexed = new ArrayList<>();
+        // exact statistics asked, as BenchBase asks
+        try (ResultSet rs = md.getIndexInfo(null, schema, table, false, false)) {
+          while (rs.next()) {
+            if (rs.getString("INDEX_NAME") != null) {
+              indexed.add(rs.getString("COLUMN_NAME"));
+            }
+          }
+        }
+        if (table.toLowerCase(java.util.Locale.ROOT).endsWith("_tx_metadata")) {
+          assertThat(indexed).as("the metadata table's primary key, " + table).isNotEmpty();
+        }
       }
     }
   }

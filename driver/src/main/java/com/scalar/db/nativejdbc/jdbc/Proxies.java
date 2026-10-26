@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
@@ -2094,7 +2095,14 @@ public final class Proxies {
 
   /**
    * Oracle's database metadata: the driver's levels, REPEATABLE READ, which runs at Oracle's
-   * SERIALIZABLE, supported, and SERIALIZABLE not (design 5).
+   * SERIALIZABLE, supported, and SERIALIZABLE not (design 5); and {@code getIndexInfo} answered
+   * from the dictionary alone for a table whose name is not all upper case. Asked for exact
+   * statistics ({@code approximate} false), ojdbc first gathers them, {@code
+   * DBMS_STATS.GATHER_TABLE_STATS} with the name unquoted, which Oracle folds to upper case, so the
+   * call fails with ORA-20000 for a table created quoted in lower case, as the driver creates
+   * ScalarDB's metadata tables; a tool that walks the schema's tables, BenchBase among them, fails
+   * with it. The index columns, uniqueness and ordering the call reports do not depend on the
+   * statistics; only the cardinality and pages columns may be as of the last gathering.
    */
   private static final class OracleMetaData extends ChildHandler {
     OracleMetaData(Object vendor, Connection connection) {
@@ -2107,6 +2115,16 @@ public final class Proxies {
         int level = (Integer) Objects.requireNonNull(args)[0];
         return level == Connection.TRANSACTION_READ_COMMITTED
             || level == Connection.TRANSACTION_REPEATABLE_READ;
+      }
+      if (method.getName().equals("getIndexInfo")
+          && args != null
+          && args.length == 5
+          && Boolean.FALSE.equals(args[4])
+          && args[2] instanceof String
+          && !((String) args[2]).equals(((String) args[2]).toUpperCase(Locale.ROOT))) {
+        Object[] approximate = args.clone();
+        approximate[4] = Boolean.TRUE;
+        return super.handle(proxy, method, approximate);
       }
       return super.handle(proxy, method, args);
     }
