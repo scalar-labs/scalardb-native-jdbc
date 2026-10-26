@@ -67,11 +67,14 @@ import org.w3c.dom.NodeList;
  *   <li>(c) the driver, every table with a primary key imported into ScalarDB and set up: the cost
  *       of the rewrite. TPC-C's {@code history} has none and stays plain.
  *   <li>(d) the vendor URL on the tables of (c), imported and set up, bypassing ScalarDB's
- *       protocol: the cost of ScalarDB's layout alone, which in the inline layout is the row's
- *       metadata and before-image columns, so that (c) against (d) is the driver's protocol by
- *       itself (todo 329). In the decoupled layout the data tables are the vendor's own, and (d) is
- *       near (a). On PostgreSQL an INSERT without a column list fills the columns it leaves out
- *       with NULL, so YCSB's runs there too.
+ *       protocol: a measurement, not a way to use the tables. The vendor driver stamps no metadata
+ *       and would read rows in flight, so its writes leave rows ScalarDB could not trust; the run
+ *       is sound only because no ScalarDB transaction runs beside it. It isolates the cost of
+ *       ScalarDB's table shape, which in the inline layout is the row's metadata and before-image
+ *       columns, left NULL here, so that (c) against (d) is the driver's protocol by itself (todo
+ *       329). In the decoupled layout the data tables are the vendor's own, and (d) is near (a). On
+ *       PostgreSQL an INSERT without a column list fills the columns it leaves out with NULL, so
+ *       YCSB's runs there too.
  * </ul>
  *
  * <p>No ScalarDB transactions run. BenchBase loads through the vendor URL in every run, from its

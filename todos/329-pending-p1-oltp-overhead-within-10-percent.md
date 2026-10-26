@@ -598,7 +598,9 @@ column could replace, the key columns needing none, so the index stays (about 7 
 a commit over 21 reads); the slim write's keys CTE (about 9 µs a write).
 
 **Run (d), the layout's cost alone** (`BenchBaseBenchmark`, runs `a,c,d`): the vendor's own driver
-on the tables of (c), imported into ScalarDB and set up, bypassing the protocol. I had written
+on the tables of (c), imported into ScalarDB and set up, bypassing the protocol: a measurement
+only, sound because no ScalarDB transaction runs beside the benchmark, since the vendor's driver
+stamps no metadata and would read rows in flight. I had written
 that the inline row's width, WAL 17 KB a commit against 7, was ScalarDB's layout and larger than
 anything left; (d) says otherwise. Local, inline, REPEATABLE READ, 60 s, one machine state:
 

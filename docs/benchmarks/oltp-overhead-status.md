@@ -40,7 +40,9 @@ Left there, by size: Delivery's write beyond the key, the two-arm shape of a key
 with CASE per column would do), the slim write's keys CTE.
 
 **Run (d), the layout alone.** The harness now has a fourth run, the vendor's driver on the tables
-of (c), imported into ScalarDB and set up. Locally at REPEATABLE READ, inline, TPC-C: (a) 1.00,
+of (c), imported into ScalarDB and set up. It is a measurement, not a supported use: the vendor's
+driver stamps no metadata and would read rows in flight, so it is sound only because no ScalarDB
+transaction runs beside the benchmark. Locally at REPEATABLE READ, inline, TPC-C: (a) 1.00,
 (d) **1.01**, (c) 0.92; YCSB (d) 0.98, (c) 0.98. ScalarDB's wider rows cost the vendor 20 to 37%
 more server time per statement and nothing in throughput, their metadata columns staying NULL. The
 driver's rows are wider still because it writes the stamp into each (WAL 15.8 KB a commit against
