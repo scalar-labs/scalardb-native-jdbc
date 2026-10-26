@@ -40,6 +40,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -213,7 +214,7 @@ class OracleOltpIntegrationTest {
     TableInfo t = catalog.lookup(List.of(), N(NS), N("t"));
     String index = Engine.ORACLE.quote(t.inflightIndex(Engine.ORACLE));
     String hint = "/*+ INDEX(\"scalardb_native_meta\" " + index + ") */";
-    try (Connection d = ORA.openDriver();
+    try (Connection d = driver();
         Connection v = ORA.open()) {
       d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       d.setAutoCommit(false);
@@ -271,20 +272,23 @@ class OracleOltpIntegrationTest {
 
   /**
    * Form 2 (design 4.3, "The keyed write on Oracle"): a write by the key runs as one block whose
-   * row comes back through a cursor, two round trips in a transaction (the execute and the cursor's
-   * fetch), on both layouts; its outcomes as the design's table: a missing key counts 0; a row this
+   * row comes back through OUT binds, one round trip in a transaction, on both layouts, two for a
+   * table's first block in the process, which returns the key through the cursor as well and
+   * compares the two; its outcomes as the design's table: a missing key counts 0; a row this
    * transaction read and another changed since aborts with 40001; a row in flight aborts at once,
    * or waits with the wait set and goes through once the row settles; at SNAPSHOT a row changed
    * after the snapshot fails the block with ORA-08177 as 40001 and leaves the transaction
-   * rollback-only; and in the inline layout at SNAPSHOT a clear table takes the vendor's statement
-   * with the stamp, one round trip.
+   * rollback-only; and at SNAPSHOT a clear table takes the vendor's statement with the stamp
+   * (inline) or the clear-table block (decoupled), one round trip. Each statement is prepared
+   * before it is measured: a text's plan, made once, reads the table's columns on Oracle.
    */
   @Test
   void form2KeyedWriteAsOneBlock() throws Exception {
     Properties waits = new Properties();
     waits.setProperty("scalardbnative.inflightWaitMs", "10000");
-    try (Connection d = ORA.openDriver();
-        Connection other = ORA.openDriver();
+    waits.setProperty("scalardbnative.catalogTtlMs", "60000");
+    try (Connection d = driver();
+        Connection other = driver();
         Connection waiting = ORA.openDriver(waits);
         TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
       for (String table : List.of("t", "ti")) {
@@ -296,36 +300,50 @@ class OracleOltpIntegrationTest {
         int before = Integer.parseInt(rows(d, "SELECT COUNT(*) FROM " + sql).get(0));
         d.setAutoCommit(false);
         Counter rt = new Counter(d);
-        long update =
-            rt.measure(
-                () -> {
-                  try (PreparedStatement ps =
-                      d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
-                    ps.setString(1, "b");
-                    ps.setInt(2, 1);
-                    assertThat(ps.executeUpdate()).isEqualTo(1);
-                  }
-                });
-        long delete =
-            rt.measure(
-                () -> assertThat(update(d, "DELETE FROM " + sql + " WHERE id = 20")).isEqualTo(1));
-        long missing =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "UPDATE " + sql + " SET x = 'z' WHERE id = 999"))
-                        .isEqualTo(0));
-        // the steps, which a write beyond the key still takes (form 3): the baseline
-        long steps =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "UPDATE " + sql + " SET x = 'b' WHERE id IN (8)"))
-                        .isEqualTo(1));
+        long first;
+        long update;
+        long delete;
+        long missing;
+        try (PreparedStatement up =
+                d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?");
+            PreparedStatement del = d.prepareStatement("DELETE FROM " + sql + " WHERE id = ?")) {
+          // the first block of the table in this process returns its key through the OUT binds
+          // and the cursor both, the check of the OUT binds' typing: one round trip more, once
+          Writes.OutBindCheck.reset();
+          first =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "b");
+                    up.setInt(2, 1);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+          update =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "b");
+                    up.setInt(2, 8);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+          delete =
+              rt.measure(
+                  () -> {
+                    del.setInt(1, 20);
+                    assertThat(del.executeUpdate()).isEqualTo(1);
+                  });
+          missing =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "z");
+                    up.setInt(2, 999);
+                    assertThat(up.executeUpdate()).isEqualTo(0);
+                  });
+        }
         d.commit();
         log(
             "form 2 ("
                 + layout
-                + "): the steps of a write by the key as a predicate, IN (8): "
-                + steps
+                + "): the table's first keyed UPDATE in the process, the check of the OUT binds, "
+                + first
                 + " round trip(s)");
         log(
             "form 2 ("
@@ -337,9 +355,10 @@ class OracleOltpIntegrationTest {
                 + ", a write of a missing key "
                 + missing
                 + " round trip(s), at READ COMMITTED in a transaction");
-        assertThat(update).isEqualTo(2);
-        assertThat(delete).isEqualTo(2);
-        assertThat(missing).isEqualTo(2);
+        assertThat(first).isEqualTo(2);
+        assertThat(update).isEqualTo(1);
+        assertThat(delete).isEqualTo(1);
+        assertThat(missing).isEqualTo(1);
         d.setAutoCommit(true);
         assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 1")).containsExactly("b");
         assertThat(rows(d, "SELECT COUNT(*) FROM " + sql))
@@ -388,18 +407,27 @@ class OracleOltpIntegrationTest {
             .as(layout + ": rollback-only after it")
             .isInstanceOf(SQLTransactionRollbackException.class);
         d.rollback();
-        // at SNAPSHOT a keyed write in a transaction: the block (decoupled), or in the inline
-        // layout the vendor's statement with the stamp, which marks the table clear, one round trip
-        long snapshot =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "UPDATE " + sql + " SET x = 'i' WHERE id = 5"))
-                        .isEqualTo(1));
-        long again =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "UPDATE " + sql + " SET x = 'j' WHERE id = 6"))
-                        .isEqualTo(1));
+        // at SNAPSHOT a keyed write in a transaction: the clear-table form, gated, then for the
+        // table found clear, one round trip each
+        long snapshot;
+        long again;
+        try (PreparedStatement up =
+            d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
+          snapshot =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "i");
+                    up.setInt(2, 5);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+          again =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "j");
+                    up.setInt(2, 6);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+        }
         d.commit();
         log(
             "form 2 ("
@@ -409,18 +437,25 @@ class OracleOltpIntegrationTest {
                 + " then "
                 + again
                 + " round trip(s)");
-        assertThat(snapshot).isEqualTo(table.equals("ti") ? 1 : 2);
-        assertThat(again).isEqualTo(table.equals("ti") ? 1 : 2);
+        assertThat(snapshot).isEqualTo(1);
+        assertThat(again).isEqualTo(1);
         assertThat(scalarDbX(table, 5)).isEqualTo("i");
         d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         d.setAutoCommit(true);
-        // in autocommit: the write in a transaction of its own
-        long auto =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "UPDATE " + sql + " SET x = 'k' WHERE id = 7"))
-                        .isEqualTo(1));
+        // in autocommit: the write in a transaction of its own, the block and the commit
+        long auto;
+        try (PreparedStatement up =
+            d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
+          auto =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "k");
+                    up.setInt(2, 7);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+        }
         log("form 2 (" + layout + "): a keyed UPDATE in autocommit " + auto + " round trip(s)");
+        assertThat(auto).isEqualTo(2);
       }
     }
   }
@@ -433,8 +468,8 @@ class OracleOltpIntegrationTest {
    */
   @Test
   void form2AnchorsOfEveryKeyType() throws Exception {
-    try (Connection d = ORA.openDriver();
-        Connection other = ORA.openDriver()) {
+    try (Connection d = driver();
+        Connection other = driver()) {
       for (KeyType k : KeyType.values()) {
         String where = " WHERE k = " + k.literal;
         d.setAutoCommit(false);
@@ -465,8 +500,8 @@ class OracleOltpIntegrationTest {
   @Test
   void form3WriteBeyondTheKeyAsOneBlock() throws Exception {
     ExecutorService pool = Executors.newSingleThreadExecutor();
-    try (Connection d = ORA.openDriver();
-        Connection other = ORA.openDriver();
+    try (Connection d = driver();
+        Connection other = driver();
         Connection v = ORA.open()) {
       for (String table : List.of("t", "ti")) {
         String sql = NS + "." + table;
@@ -474,16 +509,28 @@ class OracleOltpIntegrationTest {
         d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         d.setAutoCommit(false);
         Counter rt = new Counter(d);
-        long two =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "UPDATE " + sql + " SET x = 'p' WHERE id IN (9, 10)"))
-                        .isEqualTo(2));
-        long none =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "UPDATE " + sql + " SET x = 'q' WHERE x = 'none'"))
-                        .isEqualTo(0));
+        long two;
+        long none;
+        try (PreparedStatement ps =
+            d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id IN (?, ?)")) {
+          two =
+              rt.measure(
+                  () -> {
+                    ps.setString(1, "p");
+                    ps.setInt(2, 9);
+                    ps.setInt(3, 10);
+                    assertThat(ps.executeUpdate()).isEqualTo(2);
+                  });
+        }
+        try (PreparedStatement ps =
+            d.prepareStatement("UPDATE " + sql + " SET x = 'q' WHERE x = ?")) {
+          none =
+              rt.measure(
+                  () -> {
+                    ps.setString(1, "none");
+                    assertThat(ps.executeUpdate()).isEqualTo(0);
+                  });
+        }
         d.commit();
         log(
             "form 3 ("
@@ -493,8 +540,8 @@ class OracleOltpIntegrationTest {
                 + ", one matching nothing "
                 + none
                 + " round trip(s), at READ COMMITTED in a transaction");
-        assertThat(two).isEqualTo(2);
-        assertThat(none).isEqualTo(2);
+        assertThat(two).isEqualTo(1);
+        assertThat(none).isEqualTo(1);
         assertThat(scalarDbX(table, 9)).isEqualTo("p");
         assertThat(scalarDbX(table, 10)).isEqualTo("p");
         // a key the predicate matched that another connection moves under the block's wait so
@@ -534,16 +581,27 @@ class OracleOltpIntegrationTest {
         other.setAutoCommit(true);
         // at SNAPSHOT the clear-table form, gated, then for a table found clear
         d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
-        long clear =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "UPDATE " + sql + " SET x = 'c' WHERE id IN (15, 16)"))
-                        .isEqualTo(2));
-        long deleted =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "DELETE FROM " + sql + " WHERE id IN (17, 18)"))
-                        .isEqualTo(2));
+        long clear;
+        long deleted;
+        try (PreparedStatement up =
+                d.prepareStatement("UPDATE " + sql + " SET x = 'c' WHERE id IN (?, ?)");
+            PreparedStatement del =
+                d.prepareStatement("DELETE FROM " + sql + " WHERE id IN (?, ?)")) {
+          clear =
+              rt.measure(
+                  () -> {
+                    up.setInt(1, 15);
+                    up.setInt(2, 16);
+                    assertThat(up.executeUpdate()).isEqualTo(2);
+                  });
+          deleted =
+              rt.measure(
+                  () -> {
+                    del.setInt(1, 17);
+                    del.setInt(2, 18);
+                    assertThat(del.executeUpdate()).isEqualTo(2);
+                  });
+        }
         d.commit();
         log(
             "form 3 ("
@@ -553,8 +611,8 @@ class OracleOltpIntegrationTest {
                 + ", then a DELETE on it found clear "
                 + deleted
                 + " round trip(s)");
-        assertThat(clear).isEqualTo(table.equals("ti") ? 1 : 2);
-        assertThat(deleted).isEqualTo(table.equals("ti") ? 1 : 2);
+        assertThat(clear).isEqualTo(1);
+        assertThat(deleted).isEqualTo(1);
         assertThat(scalarDbX(table, 15)).isEqualTo("c");
         assertThat(scalarDbX(table, 17)).isNull();
         d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
@@ -565,18 +623,23 @@ class OracleOltpIntegrationTest {
       d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       d.setAutoCommit(false);
       Counter rt = new Counter(d);
-      long imported =
-          rt.measure(
-              () ->
-                  assertThat(update(d, "UPDATE " + NS + ".imp SET x = 1 WHERE x = 0"))
-                      .isEqualTo(3));
+      long imported;
+      try (PreparedStatement up =
+          d.prepareStatement("UPDATE " + NS + ".imp SET x = 1 WHERE x = ?")) {
+        imported =
+            rt.measure(
+                () -> {
+                  up.setInt(1, 0);
+                  assertThat(up.executeUpdate()).isEqualTo(3);
+                });
+      }
       d.commit();
       log(
           "form 3 (imported, decoupled): the clear-table block over three keys, one without a"
               + " metadata row: "
               + imported
               + " round trip(s)");
-      assertThat(imported).isEqualTo(2);
+      assertThat(imported).isEqualTo(1);
       String meta =
           NS
               + "."
@@ -619,6 +682,9 @@ class OracleOltpIntegrationTest {
         d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         d.setAutoCommit(false);
         Counter rt = new Counter(d);
+        // the table verified first, by a write of its own, so that the INSERT measured is the
+        // form itself and not the first-use check
+        assertThat(update(d, "UPDATE " + sql + " SET x = 'm' WHERE id = 62")).isEqualTo(1);
         long insert;
         try (PreparedStatement ps =
             d.prepareStatement("INSERT INTO " + sql + " (id, x, v) VALUES (?, ?, ?)")) {
@@ -638,7 +704,7 @@ class OracleOltpIntegrationTest {
                 + "): an INSERT of one row "
                 + insert
                 + " round trip(s), in a transaction");
-        assertThat(insert).isEqualTo(table.equals("ti") ? 1 : 2);
+        assertThat(insert).isEqualTo(1);
         assertThat(scalarDbX(table, 101)).isEqualTo("n");
         // the application's duplicate, SQLState 23000, the transaction still open
         assertThatThrownBy(
@@ -747,6 +813,9 @@ class OracleOltpIntegrationTest {
         d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         d.setAutoCommit(false);
         Counter rt = new Counter(d);
+        // the table verified first, by a write of its own, so that the batches measured are the
+        // form itself and not the first-use check
+        assertThat(update(d, "UPDATE " + sql + " SET x = 'm' WHERE id = 63")).isEqualTo(1);
         long keyed;
         try (PreparedStatement ps =
             d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
@@ -786,8 +855,8 @@ class OracleOltpIntegrationTest {
                 + ", of ten INSERTs "
                 + inserts
                 + " round trip(s), in a transaction");
-        assertThat(keyed).isEqualTo(2);
-        assertThat(inserts).isEqualTo(table.equals("ti") ? 1 : 2);
+        assertThat(keyed).isEqualTo(1);
+        assertThat(inserts).isEqualTo(1);
         assertThat(scalarDbX(table, 30)).isEqualTo("u");
         assertThat(scalarDbX(table, 39)).isEqualTo("u");
         assertThat(scalarDbX(table, 119)).isEqualTo("i");
@@ -893,11 +962,23 @@ class OracleOltpIntegrationTest {
                 () ->
                     assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 50 FOR UPDATE"))
                         .containsExactly("a"));
-        long write =
-            rt.measure(
-                () ->
-                    assertThat(update(d, "UPDATE " + sql + " SET x = 'l' WHERE id = 50"))
-                        .isEqualTo(1));
+        long write;
+        try (PreparedStatement up =
+            d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
+          // the table's first block in the process checks its OUT binds, one round trip more
+          // (form 2's figure): a write of another row first, so that the write measured is the
+          // plain one
+          up.setString(1, "a");
+          up.setInt(2, 49);
+          assertThat(up.executeUpdate()).isEqualTo(1);
+          up.setString(1, "l");
+          write =
+              rt.measure(
+                  () -> {
+                    up.setInt(2, 50);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+        }
         d.commit();
         log(
             "form 5 ("
@@ -907,6 +988,7 @@ class OracleOltpIntegrationTest {
                 + " round trip(s), the write of the locked row after it "
                 + write);
         assertThat(lock).isEqualTo(1);
+        assertThat(write).isEqualTo(1);
         assertThat(scalarDbX(table, 50)).isEqualTo("l");
         // a row in flight: an abort, or the engine's own lock failure under NOWAIT
         TwoPhaseCommitTransaction held = prepared(tpc, table, 51, "p");
@@ -1003,8 +1085,8 @@ class OracleOltpIntegrationTest {
    */
   @Test
   void form6ReadSideAnchorsAsOwnColumns() throws Exception {
-    try (Connection d = ORA.openDriver();
-        Connection other = ORA.openDriver()) {
+    try (Connection d = driver();
+        Connection other = driver()) {
       for (String table : List.of("t", "ti")) {
         String sql = NS + "." + table;
         String layout = table.equals("t") ? "decoupled" : "inline";
@@ -1041,6 +1123,17 @@ class OracleOltpIntegrationTest {
     }
   }
 
+  /**
+   * A driver connection with a catalog TTL: the fixture's TTL of 0 plans a statement again at each
+   * execute, and a write's plan reads the table's columns on Oracle, a round trip that would be
+   * counted as the form's.
+   */
+  private static Connection driver() throws SQLException {
+    Properties ttl = new Properties();
+    ttl.setProperty("scalardbnative.catalogTtlMs", "60000");
+    return ORA.openDriver(ttl);
+  }
+
   private static int update(Connection c, String sql) throws SQLException {
     try (Statement st = c.createStatement()) {
       return st.executeUpdate(sql);
@@ -1069,7 +1162,7 @@ class OracleOltpIntegrationTest {
     return tx;
   }
 
-  private static String scalarDbX(String table, int id) throws Exception {
+  private static @Nullable String scalarDbX(String table, int id) throws Exception {
     try (DistributedTransactionManager tm = factory.getTransactionManager()) {
       DistributedTransaction tx = tm.begin();
       String x =

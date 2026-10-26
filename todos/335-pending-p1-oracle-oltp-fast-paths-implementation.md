@@ -560,3 +560,74 @@ run where it came first. The plain table is renamed so that no ScalarDB table sh
 The PostgreSQL suite after all six forms: 77 tests, all passing (6 min 12 s under Testcontainers),
 so the shared code that moved (`Step`'s stamp position, `Plan.savepointed`, `Context.wantsKeys`,
 `lockingRead`'s order of computation, `inFlightCheck` from `Names`) changed nothing there.
+
+### 2026-10-26: the row through OUT binds, as the design decided (todo 334, commit 2833a5d)
+
+The blocks now return their row through OUT binds, the cursor kept as the first-use check and as
+the fallback, by translation of the decision's consequences. **The texts.** `Writes.OracleBody`
+holds a block's declarations, body, items and stop, and `block(Variant)` closes it in one of three
+ways: the items as assignments to OUT binds (`? := l_rows; ? := 1; ? := l_id; ... ? := l_k0; END;`,
+`Variant.OUT`), the assignments and then `OPEN ? FOR SELECT <the same locals> FROM dual`
+(`CHECK`), or the cursor alone (`CURSOR`, the texts as built before); `Block` (the keyed write,
+the INSERT) and `Entries` (the block of entries, per entry `n, done` and the row) give each
+variant's `Step`, with the OUT binds' types and whether a cursor follows, so the three texts
+differ in nothing but the last line (`WritesTest.onOracle_theRowComesBackThroughOutBinds` pins
+it). The counts are `NUMBER` binds; the key's bind is registered by `Writes.oracleKeyJdbcType`
+from the column's declared type, which `plan` now reads for every write plan on Oracle
+(`Writes.columns`, `ALL_TAB_COLUMNS`, before the INSERT's alone): 2 `NUMBER`, 12 `VARCHAR2`, 1
+`CHAR`, 101 `BINARY_DOUBLE` and `BINARY_FLOAT`, 93 `DATE` and `TIMESTAMP`, -3 `RAW`, and null for
+any other declared type, which keeps the cursor for that table (`Block.keyTypes` null); the row is
+read by `Writes.readOutKey`, `readKey`'s sibling on a `CallableStatement`, switching on the type
+as `readKey` does. The predicate block returns its eight counts as OUT binds and nothing else; the
+clear-table block `l_written` and `l_stamped`.
+
+**The check** (`Writes.OutBindCheck`, per table name per process): a table's blocks run the
+`CHECK` variant until the table is decided; the first block that returns a key gives it through
+both paths, `decide` compares them under `Anchors.key`, and equal marks the table verified (the
+`OUT` variant from then on), different marks it cursor-only for the rest of the process with one
+WARN line carrying both values and their classes, and no key (rows 0) decides nothing, so the
+next block checks. The row's read-back stays one method per plan: `KeyedPlan.applyBlock` (the
+check and `decide`), `KeyedPlan.applyPredicateBlock` (the counts, no key, no check),
+`KeyedPlan.applyFast`'s Oracle branch (the clear-table block's two counts),
+`InsertPlan.applyOracleBlock`, and `Writes.applyOracleEntries` for a batch (the row per entry at
+its OUT position; the checking variant's cursor over the `UNION ALL` fetched whole and each entry
+reached compared, the batch's own first-use check). An INSERT whose generated keys were asked for
+takes its key from the OUT binds (`Keys.addFromOut`), so the decoupled INSERT no longer reads the
+key by ROWID; `addBatch` on a callable statement with OUT binds is refused by ojdbc (ORA-17090),
+which the block of entries never needed.
+
+**Tests.** Confirmation test 3b is an assertion for the nine key types: the OUT bind registered
+by `oracleKeyJdbcType` of the declared type and read by `readOutKey` equals the table's key under
+`Anchors.key`, each of the nine (passes). Unit tests: `onOracle_theRowComesBackThroughOutBinds`
+(the texts per variant of the keyed block, its OUT types `2, 2, 12, 2, 2, 2, 2, 2`, the INSERT
+block's, the entries'), `onOracle_theFirstUseCheck_decidesFromTheTwoKeys` (equal, different, no
+key, and the first decisive pair counting, a later one not), the earlier text tests on the cursor
+variant as before. The form tests prepare each measured statement before measuring it, since a
+text's plan reads the table's columns once on Oracle and the fixture's catalog TTL of 0 repeated
+that at every execute (their connections carry `catalogTtlMs=60000`), and form 2 measures the
+table's first block of the process after `OutBindCheck.reset()`.
+
+What it gave, the four blocks again and the first write's extra round trip, in a transaction:
+
+| block | with the cursor | with OUT binds |
+|---|---|---|
+| the keyed UPDATE or DELETE, either layout, at READ COMMITTED | 2 | 1; the table's first block in the process (the check, OUT binds and the cursor both) 2 |
+| a write of a missing key | 2 | 1 |
+| the keyed write at SNAPSHOT: decoupled (the clear-table block); inline (the vendor's statement) | 2; 1 | 1; 1 |
+| the keyed write in autocommit (the block, the commit) | 3 | 2 |
+| the write beyond the key over two keys; one matching nothing | 2; 2 | 1; 1 |
+| the write beyond the key at SNAPSHOT, decoupled, on the table not yet found clear, then a DELETE on it found clear | 2, 2 | 1, 1 |
+| the clear-table block on the imported table, three keys one without a metadata row | 2 | 1 |
+| the INSERT of one row, decoupled (the block); inline (the statement) | 2; 1 | 1; 1 |
+| the INSERT with its generated keys asked for, decoupled; inline | 3; 3 | 2 (the block with the key, the read-back); 3 (the statement, the key by ROWID, the read-back) |
+| a batch of ten keyed UPDATEs; of ten INSERTs, decoupled | 2; 2 | 1; 1 |
+| the FOR UPDATE by the key at READ COMMITTED, and the write of the locked row after it | 1, 2 | 1, 1 (the write of another row first, so that the table's check is done; before the change the figure was the check's 2, form 5 being the first form to run) |
+
+Unit tests: 392, all passing. The full Oracle suite on a fresh container after the change: 60
+tests, all passing (11 min 55 s). `OracleOltpIntegrationTest` again after form 5's test change:
+all eight passing, the figures of the table. The PostgreSQL suite after it, since `plan` and `Step`
+changed for every engine: 77 tests, all passing (6 min 8 s under Testcontainers). Pending as
+before: the design's review pass of the result handling (`applyBlock`/`decide` now with the check,
+`applyPredicateBlock`, `applyFast`'s Oracle branch, `applyOracleBlock`, `applyGated`, `entry`,
+`applyOracleEntries`, `applyVendorBatch`) against the paragraphs' tables, and the Oracle
+BenchBase build in `matrix.sh` once the PostgreSQL matrix is done.

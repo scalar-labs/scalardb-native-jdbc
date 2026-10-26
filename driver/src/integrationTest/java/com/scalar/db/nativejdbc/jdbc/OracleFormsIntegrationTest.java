@@ -23,10 +23,6 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLTransactionRollbackException;
 import java.sql.Statement;
-import java.sql.Types;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
-import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -333,39 +329,42 @@ class OracleFormsIntegrationTest {
           tableType = typeOf(rs.getMetaData(), 1);
           jdbcType = rs.getMetaData().getColumnType(1);
         }
-        // 3b: the same key through a scalar OUT bind registered with the JDBC type the table's
-        // result set reported, read as readKey reads that type: the one-round-trip alternative the
-        // design set aside (test 8 measures the cursor's fetch); recorded for the design, not
-        // asserted
-        Object[] fromOut = new Object[1];
-        String out =
-            outcome(
-                () -> {
-                  try (CallableStatement cs =
-                      c.prepareCall(
-                          "DECLARE l_k "
-                              + t
-                              + ".k%TYPE; BEGIN SELECT k INTO l_k FROM "
-                              + t
-                              + " WHERE x = ?; ? := "
-                              + local
-                              + "; END;")) {
-                    cs.setInt(1, 0);
-                    cs.registerOutParameter(2, jdbcType);
-                    cs.execute();
-                    fromOut[0] = readOut(cs, 2, jdbcType);
-                    return show(fromOut[0]);
-                  }
-                });
-        boolean sameOut = fromOut[0] != null && Anchors.key(fromOut).equals(Anchors.key(fromTable));
+        // 3b: the same key through a scalar OUT bind registered with the JDBC type the driver
+        // takes for the column's declared type (Writes.oracleKeyJdbcType, the design's table),
+        // read as readKey reads that type (Writes.readOutKey): the form the blocks ship with,
+        // which must equal the reads' key under Anchors.key; the driver checks it on every table
+        // at first use besides (design 4.3 "The keyed write on Oracle")
+        Integer inTable = Writes.oracleKeyJdbcType(key.type());
+        assertThat(inTable).as(key.type() + " is in the table").isNotNull();
+        int declared = Objects.requireNonNull(inTable);
+        assertThat(declared).as(key.type() + " as the reads report it").isEqualTo(jdbcType);
+        Object[] fromOut;
+        try (CallableStatement cs =
+            c.prepareCall(
+                "DECLARE l_k "
+                    + t
+                    + ".k%TYPE; BEGIN SELECT k INTO l_k FROM "
+                    + t
+                    + " WHERE x = ?; ? := "
+                    + local
+                    + "; END;")) {
+          cs.setInt(1, 0);
+          cs.registerOutParameter(2, declared);
+          cs.execute();
+          Object[] read = Writes.readOutKey(cs, 2, List.of(declared));
+          assertThat(read).as(key.type() + " through an OUT bind").isNotNull();
+          fromOut = Objects.requireNonNull(read);
+        }
+        boolean sameOut = Anchors.key(fromOut).equals(Anchors.key(fromTable));
         log(
             "3b "
                 + key.type()
                 + ": through an OUT bind registered as JDBC type "
-                + jdbcType
+                + declared
                 + ": "
-                + out
+                + show(fromOut[0])
                 + (sameOut ? ": equal" : ": DIFFERS"));
+        assertThat(sameOut).as(key.type() + " through an OUT bind equals the reads' key").isTrue();
         String seen =
             key.type()
                 + ": block "
@@ -1072,17 +1071,6 @@ class OracleFormsIntegrationTest {
 
   private static String typeOf(ResultSetMetaData md, int column) throws SQLException {
     return md.getColumnTypeName(column) + "(" + md.getColumnType(column) + ")";
-  }
-
-  /** An OUT bind read as {@code Writes.readKey} reads a column of that JDBC type. */
-  private static @Nullable Object readOut(CallableStatement cs, int i, int type)
-      throws SQLException {
-    return switch (type) {
-      case Types.TIMESTAMP -> cs.getObject(i, LocalDateTime.class);
-      case Types.TIME -> cs.getObject(i, LocalTime.class);
-      case Types.TIMESTAMP_WITH_TIMEZONE -> cs.getObject(i, OffsetDateTime.class);
-      default -> cs.getObject(i);
-    };
   }
 
   private static String show(@Nullable Object v) {

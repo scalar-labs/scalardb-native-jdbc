@@ -11,6 +11,7 @@ import com.scalar.db.nativejdbc.sql.StatementShape;
 import java.lang.reflect.Constructor;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
@@ -607,8 +608,8 @@ class WritesTest {
                 + " l_id(i), 1, 0) = 1 AND COALESCE(\"tx_version\", 0) = COALESCE(l_version(i), 0);"
                 + " l_stamped := SQL%ROWCOUNT; END IF;")
         .endsWith(
-            " END IF; OPEN ? FOR SELECT l_found, l_held, l_missing, l_after, l_written,"
-                + " l_stamped, l_skipped, l_abort FROM dual; END;")
+            " END IF; ? := l_found; ? := l_held; ? := l_missing; ? := l_after; ? := l_written;"
+                + " ? := l_stamped; ? := l_skipped; ? := l_abort; END;")
         .doesNotContain("l_after FROM dual WHERE EXISTS")
         .doesNotContain("-- note");
     // at SNAPSHOT the after-image check, hinted, before the gate; and the clear-table block ahead
@@ -632,8 +633,8 @@ class WritesTest {
                 + " UPDATE \"ns\".\"t_meta\" SET \"tx_id\" = l_i, \"tx_prepared_at\" = l_p,"
                 + " \"tx_committed_at\" = l_c, \"tx_state\" = 3, \"tx_version\" = CASE WHEN \"tx_id\""
                 + " IS NULL THEN 1 ELSE COALESCE(\"tx_version\", 0) + 1 END WHERE \"id\" = l_w0(i) AND"
-                + " COALESCE(\"tx_state\", 3) = 3; l_stamped := SQL%ROWCOUNT; OPEN ? FOR SELECT"
-                + " l_written, l_stamped FROM dual; END;");
+                + " COALESCE(\"tx_state\", 3) = 3; l_stamped := SQL%ROWCOUNT; ? := l_written;"
+                + " ? := l_stamped; END;");
     // a created table's DELETE removes the metadata rows; an imported table's stamp is a MERGE
     // per key, which writes the row a key had none of yet
     List<String> createdDelete = oracle(created(), "DELETE FROM t WHERE x = ?", true);
@@ -724,7 +725,7 @@ class WritesTest {
     assertThat(entries).isNotNull();
     assertThat(entries.binds).containsExactly(2, 1, 2); // the key for the read, then x and the key
     assertThat(entries.stampAfter).isEqualTo(1);
-    String two = entries.sql(2);
+    String two = entries.sql(2, Writes.Variant.CURSOR);
     assertThat(two)
         .startsWith("DECLARE l_rows_1 NUMBER := 0; l_written_1 NUMBER := 0; l_id_1")
         .contains(" l_k0_1 \"ns\".\"t\".\"id\"%TYPE; l_done_1 NUMBER := 0; l_rows_2 NUMBER := 0;")
@@ -751,7 +752,7 @@ class WritesTest {
     Writes.Plan created = Writes.plan(Engine.ORACLE, insert, created(), "", false, false, null);
     Writes.Entries inserts = created.entries();
     assertThat(inserts).isNotNull();
-    assertThat(inserts.sql(2))
+    assertThat(inserts.sql(2, Writes.Variant.CURSOR))
         .contains(
             " BEGIN IF l_stop = 0 THEN l_done_1 := 1; l_i_1 := ?; l_p_1 := ?; l_c_1 := ?;"
                 + " INSERT INTO \"ns\".\"t_data\" (id, x) VALUES (?, ?) RETURNING \"id\" INTO l_k0_1;")
@@ -767,6 +768,126 @@ class WritesTest {
         .isEqualTo(
             "INSERT INTO t (id, x, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
                 + " \"tx_committed_at\") VALUES (?, ?, ?, 3, 1, ?, ?)");
+  }
+
+  /** The declared types a table of one NUMBER key and a text column has on Oracle. */
+  private static final Map<String, String> ORACLE_COLUMNS =
+      Map.of("id", "number", "x", "varchar2(10 char)");
+
+  private static Writes.Plan oraclePlan(TableInfo t, String sql, boolean snapshot)
+      throws Exception {
+    StatementShape shape =
+        StatementShape.of(SqlAst.parse(sql, Engine.ORACLE).orElseThrow()).orElseThrow();
+    return Writes.plan(Engine.ORACLE, shape, t, "", snapshot, false, null, ORACLE_COLUMNS);
+  }
+
+  @Test
+  void onOracle_theRowComesBackThroughOutBinds() throws Exception {
+    // the OUT bind's type per declared key type, as the design's table has it; any other type
+    // keeps the cursor
+    assertThat(Writes.oracleKeyJdbcType("NUMBER")).isEqualTo(2);
+    assertThat(Writes.oracleKeyJdbcType("number(10)")).isEqualTo(2);
+    assertThat(Writes.oracleKeyJdbcType("varchar2(10 char)")).isEqualTo(12);
+    assertThat(Writes.oracleKeyJdbcType("char(5 char)")).isEqualTo(1);
+    assertThat(Writes.oracleKeyJdbcType("binary_float")).isEqualTo(101);
+    assertThat(Writes.oracleKeyJdbcType("binary_double")).isEqualTo(101);
+    assertThat(Writes.oracleKeyJdbcType("date")).isEqualTo(93);
+    assertThat(Writes.oracleKeyJdbcType("timestamp(6)")).isEqualTo(93);
+    assertThat(Writes.oracleKeyJdbcType("raw(16)")).isEqualTo(-3);
+    for (String other :
+        List.of(
+            "timestamp(6) with time zone",
+            "nvarchar2(10)",
+            "nchar(5)",
+            "float",
+            "interval day to second")) {
+      assertThat(Writes.oracleKeyJdbcType(other)).as(other).isNull();
+    }
+    // with the columns' types known, the keyed block returns its row as assignments to OUT
+    // binds, the counts NUMBER and the key by the column's type; the checking variant adds the
+    // cursor over the same locals after them; the cursor variant is the first design's
+    Writes.Plan keyed = oraclePlan(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ?", false);
+    Writes.Block block = keyed.oracleBlock();
+    assertThat(block).isNotNull();
+    assertThat(block.keyTypes).containsExactly(2);
+    String assigns =
+        " ? := l_rows; ? := 1; ? := l_id; ? := l_version; ? := l_state; ? := l_written;"
+            + " ? := l_written; ? := l_k0;";
+    String cursor =
+        " OPEN ? FOR SELECT l_rows, 1, l_id, l_version, l_state, l_written, l_written, l_k0 FROM"
+            + " dual;";
+    assertThat(block.step(Writes.Variant.OUT).sql).endsWith(" END IF;" + assigns + " END;");
+    assertThat(block.step(Writes.Variant.CHECK).sql)
+        .endsWith(" END IF;" + assigns + cursor + " END;");
+    assertThat(block.step(Writes.Variant.CURSOR).sql).endsWith(" END IF;" + cursor + " END;");
+    assertThat(block.step(Writes.Variant.OUT).outTypes).containsExactly(2, 2, 12, 2, 2, 2, 2, 2);
+    assertThat(block.step(Writes.Variant.OUT).cursor).isFalse();
+    assertThat(block.step(Writes.Variant.CHECK).cursor).isTrue();
+    assertThat(block.step(Writes.Variant.CURSOR).outTypes).isEmpty();
+    // the texts differ in nothing but the row's return
+    String body = block.step(Writes.Variant.OUT).sql;
+    assertThat(block.step(Writes.Variant.CHECK).sql)
+        .startsWith(body.substring(0, body.length() - " END;".length()));
+    // the INSERT block likewise, meta, stamped and the key
+    Writes.Plan insert = oraclePlan(created(), "INSERT INTO t (id, x) VALUES (?, ?)", false);
+    Writes.Block inserted = insert.oracleBlock();
+    assertThat(inserted).isNotNull();
+    assertThat(inserted.step(Writes.Variant.OUT).sql)
+        .endsWith(" END IF; ? := l_meta; ? := l_stamped; ? := l_k0; END;");
+    assertThat(inserted.step(Writes.Variant.OUT).outTypes).containsExactly(2, 2, 2);
+    // a batch's entries: per entry n, done and the row as OUT binds; the checking variant's
+    // cursor is the UNION ALL as before
+    Writes.Entries entries = keyed.entries();
+    assertThat(entries).isNotNull();
+    assertThat(entries.outTypes()).containsExactly(2, 2, 2, 2, 12, 2, 2, 2, 2, 2);
+    assertThat(entries.sql(2, Writes.Variant.OUT))
+        .contains(
+            " ? := 1; ? := l_done_1; ? := l_rows_1; ? := 1; ? := l_id_1; ? := l_version_1;"
+                + " ? := l_state_1; ? := l_written_1; ? := l_written_1; ? := l_k0_1; ? := 2;"
+                + " ? := l_done_2;")
+        .endsWith(" ? := l_k0_2; END;")
+        .doesNotContain("OPEN ?");
+    assertThat(entries.sql(2, Writes.Variant.CHECK))
+        .contains(" ? := l_k0_2; OPEN ? FOR SELECT 1, l_done_1,")
+        .endsWith(" FROM dual ORDER BY 1; END;");
+    // without the columns' types the cursor stands: the plan's text is the first design's
+    assertThat(oracle(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ?", false))
+        .last()
+        .asString()
+        .endsWith(cursor + " END;");
+    assertThat(oracle(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ?", false).size())
+        .isEqualTo(
+            oraclePlan(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ?", false).sql().size());
+  }
+
+  @Test
+  void onOracle_theFirstUseCheck_decidesFromTheTwoKeys() {
+    Object[] out = {new java.math.BigDecimal(5)};
+    Object[] same = {new java.math.BigDecimal(5)};
+    Object[] other = {5L};
+    // equal under Anchors.key: verified; a different class or value: the cursor; no key: nothing
+    assertThat(Writes.OutBindCheck.compare(out, same))
+        .isEqualTo(Writes.OutBindCheck.Outcome.VERIFIED);
+    assertThat(Writes.OutBindCheck.compare(out, other))
+        .isEqualTo(Writes.OutBindCheck.Outcome.CURSOR);
+    assertThat(Writes.OutBindCheck.compare(null, null))
+        .isEqualTo(Writes.OutBindCheck.Outcome.UNDECIDED);
+    assertThat(Writes.OutBindCheck.compare(out, null))
+        .isEqualTo(Writes.OutBindCheck.Outcome.CURSOR);
+    // recorded once per table: the first decisive pair counts, a later one changes nothing
+    Writes.OutBindCheck.reset();
+    assertThat(Writes.OutBindCheck.variant("ns.a")).isEqualTo(Writes.Variant.CHECK);
+    assertThat(Writes.OutBindCheck.decide("ns.a", null, null))
+        .isEqualTo(Writes.OutBindCheck.Outcome.UNDECIDED);
+    assertThat(Writes.OutBindCheck.variant("ns.a")).isEqualTo(Writes.Variant.CHECK);
+    Writes.OutBindCheck.decide("ns.a", out, same);
+    assertThat(Writes.OutBindCheck.variant("ns.a")).isEqualTo(Writes.Variant.OUT);
+    Writes.OutBindCheck.decide("ns.a", out, other);
+    assertThat(Writes.OutBindCheck.variant("ns.a")).isEqualTo(Writes.Variant.OUT);
+    Writes.OutBindCheck.decide("ns.b", out, other);
+    assertThat(Writes.OutBindCheck.variant("ns.b")).isEqualTo(Writes.Variant.CURSOR);
+    Writes.OutBindCheck.reset();
+    assertThat(Writes.OutBindCheck.variant("ns.b")).isEqualTo(Writes.Variant.CHECK);
   }
 
   @Test
