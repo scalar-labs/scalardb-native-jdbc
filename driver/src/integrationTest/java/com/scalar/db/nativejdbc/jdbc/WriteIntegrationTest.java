@@ -1241,19 +1241,14 @@ class WriteIntegrationTest {
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     // every level the driver runs on the engine (README, "Isolation levels"): Oracle refuses
-    // SERIALIZABLE, and SQL Server's levels above READ COMMITTED need its database set up for them
+    // SERIALIZABLE; SQL Server's test database allows SNAPSHOT, which its higher levels run at
     List<Integer> levels =
-        switch (e.engine()) {
-          case ORACLE ->
-              List.of(
-                  Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ);
-          case SQLSERVER -> List.of(Connection.TRANSACTION_READ_COMMITTED);
-          default ->
-              List.of(
-                  Connection.TRANSACTION_READ_COMMITTED,
-                  Connection.TRANSACTION_REPEATABLE_READ,
-                  Connection.TRANSACTION_SERIALIZABLE);
-        };
+        e.engine() == Engine.ORACLE
+            ? List.of(Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ)
+            : List.of(
+                Connection.TRANSACTION_READ_COMMITTED,
+                Connection.TRANSACTION_REPEATABLE_READ,
+                Connection.TRANSACTION_SERIALIZABLE);
     try (Connection d = e.openDriver();
         Connection other = e.openDriver()) {
       for (String table : List.of("ryw.imp", "ryw.impi")) {
