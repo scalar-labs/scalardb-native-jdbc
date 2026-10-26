@@ -23,7 +23,8 @@
 # matrix.sh's REPS, INFLIGHT, CHANGED, WRITERS, READS, BENCHBASE, BB_WORKLOADS, BB_TIME, BB_RUNS,
 # BB_JVM_ARGS, BB_LAYOUTS, BB_ISOLATIONS and NET_DELAYS (a slower network than the placement gives,
 # one tier at a time: the delays are the client's); BASELINE,
-# a commit whose tree BENCHBASE runs too.
+# a commit whose tree BENCHBASE runs too; SOURCE, a commit to run instead of the working tree (which
+# other sessions may be editing).
 # Arguments after `run` go to matrix.sh (and from there to Gradle).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -122,9 +123,13 @@ for key, url in urls.items():
 ' "$tier" "$urls")
   [ -z "$args" ] && continue
   echo "=== tier $tier: $(echo $args | tr '\n' ' ')"
-  # the working tree, tracked and untracked, without what git ignores (secrets, state, results)
-  (cd "$repo" && git ls-files -co --exclude-standard -z | tar -c -f - --null -T -) |
-    ssh_ "rm -rf $tier && mkdir $tier && tar -x -C $tier"
+  # SOURCE's tree, or the working tree, tracked and untracked, without what git ignores (secrets,
+  # state, results)
+  if [ -n "${SOURCE:-}" ]; then
+    (cd "$repo" && git archive "$SOURCE")
+  else
+    (cd "$repo" && git ls-files -co --exclude-standard -z | tar -c -f - --null -T -)
+  fi | ssh_ "rm -rf $tier && mkdir $tier && tar -x -C $tier"
   copied=$tier
   # BASELINE=<commit>: that commit's tree beside it, for matrix.sh's BENCHBASE runs to compare with
   if [ -n "${BASELINE:-}" ]; then
