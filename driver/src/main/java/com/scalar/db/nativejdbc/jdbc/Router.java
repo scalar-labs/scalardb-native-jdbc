@@ -1087,9 +1087,33 @@ final class Router {
    */
   private List<String> versions(
       SqlAst.TableRef ref, Writes.Names n, SqlAst.Piece piece, boolean states, boolean versioned) {
+    return versions(ref, n, piece, states, versioned, false);
+  }
+
+  /**
+   * As {@link #versions(SqlAst.TableRef, Writes.Names, SqlAst.Piece, boolean, boolean)}; with
+   * {@code own}, the versions are the copy's own columns, which it carries in place of a lookup per
+   * row ({@link SplitRead#OWN}, todo 329), the state among them with {@code states}.
+   */
+  private List<String> versions(
+      SqlAst.TableRef ref,
+      Writes.Names n,
+      SqlAst.Piece piece,
+      boolean states,
+      boolean versioned,
+      boolean own) {
     String x = exposed(ref);
     String m = engine.quote(META_ALIAS);
     List<String> out = new ArrayList<>();
+    if (own && versioned) {
+      for (String k : n.keyColumns) {
+        out.add(n.key(x, k));
+      }
+      for (int i = 0; i < (states ? 3 : 2); i++) {
+        out.add(x + "." + engine.quote(SplitRead.OWN + i));
+      }
+      return out;
+    }
     if (!versioned) {
       if (states) {
         // 0 when the table has no row in flight at all, which one probe of the in-flight index
@@ -1290,11 +1314,12 @@ final class Router {
     SqlAst.TableRef anchoredRef = readRef;
     // the lock sent with its in-flight check in one round trip reads no versions (LockPlan)
     boolean versioned = !versionless() || shape.skipLocked();
+    SqlAst.Split readSplit = read.split(r -> r == anchoredRef ? t.keyColumns() : null);
     SqlAst.SplitText text =
         SplitRead.emit(
             engine,
             read,
-            read.split(r -> r == anchoredRef ? t.keyColumns() : null),
+            readSplit,
             readDb,
             new IdentityHashMap<>(),
             Set.of(),
@@ -1303,6 +1328,37 @@ final class Router {
             true,
             false,
             inner == null ? null : LOCK_MARK);
+    // at READ COMMITTED on PostgreSQL, a table in the inline layout, the statement as written
+    // over the rows as they are, each with its key, version and state as columns of the row: the
+    // lock returns each row's newest version, the anchor the level wants, and a row in flight
+    // shows its state; the images of a row differ in no column the statement matches or orders
+    // by, so no row in flight is matched by its before image alone (design 4.2, todo 329)
+    SqlAst.SplitText fastText = null;
+    if (engine == Engine.POSTGRESQL
+        && !snapshot()
+        && n.inline
+        && !shape.skipLocked()
+        && !shape.grouped()
+        && shape.wherePure()
+        && shape.orderByPure()
+        && keysOnly(t, shape.whereColumns())
+        && keysOnly(t, shape.orderByColumns())) {
+      fastText =
+          SplitRead.emit(
+              engine,
+              read,
+              readSplit,
+              readDb,
+              new IdentityHashMap<>(),
+              Set.of(),
+              List.of(readRef),
+              (r, piece) -> versions(anchoredRef, n, piece, true, true, true),
+              true,
+              true,
+              null,
+              Set.of(readRef),
+              true);
+    }
     Expression where = shape.where();
     int[] span = where == null ? null : ast.span(where);
     List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
@@ -1366,7 +1422,8 @@ final class Router {
                 ? new Writes.Step(text.sql(), text.parameterSources())
                 : null,
             engine == Engine.POSTGRESQL && snapshot(),
-            plainSql == null || all == null ? null : new Writes.Step(plainSql, all));
+            plainSql == null || all == null ? null : new Writes.Step(plainSql, all),
+            fastText == null ? null : new Writes.Step(fastText.sql(), fastText.parameterSources()));
     return new Route(
         sql,
         sql,
@@ -1393,6 +1450,20 @@ final class Router {
         null,
         null,
         List.of());
+  }
+
+  /** Whether every one of {@code columns} is a key column of {@code t}. */
+  private boolean keysOnly(TableInfo t, List<String> columns) {
+    Set<String> keys = new HashSet<>();
+    for (String k : t.keyColumns()) {
+      keys.add(engine.columnKey(k));
+    }
+    for (String c : columns) {
+      if (!keys.contains(engine.columnKey(c))) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -1570,9 +1641,14 @@ final class Router {
             && scalarDb.keySet().stream().allMatch(r -> anchorable.stream().anyMatch(x -> x == r))
             && !split.places().containsValue(SqlAst.Place.NULLABLE)
             && !ast.skipsRows();
-    // the versions cost lookups per row, read only where they are recorded
+    // the versions cost lookups per row, read only where they are recorded; on PostgreSQL each
+    // copy carries them as columns of its own instead (todo 329)
     boolean versioned = !versionless();
     List<SqlAst.TableRef> anchored = (anchoring && versioned) || states ? anchorable : List.of();
+    Set<SqlAst.TableRef> own = Collections.newSetFromMap(new IdentityHashMap<>());
+    if (engine == Engine.POSTGRESQL && versioned) {
+      own.addAll(anchored);
+    }
     IdentityHashMap<SqlAst.TableRef, Writes.Names> anchorNames = new IdentityHashMap<>();
     List<String> anchorTables = new ArrayList<>();
     List<Integer> keys = new ArrayList<>();
@@ -1594,10 +1670,35 @@ final class Router {
             perRow,
             anchored,
             (r, piece) ->
-                versions(r, Objects.requireNonNull(anchorNames.get(r)), piece, states, versioned),
+                versions(
+                    r,
+                    Objects.requireNonNull(anchorNames.get(r)),
+                    piece,
+                    states,
+                    versioned,
+                    !own.isEmpty()),
             false,
             states,
-            null);
+            null,
+            own,
+            false);
+    if (text == null && !own.isEmpty()) {
+      // a * the copies cannot spell out: the versions looked up per row
+      text =
+          SplitRead.emit(
+              engine,
+              ast,
+              split,
+              scalarDb,
+              views,
+              perRow,
+              anchored,
+              (r, piece) ->
+                  versions(r, Objects.requireNonNull(anchorNames.get(r)), piece, states, versioned),
+              false,
+              states,
+              null);
+    }
     if (text != null) {
       Route r =
           route(

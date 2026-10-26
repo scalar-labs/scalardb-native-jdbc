@@ -60,6 +60,7 @@ import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
 import net.sf.jsqlparser.statement.select.ForMode;
 import net.sf.jsqlparser.statement.select.FromItem;
+import net.sf.jsqlparser.statement.select.OrderByElement;
 import net.sf.jsqlparser.statement.select.ParenthesedSelect;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.SelectItem;
@@ -110,6 +111,8 @@ public final class StatementShape {
   private final List<String> selectColumns;
   private final boolean grouped;
   private final boolean ordered;
+  private final List<String> orderByColumns;
+  private final boolean orderByPure;
   private final boolean limited;
 
   /** SQL Server's table hints a locking read of a ScalarDB table takes. */
@@ -144,6 +147,8 @@ public final class StatementShape {
     this.selectColumns = List.copyOf(b.selectColumns);
     this.grouped = b.grouped;
     this.ordered = b.ordered;
+    this.orderByColumns = List.copyOf(b.orderByColumns);
+    this.orderByPure = b.orderByPure;
     this.limited = b.limited;
     this.lockMode = b.lockMode;
     this.skipLocked = b.skipLocked;
@@ -302,6 +307,27 @@ public final class StatementShape {
    */
   public boolean ordered() {
     return ordered;
+  }
+
+  /**
+   * Returns the columns the {@code ORDER BY} clause names, as the engine resolves them, in order of
+   * appearance and without duplicates; empty without one, or where the clause cannot be inspected,
+   * which {@link #orderByPure()} says.
+   *
+   * @return the clause's columns
+   */
+  public List<String> orderByColumns() {
+    return orderByColumns;
+  }
+
+  /**
+   * Returns whether the {@code ORDER BY} clause is built of columns alone, each of them known, so
+   * that the order of the rows depends on nothing but their columns. True without a clause.
+   *
+   * @return whether the clause is columns alone
+   */
+  public boolean orderByPure() {
+    return orderByPure;
   }
 
   /**
@@ -656,6 +682,8 @@ public final class StatementShape {
     List<String> selectColumns = List.of();
     boolean grouped;
     boolean ordered;
+    List<String> orderByColumns = List.of();
+    boolean orderByPure = true;
     boolean limited;
     @Nullable ForMode lockMode;
     boolean skipLocked;
@@ -783,6 +811,23 @@ public final class StatementShape {
       grouped =
           functions || s.getDistinct() != null || s.getGroupBy() != null || s.getHaving() != null;
       ordered = s.getOrderByElements() != null && !s.getOrderByElements().isEmpty();
+      if (ordered) {
+        Set<String> names = new LinkedHashSet<>();
+        for (OrderByElement o : s.getOrderByElements()) {
+          Expression e = o.getExpression();
+          Set<Object> nodes = e instanceof Column ? SqlAst.valuesUnder(e) : null;
+          if (nodes == null) {
+            orderByPure = false;
+            continue;
+          }
+          for (SqlAst.ColumnRef c : ast.columnRefs()) {
+            if (c.isAmong(nodes)) {
+              names.add(engine.resolveIdentifier(c.name()));
+            }
+          }
+        }
+        orderByColumns = new ArrayList<>(names);
+      }
       limited = s.getLimit() != null || s.getOffset() != null || s.getFetch() != null;
       lockMode = s.getForMode();
       skipLocked = s.isSkipLocked();

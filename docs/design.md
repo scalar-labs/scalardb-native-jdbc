@@ -812,7 +812,13 @@ union as a derived table.
   a subquery returns no row and takes no anchor, nor does any table of a grouped or DISTINCT read,
   nor a read through `rc_T`. The versions cost two lookups per anchored table and row, up to 11x
   on a join of 150k rows, so a read takes them only where they are recorded: in a transaction, on a
-  connection that is not read-only. A statement prepared in the other mode is prepared again when it
+  connection that is not read-only. On PostgreSQL each copy carries them as columns of its own
+  instead of lookups (todo 329): a committed copy of an inline table its row's `tx_id` and
+  `tx_version`, the copy kept to the rows whose own state is committed rather than probing the
+  in-flight index per row; a decoupled table's by a left join to its metadata row; an in-flight
+  copy its before image's. A `*` or `t.*` over such a copy is spelled out as the table's columns,
+  which the copy would otherwise show; where it cannot be, a NATURAL or USING join, the lookups
+  stay. A statement prepared in the other mode is prepared again when it
   runs; either text returns the same rows. A
   user `SELECT ... FOR UPDATE` or `FOR SHARE` of one table, read row by row, reads the **first arm
   alone**: the statement as written over the first arm's derived table, its locking clause, `NOWAIT`
@@ -1345,8 +1351,17 @@ statements sent in one round trip. At REPEATABLE READ every statement of the tra
 snapshot, so the check after the lock and the versions read under it would see only what these two
 see. A row in flight aborts at once at those levels (section 6), its locks released with the
 transaction, and a row a ScalarDB prepare wrote after the snapshot fails the lock itself with
-PostgreSQL's serialization failure. At READ COMMITTED each statement takes a new snapshot, and the
-locking read keeps its steps and savepoint.
+PostgreSQL's serialization failure. At READ COMMITTED each statement takes a new snapshot. There,
+on a table in the inline layout, a locking read whose predicate and ORDER BY name key columns only,
+without SKIP LOCKED, is one statement (todo 329): the statement as written over the rows as they
+are, each row carrying its key, `tx_id`, `tx_version` and `tx_state` as columns of its own (4.2).
+The lock returns each row at its newest version, which PostgreSQL re-reads after a wait on the
+row, and that version is the anchor the level wants, a read now (step 1); a row in flight shows
+its state and aborts, or fails as NOWAIT fails, since the lock held on it must not outlast the
+statement (section 6). No row in flight is matched by its before image alone, since the images of
+a row differ in no key column. Only where no wait is configured, as a wait would hold the lock;
+with `scalardbnative.inflightWaitMs` set, and on a decoupled table, whose state is in another row
+the lock's re-read does not reach, the locking read keeps its steps and savepoint.
 
 The other engines still run the steps one by one, each write under a savepoint of its own. They have
 no data-modifying CTEs; their single-round-trip forms are a multi-statement batch on MySQL and

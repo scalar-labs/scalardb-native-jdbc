@@ -511,3 +511,99 @@ tables each touched once); the inline INSERT's CTE and savepoint (about 15 µs);
 INSERT (about 90 µs a NewOrder over ten plain inserts); the inline row's width. On AWS the
 ratios will be lower than here at a shorter round trip and higher at a longer one, as before;
 the time added per transaction is the number to read.
+
+### 2026-10-26, late: READ COMMITTED, the default level, given the same treatment
+
+The user's point: a fast path that serves SNAPSHOT and SERIALIZABLE alone leaves the default level,
+READ COMMITTED, as the slow one, and ScalarDB's READ COMMITTED does less than its SNAPSHOT, so the
+driver's should be the cheapest level. Every run of this todo had been at REPEATABLE READ, the
+harness's default, so the level had never been measured. Measured, same laptop, inline layout,
+60 s, the build of the entry above:
+
+| | (a) | (c) | (c)/(a) | packets per commit (a → c) |
+|---|---|---|---|---|
+| TPC-C at REPEATABLE READ | 670/s | 642/s | 0.96 | 19.6 → 19.7 |
+| TPC-C at READ COMMITTED | 703/s | 299/s | **0.43** | 19.5 → 44.3 |
+| YCSB at REPEATABLE READ | 3412/s | 3343/s | 0.98 | 11.0 → 11.2 |
+| YCSB at READ COMMITTED | 3340/s | 2381/s | **0.71** | 11.2 → 12.9 |
+
+TPC-C p95 against (a) at READ COMMITTED: NewOrder 3.03, StockLevel 2.16, OrderStatus 1.67,
+Delivery 1.56, Payment 1.28; YCSB read-modify-write 1.83, Scan 1.47. Where it went, per statement
+(`pgss-sum.py`, `runs/rc-tpcc-inline`): the locking read is four statements over several round
+trips, the lock with two anchor subqueries per row (28.5 µs against the vendor's 12.2), the
+versions read again after it (9.6), the before-image check twice (2.6 each), forty statements a
+NewOrder for the vendor's ten; every read looks its anchors up by two subqueries per row (the item
+read 17.3 against 6.6, the customer by last name 91 against 38); the keyed writes run the keys-CTE
+form (29 to 63 µs against 21 to 33). The earlier write-side work (merged batches, the slim and
+fused forms, the inline forms) was there at every level; what was bound to SNAPSHOT and
+SERIALIZABLE was reads without anchors, the fused locking read of todo 328, and the entry above.
+
+Nothing can be remembered across statements at this level, each having its own snapshot; but the
+same idea holds within one statement, and PostgreSQL re-checks a row's own columns on its newest
+version after a lock wait (EvalPlanQual), which a subquery's snapshot does not follow. Hence, on
+PostgreSQL (design 4.2, 4.3):
+
+1. **Reads** carry their anchors as columns of each copy instead of two lookups per row: an inline
+   table's row gives `tx_id` and `tx_version` itself, and its committed copy is kept by
+   `COALESCE(tx_state, 3) = 3` on the row rather than a probe of the in-flight index per row; a
+   decoupled table's by a left join to its metadata row; the in-flight copy gives its before
+   image's. A `*` over such a copy is spelled out as the table's columns (`SplitRead`,
+   `SqlAst.emitSplit`, `Router.versions`). Both layouts.
+2. **A locking read by key columns** (predicate and ORDER BY on key columns only, no SKIP LOCKED,
+   inline layout, no wait configured) is one statement: the statement as written over the rows as
+   they are, each with its key, version and state. The lock's re-read gives the newest version, the
+   anchor the level wants; a row in flight aborts, or fails as NOWAIT fails, since the lock on it
+   must not be held while waiting (`LockPlan.applyFastRc`).
+3. **Writes keep their forms.** A write at this level CASes on the version the statement's own
+   snapshot read of a key the transaction never read before (4.3 step 1), which is what the slim
+   form's keys CTE gives, and ScalarDB's own prepare does the same. The vendor's statement with
+   the stamp and the row's own state, tried first, wrote such a key at the version the lock
+   re-read instead, as PostgreSQL's READ COMMITTED does: a row changed under the lock by another
+   writer and still matching was written rather than aborted (`InlineIntegrationTest`, todo 292,
+   caught it). An exact form needs the snapshot's version and a count beside the write, which is
+   the slim form again, so it was taken out. The slim write costs about 9 µs more than the
+   SNAPSHOT fast form per statement, under 1% of a TPC-C transaction.
+
+Measured, same laptop, inline layout, 60 s, the two levels back to back in one machine state (a
+busier one than the entry above's: the vendor itself ran at 600/s rather than 670-700):
+
+| | (a) | (c) | (c)/(a) | added per transaction | packets per commit (a → c) | server CPU per commit (a → c) |
+|---|---|---|---|---|---|---|
+| TPC-C at REPEATABLE READ | 601/s | 548/s | 0.91 | +0.64 ms | 19.4 → 19.5 | 1.68 → 2.10 ms |
+| TPC-C at READ COMMITTED, before | 703/s | 299/s | 0.43 | +7.7 ms | 19.5 → 44.3 | 1.20 → 3.37 ms |
+| TPC-C at READ COMMITTED, after | 591/s | 507/s | **0.86** | **+1.11 ms** | 19.4 → 19.8 | 1.42 → 2.20 ms |
+| YCSB at READ COMMITTED, before | 3340/s | 2381/s | 0.71 | +121 µs | 11.2 → 12.9 | |
+| YCSB at READ COMMITTED, after | 2671/s | 2833/s | 1.06 | | 11.2 → 11.6 | 0.44 → 0.42 ms |
+
+The YCSB ratio above 1 is the machine's load moving between the two runs; read it as parity, each
+operation's p95 within 15% of the vendor's and below it in that run. TPC-C p95 against (a) at READ
+COMMITTED, after: NewOrder 1.12 (3.03 before), Payment 1.16, OrderStatus 1.17, Delivery 1.37,
+StockLevel 1.50. Per statement, (c) against (a) in the same state: the stock lock is one statement,
+25.5 µs against the vendor's 16.5 (the four of before: 28.5 + 9.6 + 2.6 + 2.6 over several round
+trips); the item read 17.5 against 9.0, unchanged by its own version columns.
+
+Why the read still costs: `EXPLAIN ANALYZE` on the benchmark tables shows the two-arm read's plan
+as an Append over the committed arm's index scan with its state filter and the in-flight arm's
+scan of the in-flight partial index, which is empty, so the arm's own cost is nothing; the
+difference to the vendor is the executor's setup of the extra nodes (Append, a subquery scan, the
+filter) and the row's three extra columns. A one-time filter on the in-flight arm (`AND EXISTS
+(SELECT 1 FROM T WHERE tx_state IN (1, 2))`, an InitPlan) was tried and taken out: it replaces one
+scan of the empty index with another. The lock's derived table is pulled up into the vendor's own
+plan (LockRows over the primary key scan); its extra cost is the five columns and the wider row.
+
+Left at READ COMMITTED, in order of size: Delivery's `order_line` write beyond the key, the fused
+form (169 µs against 52 for ten rows, 0.15 ms a commit); the two-arm shape of a key read on an
+inline table, which one scan with `CASE WHEN tx_state IN (1, 2) THEN before_x ELSE x END` per
+column could replace, the key columns needing none, so the index stays (about 7 µs a read, 0.13 ms
+a commit over 21 reads); the slim write's keys CTE (about 9 µs a write). Common to both levels and
+larger than any of these: WAL per commit is 17 KB against the vendor's 7, the inline row carrying
+its before images, which is ScalarDB's layout rather than the driver's protocol, and shows as
+server CPU outside statement execution (about 0.5 ms a commit here).
+
+The integration suite: it passes in full against an external PostgreSQL (a throwaway container,
+`-Dnativejdbc.postgresql.url`). Under Testcontainers four passthrough tests (`RoutingIntegrationTest`
+three, `UnparsedIntegrationTest` one) failed in three runs of four with "names p, which ScalarDB
+manages", and pass alone; the word `p` is a ScalarDB table of `WriteIntegrationTest.anchorsFromJoins`
+(`aj.p`), which that test now drops at its end, though ScalarDB's drop leaves the imported table's
+metadata behind, and the same leftover was present in the runs that passed. Not resolved; it does
+not touch the changed paths.

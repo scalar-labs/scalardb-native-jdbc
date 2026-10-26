@@ -17,7 +17,30 @@ transaction found clear"). Local laptop, round trip about 185 µs, 60 s, inline 
 | YCSB p95 vs (a): Insert, Update, read-modify-write, Read, Scan | | 1.04, 1.01, 1.02, 1.05, 0.99 |
 | TPC-C (c)/(a), decoupled | | 0.92, +0.53 ms a transaction |
 
-The rest of this page is the state before that change; its "Where the remaining cost goes" and
+**Update, 2026-10-26 (late): READ COMMITTED, the driver's default level.** Every run above was at
+REPEATABLE READ. Measured at READ COMMITTED, the same build was at 0.43 of the vendor on TPC-C and
+0.71 on YCSB: the locking read ran as four statements over several round trips, every read looked
+its anchors up by two subqueries per row, and nothing of the clear-table path applies there, each
+statement having its own snapshot. On PostgreSQL the driver now reads the anchors as columns of
+each copy (an inline table's row, a decoupled table's metadata row by a left join), spells a `*`
+out as the table's columns, and runs a locking read by key columns on an inline table as one
+`FOR UPDATE` statement with the key, version and state as columns (design 4.2, 4.3; todo 329,
+"READ COMMITTED, the default level"). Writes keep their forms there, which CAS on the version the
+statement's snapshot read, as ScalarDB's own prepare does. Same laptop, both levels back to back in
+one (busier) machine state, inline layout, 60 s:
+
+| | REPEATABLE READ | READ COMMITTED before | READ COMMITTED after |
+|---|---|---|---|
+| TPC-C (c)/(a) | 0.91 | 0.43 | **0.86** |
+| TPC-C time added per transaction | +0.64 ms | +7.7 ms | **+1.11 ms** |
+| TPC-C server packets per commit, (a) → (c) | 19.4 → 19.5 | 19.5 → 44.3 | 19.4 → 19.8 |
+| YCSB (c)/(a) | 0.98 | 0.71 | about 1.0 |
+
+Left there, by size: Delivery's write beyond the key, the two-arm shape of a key read (one scan
+with CASE per column would do), the slim write's keys CTE; and at both levels the inline row's
+width (WAL 17 KB a commit against 7), which is ScalarDB's layout.
+
+The rest of this page is the state before these changes; its "Where the remaining cost goes" and
 "Open ideas" are superseded by the todo's entry, which lists what is left: the first-touch reads'
 rewritten shape, the INSERT's CTE and savepoint, the merged INSERT, the inline row's width, and
 the decoupled layout's second row per write. Next: the same on AWS (`bench-env/run.sh`), both

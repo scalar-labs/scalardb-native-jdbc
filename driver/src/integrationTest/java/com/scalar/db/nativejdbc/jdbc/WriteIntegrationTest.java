@@ -861,160 +861,189 @@ class WriteIntegrationTest {
               .build(),
           DECOUPLED);
     }
-    try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
-      DistributedTransaction tx = tm.begin();
-      for (int i = 1; i <= 9; i++) {
-        if (i != 4) { // parent 4 has no child
-          tx.insert(
-              Insert.newBuilder()
-                  .namespace(N("aj"))
-                  .table(N("c"))
-                  .partitionKey(id(i))
-                  .intValue(N("pid"), i)
-                  .textValue(N("x"), "c")
-                  .build());
+    // the ScalarDB tables dropped after: their names, p among them, would otherwise count as
+    // ScalarDB's for the tests after this one, whose plain tables may be named so too
+    try {
+      try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
+        DistributedTransaction tx = tm.begin();
+        for (int i = 1; i <= 9; i++) {
+          if (i != 4) { // parent 4 has no child
+            tx.insert(
+                Insert.newBuilder()
+                    .namespace(N("aj"))
+                    .table(N("c"))
+                    .partitionKey(id(i))
+                    .intValue(N("pid"), i)
+                    .textValue(N("x"), "c")
+                    .build());
+          }
         }
+        tx.commit();
       }
-      tx.commit();
-    }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
-    try (Connection c = e.open()) {
-      assertThat(
-              Setup.run(
-                  catalog, c, t -> t.namespace().equals(N("aj")), Duration.ofMinutes(1), List.of()))
-          .allMatch(Setup.Result::succeeded, "succeeded");
-    }
-    TableInfo pInfo = catalog.lookup(List.of(), N("aj"), N("p"));
-    Table p =
-        new Table(
-            "aj.p", "aj." + Q(pInfo.metadataTable()), Objects.requireNonNull(pInfo.virtualTable()));
-    Table ch =
-        new Table(
-            "aj.c", "aj." + Q(catalog.lookup(List.of(), N("aj"), N("c")).metadataTable()), N("c"));
-    String join = "SELECT p.x, c.x FROM aj.p p JOIN aj.c c ON c.pid = p.id WHERE p.id = ";
-    String leftJoin =
-        "SELECT p.id, c.id FROM aj.p p LEFT JOIN aj.c c ON c.pid = p.id WHERE p.id = ";
-    try (DistributedTransactionManager tm = scalarDb.getTransactionManager();
-        TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();
-        Connection d = e.openDriver();
-        Connection other = e.openDriver()) {
-      // versions are read only where they are recorded: not in autocommit, nor read-only
-      assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
-      // prepared in autocommit, run in a transaction: prepared again, it anchors
-      try (PreparedStatement ps = d.prepareStatement(join + "?")) {
-        d.setAutoCommit(false);
-        assertThat(d.nativeSQL(join + "1")).contains("scalardb_native_meta");
-        ps.setInt(1, 6);
-        try (ResultSet rs = ps.executeQuery()) {
+      Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+      try (Connection c = e.open()) {
+        assertThat(
+                Setup.run(
+                    catalog,
+                    c,
+                    t -> t.namespace().equals(N("aj")),
+                    Duration.ofMinutes(1),
+                    List.of()))
+            .allMatch(Setup.Result::succeeded, "succeeded");
+      }
+      TableInfo pInfo = catalog.lookup(List.of(), N("aj"), N("p"));
+      Table p =
+          new Table(
+              "aj.p",
+              "aj." + Q(pInfo.metadataTable()),
+              Objects.requireNonNull(pInfo.virtualTable()));
+      Table ch =
+          new Table(
+              "aj.c",
+              "aj." + Q(catalog.lookup(List.of(), N("aj"), N("c")).metadataTable()),
+              N("c"));
+      String join = "SELECT p.x, c.x FROM aj.p p JOIN aj.c c ON c.pid = p.id WHERE p.id = ";
+      String leftJoin =
+          "SELECT p.id, c.id FROM aj.p p LEFT JOIN aj.c c ON c.pid = p.id WHERE p.id = ";
+      try (DistributedTransactionManager tm = scalarDb.getTransactionManager();
+          TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager();
+          Connection d = e.openDriver();
+          Connection other = e.openDriver()) {
+        // versions are read only where they are recorded: not in autocommit, nor read-only
+        assertThat(d.nativeSQL(join + "1"))
+            .doesNotContain("scalardb_native_meta")
+            .doesNotContain("scalardb_native_v0");
+        // prepared in autocommit, run in a transaction: prepared again, it anchors: on PostgreSQL
+        // by each copy's own version columns (todo 329)
+        try (PreparedStatement ps = d.prepareStatement(join + "?")) {
+          d.setAutoCommit(false);
+          assertThat(d.nativeSQL(join + "1"))
+              .contains(
+                  e.engine() == Engine.POSTGRESQL ? "scalardb_native_v0" : "scalardb_native_meta");
+          ps.setInt(1, 6);
+          try (ResultSet rs = ps.executeQuery()) {
+            assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);
+            assertThat(rs.next()).isTrue();
+          }
+          scalarDbSet(tm, ch, 6, "scalardb");
+          assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 6");
+          // tracked by the driver, SQL Server's ignoring it (todo 300)
+          d.setReadOnly(true);
+          assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
+          d.setReadOnly(false);
+        }
+        // one that cannot be prepared again, since the application unwrapped it, is refused rather
+        // than read without anchors
+        d.setAutoCommit(true);
+        try (PreparedStatement ps = d.prepareStatement(join + "?")) {
+          ps.unwrap(
+              Class.forName(
+                  switch (e.engine()) {
+                    case POSTGRESQL -> "org.postgresql.PGStatement";
+                    case MARIADB -> "org.mariadb.jdbc.Statement";
+                    case SQLSERVER -> "com.microsoft.sqlserver.jdbc.ISQLServerStatement";
+                    case ORACLE -> "oracle.jdbc.OracleStatement";
+                    default -> "com.mysql.cj.jdbc.JdbcStatement";
+                  })); // the vendor statement
+          d.setAutoCommit(false);
+          ps.setInt(1, 7);
+          assertThatThrownBy(ps::executeQuery)
+              .isInstanceOf(SQLException.class)
+              .hasMessageContaining("prepare it again");
+          d.rollback();
+        }
+        // the application's columns only
+        try (ResultSet rs = d.createStatement().executeQuery(join + "1")) {
           assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);
           assertThat(rs.next()).isTrue();
+          assertThatThrownBy(() -> rs.getObject(3)).isInstanceOf(SQLException.class);
         }
-        scalarDbSet(tm, ch, 6, "scalardb");
-        assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 6");
-        // tracked by the driver, SQL Server's ignoring it (todo 300)
-        d.setReadOnly(true);
-        assertThat(d.nativeSQL(join + "1")).doesNotContain("scalardb_native_meta");
-        d.setReadOnly(false);
-      }
-      // one that cannot be prepared again, since the application unwrapped it, is refused rather
-      // than read without anchors
-      d.setAutoCommit(true);
-      try (PreparedStatement ps = d.prepareStatement(join + "?")) {
-        ps.unwrap(
-            Class.forName(
-                switch (e.engine()) {
-                  case POSTGRESQL -> "org.postgresql.PGStatement";
-                  case MARIADB -> "org.mariadb.jdbc.Statement";
-                  case SQLSERVER -> "com.microsoft.sqlserver.jdbc.ISQLServerStatement";
-                  case ORACLE -> "oracle.jdbc.OracleStatement";
-                  default -> "com.mysql.cj.jdbc.JdbcStatement";
-                })); // the vendor statement
-        d.setAutoCommit(false);
-        ps.setInt(1, 7);
-        assertThatThrownBy(ps::executeQuery)
-            .isInstanceOf(SQLException.class)
-            .hasMessageContaining("prepare it again");
         d.rollback();
-      }
-      // the application's columns only
-      try (ResultSet rs = d.createStatement().executeQuery(join + "1")) {
-        assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);
-        assertThat(rs.next()).isTrue();
-        assertThatThrownBy(() -> rs.getObject(3)).isInstanceOf(SQLException.class);
-      }
-      d.rollback();
-      // both tables of an inner join are anchored
-      for (Table t : List.of(p, ch)) {
-        int id = t == p ? 1 : 3;
-        assertThat(rows(d, join + id)).containsExactly("a/c");
-        scalarDbSet(tm, t, id, "scalardb");
-        assertThatThrownBy(
-                () ->
-                    d.createStatement()
-                        .executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id = " + id))
-            .as(t.sql)
-            .isInstanceOf(SQLTransactionRollbackException.class);
-        d.rollback();
-      }
-      // a LEFT JOIN: the preserved row of an unmatched parent, and the nullable side's rows
-      assertThat(rows(d, leftJoin + "4")).containsExactly("4/null");
-      scalarDbSet(tm, p, 4, "scalardb");
-      assertAborts(d, "UPDATE aj.p SET x = 'd' WHERE id = 4");
-      assertThat(rows(d, leftJoin + "2")).containsExactly("2/2");
-      other.createStatement().executeUpdate("UPDATE aj.c SET x = 'o' WHERE id = 2");
-      assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 2");
-      // ORDER BY and LIMIT on top of the copies
-      assertThat(
-              rows(
-                  d,
-                  "SELECT c.id FROM aj.p p JOIN aj.c c ON c.pid = p.id WHERE p.id IN (3, 5)"
-                      + (e.engine() == Engine.SQLSERVER
-                          ? " ORDER BY p.id DESC OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY"
-                          : " ORDER BY p.id DESC LIMIT 1")))
-          .containsExactly("5");
-      scalarDbSet(tm, ch, 5, "scalardb");
-      assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 5");
-      // a self-join anchors the rows of both references
-      assertThat(rows(d, "SELECT b.id FROM aj.p a JOIN aj.p b ON b.id = a.id + 1 WHERE a.id = 6"))
-          .containsExactly("7");
-      scalarDbSet(tm, p, 7, "scalardb");
-      assertAborts(d, "UPDATE aj.p SET x = 'd' WHERE id = 7");
-      // an IN subquery over the key: the outer table is anchored, the subquery's returns no row
-      assertThat(rows(d, "SELECT x FROM aj.p WHERE id IN (SELECT id FROM aj.c WHERE id = 2)"))
-          .containsExactly("a");
-      scalarDbSet(tm, p, 2, "scalardb");
-      assertAborts(d, "UPDATE aj.p SET x = 'd' WHERE id = 2");
-      // a nullable row read in flight is anchored on its before image: a ScalarDB rollback keeps
-      // it valid, a commit does not
-      for (boolean commit : new boolean[] {false, true}) {
-        int id = commit ? 9 : 8;
-        TwoPhaseCommitTransaction held = tpc.begin();
-        held.update(
-            Update.newBuilder()
-                .namespace(N("aj"))
-                .table(N("c"))
-                .partitionKey(id(id))
-                .textValue(N("x"), "held")
-                .build());
-        held.prepare();
+        // both tables of an inner join are anchored
+        for (Table t : List.of(p, ch)) {
+          int id = t == p ? 1 : 3;
+          assertThat(rows(d, join + id)).containsExactly("a/c");
+          scalarDbSet(tm, t, id, "scalardb");
+          assertThatThrownBy(
+                  () ->
+                      d.createStatement()
+                          .executeUpdate("UPDATE " + t.sql + " SET x = 'd' WHERE id = " + id))
+              .as(t.sql)
+              .isInstanceOf(SQLTransactionRollbackException.class);
+          d.rollback();
+        }
+        // a LEFT JOIN: the preserved row of an unmatched parent, and the nullable side's rows
+        assertThat(rows(d, leftJoin + "4")).containsExactly("4/null");
+        scalarDbSet(tm, p, 4, "scalardb");
+        assertAborts(d, "UPDATE aj.p SET x = 'd' WHERE id = 4");
+        assertThat(rows(d, leftJoin + "2")).containsExactly("2/2");
+        other.createStatement().executeUpdate("UPDATE aj.c SET x = 'o' WHERE id = 2");
+        assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 2");
+        // ORDER BY and LIMIT on top of the copies
         assertThat(
                 rows(
                     d,
-                    "SELECT c.x FROM aj.p p LEFT JOIN aj.c c ON c.pid = p.id WHERE p.id = " + id))
-            .containsExactly("c");
-        if (commit) {
-          held.validate();
-          held.commit();
-        } else {
-          held.rollback();
+                    "SELECT c.id FROM aj.p p JOIN aj.c c ON c.pid = p.id WHERE p.id IN (3, 5)"
+                        + (e.engine() == Engine.SQLSERVER
+                            ? " ORDER BY p.id DESC OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY"
+                            : " ORDER BY p.id DESC LIMIT 1")))
+            .containsExactly("5");
+        scalarDbSet(tm, ch, 5, "scalardb");
+        assertAborts(d, "UPDATE aj.c SET x = 'd' WHERE id = 5");
+        // a self-join anchors the rows of both references
+        assertThat(rows(d, "SELECT b.id FROM aj.p a JOIN aj.p b ON b.id = a.id + 1 WHERE a.id = 6"))
+            .containsExactly("7");
+        scalarDbSet(tm, p, 7, "scalardb");
+        assertAborts(d, "UPDATE aj.p SET x = 'd' WHERE id = 7");
+        // an IN subquery over the key: the outer table is anchored, the subquery's returns no row
+        assertThat(rows(d, "SELECT x FROM aj.p WHERE id IN (SELECT id FROM aj.c WHERE id = 2)"))
+            .containsExactly("a");
+        scalarDbSet(tm, p, 2, "scalardb");
+        assertAborts(d, "UPDATE aj.p SET x = 'd' WHERE id = 2");
+        // a nullable row read in flight is anchored on its before image: a ScalarDB rollback keeps
+        // it valid, a commit does not
+        for (boolean commit : new boolean[] {false, true}) {
+          int id = commit ? 9 : 8;
+          TwoPhaseCommitTransaction held = tpc.begin();
+          held.update(
+              Update.newBuilder()
+                  .namespace(N("aj"))
+                  .table(N("c"))
+                  .partitionKey(id(id))
+                  .textValue(N("x"), "held")
+                  .build());
+          held.prepare();
+          assertThat(
+                  rows(
+                      d,
+                      "SELECT c.x FROM aj.p p LEFT JOIN aj.c c ON c.pid = p.id WHERE p.id = " + id))
+              .containsExactly("c");
+          if (commit) {
+            held.validate();
+            held.commit();
+          } else {
+            held.rollback();
+          }
+          String update = "UPDATE aj.c SET x = 'd' WHERE id = " + id;
+          if (commit) {
+            assertAborts(d, update);
+          } else {
+            assertThat(d.createStatement().executeUpdate(update)).isEqualTo(1);
+            d.commit();
+          }
         }
-        String update = "UPDATE aj.c SET x = 'd' WHERE id = " + id;
-        if (commit) {
-          assertAborts(d, update);
-        } else {
-          assertThat(d.createStatement().executeUpdate(update)).isEqualTo(1);
-          d.commit();
-        }
+      }
+    } finally {
+      // the driver's objects first, which ScalarDB's drop would otherwise stop at
+      try (Connection c = e.open()) {
+        Setup.teardown(
+            new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
+            c,
+            t -> t.namespace().equals(N("aj")));
+      }
+      try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+        admin.dropTable(N("aj"), N("c"), true);
+        admin.dropTable(N("aj"), N("p"), true);
       }
     }
   }

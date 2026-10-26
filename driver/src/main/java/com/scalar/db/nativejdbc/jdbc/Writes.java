@@ -984,7 +984,8 @@ final class Writes {
               + where
               + source.substring(end);
     } else {
-      text = head + where + source.substring(end);
+      // a trailing comment left out of the decoupled form, which would run on over the RETURNING
+      text = head + where + (inline ? source.substring(end) : "");
     }
     String dml = onDataTable(engine, ast, t, true, text, from);
     if (dml == null) {
@@ -4357,6 +4358,9 @@ final class Writes {
     final @Nullable Step plain;
     final @Nullable Step checked;
     final String check;
+    // at READ COMMITTED on PostgreSQL, a table in the inline layout: the statement as written over
+    // the rows as they are, each with its key, version and state, one statement (todo 329)
+    final @Nullable Step fastRc;
 
     LockPlan(
         Names n,
@@ -4366,8 +4370,10 @@ final class Writes {
         @Nullable String relock,
         @Nullable Step snapshot,
         boolean fuse,
-        @Nullable Step plain) {
+        @Nullable Step plain,
+        @Nullable Step fastRc) {
       super(n);
+      this.fastRc = fastRc;
       this.lock = lock;
       this.inFlight = inFlight;
       this.noWait = noWait;
@@ -4404,7 +4410,7 @@ final class Writes {
     @Override
     List<String> sql() {
       List<String> out = new ArrayList<>();
-      for (Step s : Arrays.asList(inFlight, lock, snapshot, fused, plain)) {
+      for (Step s : Arrays.asList(inFlight, lock, snapshot, fused, plain, fastRc)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -4419,7 +4425,56 @@ final class Writes {
             ? applyPlain(run, plain, false)
             : applyPlain(run, checked, true);
       }
+      if (fastRc != null && run.context.inflightWait().isZero()) {
+        return applyFastRc(run, fastRc);
+      }
       return fused != null ? applyFused(run, fused) : applySteps(run);
+    }
+
+    /**
+     * The locking read at READ COMMITTED on PostgreSQL as one statement (todo 329): the statement
+     * as written over the rows of a table in the inline layout as they are, each row with its key,
+     * version and state as columns of its own. The lock returns each row at its newest version,
+     * which PostgreSQL re-reads after a wait on the row, and that version is the anchor the level
+     * wants, a read now (4.3 step 1); its state says whether the row is in flight, which aborts, or
+     * fails as NOWAIT fails, since the lock held on it must not outlast the statement (section 6).
+     * Only where no wait is configured: a wait would hold the lock.
+     */
+    @SuppressFBWarnings(
+        value = "OBL_UNSATISFIED_OBLIGATION",
+        justification = "the rows are handed to the application, closed with their statement")
+    private long applyFastRc(Run run, Step step) throws SQLException {
+      int width = n.keyColumns.size();
+      String held = "a row the statement locks is being written by a ScalarDB transaction";
+      PreparedStatement ps = run.prepare(step, null, true);
+      try {
+        ResultSet rs = ps.executeQuery();
+        // the key, the version and the state the copy appends
+        int from = rs.getMetaData().getColumnCount() - width - 2;
+        List<Object[]> keys = new ArrayList<>();
+        List<Anchors.Version> versions = new ArrayList<>();
+        while (rs.next()) {
+          if (inFlight(rs.getObject(from + width + 2))) {
+            if (noWait) {
+              throw notAvailable(held);
+            }
+            throw new Aborted(held);
+          }
+          keys.add(Objects.requireNonNull(readKey(rs, from, width)));
+          versions.add(
+              new Anchors.Version(rs.getString(from + width), rs.getObject(from + width + 1)));
+        }
+        for (int i = 0; i < keys.size(); i++) {
+          run.context.anchor(n.table, keys.get(i), versions.get(i));
+        }
+        rs.beforeFirst();
+        ps.closeOnCompletion();
+        run.context.rows(rs, width + 3);
+        return keys.size();
+      } catch (SQLException | RuntimeException e) {
+        ps.close();
+        throw e;
+      }
     }
 
     /**

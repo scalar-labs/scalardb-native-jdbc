@@ -1,5 +1,6 @@
 package com.scalar.db.nativejdbc.jdbc;
 
+import com.scalar.db.nativejdbc.catalog.Layout;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.SqlAst;
@@ -61,8 +62,16 @@ final class SplitRead {
      * None: every row as it is, those in flight with their after images, which then carry their
      * state and abort the read (SNAPSHOT and SERIALIZABLE).
      */
-    NONE
+    NONE,
+    /**
+     * The row's own state, a condition on the row itself: a table in the inline layout, whose
+     * metadata is in the row (todo 329).
+     */
+    OWN
   }
+
+  /** The label of a copy's own version column {@code i} (todo 329). */
+  static final String OWN = "scalardb_native_v";
 
   private SplitRead() {}
 
@@ -98,6 +107,47 @@ final class SplitRead {
       boolean committedOnly,
       boolean raw,
       @Nullable String lock) {
+    return emit(
+        engine,
+        ast,
+        split,
+        scalarDb,
+        views,
+        perRow,
+        anchored,
+        extras,
+        committedOnly,
+        raw,
+        lock,
+        Set.of(),
+        false);
+  }
+
+  /**
+   * As {@link #emit(Engine, SqlAst, SqlAst.Split, Map, Map, Set, List, BiFunction, boolean,
+   * boolean, String)}, with the copies of {@code own} carrying the version of each row as columns
+   * of their own, {@code scalardb_native_v0} and {@code v1}, the committed copy's {@code tx_id} and
+   * {@code tx_version}, the in-flight copy's before image's, and with {@code state} the row's own
+   * state as {@code v2}, in place of lookups per row (todo 329). A table in the inline layout reads
+   * them from the row, and its committed copy keeps the rows whose own state is not in flight; a
+   * table in the decoupled layout reads them by a left join to its metadata table, kept likewise. A
+   * {@code *} over such a copy is spelled out as the table's columns, which it would otherwise
+   * show.
+   */
+  static SqlAst.@Nullable SplitText emit(
+      Engine engine,
+      SqlAst ast,
+      SqlAst.Split split,
+      Map<SqlAst.TableRef, TableInfo> scalarDb,
+      Map<SqlAst.TableRef, String> views,
+      Set<SqlAst.TableRef> perRow,
+      List<SqlAst.TableRef> anchored,
+      BiFunction<SqlAst.TableRef, SqlAst.Piece, List<String>> extras,
+      boolean committedOnly,
+      boolean raw,
+      @Nullable String lock,
+      Set<SqlAst.TableRef> own,
+      boolean state) {
     Map<SqlAst.TableRef, SqlAst.Place> places = split.places();
     List<SqlAst.TableRef> refs = new ArrayList<>();
     List<List<SqlAst.Piece>> pieces = new ArrayList<>();
@@ -182,14 +232,23 @@ final class SplitRead {
             }
 
             @Override
+            public boolean exposesColumns() {
+              return !own.isEmpty();
+            }
+
+            @Override
             public String fragment(SqlAst.TableRef ref, SqlAst.Piece piece) {
               TableInfo t = Objects.requireNonNull(scalarDb.get(ref));
               List<String> cols = Objects.requireNonNull(read.get(ref));
+              // the copy's own version columns (todo 329): none, or the row's, or its before
+              // image's, and the row's own state with them
+              Versions v =
+                  own.contains(ref) ? new Versions(t.layout() == Layout.INLINE, state) : null;
               switch (piece) {
                 case IN_FLIGHT:
-                  return inFlight(engine, t, cols);
+                  return inFlight(engine, t, cols, false, v);
                 case UNMATCHED:
-                  return none(engine, t, cols);
+                  return none(engine, t, cols, v);
                 default:
                   return committed(
                       engine,
@@ -197,14 +256,19 @@ final class SplitRead {
                       cols,
                       raw
                           ? Check.NONE
-                          : lock != null
-                              ? Check.SCALAR
-                              : perRow.contains(ref) || rowByRowUnderLimit
-                                  ? engine != Engine.SQLSERVER
-                                      ? Check.LEFT_JOIN
-                                      : inCopy == Check.LEFT_JOIN ? inCopy : Check.SEEK
-                                  : inCopy,
-                      lock);
+                          : v != null
+                              ? v.inline ? Check.OWN : Check.LEFT_JOIN
+                              : lock != null
+                                  ? Check.SCALAR
+                                  : perRow.contains(ref) || rowByRowUnderLimit
+                                      ? engine != Engine.SQLSERVER
+                                          ? Check.LEFT_JOIN
+                                          : inCopy == Check.LEFT_JOIN ? inCopy : Check.SEEK
+                                      : engine == Engine.POSTGRESQL && t.layout() == Layout.INLINE
+                                          ? Check.OWN // the row's own state, no probe per row
+                                          : inCopy,
+                      lock,
+                      v);
               }
             }
           });
@@ -253,16 +317,64 @@ final class SplitRead {
     throw new AssertionError(engine);
   }
 
+  /**
+   * A copy's own version columns (todo 329): whether the table is inline, whose row holds them, and
+   * whether the row's own state comes as a third.
+   */
+  private static final class Versions {
+    final boolean inline;
+    final boolean state;
+
+    Versions(boolean inline, boolean state) {
+      this.inline = inline;
+      this.state = state;
+    }
+
+    /**
+     * The columns as select items, after a comma: those of the row of {@code alias}, or of its
+     * before image with {@code before}.
+     */
+    String items(Engine engine, String alias, boolean before) {
+      String prefix = before ? "before_" : "";
+      String out =
+          ", "
+              + alias
+              + "."
+              + engine.quote(prefix + "tx_id")
+              + " AS "
+              + engine.quote(OWN + 0)
+              + ", "
+              + alias
+              + "."
+              + engine.quote(prefix + "tx_version")
+              + " AS "
+              + engine.quote(OWN + 1);
+      return state
+          ? out + ", " + alias + "." + engine.quote("tx_state") + " AS " + engine.quote(OWN + 2)
+          : out;
+    }
+  }
+
   /** The table's rows not in flight, with the columns {@code read} of its own. */
   private static String committed(
-      Engine engine, TableInfo t, List<String> read, Check check, @Nullable String lock) {
+      Engine engine,
+      TableInfo t,
+      List<String> read,
+      Check check,
+      @Nullable String lock,
+      @Nullable Versions v) {
     String txState = engine.quote("tx_state");
     StringBuilder sql = new StringBuilder("(SELECT ");
     List<String> cols = new ArrayList<>();
     for (String c : read) {
       cols.add("t." + engine.quote(c));
     }
-    sql.append(String.join(", ", cols)).append(" FROM ").append(data(engine, t)).append(" t");
+    sql.append(String.join(", ", cols));
+    if (v != null) {
+      // the inline row's own, else the metadata row's, which the left join below exposes as m
+      sql.append(v.items(engine, v.inline ? "t" : "m", false));
+    }
+    sql.append(" FROM ").append(data(engine, t)).append(" t");
     if (lock != null && engine == Engine.SQLSERVER) {
       sql.append(" ").append(lock); // a table hint there
     }
@@ -297,13 +409,14 @@ final class SplitRead {
           break;
         }
       case LEFT_JOIN:
+        // with the copy's own versions, every state but in flight, as NOT EXISTS keeps them
         sql.append(" LEFT JOIN ")
             .append(meta(engine, t))
             .append(" m ON ")
             .append(keyJoin(engine, t, "m"))
             .append(" WHERE COALESCE(m.")
             .append(txState)
-            .append(", 3) = 3");
+            .append(v != null ? ", 3) NOT IN (1, 2)" : ", 3) = 3");
         break;
       case SCALAR:
         sql.append(" WHERE COALESCE((SELECT q.")
@@ -314,7 +427,17 @@ final class SplitRead {
             .append(keyJoin(engine, t, "q"))
             .append("), 3) NOT IN (1, 2)");
         break;
+      case OWN:
+        sql.append(" WHERE COALESCE(t.").append(txState).append(", 3) NOT IN (1, 2)");
+        break;
       case NONE:
+        if (v != null && !v.inline) {
+          // the versions of a decoupled table's rows as they are, every row kept
+          sql.append(" LEFT JOIN ")
+              .append(meta(engine, t))
+              .append(" m ON ")
+              .append(keyJoin(engine, t, "m"));
+        }
         break;
     }
     if (lock != null && engine != Engine.SQLSERVER) {
@@ -324,8 +447,17 @@ final class SplitRead {
   }
 
   /** No row, with the columns {@code read} of the table and their types. */
-  private static String none(Engine engine, TableInfo t, List<String> read) {
-    return "(SELECT " + columns(engine, read) + " FROM " + data(engine, t) + " t WHERE 1 = 0)";
+  private static String none(Engine engine, TableInfo t, List<String> read, @Nullable Versions v) {
+    String from = data(engine, t) + " t";
+    if (v != null && !v.inline) {
+      from += " LEFT JOIN " + meta(engine, t) + " m ON " + keyJoin(engine, t, "m");
+    }
+    return "(SELECT "
+        + columns(engine, read)
+        + (v == null ? "" : v.items(engine, v.inline ? "t" : "m", false))
+        + " FROM "
+        + from
+        + " WHERE 1 = 0)";
   }
 
   /** The columns {@code read} of the data table, aliased {@code t}. */
@@ -355,6 +487,12 @@ final class SplitRead {
    * forced seek fails where no index gives one (error 8622).
    */
   static String inFlight(Engine engine, TableInfo t, List<String> read, boolean hinted) {
+    return inFlight(engine, t, read, hinted, null);
+  }
+
+  /** As {@link #inFlight(Engine, TableInfo, List, boolean)}, with the copy's own versions. */
+  private static String inFlight(
+      Engine engine, TableInfo t, List<String> read, boolean hinted, @Nullable Versions v) {
     List<String> cols = new ArrayList<>();
     List<String> keys = t.keyColumns();
     for (String c : read) {
@@ -364,6 +502,7 @@ final class SplitRead {
     return "(SELECT "
         + inflightHint(engine, t, hinted)
         + String.join(", ", cols)
+        + (v == null ? "" : v.items(engine, "m", true))
         + " FROM "
         + meta(engine, t)
         + " m"

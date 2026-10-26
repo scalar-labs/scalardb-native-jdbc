@@ -2418,6 +2418,17 @@ public final class SqlAst {
     default List<String> selectExtra() {
       return List.of();
     }
+
+    /**
+     * Returns whether a derived table of this copy exposes columns beyond the table's own, which a
+     * {@code *} over it must not show: the split read then spells a {@code *} or {@code t.*} out as
+     * the columns of each table it covers.
+     *
+     * @return whether a copy exposes columns of its own, false by default
+     */
+    default boolean exposesColumns() {
+      return false;
+    }
   }
 
   /** The ScalarDB table references a split read takes pieces of, and where each stands. */
@@ -3874,6 +3885,28 @@ public final class SqlAst {
                 || s.getOffset() != null
                 || s.getFetch() != null
                 || s.getOrderByElements() != null);
+    if (!onTop && copies.get(0).exposesColumns()) {
+      // a * or t.* over a copy that exposes columns of its own, spelled out as the columns of
+      // each table it covers (todo 329); the select list on top does the same where there is one
+      for (SelectItem<?> item : s.getSelectItems()) {
+        Expression e = item.getExpression();
+        if (!(e instanceof AllColumns)) {
+          continue;
+        }
+        Table q = e instanceof AllTableColumns ? ((AllTableColumns) e).getTable() : null;
+        String all = spelledStar(s, q, columns);
+        Node n = item.getASTNode();
+        Token first = n == null ? null : n.jjtGetFirstToken();
+        Token end = n == null ? null : n.jjtGetLastToken();
+        if (all == null || first == null || end == null) {
+          return null;
+        }
+        for (Edits ed : edits) {
+          ed.from.put(first, all);
+          ed.to.put(first, end);
+        }
+      }
+    }
     List<Integer> sources = new ArrayList<>();
     List<SelectItem<?>> items = s.getSelectItems();
     Node lastItemNode = items.get(items.size() - 1).getASTNode();
@@ -3986,6 +4019,50 @@ public final class SqlAst {
             && (lastCopy == 0 || parses(head + texts.get(lastCopy) + end))
         : head + texts.get(lastCopy) + end;
     return checked(head + String.join(" UNION ALL ", texts) + end, sources);
+  }
+
+  /**
+   * {@code *}, or {@code q.*} with {@code q}, as the columns of each FROM item it covers, in order:
+   * those of {@code columns} for a table listed there, by the name the item is exposed by, and
+   * {@code a.*} for any other; null where that is not what the star is, a join USING or NATURAL, an
+   * item with no name, or a {@code q.*} that names no item.
+   */
+  private @Nullable String spelledStar(
+      PlainSelect s, @Nullable Table q, Map<TableRef, List<String>> columns) {
+    Map<Object, TableRef> byNode = new IdentityHashMap<>();
+    for (TableRef r : tableRefs) {
+      byNode.put(r.node, r);
+    }
+    List<FromItem> from = new ArrayList<>(List.of(s.getFromItem()));
+    if (s.getJoins() != null) {
+      for (Join j : s.getJoins()) {
+        if (j.isNatural() || (j.getUsingColumns() != null && !j.getUsingColumns().isEmpty())) {
+          return null;
+        }
+        from.add(j.getFromItem());
+      }
+    }
+    List<String> out = new ArrayList<>();
+    for (FromItem f : from) {
+      TableRef r = byNode.get(f);
+      if (q != null && (r == null || !(r.hasAlias() ? sameAlias(q, r) : qualifies(q, r)))) {
+        continue;
+      }
+      Alias a = f.getAlias();
+      String name = a != null ? a.getName() : f instanceof Table ? ((Table) f).getName() : null;
+      if (name == null) {
+        return null;
+      }
+      List<String> cols = r == null ? null : columns.get(r);
+      if (cols == null) {
+        out.add(name + ".*");
+        continue;
+      }
+      for (String col : cols) {
+        out.add(name + "." + engine.quote(col));
+      }
+    }
+    return out.isEmpty() ? null : String.join(", ", out);
   }
 
   /**
