@@ -303,3 +303,47 @@ entries is the only way.
 Left: form 5 (the locking read: the in-flight check and the lock in one round trip at SNAPSHOT,
 and at READ COMMITTED the one-statement form if Oracle's statement restart gives the newest
 version's anchor, to verify first), form 6 (the read side with the micro-benchmark session).
+
+### 2026-10-26: form 5 designed (Fable), design 4.3 "The locking read on Oracle"
+
+Designed against the PostgreSQL text as the other session left it (`816f506`, the decoupled
+READ COMMITTED locking read as two statements in one round trip). Oracle has no multi-statement
+text, so "two statements in one round trip" becomes one statement or two round trips; the forms
+make the common case one statement at both levels.
+
+- **SNAPSHOT:** the PostgreSQL argument holds as it stands (one snapshot, no versions, ORA-08177
+  from the lock itself for a row changed since). The coarse check and the lock, which PostgreSQL
+  sends together, become the write's gate inside the lock statement, `AND NOT EXISTS (in
+  flight)`, one round trip when rows come back (which proves the table clear), and the coarse
+  check in a second round trip only when nothing came back on a table not yet clear, exactly as
+  `applyFast` tells a write's zero rows apart. Weighed and rejected: a PL/SQL block holding the
+  check and the lock as a ref cursor, since a ref cursor's result set is forward-only and the
+  application's statement may be scrollable; and the coarse check always first, a round trip on
+  every first touch of a table in a transaction.
+- **READ COMMITTED, inline:** the PostgreSQL one-statement form as it is, the three metadata
+  columns appended. It rests on Oracle's statement restart, which Oracle's Concepts manual states
+  for a waiting UPDATE (the statement proceeds against the newly committed row, its predicate
+  re-checked) and Kyte's AskTom series states for `SELECT FOR UPDATE` (the statement restarts when
+  a row's current version differs from the one it read); the test in the design confirms it on
+  the container before the form is built, as the brief asked.
+- **READ COMMITTED, decoupled:** the join form, `T LEFT JOIN T_meta ... FOR UPDATE OF t.k`, one
+  statement, which PostgreSQL cannot have (its re-read does not reach a joined row) and Oracle
+  can if its restart runs the join again at the new point in time. Pachot (dbi services) shows a
+  write-consistency bug, open since 2011 and present in 21c, where a nested subquery in an UPDATE's
+  WHERE escapes the re-evaluation, so the join form is conditional on the restart test passing on
+  the decoupled layout, and the two statements as two round trips stand otherwise, exact by the
+  PostgreSQL form's own argument (no uncommitted prepare holds a locked data row once the lock is
+  granted). A verifiable condition, not an open case: the test fails loudly, by returning a row
+  in flight, if the form is unsound.
+- The rest as on PostgreSQL: a wait configured, `SKIP LOCKED`, a predicate beyond the key
+  columns, or an impure one, keep the steps and the savepoint; `NOWAIT` fails as the driver's
+  ORA-00054 on a row in flight and as Oracle's own on a locked row.
+
+Sources checked today: Oracle Database Concepts 23ai, "Data Concurrency and Consistency"
+(conflicting writes at read committed; ORA-08177 at serializable for UPDATE and DELETE, the
+FOR UPDATE case the driver's section 5 states as built); Franck Pachot, "Oracle write consistency
+bug and multi-thread de-queuing" (dbi services); Kyte's "Something Different, part I" as search
+results summarize it (the page itself timed out twice).
+
+Left: form 6 (the read side's Oracle costs from the micro-benchmarks, with the session working on
+them).

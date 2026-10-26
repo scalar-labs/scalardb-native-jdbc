@@ -1848,6 +1848,107 @@ A multi-row INSERT and an `INSERT ... SELECT`, which Oracle's `RETURNING` cannot
 steps. A `BEFORE INSERT` row trigger still refuses the INSERT (todo 275): the key `RETURNING`
 gives would be the trigger's, exact, but the refusal is lifted only with a test.
 
+**The locking read on Oracle (todo 334).** A user's `SELECT ... FOR UPDATE` of one ScalarDB table,
+`NOWAIT` or not, which on Oracle today runs the steps of 4.2 as five round trips, the predicate's
+in-flight check, a savepoint, the lock over the committed copy with two version lookups per row,
+the check again and the versions under the lock, the savepoint never released since ojdbc cannot.
+Oracle has no multi-statement text, so what PostgreSQL sends as two statements in one round trip
+is here either one statement or two round trips; the forms below make the common case one
+statement at both levels, and say what each rests on.
+
+*At SNAPSHOT, in a transaction.* The argument of the PostgreSQL form holds unchanged: every
+statement of the transaction reads its one snapshot, so the check after the lock and the versions
+read under it would see what one check before sees, a row in flight aborts at once (section 6),
+its locks released with the transaction, no read records a version (4.2 on Oracle), and a row a
+ScalarDB prepare wrote after the snapshot fails the lock itself, `SELECT ... FOR UPDATE` raising
+ORA-08177 for a row changed since the snapshot as an UPDATE does (section 5). So no savepoint, no
+versions, and one check, which is the table's: on a table the transaction found clear the
+statement as written, the user's own text on the data table, as PostgreSQL's `applyPlain` runs it,
+and on a table not yet found clear the same statement with the write's gate in its WHERE clause,
+`AND NOT EXISTS (SELECT /*+ INDEX(m <T_inflight>) */ 1 FROM T_meta m WHERE m.tx_state IN (1, 2))`,
+one probe of the in-flight index, which Oracle locks nothing through, the lock reaching the
+statement's own table alone. A row returned proves the gate open and marks the table clear. No
+row returned is either the predicate matching nothing or the gate closed, which the coarse check
+of 4.2 then tells in a second round trip, as it does for a write: none found marks the table clear
+and the empty result is the vendor's; a row found runs the predicate's in-flight check by either
+image (`inFlightStep`), which aborts for a row in flight the statement matches, `NOWAIT` or not,
+and otherwise the lock over the committed copy as today, without its versions, its savepoint or
+its second check, one snapshot making them vacuous. An inline table read whole (`*`) takes the
+committed copy's form in place of the statement as written, which would show the metadata
+columns, as on PostgreSQL. `SKIP LOCKED` keeps the steps and their versions, as on PostgreSQL. An
+autocommit locking read runs in the transaction of its own of todo 283, at SERIALIZABLE, where
+nothing is remembered and the gated statement decides alone.
+
+*At READ COMMITTED, one statement.* Each statement reads its own snapshot and anchors are
+recorded, so the lock must return each row at its newest version with its state, as PostgreSQL's
+one-statement form has it from the lock's re-read of the row after a wait. Oracle gives the same
+by its statement restart: a statement that finds a row changed by a transaction that committed
+after the statement's consistent read, an `UPDATE` or a `SELECT ... FOR UPDATE` that waited on the
+row's lock among them, is rolled back and run again as of a new point in time, its WHERE clause
+evaluated again on the row as it is now and the row locked at that version (Oracle Database
+Concepts, "Conflicting Writes in Read Committed Transactions"; Kyte, "Something Different",
+AskTom). Where PostgreSQL rechecks the row's own quals on its newest version and keeps the rest
+of the statement at the old snapshot, Oracle runs the whole statement again at the new one. Two
+forms, under the PostgreSQL form's conditions, a predicate and ORDER BY on key columns only, pure,
+no `SKIP LOCKED`, no grouping, no wait configured:
+
+- the inline layout's: the statement as written over the rows as they are, each row's key,
+  `tx_id`, `tx_version` and `tx_state` appended to the select list, `FOR UPDATE` where the user put
+  it, `NOWAIT` kept. The row returned is its newest version, the anchor the level wants (4.3 step
+  1, a read now); a row in flight shows its state and aborts, or fails as `NOWAIT` fails, the
+  driver's ORA-00054 (`notAvailable`), since the lock held on it must not outlast the statement
+  (section 6); no row in flight is matched by its before image alone, the images of a row
+  differing in no key column;
+- the decoupled layout's: the same statement with the metadata row joined, `FROM T t LEFT JOIN
+  T_meta m ON m.k = t.k ... FOR UPDATE OF t.k`, the key named in `OF` so that only the data rows are
+  locked, the metadata row's `tx_id`, `tx_version` and `tx_state` in the select list, which
+  PostgreSQL could not do, its re-read not reaching a joined row. It is exact if, and only if,
+  the restart runs the join again at the new point in time, so that a prepare that committed
+  while the lock waited shows as state 1 or 2 in the row returned. Kyte describes the restart as
+  the statement run again, and Oracle's own text has the predicate evaluated again on the newly
+  committed row, but a write-consistency bug Kyte reported in 2011 and still present in 21c lets
+  a nested subquery in an UPDATE's WHERE clause escape the re-evaluation (Pachot, dbi services), so
+  this form is built only after the test below passes on the container, and otherwise the
+  decoupled layout takes the two statements of the PostgreSQL form as two round trips: the lock
+  over the committed copy as today, then the keys, versions and states of the rows the predicate
+  matches from `T JOIN T_meta` in a snapshot taken after the lock, exact for the reason given
+  there, which no restart enters: once the lock is granted no uncommitted prepare holds a data
+  row the statement locked, and a new one blocks on it, so the metadata rows read after the lock
+  are those the locked rows have, a state 1 or 2 among them, with a before image or on a locked
+  key, an abort.
+
+The test that decides the decoupled form, run on both layouts: connection A, as a ScalarDB prepare
+would, updates a row of `T` and sets its metadata row to state 1 in one transaction and holds it;
+the driver's locking read on that row waits; A commits; the driver must abort with `40001` (or
+fail with ORA-00054 under `NOWAIT`), never return the row. On the inline layout this is the
+restart's own-row re-read, Oracle's documented behaviour; on the decoupled layout it is the
+joined row's. A second case, A committing a plain change of the row and its metadata as a driver
+write does: the row returned must carry A's `tx_id` and version, which `committedWhileItWaits` then
+holds the write to. With `scalardbnative.inflightWaitMs` set, `SKIP LOCKED`, a predicate beyond
+the key columns, or a non-pure one, the locking read keeps its steps and savepoint, as on
+PostgreSQL. What the driver reads back and does:
+
+| the result | the driver |
+|---|---|
+| SNAPSHOT, rows returned | the rows to the application; the table marked clear when the gate was in the statement; no anchors |
+| SNAPSHOT, no row, table found clear | the empty result to the application |
+| SNAPSHOT, no row, table not yet clear | the coarse check: none found marks the table clear and returns the empty result; a row found runs the predicate's check, an abort `40001` if it matches by either image, else the committed copy's lock, its rows to the application |
+| SNAPSHOT, ORA-08177 | `40001`, rollback-only: a row the statement locks changed after the snapshot |
+| READ COMMITTED, every row's state committed | each row's version its anchor (`Context.anchor`), the rows to the application |
+| READ COMMITTED, a row's state 1 or 2 | abort `40001`, or the driver's ORA-00054 under `NOWAIT`; the lock on that row goes with the rollback |
+| READ COMMITTED, decoupled, two statements: a key locked that the second read does not show | the steps, as PostgreSQL's `applyFastRcDecoupled` falls back |
+| ORA-00054 from Oracle under `NOWAIT` | the vendor's own: a row locked by another session, a prepare in progress among them |
+| any other error | the vendor's own; a statement that failed locked nothing |
+
+What must keep holding on Oracle: `MoreWritesIntegrationTest.lockingReads` on both layouts,
+`largeLockingRead`, `inFlightWait`'s locking reads, `timeoutMidWrite`, `SnapshotIntegrationTest`'s
+lock-then-update on Oracle, `committedWhileItWaits`. To add: the restart test above, both layouts
+and both cases; the gated lock at SNAPSHOT on a table with a row in flight that the predicate does
+not match, which locks through the committed copy, and one it matches, an abort; a locking read
+that marks a table clear, after which a plain read of it runs as written. Measured: NewOrder's
+stock `FOR UPDATE`, ten a transaction, from five round trips each to one, locally beside the
+vendor's own statement, then on AWS with the rest.
+
 ### 4.4 Builder notes
 
 - **Autocommit.** A write is three statements that must share one database transaction. In autocommit
