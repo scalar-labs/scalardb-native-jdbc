@@ -1585,31 +1585,35 @@ MariaDB, a T-SQL batch on SQL Server, and an anonymous PL/SQL block on Oracle (t
 **The keyed write on Oracle, one PL/SQL block (todo 334).** An UPDATE or DELETE by the table's full
 key, each key column equal to a placeholder or a literal and nothing else, at READ COMMITTED and at
 SNAPSHOT, in both layouts, on a created or an imported table, without a locking clause. The steps
-above are three statements with two decisions between them: after step 1, whether to go on (the
-data row exists, has a metadata row, and is committed; at READ COMMITTED, otherwise wait), and after
-step 2, whether the DML wrote its row. Each decision is a function of the earlier statements' own
-results and of nothing the client knows that the server cannot be told, with one exception: the
-version the transaction read earlier, whose comparison needs no decision before the write, since
-its failure is an abort, which undoes the write with the transaction, as the fused statement on
-PostgreSQL already has it. So the three statements and the two decisions run as one anonymous
-block, and the driver decides the rest from the one row the block returns. The block is the
-protocol, not a new one: every statement in it is the step's statement, run by the same engine at
-the same level in the same order, the data row before the metadata row, and the only change is
-where the decision is made. What Oracle adds is the block's atomicity as the client's statement: an
-unhandled exception in it, ORA-08177, ORA-00060 or any other, fails the block as one statement and
-undoes everything it wrote, so the write needs no savepoint of its own and the transaction after an
-error is as it was before the block; the errors are mapped as they are today, ORA-08177 and
-ORA-08176 to `40001` rollback-only. The block raises nothing of its own. It returns before writing
-on every outcome the driver may wait on or count as nothing written, and writes only when the row
-it read is committed, so an outcome returned after a write is one the driver aborts on, the DML it
-left applied undone with the rollback, as on PostgreSQL. Two more things it gets right by
-construction. At SNAPSHOT its read is in the transaction's snapshot and no read recorded an anchor
-(4.2 on Oracle), so the version it reads is the anchor the level wants, and a row changed since
-fails the DML with ORA-08177 before the CAS; at READ COMMITTED its read is a read now, step 1's
-anchor for a key the transaction never read, and for a key it read before the driver compares the
-version returned with the recorded one afterwards and aborts (`Anchors.unchanged`), which
-`committedWhileItWaits` checks. And the wait of section 6 holds no lock: the block reads without
-locking and writes nothing while the row is in flight.
+above are three statements with two decisions between them: after step 1, whether to go on (the data
+row exists, has a metadata row, and is committed; at READ COMMITTED, otherwise wait), and after step
+2, whether the DML wrote its row. Each decision is a function of the earlier statements' own results
+and of nothing the client knows that the server cannot be told, with one exception: the version the
+transaction read earlier, whose comparison needs no decision before the write, since its failure is
+an abort, which undoes the write with the transaction, as the fused statement on PostgreSQL already
+has it. So the three statements and the two decisions run as one anonymous block, and the driver
+decides the rest from the one row the block returns. The block is the protocol, not a new one: every
+statement in it is the step's statement, run by the same engine at the same level in the same order,
+the data row before the metadata row, and the only change is where the decision is made. What Oracle
+adds is the block's atomicity as the client's statement: an unhandled exception in it, ORA-08177,
+ORA-00060 or any other, fails the block as one statement and undoes everything it wrote, so the
+write needs no savepoint of its own and the transaction after an error is as it was before the
+block; the errors are mapped as they are today, ORA-08177 and ORA-08176 to `40001` rollback-only.
+The block raises nothing of its own. It returns before writing on every outcome the driver may wait
+on or count as nothing written, and writes only when the row it read is committed, so an outcome
+returned after a write is one the driver aborts on, the DML it left applied undone with the
+rollback, as on PostgreSQL. Two more things it gets right by construction. At SNAPSHOT its read is
+in the transaction's snapshot and no read recorded an anchor (4.2 on Oracle), so the version it
+reads is the anchor the level wants, and a row changed since fails the DML with ORA-08177 before the
+CAS; at READ COMMITTED its read is a read now, step 1's anchor for a key the transaction never read,
+and for a key it read before the driver compares the version returned with the recorded one
+afterwards and aborts (`Anchors.unchanged`), which `committedWhileItWaits` checks. And the wait of
+section 6 holds no lock: the block reads without locking and writes nothing while the row is in
+flight. Each block, as every statement the driver prepares on Oracle, is prepared once per
+connection: ojdbc's implicit statement cache, which the driver turns on for the connection it opens
+unless the user set the property, since a parse call per block costs the server 16 µs of CPU and the
+client 90 of wall time, against 2 and 36 for a plain statement, and takes the nested statements'
+parse calls with it (todo 334's log, 2026-10-27).
 
 The text, for a table `T` with key `k` (every key column where `k` stands), the user's WHERE
 clause `P` under the name the statement exposes for the table, its placeholders where `P` stands,
@@ -2097,10 +2101,20 @@ no `SKIP LOCKED`, no grouping, no wait configured:
   (section 6); no row in flight is matched by its before image alone, the images of a row
   differing in no key column;
 - the decoupled layout's: the same statement with the metadata row joined, `FROM T t LEFT JOIN
-  T_meta m ON m.k = t.k ... FOR UPDATE` on the derived table of the key, which locks the metadata
-  row joined to each data row beside it (a prepare of the row, which updates both, waits on either
-  lock alike), the metadata row's `tx_id`, `tx_version` and `tx_state` in the select list, which
-  PostgreSQL could not do, its re-read not reaching a joined row. It is exact if, and only if,
+  T_meta m ON m.k = t.k ... FOR UPDATE OF x.k` on the derived table of the key, `OF` a key column of
+  the derived table under the name the statement exposes, so that the lock reaches the data row
+  alone, as the one-statement form on PostgreSQL and the keys-only lock of todo 336 do, and the
+  metadata row stays free; the metadata row's `tx_id`, `tx_version` and `tx_state` in the select
+  list, which PostgreSQL could not do, its re-read not reaching a joined row. The first form locked
+  the metadata row joined to each data row beside it, on the ground that a prepare of the row, which
+  updates both, waits on either lock alike; it does, but the write blocks of 4.3 take the data row
+  before the metadata row, so a lock read holding a metadata row while it waits for the data row
+  closes a cycle with a write block holding the data row and waiting for the metadata row, ORA-00060
+  after Oracle's three seconds with every other session queued behind the pair (the first Oracle
+  BenchBase run, YCSB's read-modify-write at this level: 25 deadlocks and 316 of 480 terminal-
+  seconds in lock waits; todo 334's log, 2026-10-27). Locking the data row alone loses nothing the
+  form rests on: the restart is the locked row's, and the metadata row's state and version come from
+  the statement run again at the new point in time; It is exact if, and only if,
   the restart runs the join again at the new point in time, so that a prepare that committed
   while the lock waited shows as state 1 or 2 in the row returned. Kyte describes the restart as
   the statement run again, and Oracle's own text has the predicate evaluated again on the newly
@@ -2117,14 +2131,18 @@ no `SKIP LOCKED`, no grouping, no wait configured:
 
 The test that decides the decoupled form, run on both layouts: connection A, as a ScalarDB prepare
 would, updates a row of `T` and sets its metadata row to state 1 in one transaction and holds it;
-the driver's locking read on that row waits; A commits; the driver must abort with `40001` (or
-fail with ORA-00054 under `NOWAIT`), never return the row. On the inline layout this is the
-restart's own-row re-read, Oracle's documented behaviour; on the decoupled layout it is the
-joined row's. A second case, A committing a plain change of the row and its metadata as a driver
-write does: the row returned must carry A's `tx_id` and version, which `committedWhileItWaits` then
-holds the write to. With `scalardbnative.inflightWaitMs` set, `SKIP LOCKED`, a predicate beyond
-the key columns, or a non-pure one, the locking read keeps its steps and savepoint, as on
-PostgreSQL. What the driver reads back and does:
+the driver's locking read on that row waits; A commits; the driver must abort with `40001` (or fail
+with ORA-00054 under `NOWAIT`), never return the row. On the inline layout this is the restart's
+own-row re-read, Oracle's documented behaviour; on the decoupled layout it is the joined row's. A
+second case, A committing a plain change of the row and its metadata as a driver write does: the row
+returned must carry A's `tx_id` and version, which `committedWhileItWaits` then holds the write to.
+A third, the lock's scope: with a key locked through the decoupled form, a second connection's
+`SELECT ... FOR UPDATE NOWAIT` of its metadata row returns the row, and of its data row fails with
+ORA-00054 (checked on the container, 2026-10-27: the form without `OF` fails both, `OF x.k` and `OF
+k` alike free the metadata row). With `scalardbnative.inflightWaitMs` set, `SKIP LOCKED`, a
+predicate beyond the key columns, or a non-pure one, the locking read keeps its steps and savepoint,
+as on PostgreSQL.
+What the driver reads back and does:
 
 | the result | the driver |
 |---|---|

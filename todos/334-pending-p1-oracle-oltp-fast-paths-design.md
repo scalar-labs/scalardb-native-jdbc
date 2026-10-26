@@ -615,3 +615,89 @@ connection's keyed write holds, which lands on `stamped` 0 and the inline `writt
 on the anchor; `form4InsertOverAMetadataRowInFlight` on the imported table). Nothing is open on
 the design side for the six forms. What follows is the measurement: the Oracle BenchBase build and
 the AWS run after the PostgreSQL matrix, against the figures of todo 335's log.
+
+### 2026-10-27: the first Oracle BenchBase run read (the design)
+
+Run 20261027-0133 (`docs/benchmarks/benchbase-oracle-aws.md`, 9850da9 and 9349ad8, by the AWS
+session; tree 71e53d5): TPC-C 0.41–0.69 of the vendor fast, 0.58–0.74 slow; YCSB decoupled READ
+COMMITTED 0.20 fast. The user finds it unacceptable. Three things decided or measured here, two
+candidates sized, and one anomaly in the readout.
+
+**1. The decoupled READ COMMITTED lock holds the metadata row, which closes a cycle with the write
+blocks: fixed in the design by `FOR UPDATE OF`.** YCSB's read-modify-write cell logs about 25
+ORA-00060 a run and 813 `enq: TX - row lock contention` waits worth 316 of 480 terminal-seconds;
+inside the write block the `UPDATE T_meta` waits 84 s over 53,909 calls, which only a session
+holding the metadata row without the data row explains, and the lock read is the one statement
+that takes a metadata row. Checked on the container (`scratchpad/ora/lockscope.sh`): the form as
+built, `... FROM (T t LEFT JOIN T_meta m ...) x WHERE x.k = :1 FOR UPDATE`, leaves a second
+connection's `FOR UPDATE NOWAIT` of the key's metadata row and data row both ORA-00054; with `FOR
+UPDATE OF x.k` (or `OF k`) the metadata row is free and the data row locked, the plan unchanged
+(FOR UPDATE over NESTED LOOPS OUTER from `T`). Design 4.3 "The locking read on Oracle" now has the
+decoupled form with `OF` a key column of the derived table under the exposed name, the reason, and
+the lock's scope as a third deciding test. The builder: in `Router`'s Oracle `fastRc` branch on a
+decoupled table, the user's `FOR UPDATE[ NOWAIT]` clause becomes `FOR UPDATE OF <x>.<k0>[ NOWAIT]`;
+`OracleFormsIntegrationTest` gets the scope test beside test 6, and the restart test runs again on
+the new text. The YCSB decoupled READ COMMITTED cell on AWS is the proof. TPC-C at that level shows
+no deadlock because its contended keys (district, warehouse) are locked by NewOrder alone and
+written by Payment's block, whose data-row wait precedes any metadata lock; YCSB's update and
+read-modify-write on one hot key meet in both orders.
+
+**2. Every statement the driver prepares on Oracle is parsed per call; measured, the cache is
+worth taking.** `server.txt` has parse calls equal to calls on both sides (BenchBase prepares per
+transaction; ojdbc's implicit statement cache is off by default; the driver prepares its own
+texts, the blocks among them, per call on the vendor connection). On PostgreSQL pgjdbc's
+server-side prepared statements gave the driver's texts this for free. Measured on the container
+(`scratchpad/ora/cache2.jsh`, 10,000 calls a cell after 300 warm, `V$MYSTAT` deltas of the session,
+a clear-table block of the warehouse's shape against the plain UPDATE):
+
+| per call | parsed per call | implicit cache |
+|---|---|---|
+| block: server CPU, DB time | 37, 95 µs | 21, 75 µs |
+| block: wall clock at the client | 344 µs | 254 µs |
+| plain UPDATE: server CPU, DB time | 10, 40 µs | 8, 38 µs |
+| plain UPDATE: wall clock | 236 µs | 200 µs |
+| parses per call (block, with its two nested statements) | 3.09 | 0 |
+
+So a parse call costs the server 16 µs of CPU on a block (2 on a plain statement) and the client
+90 (36), and the nested statements' parse calls go with it. Decision: the driver turns on ojdbc's
+implicit statement cache for the connection it opens on Oracle unless the user set the property
+(`oracle.jdbc.implicitStatementCacheSize`, a size that holds the driver's texts, 64), noted in
+design 4.3's keyed-write paragraph. The application's own statements are cached by it too, which
+is a gain to users and a question of fairness in the benchmark: the vendor's run should get the
+same property for the comparison, or the harness its own statement cache. At 21–36 driver calls a
+commit the server saving is of the order of 0.2 ms a commit of the 2.6 ms gap at SNAPSHOT
+decoupled, the latency saving larger; the AWS cell decides.
+
+**3. The next design item, the batch entries at SNAPSHOT on a clear table.** In the SNAPSHOT
+decoupled TPC-C cell NewOrder's stock batch runs as keyed-block entries (`l_rows_1`, ... one text
+per row count): per stock row a versions read (`SELECT 1, CASE WHEN M.k IS NULL ...`, 283,777
+calls, 14 µs each), the `UPDATE STOCK` and the `UPDATE STOCK_tx_metadata` (24 µs), and per order
+line the `INSERT ORDER_LINE` and its metadata insert (24 µs): about 50 nested statements a
+NewOrder, 1,262 µs of block time a commit of which 722 is the nested statements and 540 the
+blocks' own. On a table the transaction found clear at SNAPSHOT the lock recorded no version
+(4.2 on Oracle), so the entries need no read and no CAS: the clear-table form's two writes per
+entry, which as `FORALL` over the entries' arrays are two bulk statements a batch in one block, one
+text for every row count, the metadata rows stamped by one `MERGE` or `INSERT`. The same for the
+decoupled INSERT entries. Not designed here yet: the outcome rules per entry under a bulk statement
+(`SQL%BULK_ROWCOUNT`) and the duplicate among inserts (`SAVE EXCEPTIONS`). This is the largest
+statement-CPU item for TPC-C decoupled after the cache; the inline layout's SNAPSHOT vendor batch,
+designed in 4.4 and not built, is its counterpart there.
+
+**4. Noted, not acted on.** (a) At READ COMMITTED the keyed block whose data-row UPDATE waited on
+another connection's write finds the version moved and returns `stamped` 0, which the driver
+aborts as `40001` (`form2RowMovedBetweenTheReadAndTheCas`); the vendor applies the update after
+the wait, and PostgreSQL's form of todo 336 does too. BenchBase shows it as "rejected (server
+retry)": 550 in YCSB decoupled READ COMMITTED and 614 inline against the vendor's 0, 2 in TPC-C.
+A behavioural difference at this level, small in cost; the fix is the block re-reading the version
+under the lock after the data write and comparing a recorded anchor afterwards. (b) SNAPSHOT inline
+YCSB fast: 585 row-lock waits (45 s) and 17 s of buffer busy waits, no deadlock; unexplained. (c)
+BenchBase's `isRetryable` knows MySQL's and PostgreSQL's codes only, so ORA-08177 (both sides,
+25,930 and 6,784 unexpected in TPC-C fast) and ORA-00060 are dropped transactions, not retries.
+
+**5. The readout.** In the driver's `tpcc-c-1/server.txt` of the SNAPSHOT decoupled cell the
+vendor-shaped texts (a leading space, lower-case table names: ` SELECT S_QUANTITY ... FOR UPDATE`
+with 614,539 calls, the vendor's own count to the call) appear beside the driver's rewritten ones
+(`/* scalardb_native_lock */ SELECT S_QUANTITY ...`, 261,668 plain and 29,165 gated), 643,273
+calls and 10.2 of 147 s of CPU in all: the delta seems to carry the previous run's cursors. "The
+stock SELECT ... FOR UPDATE runs 10.4 times a commit against 5.0" reads as that artifact; the
+driver's locks are one gated and nine plain a NewOrder. Sent to the AWS session.
