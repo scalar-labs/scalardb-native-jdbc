@@ -142,6 +142,10 @@ class BenchBaseBenchmark {
 
   private static final String SCHEMA = "bb";
 
+  // Oracle has no URL setting for a session's schema: BenchBase logs on as this user, whose logon
+  // trigger sets CURRENT_SCHEMA to the benchmark's, so that system's own logons stay as they are
+  private static final String ORACLE_RUNNER = "BBRUN";
+
   // the vendor drivers on this JVM's classpath replace BenchBase's, so that (a) and the driver's
   // runs use the version the integration tests run
   private static final Pattern VENDOR_JAR =
@@ -158,7 +162,9 @@ class BenchBaseBenchmark {
   @ParameterizedTest
   @MethodSource("engines")
   void benchBase(Engines e) throws Exception {
-    assumeTrue(e.engine() == Engine.POSTGRESQL, "PostgreSQL only so far");
+    assumeTrue(
+        e.engine() == Engine.POSTGRESQL || e.engine() == Engine.ORACLE,
+        "PostgreSQL and Oracle so far");
     assertThat(HOME.resolve("benchbase.jar")).exists();
     Path dir = OUT.resolve("benchbase-" + e.name().toLowerCase(Locale.ROOT));
     Files.createDirectories(dir);
@@ -201,6 +207,35 @@ class BenchBaseBenchmark {
     System.out.println(report);
   }
 
+  /** Whether the run reads the server's own account of it: PostgreSQL's views so far. */
+  private static boolean stats(Engines e) {
+    return SERVER_STATS && e.engine() == Engine.POSTGRESQL;
+  }
+
+  /**
+   * On Oracle, the user BenchBase logs on as: the rights of {@code system}, which ScalarDB's tables
+   * need, and a logon trigger that makes the benchmark's schema the session's.
+   */
+  @SuppressFBWarnings(
+      value = "SQL_INJECTION_JDBC",
+      justification = "the benchmark's own names and password")
+  private static void oracleRunner(Engines e, String ns) throws SQLException {
+    String runner = e.engine().quote(ORACLE_RUNNER);
+    try (Connection c = e.open();
+        Statement st = c.createStatement()) {
+      st.execute("CREATE USER " + runner + " IDENTIFIED BY \"" + e.password() + "\"");
+      st.execute("GRANT DBA TO " + runner);
+      st.execute(
+          "CREATE OR REPLACE TRIGGER "
+              + runner
+              + ".\"BB_SCHEMA\" AFTER LOGON ON "
+              + runner
+              + ".SCHEMA BEGIN EXECUTE IMMEDIATE 'ALTER SESSION SET CURRENT_SCHEMA = "
+              + e.engine().quote(ns)
+              + "'; END;");
+    }
+  }
+
   /** One run: fresh tables, loaded through the vendor URL, set up for (c), then executed. */
   private static Result run(Engines e, String workload, String run, Path dir) throws Exception {
     // BenchBase names its files by the time; a directory left from a run before holds others
@@ -214,11 +249,17 @@ class BenchBaseBenchmark {
     Files.createDirectories(dir);
     try (Connection c = e.open()) {
       e.dropSchemas(c, e.storedSchema(SCHEMA), "scalardb", "coordinator");
+      if (e.engine() == Engine.ORACLE) {
+        e.dropSchemas(c, ORACLE_RUNNER);
+      }
     }
     String ns = e.storedSchema(SCHEMA);
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(ns, true);
+    }
+    if (e.engine() == Engine.ORACLE) {
+      oracleRunner(e, ns);
     }
     benchBase(e, workload, "a", dir, "load", "--create=true", "--load=true");
     List<String> imported = new ArrayList<>();
@@ -255,8 +296,11 @@ class BenchBaseBenchmark {
     try (Connection c = e.open();
         Statement st = c.createStatement()) {
       // the statistics of the loaded tables, and in (c) of the metadata tables the setup filled
-      st.execute("ANALYZE");
-      if (SERVER_STATS) {
+      st.execute(
+          e.engine() == Engine.ORACLE
+              ? "BEGIN DBMS_STATS.GATHER_SCHEMA_STATS('" + ns + "'); END;"
+              : "ANALYZE");
+      if (stats(e)) {
         Server.reset(st);
       }
       // -Dnativejdbc.benchbase.beforeExecute=SELECT pg_stat_statements_reset(): a statement run
@@ -266,9 +310,9 @@ class BenchBaseBenchmark {
         st.execute(before);
       }
     }
-    long[] roundTrip = SERVER_STATS ? Server.roundTrip(e) : null;
-    Server.@Nullable Snapshot start = SERVER_STATS ? Server.snapshot(e) : null;
-    Sampler sampler = SERVER_STATS ? new Sampler(e) : null;
+    long[] roundTrip = stats(e) ? Server.roundTrip(e) : null;
+    Server.@Nullable Snapshot start = stats(e) ? Server.snapshot(e) : null;
+    Sampler sampler = stats(e) ? new Sampler(e) : null;
     Path histograms = dir.resolve("histograms.json");
     try {
       benchBase(
@@ -688,13 +732,16 @@ class BenchBaseBenchmark {
     Document d =
         f.newDocumentBuilder().parse(sample.resolve("sample_" + workload + "_config.xml").toFile());
     boolean vendor = run.equals("a") || run.equals("d");
-    String url = e.url() + (e.url().contains("?") ? "&" : "?") + "currentSchema=" + SCHEMA;
+    String url =
+        e.engine() == Engine.ORACLE
+            ? e.url()
+            : e.url() + (e.url().contains("?") ? "&" : "?") + "currentSchema=" + SCHEMA;
     set(
         d,
         "driver",
         vendor ? vendorDriverClass(e.engine()) : "com.scalar.db.nativejdbc.NativeJdbcDriver");
     set(d, "url", vendor ? url : "jdbc:scalardb-native:" + url.substring("jdbc:".length()));
-    set(d, "username", e.username());
+    set(d, "username", e.engine() == Engine.ORACLE ? ORACLE_RUNNER : e.username());
     set(d, "password", e.password());
     set(d, "isolation", "TRANSACTION_" + (vendor ? vendorIsolation(e.engine()) : ISOLATION));
     set(d, "terminals", String.valueOf(TERMINALS));
@@ -731,10 +778,18 @@ class BenchBaseBenchmark {
   private static final Pattern DECIMAL =
       Pattern.compile("\\bdecimal\\s*\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\)", Pattern.CASE_INSENSITIVE);
 
+  // Oracle's FLOAT without a precision is FLOAT(126) and its INT NUMBER(38), which ScalarDB 3.19
+  // cannot import (a NUMBER over 18 digits), and a NUMBER without a precision would import as
+  // DOUBLE, TPC-C's keys among them
+  private static final Pattern ORACLE_FLOAT =
+      Pattern.compile("\\bFLOAT\\b(?!\\s*\\()", Pattern.CASE_INSENSITIVE);
+  private static final Pattern ORACLE_NUMBER =
+      Pattern.compile("\\b(NUMBER\\b(?!\\s*\\()|INT(EGER)?\\b)", Pattern.CASE_INSENSITIVE);
+
   /**
-   * BenchBase's DDL for the workload with its decimals as doubles, which ScalarDB 3.19 cannot
-   * import otherwise; every run creates its tables from it, so that (a) and (b) read the same
-   * types.
+   * BenchBase's DDL for the workload with the types ScalarDB 3.19 cannot import replaced: its
+   * decimals as doubles, and on Oracle FLOAT as BINARY_DOUBLE and INT or a bare NUMBER as
+   * NUMBER(10); every run creates its tables from it, so that (a) and (b) read the same types.
    *
    * @return whether the DDL differs from BenchBase's, and was written
    */
@@ -747,7 +802,12 @@ class BenchBaseBenchmark {
         ddl = new String(in.readAllBytes(), StandardCharsets.UTF_8);
       }
     }
-    String changed = DECIMAL.matcher(ddl).replaceAll("double precision");
+    String changed =
+        engine == Engine.ORACLE
+            ? ORACLE_NUMBER
+                .matcher(ORACLE_FLOAT.matcher(ddl).replaceAll("BINARY_DOUBLE"))
+                .replaceAll("NUMBER(10)")
+            : DECIMAL.matcher(ddl).replaceAll("double precision");
     if (changed.equals(ddl)) {
       return false;
     }
