@@ -87,6 +87,21 @@ TPC-C, per transaction:
 Oracle, third run, YCSB: the scan is behind the vendor only at decoupled RC (2307 → 4020); the
 update adds 136–164 µs on decoupled at both levels and 115 inline RC, against 26 inline SNAPSHOT.
 
+Oracle, third run, TPC-C, added µs a transaction (times the vendor's), and the share of the
+transaction's added time by mix weight:
+
+| Oracle | NewOrder | Payment | Delivery | StockLevel | OrderStatus | added, by share |
+|---|---|---|---|---|---|---|
+| decoupled RC | +3212 (1.92) | +792 (1.74) | +11200 (2.28) | +550 (1.52) | +271 (1.52) | 2.27 ms |
+| decoupled SNAPSHOT | +2044 (1.60) | +633 (1.57) | +6335 (1.73) | +223 (1.20) | +365 (1.67) | 1.47 ms |
+| inline RC | +1683 (1.46) | +505 (1.45) | +10006 (2.09) | +998 (1.88) | +196 (1.35) | 1.42 ms |
+| inline SNAPSHOT | +1339 (1.40) | +239 (1.22) | +2060 (1.24) | +312 (1.30) | +369 (1.69) | 0.82 ms |
+
+NewOrder is 53–64% of the added time in every cell (its order_line inserts still per row in this
+run, the bulk block's double fixed after it, 4834c21, not yet measured). At RC, Delivery is
+2.1–2.3 times the vendor's on both layouts, about 0.4 ms a transaction by share: the write beyond
+the key, as on PostgreSQL inline.
+
 The mixed runs keep contention and cache effects in these figures. A run with one operation at a
 time (YCSB with one weight at 100) would isolate each; the per-type series above already point at
 the items: the decoupled RC scan, the inline RC write beyond the key, the update on Oracle.
