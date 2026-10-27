@@ -14,7 +14,7 @@
   },
   "runs": "a,c",
   "reps": 2,
-  "time_s": 120,
+  "time_s": 60,
   "terminals": 4,
   "loader_threads": 8,
   "jvm_args": ["-Doracle.jdbc.implicitStatementCacheSize=128"]
