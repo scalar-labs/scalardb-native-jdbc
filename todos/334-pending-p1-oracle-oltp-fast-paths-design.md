@@ -1628,3 +1628,84 @@ user's per-table choice (the scan note above). Recommended order: the inline RET
 (one line, its own cell to confirm), the fast path next (todo 334's parked item, the measure
 `ClientCostIntegrationTest`'s scan and read), (b) after it if the user still wants the RC scan's
 remaining 50–75.
+
+### 2026-10-27: the proxied-call fast path for the result set, designed (the design's decision; item 2 of the user's order, for c7)
+
+The user approved f767e74's three items in order (6e): (1) the inline INSERT's RETURNING fix,
+built by c7 as 990c49d on `oracle-insert-returning` and reviewed mergeable; (2) this; (3) the lazy
+anchor map with `getLong`, designed after this one lands, on the same path.
+
+**What costs.** A call on a driver result set runs `$Proxy.getString(int)` (the stub boxes the
+arguments into an `Object[]`) → `Handler.invoke` (a switch over the five Object and Wrapper
+methods) → `AnchoredHandler.handle` (a second switch, then `startsWith("get")`, the bound check
+`i > visible()`) → `forward` → `Method.invoke` (its access checks and method-handle dispatch, the
+call site megamorphic) → the vendor's getter. The JFR of the fifth run (the note above): about 20
+ns a call, 5,500 calls a 500-row scan (500 `next`, 5,000 `getString`), 125 µs of the scan's +381
+of client CPU, the same at SNAPSHOT (111 of its +118): `Method.invoke`'s checks 8 ns, the two
+switches and name compares 8, the stub, the arguments and the result checks the rest. The third
+run's microbenchmark (21 against 18 ns) saw a monomorphic site the JIT inlines; the handler's is
+not. A getter by label costs a vendor `findColumn` for the bound check and then the vendor's own
+lookup inside `getString(label)`: two lookups.
+
+**The design: direct calls for the hot methods, the generic path for the rest.** The proxies stay
+(one proxy class an interface, `Handler.invoke` as it is); the three result-set handlers,
+`AnchoredHandler`, `ChildHandler` and `BooleanColumns`, call the vendor object directly for:
+
+- `next()`: `rs.next()`, then the row hook — the anchor and state code now inline after `forward`,
+  moved into `rowReached(ResultSet)` and called by the fast case and by the generic path for
+  `previous`, `first`, `last`, `absolute`, `relative`, which stay generic;
+- `wasNull()`: direct;
+- the getters by index with one `int` argument: `getString`, `getObject`, `getInt`, `getLong`,
+  `getDouble`, `getBoolean`, `getBigDecimal`, `getTimestamp`, `getDate`, `getTime`, `getBytes`,
+  `getShort`, `getFloat`, `getByte` — one static `Proxies.getter(ResultSet rs, String name, int i)`,
+  a switch returning a sentinel `NONE` for any other name, so the three handlers share one list;
+  the handler's bound check first (`i > visible()`, the same `22023`), `getObject`'s result checked
+  for a `ResultSet` and wrapped as today (a refcursor on PostgreSQL);
+- the same getters by label: the index from the vendor's `findColumn(label)` (the handler calls it
+  for the bound check already), then the direct getter by index: one lookup, not two;
+- around every direct call the same `try { } catch (SQLException e) { throw failed.apply(e); }`
+  `forward` has (SQL Server's 3960 and deadlocks while rows stream, todo 263); a direct call throws
+  the vendor's exception itself, no `InvocationTargetException` to unwrap.
+
+`BooleanColumns` keeps its `getObject` of a widened column first (todo 304), then the fast getters
+on its target, the anchored proxy, whose own fast path runs next. Every other method, the updaters,
+`getMetaData`, `close`, `findColumn`, the two-argument getters, the Object methods: unchanged.
+Expected: about 8–10 ns a call instead of 20, −55–70 µs of a 500-row scan's client CPU at both
+levels on every engine, a few hundred ns off a key read, one vendor lookup less per getter by
+label; not the whole 125: the stub's arguments and the two switches remain.
+
+**Declined: a delegating `ResultSet` class.** 190 hand-written methods would take the stub and the
+switches too (about 3 ns a call left), 45 µs more a 500-row scan, 1.5% of its p50, and every hook
+(the six cursor moves, the bound check in the sixty getters and updaters, the metadata, the close,
+the exception mapping) placed by hand in each; the generic path keeps them in one place. The
+measure decides whether to revisit.
+
+**Tests** (every engine of `Engines`, both layouts where the suite has them; the fast path runs on
+all engines, so the whole suite is the regression net, and these are the ones to read first):
+- kept: `ReadIntegrationTest.reads_seeTheCommittedImage_whileScalarDbHoldsRowsPrepared` (the
+  values through the getters, the hidden columns in the SQL only);
+  `WriteIntegrationTest.anchorReviewFindings` (a hidden column by label refused, `22023`; the
+  scrollable result set); `SnapshotIntegrationTest.scenarios` (a row in flight aborts the read as
+  `next` reaches it; the scrollable read in autocommit; SQL Server's 3960 while rows stream);
+  `DecoupledReadCommittedIntegrationTest` form2/form3 and `OracleOltpIntegrationTest`'s anchored
+  read-then-write tests (the anchor the first read's, through `next`); the widened-BOOLEAN reads
+  of todo 304 where they are tested (`BooleanColumns`), the coverage corpus if nowhere else.
+- to add, in `ReadIntegrationTest` on every engine: every fast getter by index and by label on a
+  ScalarDB table's row of each column type the engine has (string, integer, long, double, decimal,
+  boolean, timestamp, date, bytes), equal to the vendor's own values on the plain table; `wasNull`
+  after a NULL column; the hidden columns refused by index past the visible count and by their
+  label (`scalardb_native_x0`) with `22023`, by every fast getter, not only `getString`; a vendor
+  error from a getter mapped through `failed` (SQL Server's 3960 is the live case; on the others a
+  closed result set's getter still raises the vendor's exception); a scrollable read at READ
+  COMMITTED, a row reached by `absolute` and then written while another connection moved its
+  version in between, `40001` (the generic cursor moves still anchor); on PostgreSQL `getObject`
+  of a refcursor column returns driver rows (wrapped) — if the suite reaches refcursors anywhere,
+  else noted as not covered.
+- the measure: the JFR of the next AWS run (6e's plan, Oracle and PostgreSQL): `Method.invoke`'s
+  frames gone from the scan's samples, the dispatch's share of the 500-row scan from 125 µs toward
+  60; locally, `ora/jfrcat.py` on a BenchBase YCSB E run against a container, or a JFR of
+  `ReadIntegrationTest`'s scan read in a loop.
+
+**The design's own text.** At the merge, the architecture bullet of design section 1 gains:
+"the result set's `next`, `wasNull` and the common getters are called on the vendor object
+directly, everything else through reflection (todo 334)"; nothing else in the design changes.
