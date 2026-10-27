@@ -232,3 +232,52 @@ The design session's other readings of this run:
   (executions, parse calls, loads, invalidations, bind sensitivity, shareability), their plans
   (`DBMS_XPLAN.DISPLAY_CURSOR`), buffer gets per call, and the schema's table and key-column
   statistics at the run's start.
+
+## Fourth run: the order_line batch in the bulk block, the plans (2026-10-27)
+
+Run `20261027-1617` (`SOURCE=bdbdd21`: a double's bulk element typed from ojdbc's resolved
+`SetFloatAndDoubleUseBinary`, 65d83c3, and the harness's plans, cursors and statistics,
+804b9e8), decoupled at READ COMMITTED and SNAPSHOT, statement cache 128, fast network, REPS 2,
+no flight recording. About 50 minutes of instances.
+
+| (c)/(a), TPC-C / YCSB | third run | fourth run |
+|---|---|---|
+| READ COMMITTED, decoupled | 0.51 / 0.64 | 0.51 / 0.78 |
+| SNAPSHOT, decoupled | 0.63 / 0.89 | 0.62 / 0.75 |
+
+YCSB p50, µs, vendor → driver:
+
+| | read | update | insert | read-modify-write | scan |
+|---|---|---|---|---|---|
+| READ COMMITTED, decoupled | 189 → 214 (+13%) | 352 → 485 (+38%) | 377 → 438 (+16%) | 477 → 621 (+30%) | 3919 → 4845 |
+| SNAPSHOT, decoupled | 190 → 227 (+19%) | 345 → 503 (+46%) | 371 → 436 (+18%) | 466 → 621 (+33%) | 4072 → 4670 |
+
+**The order_line batch now takes the bulk block, but TPC-C did not move.** In the SNAPSHOT run's
+first TPC-C execution, `INSERT INTO ORDER_LINE` ran 52,592 times for 513,762 rows (about ten a
+call; third run 432,875 calls for 432,346 rows), parsed 973 times (432,798). All statements
+together parsed 105,782 times against 967,549. Server CPU fell to 2.68 ms a commit (third run
+3.20; the vendor 1.56), and DB time to 3.01 ms (3.37; the vendor 1.49). Throughput stayed at 0.62.
+TPC-C p50, vendor → driver: NewOrder 3,299 → 4,696 µs, Payment 1,059 → 1,617, Delivery 8,331 →
+14,071, OrderStatus 525 → 875, StockLevel 1,046 → 1,254. The time that remains is DB time, not
+CPU. Payment's district and warehouse reads, plain key reads, take 840 and 265 µs elapsed a call
+(2.5 buffer gets, 13 µs of CPU), against the vendor's 400 and 260. Both sides wait there on the
+hot blocks of scale 4: buffer busy waits are 55 s a run for (c) and 49 s for (a). The driver's
+transactions are longer and hold those blocks longer.
+
+**The design session's two questions, from the new sections:**
+- **The READ COMMITTED decoupled scan** is a hash join of two full scans: `TABLE ACCESS FULL` of
+  USERTABLE and of USERTABLE_tx_metadata, 1,660 buffer gets and 3.65 ms of CPU a call. The
+  statistics at the run's start were gathered after the load: 1,000 rows and 244 blocks for
+  USERTABLE, 1,000 rows and 13 blocks for the metadata table, which has its statistics locked.
+  The table grows with the runs' inserts after that.
+- **The vendor's scan flips plans between cells.** Its one text (`cucxy6uzcz35q`) is an index
+  range scan in one cell (104 gets, 788 µs a call) and a full scan of USERTABLE in the other
+  (1,560 gets, 4.9 ms). The plan is chosen at the first hard parse by the binds peeked there;
+  each run starts with a flushed shared pool, so each run draws again. This is the vendor YCSB
+  drift seen since the first run.
+- **The SNAPSHOT scan** has two children: child 0 is not shareable, at 110 gets a call, and
+  child 1 is bind-aware (adaptive cursor sharing), at 1,856 gets a call.
+- **The decoupled update's MERGE stamp** (`MERGE INTO USERTABLE_tx_metadata`) ran 177,137 times
+  with 78,779 parse calls, on one child, 1 load and no invalidation. These are soft parses of the
+  nested cursor, not reloads: the PL/SQL cursor cache overflowing (`session_cached_cursors`, 50),
+  as the design session found for the batch blocks.
