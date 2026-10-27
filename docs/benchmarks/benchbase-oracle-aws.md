@@ -115,3 +115,40 @@ shared pool before each run's start reading.
 `bench-env/results/20261027-0133/` (git-ignored): `a/bb[-inline][-rc]-d{0,250}-benchbase-oracle.md`
 and each cell's runs (`*-runs.tgz`, with each run's `server.txt`: `V$SQL` per statement and the wait
 events).
+
+## Second run: the statement cache on both sides, the deadlock fix (2026-10-27)
+
+Run `20261027-0858` (`SOURCE=1219aac`: the decoupled READ COMMITTED lock `FOR UPDATE OF` the data
+row, `d56e87d`, and the shared pool flushed before each run's counters; `BB_JVM_ARGS=
+-Doracle.jdbc.implicitStatementCacheSize=128`, which reaches the vendor's connections and the
+driver's own ojdbc ones alike), fast network only, REPS 2. The READ COMMITTED decoupled cell
+failed before its first run: the logon worked while the database was still being created, before
+its USERS tablespace existed (ORA-00959 on ScalarDB's quota); the harness now waits for the
+tablespace (`0298611`). That cell, the deadlock fix's proof, is still to run.
+
+| (c)/(a), TPC-C / YCSB | first run, no cache | this run, cache 128 |
+|---|---|---|
+| READ COMMITTED, inline | 0.47 / 0.62 | **0.66 / 0.90** |
+| SNAPSHOT, decoupled | 0.47 / 0.86 | **0.64 / 1.04** |
+| SNAPSHOT, inline | 0.69 / 0.59 | **0.76 / 0.61** |
+
+The vendor gained too (TPC-C 1168–1206/s → 1446–1604/s), and its YCSB rate held this time
+(5234–5422/s; scans 3.7–3.9 ms p50 in every cell), so this run's YCSB ratios can be read.
+
+YCSB medians, µs, vendor → driver:
+
+| | read | update | insert | read-modify-write |
+|---|---|---|---|---|
+| SNAPSHOT, decoupled | 199 → 237 (+19%) | 341 → 477 (+40%) | 354 → 449 (+27%) | 464 → 601 (+30%) |
+| SNAPSHOT, inline | 202 → 227 (+12%) | 343 → 372 (+8%) | 356 → 412 (+16%) | 468 → 1381 |
+| READ COMMITTED, inline | 198 → 215 (+9%) | 361 → 441 (+22%) | 380 → 424 (+12%) | 490 → 575 (+17%) |
+
+- The cache took: the vendor's TPC-C parses fell to 250–13,878 for 3.3–3.6 M calls. The driver's
+  top-level statements are cached too, but the nested statements of NewOrder's batch blocks still
+  parse on every call (the order-line inserts, their metadata inserts, the stock versions read,
+  update and metadata update, about 525,000 calls and as many parses each in a run).
+- Decoupled update +136 µs, near the +105–120 the container's measurements predicted.
+- SNAPSHOT inline YCSB still waits on row locks (1,440 waits, 98 s, and 36 s of buffer busy waits
+  in a run; no ORA-00060): its read-modify-write at 1381 µs is the cell's 0.61.
+- Server CPU per commit, TPC-C: 3.00 ms decoupled against the vendor's 1.28, 2.12 inline against
+  1.26; packets are now equal (22.0 against 21.9; inline 23.5).
