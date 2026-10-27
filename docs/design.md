@@ -2392,7 +2392,7 @@ vendor's own statement, then on AWS with the rest.
   of entries. Up to 64 entries per text, as on PostgreSQL. Built after the block of entries and
   measured against it: what it saves is executions inside one call, not round trips.
 
-    *The entries merged on a clear table at SNAPSHOT (todo 334, 2026-10-27).* Where the write's single
+  *The entries merged on a clear table at SNAPSHOT (todo 334, 2026-10-27).* Where the write's single
   form is the clear-table block, at SNAPSHOT on a decoupled table of which the transaction recorded
   no anchor, the entries need no step 1 and no CAS, so the merged form above loses them: one
   anonymous block per write shape, the same text for every batch size up to 16, the slots beyond the
