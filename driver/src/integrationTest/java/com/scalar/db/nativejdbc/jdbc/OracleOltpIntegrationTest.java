@@ -713,6 +713,7 @@ class OracleOltpIntegrationTest {
         // form itself and not the first-use check
         assertThat(update(d, "UPDATE " + sql + " SET x = 'm' WHERE id = 62")).isEqualTo(1);
         long insert;
+        long returning = returningInserts(v, sql);
         try (PreparedStatement ps =
             d.prepareStatement("INSERT INTO " + sql + " (id, x, v) VALUES (?, ?, ?)")) {
           insert =
@@ -733,6 +734,10 @@ class OracleOltpIntegrationTest {
                 + " round trip(s), in a transaction");
         assertThat(insert).isEqualTo(1);
         assertThat(scalarDbX(table, 101)).isEqualTo("n");
+        // no generated keys asked for: ojdbc appends no RETURNING ROWID INTO (todo 334)
+        assertThat(returningInserts(v, sql))
+            .as(layout + ": RETURNING unasked")
+            .isEqualTo(returning);
         // the table's first INSERT in the process: the decoupled one is INSERT ALL, a statement
         // without OUT binds, so no first-use check of them either (design 4.3, todo 334)
         Writes.OutBindCheck.reset();
@@ -792,7 +797,11 @@ class OracleOltpIntegrationTest {
           ps.setInt(1, 104);
           ps.setString(2, "r");
           ps.setInt(3, 0);
+          long before = returningInserts(v, sql);
           long asked = rt.measure(() -> assertThat(ps.executeUpdate()).isEqualTo(1));
+          if (layout.equals("inline")) {
+            assertThat(returningInserts(v, sql)).as("RETURNING asked").isEqualTo(before + 1);
+          }
           try (ResultSet k = ps.getGeneratedKeys()) {
             assertThat(rows(k)).hasSize(1).first().asString().startsWith("104");
           }
@@ -1967,6 +1976,23 @@ class OracleOltpIntegrationTest {
               + " parse calls");
       assertThat(executions).isGreaterThan(0);
       assertThat(parses).isZero();
+    }
+  }
+
+  /**
+   * The executions {@code V$SQL} has of INSERTs into {@code table} with ojdbc's RETURNING ROWID.
+   */
+  private static long returningInserts(Connection v, String table) throws SQLException {
+    try (PreparedStatement ps =
+        v.prepareStatement(
+            "SELECT NVL(SUM(executions), 0) FROM v$sql WHERE UPPER(sql_text) LIKE 'INSERT INTO '"
+                + " || UPPER(?) || ' %' AND DBMS_LOB.INSTR(sql_fulltext, 'RETURNING ROWID INTO')"
+                + " > 0")) {
+      ps.setString(1, table);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getLong(1);
+      }
     }
   }
 

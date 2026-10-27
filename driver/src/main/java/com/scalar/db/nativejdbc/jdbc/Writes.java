@@ -8111,7 +8111,9 @@ final class Writes {
      */
     private long applyOracleInline(Run run, Step step) throws SQLException {
       Keys keys = new Keys();
-      try (PreparedStatement ps = run.prepare(step, null, false, new String[0])) {
+      // no keys asked for: no RETURNING ROWID INTO from ojdbc, nor its tokenizing at each prepare
+      try (PreparedStatement ps =
+          run.prepare(step, null, false, run.context.wantsKeys() ? new String[0] : null)) {
         try {
           ps.executeUpdate();
         } catch (SQLException e) {

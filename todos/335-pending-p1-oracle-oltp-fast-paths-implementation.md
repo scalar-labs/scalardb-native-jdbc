@@ -1050,3 +1050,11 @@ cache 128, an UPDATE and its commit, or the read of the key before it), the driv
 The inline update reaches the vendor's cost; the decoupled one saves step 1's execution, which the
 laptop's noise (±20–50 µs between runs) does not resolve: AWS's YCSB single-key plan is the
 measure there.
+
+2026-10-27, night: the inline INSERT prepared with RETURN_GENERATED_KEYS only when the application
+asks for keys (todo 334's log at f767e74). Before, every inline INSERT asked: ojdbc appended
+` RETURNING ROWID INTO :n` and tokenized the text at each prepare. `form4InsertAsOneStatement` now
+counts V$SQL's executions of the table's INSERTs that carry the RETURNING: unchanged by an INSERT
+without keys asked for, one more by one with `RETURN_GENERATED_KEYS` (inline). Without the fix
+the first check fails (expected 0, was 1). The measure is the next AWS run's YCSB E inline insert
+(expected +32% → about +21%).
