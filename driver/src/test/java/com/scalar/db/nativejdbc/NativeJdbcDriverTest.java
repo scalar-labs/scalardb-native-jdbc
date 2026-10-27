@@ -20,6 +20,17 @@ class NativeJdbcDriverTest {
   }
 
   @Test
+  void majorAndMinorVersion_areTheBuildVersionsLine() {
+    // 3.20.0-beta.1 is certified against ScalarDB 3.20: the version's line is the driver's
+    String version = System.getProperty("nativejdbc.version");
+    Assumptions.assumeTrue(version != null, "run outside Gradle");
+    NativeJdbcDriver driver = new NativeJdbcDriver();
+
+    assertThat(driver.getMajorVersion() + "." + driver.getMinorVersion() + ".")
+        .isEqualTo(version.substring(0, version.indexOf('.', version.indexOf('.') + 1) + 1));
+  }
+
+  @Test
   void connect_returnsNullForAForeignUrl() throws SQLException {
     assertThat(new NativeJdbcDriver().connect("jdbc:postgresql://localhost/db", new Properties()))
         .isNull();

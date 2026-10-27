@@ -92,6 +92,11 @@ tasks.withType<Test>().matching { it.name.startsWith("integrationTest") }.config
     enableAssertions = providers.systemProperty("nativejdbc.bench").map { it != "true" }.getOrElse(true)
 }
 
+// The unit tests check the driver's major and minor version against the build's version
+tasks.test {
+    systemProperty("nativejdbc.version", project.version.toString())
+}
+
 // The driver inspects statements through JSQLParser's public syntax tree, never through its private
 // fields, so it must give the same answers with JSQLParser loaded as a named module, where
 // reflection is refused. This runs the classifier that way once per build.

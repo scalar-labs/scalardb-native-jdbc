@@ -36,7 +36,7 @@ public final class NativeJdbcDriver implements Driver {
    */
   private static final int MAJOR_VERSION = 3;
 
-  private static final int MINOR_VERSION = 19;
+  private static final int MINOR_VERSION = 20;
 
   /**
    * The client-info key that sends statements verbatim, set with {@code
