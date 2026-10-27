@@ -382,8 +382,15 @@ and 144c623). Measured from the live dictionary during the slow cell's driver ru
   table has statistics on `tx_state` alone.
 
 A one-line fix (gather all columns, `SIZE REPEAT`, before the fixed histogram) is proposed. The
-design session expects the cell at about 0.19 with it; the rest is the RC block of entries (33–55 ms
-a call), the merged form's item. SNAPSHOT's TPC-C (bulk blocks) is 0.63 fast, as at scale 4, and
+RC block of entries' own 33–55 ms a call is the same sampling (todo 334, 018283c). Oracle counts a
+hard parse's sampling queries, run as recursive SQL, in the parsed cursor's own CPU and gets, so
+each nested statement carries its parse's sampling, averaged over its calls:
+- the CAS on STOCK_tx_metadata: 1.4 ms CPU and 58 gets a call, by its primary key;
+- step 1's read: 0.7 ms and 33.5 gets.
+On the design session's container, with STOCK's shape at 3.2M rows, the same plans cost 8.6–12.6
+gets and 83–91 µs a call under the proposed gather, with no sampling cursors. So without the
+sampling the cell should move toward the other TPC-C cells (0.54–0.63 fast), not the 0.19 first
+estimated (ac5eeec). The merged form's item remains for the 9–13 gets an entry that stay. SNAPSHOT's TPC-C (bulk blocks) is 0.63 fast, as at scale 4, and
 0.86–0.88 slow.
 
 **The night's three items, from the flight recordings** (RC decoupled, YCSB E, driver run):
