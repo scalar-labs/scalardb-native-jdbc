@@ -1169,3 +1169,8 @@ test asserts the stored values only under the default; the binary iteration need
 both iterations as NUMBER untested. The seed row the test needs (ORA-08177 on the first INSERT
 into a segment-less table at SERIALIZABLE) is Oracle's own, a documentation point for the
 transactions guide. Landing waits on the user; the proof is 6e's SNAPSHOT decoupled TPC-C rerun.
+
+The ask met as 4834c21 (on 5d10929, the branch oracle-bulk-double): under the binary iteration
+the test asserts 2.675 stored as 2.67 in the NUMBER(6,2) and 0.1 in the NUMBER as one row that is
+not .1; only the test and todo 335's log changed, the main code as reviewed. Both iterations run
+as the bulk block, 4 statements each. Review closed; landing on main waits on the user.
