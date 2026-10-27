@@ -1499,3 +1499,43 @@ COMMITTED, the client CPU and the allocation, then the next YCSB E cell. After i
 calls' 150–350 µs a scan are the remaining client item at both levels (the fast path for
 `getXxx(int)` within the visible columns, the third run's note); the covering index goes into the
 Oracle notes as a per-table choice.
+
+### 2026-10-27: YCSB E's inserts, +27% decoupled and +32% inline at READ COMMITTED (the design's note, interim)
+
+6e's figures from run 20261027-1948, rep 1: the insert's p50, vendor → driver, decoupled 443 → 564
+(+121 µs), inline 429 → 565 (+136); V$SQL a call: the vendor's INSERT 92 elapsed / 45 CPU / 7.2
+gets (the decoupled cell) and 90 / 45 / 7.3 (the inline cell); the driver's INSERT ALL 158 / 72 /
+13.8, its inline INSERT with the tx columns 121 / 56 / 10.6. Each insert is a transaction of its
+own, the insert and its commit, among 95% scans of about 500 rows.
+
+What the data settle:
+- The statement's part. Decoupled, +66 µs a call: the second table's row, its primary-key entry
+  and its in-flight index entry (13.8 gets against 7.2), the +15% the mixed workload gave INSERT
+  ALL (+14–17%). Inline, +31 µs: five more columns in the row and the in-flight index's entry
+  (10.6 against 7.3). Index maintenance at 1M rows (hypothesis 3) is inside those figures, on both
+  sides alike: nothing beyond the second table and the second index.
+- The commit (hypothesis 1), refuted. The driver's commit is the vendor's `commit()` and
+  client-side bookkeeping (`Proxies`, the "commit" case: `transactionEnded` on the session, the
+  router and the anchors), no statement, no round trip. On the container the insert-and-commit
+  transaction through the driver costs the vendor's calls: 2 round trips, 1 execute, 2–3 user
+  calls (`clientcost3.txt`, both levels, with and without the cache), its wall within the drift.
+  `log file sync` is one wait per commit on both sides: the fourth run's YCSB A at READ COMMITTED
+  decoupled has the vendor at 294,722 waits of 105 µs and the driver at 128,509 of 97 µs; the E
+  cell's driver figure, 106 µs a wait, is that, and the vendor's is below the capture's top waits
+  by its total (6,051 × 105 µs, 0.6 s, under the scans' SQL*Net waits), not absent.
+- The client's per-insert cost: the proxy's bind recording, the plan's lookup, the stamp (an id
+  sliced from a per-thread DRBG's kilobyte, `freshTxId`), the vendor statement from ojdbc's cache:
+  +10–45 µs of client CPU an insert on the container, not a hundred.
+
+What is open: +55 (decoupled) and +105 (inline) µs an insert outside the INSERT, both layouts
+landing at the same p50 (564, 565) while their INSERTs differ by 37 µs, which points at something
+common to the driver's runs rather than the statement. Hypothesis 2, queueing behind the scans on
+the client, has against it the client's size: m6i.4xlarge, 16 vCPUs for 4 terminals; the driver's
+scans add about 390 µs of client CPU each, 1,476 a second, 0.6 CPU-seconds a second, no saturation,
+unless the JVM's GC under the scans' allocation (+420 KB a scan) pauses the terminals. The fetched
+files settle it: (1) every statement with calls near the insert count in the driver's cells, where
+a per-insert extra would show; (2) the cells' `user calls`, `execute count`, `SQL*Net roundtrips
+to/from client` and `user commits`, the calls a transaction; (3) the inserts' latency percentiles,
+a shift at every percentile being a per-insert cost and a spread interference; (4) the JFR:
+`jdk.GCPhasePause` count and total, `jdk.CPULoad`, and the execution samples under BenchBase's
+`InsertRecord`, the driver's frames beneath. Read after the fetch; the answer completed then.
