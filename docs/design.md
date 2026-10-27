@@ -2418,9 +2418,19 @@ vendor's own statement, then on AWS with the rest.
   fewer rows stamped than returned is an abort as a zero-row CAS; for the INSERT a duplicate data
   row raises ORA-00001 out of the block, which undoes it whole, and the driver runs the entries one
   by one as above, and rows taken over short of stamped are an abort, the tombstone in flight. The
-  entries beyond 16 go in further blocks. A `setDouble` or `setFloat` among the binds keeps the
-  block of entries, the driver not knowing whether the connection sets `SetFloatAndDoubleUseBinary`,
-  as does a placeholder whose entries bind different types (built as todo 335 has it). Measured on
+  entries beyond 16 go in further blocks. A double or a float (`setDouble`, `setFloat`, `setObject`
+  of a `Double` or a `Float`) is typed as ojdbc binds it on the connection: `NUMBER`, or
+  `BINARY_DOUBLE` and `BINARY_FLOAT` where the connection's `SetFloatAndDoubleUseBinary` is true,
+  which the driver reads once at connect from ojdbc's own resolved properties
+  (`OracleConnection.getProperties()`, under the key without its `oracle.jdbc.` prefix), the one
+  place that holds the setting from every source ojdbc takes it, the properties, the URL, the
+  system property and the `ojdbc.properties` file; a `setNull` of `DOUBLE`, `FLOAT` or `REAL` the
+  same; a connection whose properties do not name the setting keeps the block of entries for such
+  binds. The type decides the row, not only the plan: a `NUMBER` bind of 2.675 stored into a
+  `NUMBER(6,2)` through a `BINARY_DOUBLE` element is 2.67 where the statement alone stores 2.68,
+  and into a `NUMBER` the double's expansion where the statement stores 0.1 (todo 334's log,
+  2026-10-27). A placeholder whose entries bind different types keeps the block of entries (built
+  as todo 335 has it). Measured on
   the container (todo 334's log): a NewOrder-shaped transaction of ten stock updates and ten order-
   line inserts, today's two blocks of entries against the two bulk blocks, server CPU 1,190–1,210 →
   455–515 µs against the vendor's two array executions at 205–285, DB time 2,405–2,510 → 1,125–1,380

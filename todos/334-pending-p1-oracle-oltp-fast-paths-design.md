@@ -1126,3 +1126,29 @@ the inline whole-row lock (1070d98) and the `FOR UPDATE OF` fix (d56e87d) alread
 Oracle proof run can go from main: the decoupled READ COMMITTED cell for the lock's scope, the
 inline SNAPSHOT cell for the whole-row lock, and the decoupled cells at SNAPSHOT for INSERT ALL
 and the bulk block.
+
+### 2026-10-27: the bulk block and BenchBase's order_line batch (the design's decision)
+
+Run 20261027-1344 (6e, main 2162759): at SNAPSHOT decoupled the stock batch went bulk (43k calls,
+432k rows, 4 parses) and the order_line batch did not, BenchBase's NewOrder binding OL_AMOUNT
+with `setDouble`, which 4.4 kept on the block of entries; TPC-C 0.63 against 0.64 before. c7
+proposed reading `SetFloatAndDoubleUseBinary` from the properties, the URL and the system
+property. Measured on the container (`ora/dbl*.jsh` in the design session's scratchpad): ojdbc
+honours the setting from the properties, the URL, the system property and the `ojdbc.properties`
+file under TNS_ADMIN (by the URL parameter or `oracle.net.tns_admin`), and reports the resolved
+value through `OracleConnection.getProperties()` under the key `SetFloatAndDoubleUseBinary` alone,
+the `oracle.jdbc.`-prefixed key absent: `false` by default, `true` for `true` or `TRUE`, `false`
+for `yes`. `setDouble`, `setFloat` and `setObject` of a Double or a Float all follow it, NUMBER
+(Typ=2) off, BINARY_DOUBLE (101) and BINARY_FLOAT (100) on, `setObject(d, Types.NUMERIC)` too.
+Through a block whose element is typed as the bind, ten doubles (0.1, 1.005, 2.675, 0.1+0.2, 1e-7,
+1234.5678, -0.005, pi, 9999.994, 1/3) stored into NUMBER(6,2), NUMBER, BINARY_DOUBLE and
+BINARY_FLOAT columns are byte-identical by DUMP to the statement alone, under both settings. Typed
+BINARY_DOUBLE against a NUMBER bind, 7 of 10 rows differ (2.675 → 2.67 for the statement's 2.68 in
+NUMBER(6,2), 0.1's binary expansion for 0.1 in NUMBER): the exclusion was right while the setting
+was unknown. Typed NUMBER against a BINARY_DOUBLE bind the rows match, the comparison semantics
+would not. Decided: the element typed by ojdbc's resolved properties, read once at connect, not
+from the sources, which would miss the file and ojdbc's own parsing; a connection whose
+properties lack the key keeps the block of entries for such binds. Design 4.4 amended. Handed to
+c7 to build, with the confirmation test under both settings (the DUMP comparison, and the key's
+presence in `getProperties()`, so that an ojdbc change fails the test rather than the fast path
+silently). Proof: a SNAPSHOT decoupled TPC-C rerun, the order_line batch counted as bulk calls.
