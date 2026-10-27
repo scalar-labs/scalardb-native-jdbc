@@ -1539,3 +1539,92 @@ to/from client` and `user commits`, the calls a transaction; (3) the inserts' la
 a shift at every percentile being a per-insert cost and a spread interference; (4) the JFR:
 `jdk.GCPhasePause` count and total, `jdk.CPULoad`, and the execution samples under BenchBase's
 `InsertRecord`, the driver's frames beneath. Read after the fetch; the answer completed then.
+
+### 2026-10-27: YCSB E's inserts answered from the fetched files; the inline INSERT's RETURNING ROWID; the scan's client cost re-sized by the JFR (the design's note)
+
+Run 20261027-1948 read from `bench-env/results/20261027-1948/a/y/<cell>/benchbase-oracle/ycsb-e-{a,c}-{1,2}/`
+(a = the vendor, c = the driver): `execute/*.results.InsertRecord.csv` (the percentiles, the median
+over the 5-second buckets after the first), `server.txt` (V$SQL a call, the wait events; the
+capture has no V$SYSSTAT, so `user calls` and `SQL*Net roundtrips` are not in it and the waits
+stand in), `execute.jfr` (`jdk.CPUTimeSample`, 1 ms of the thread's CPU a sample, every sample's
+stack classified by its procedure and by where it lies; `ora/jfrcat.py`, `ora/jfrstack.py`).
+
+**The insert, taken apart.** READ COMMITTED, the median of the two reps, µs an insert:
+
+| per insert | vendor | driver | difference |
+|---|---|---|---|
+| decoupled: p50 | 443 | 557 | +114 |
+| its INSERT, server elapsed / CPU / gets | 90 / 42 / 7.2 | 157 / 74 / 13.8 | +67 elapsed |
+| `log file sync` a commit | 103 | 109 | +6 |
+| the client's CPU (JFR) | 26 | 50 | +25 |
+| inline: p50 | 428 | 554 | +127 |
+| its INSERT, server elapsed / CPU / gets | 90 / 45 / 7.3 | 123 / 59 / 10.6 | +34 elapsed |
+| `log file sync` a commit | 94 | 108 | +14 |
+| the client's CPU (JFR) | 17 | 63 | +46 |
+
+The parts sum: decoupled 98 of the +114, inline 94 of the +127; the rest is within the figures'
+own noise (the vendor's insert CPU differs by 8 µs between its two cells for the same statement,
+`log file sync` by 5). The items of the interim note: (1) no other per-insert statement (6e).
+(2) The round trips are the vendor's: `SQL*Net message to client` waits a measured request, both
+sides, A 2.02 (the update and its commit), C 1.00–1.01, E 6.4–6.5 (the scan's fetches); nothing
+extra an insert. (3) The percentiles shift as one: decoupled +101 at p25, +114 p50, +128 p75, +143
+p95 (inline +108 / +127 / +152 / +170), the minimum by +40 and +66: a per-insert cost, the
+fastest inserts paying the statement's floor, not interference between the terminals. (4) GC pauses equal
+(6e); the JFR's CPU an insert above; its wall samplers (`jdk.ExecutionSample`,
+`jdk.NativeMethodSample`) under-sample the inserts 1.4–3x against the latencies on both sides and
+are not used. So hypothesis 2 (queueing) is out with 1 (the commit); the answer is the statement
+(+67 / +34 server elapsed, the layout's second row and index entries, 13.8 / 10.6 gets against
+7.2) plus the client's +25 / +46 of CPU, of which the decoupled part is the driver's own path
+(`insertBody` 3, `freshTxId` 2, `runWrite` 2, the `Run`, the context, the plan: 15 µs), the proxy
+4, the forwarded setters 4; the inline part has a finding in it:
+
+**The inline INSERT asks ojdbc for the ROWID on every insert.** `applyOracleInline` prepares the
+statement with `new String[0]`, i.e. `RETURN_GENERATED_KEYS`, whether or not the application
+wants keys (only the read-back is gated by `wantsKeys()`); ojdbc then appends ` RETURNING ROWID
+INTO :15` (V$SQL's text of the inline INSERT ends so) and, at every prepare, tokenizes the whole
+text to classify it (`AutoKeyInfo.create` → `parseSql` → `OracleSql.computeBasicInfo` →
+`SQLTokenizer`: 51 of the insert's 294 CPU samples, 11 µs an insert, where the decoupled INSERT
+ALL's prepare has 2 samples) and at every execute registers the return parameter
+(`initializeAutoKeyInfo`, 2 µs). On the container (`ora/ret.jsh`: the inline shape, 200k rows,
+4,000 inserts a form interleaved, a commit each, laptop load 3): the server's INSERT 127 µs elapsed
+plain against 174 with `RETURNING ROWID INTO` (+47; the CPU column too coarse there), the client
++21 µs of CPU an insert. On AWS the RETURNING's part sits inside the inline INSERT's +34 of server
+elapsed and the client's +13. The fix is one expression in `applyOracleInline`:
+`run.prepare(step, null, false, run.context.wantsKeys() ? new String[0] : null)`; the duplicate
+path and the ROWID read-back unchanged (the read-back only runs under `wantsKeys()`, where the
+prepare still asks). Test: an inline INSERT without `getGeneratedKeys` reaches the vendor without
+a RETURNING clause (the captured prepare, or V$SQL's text in the Oracle integration test), and one
+with `RETURN_GENERATED_KEYS` still reads its key back (the existing test). Expected on the inline
+insert: about −13 client and up to −30 server, p50 from +127 to about +90 (+21%); the decoupled
+insert stays at +114 (+26%), the layout's price: the second table's row and its two index entries.
+
+**The scan's client cost, re-sized** (6e's question on the lazy map's −250 estimate). The JFR's
+CPU an E transaction (rep 1, the samples under `ScanRecord`): vendor 697 µs, driver 1,078, +381
+(inline: 717 → 1,009, +292; SNAPSHOT decoupled 727 → 845, +118). Where the +381 lies:
+
+| per 500-row scan, RC decoupled | µs | what |
+|---|---|---|
+| the proxy's dispatch | 125 | `Method.invoke` and its access checks (44), the handler's switch and name compares (30), the invoke (17), the rest the arguments: 20 ns a call over 5,500 calls (500 `next`, 5,000 `getString`); SNAPSHOT's +118 is this alone (111) |
+| the anchors | 124 | the version getters 50 (`getString` of `tx_id` 30, `getObject` of `tx_version` 20); `readKey` 42 (the key's `getObject` as a BigDecimal 21, the per-row `getColumnTypeName` and the loop 21); the map 32 (`putIfAbsent` 11, `resize` 7 as the map grows through 500 rows, the key `List` and its hash 14) |
+| ojdbc's own work on the three hidden columns | ~140 | `next()` 239 against 142 (14 columns unpacked a row instead of 11, `tx_id` 36 characters), `getString` +20, the socket +23 |
+
+So the anchor bookkeeping is 124 of the +381, the map 32 of that, and the lazy map as proposed
+(the raw key and version objects in a flat list, the map at the first write, `readKey`'s metadata
+hoisted) saves the map and the per-row lookups and loop: about −50 µs a scan, not −250; `getLong`
+for `tx_version` and an integral key instead of the BigDecimal decode takes another ~25. The
+getters stay: the row must be read before `next()` moves on. The estimate's error: the
+`ClientCostIntegrationTest` figures counted the whole client difference at RC as the anchors' and
+the per-row cost at 0.8 µs; the JFR puts the anchors at 0.25 µs a row, the rest in the dispatch
+and in ojdbc. Corrected expectation for (b): YCSB E's scan from +47% to about +44–45%.
+
+The client's levers, ranked by the JFR: (1) the proxied-call fast path (the parked item: the
+result set's `next` and `getXxx(int)` called on the target directly from the handler instead of
+through `Method.invoke`, the anchors' hook kept on `next`): −80–100 µs a scan at both levels, every
+engine, and a share of every proxied read; (2) the lazy map with `getLong`: −50–75 at RC;
+(3) nothing else without dropping a hidden column (`tx_id`'s 36 characters are the one that costs
+on the wire and in `next()`, ~20–30). The server's +560 at RC decoupled (the join +400 over
+SNAPSHOT's probe form, which costs +140) stays the largest piece; the covering index's −150 is the
+user's per-table choice (the scan note above). Recommended order: the inline RETURNING fix now
+(one line, its own cell to confirm), the fast path next (todo 334's parked item, the measure
+`ClientCostIntegrationTest`'s scan and read), (b) after it if the user still wants the RC scan's
+remaining 50–75.
