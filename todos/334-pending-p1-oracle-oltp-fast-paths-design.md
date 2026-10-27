@@ -1027,3 +1027,31 @@ change, on a fresh container.
 The ask on 1070d98 is met (the AWS session, 2026-10-27): the Oracle `InlineIntegrationTest`
 passed on a fresh container, 3 of 3, the star forms at SNAPSHOT among them. The review of 1070d98
 is closed; its proof is the SNAPSHOT inline YCSB cell of the next AWS run.
+
+### 2026-10-27: 438d627 reviewed (the design), INSERT ALL on the branch oracle-insert-all
+
+Read from the commit (rebased onto 3c8ef6f, not on main). `Writes.oracleInsertAll` emits the
+decided text, the data INSERT as written with `ALL` after its first keyword and the metadata
+`INTO` with the key's values again and the stamp, `SELECT 1 FROM dual`; its binds the
+statement's, the key's again, the stamp's; built for one VALUES row whose key the statement gives
+and is not generated, with nothing after the row and every placeholder inside it; run unless
+the application asked for generated keys; batches keep the block of entries. ORA-00001 is read
+by its constraint's table from `all_constraints`, once per name and cached: the metadata
+table's sends the row to the block, which takes it over or aborts on a row in flight; any other
+is the duplicate as before. The tests decide it (form 4: one round trip for the first insert, the
+tombstone taken over at the next version; the duplicate, the in-flight key, the in-flight
+tombstone, generated keys). Matches the decision.
+
+One ask before it lands, not a hold on the design: the key's values are repeated by their source
+text, so a value that is an expression is evaluated again in the second `INTO`. Oracle evaluates
+a sequence's `NEXTVAL` once per subquery row across the `INTO` clauses and `SYSDATE` once per
+statement, but a user's function may answer differently twice, and the metadata row would then
+carry a key the data row does not, silently. Take the single statement for a key given as
+placeholders and literals and leave any other expression to the block, which carries the key
+through `RETURNING ... INTO`. A note, no change asked: `ALL` placed right after `INSERT` lands
+before a hint comment the user wrote there, which Oracle then reads as a comment; the hint is
+lost, nothing else.
+
+The AWS session's finding is logged with the test: `SQL*Net roundtrips` in `V$MYSTAT` does not
+count a failed call, so the tombstone path reads one round trip there though it is two on the
+wire.
