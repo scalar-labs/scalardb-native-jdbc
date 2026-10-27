@@ -1,0 +1,155 @@
+# Transactions and isolation levels
+
+Transactions through the driver are the database's own: `setAutoCommit(false)`, `commit()` and
+`rollback()`, at the level set with `setTransactionIsolation`. That level also decides how they are
+isolated from ScalarDB transactions on the same tables.
+
+A row *in flight* below is a row a ScalarDB transaction has prepared, and whose commit or rollback is
+not yet applied to the row.
+
+## Isolation levels
+
+| `setTransactionIsolation` | Engines | ScalarDB settings |
+|---|---|---|
+| `TRANSACTION_READ_COMMITTED` | all five | none |
+| `TRANSACTION_REPEATABLE_READ` (SNAPSHOT) | all five | none |
+| `TRANSACTION_SERIALIZABLE` | PostgreSQL | `scalar.db.consensus_commit.isolation_level=SERIALIZABLE` and `scalar.db.jdbc.isolation_level=SERIALIZABLE` |
+| `TRANSACTION_SERIALIZABLE` | MySQL, MariaDB, SQL Server | `scalar.db.consensus_commit.isolation_level=SERIALIZABLE` |
+
+Without the ScalarDB settings in its row, SERIALIZABLE between the driver and ScalarDB is not
+guaranteed.
+
+- `TRANSACTION_REPEATABLE_READ` is snapshot isolation, called SNAPSHOT in these docs. SQL Server and
+  Oracle map the levels to their own ([SQL Server](#sql-server), [Oracle](#oracle)).
+- `TRANSACTION_SERIALIZABLE` is refused on Oracle with `0AN01` ([Oracle](#oracle)).
+- `TRANSACTION_READ_UNCOMMITTED` is refused with `0AN01`.
+
+### Setting the level
+
+- Set it with `setTransactionIsolation` only. `SET`, `RESET` and `set_config` of it are refused. A
+  database function of your own that changes it is not detected, so don't write one.
+- Change it between transactions. Once the open transaction has run a statement,
+  `setTransactionIsolation` fails with `25001`, as pgjdbc's does.
+
+## Conflicts and retries
+
+A transaction through the driver fails with `40001`, and is left rollback-only, when:
+
+- at SNAPSHOT and SERIALIZABLE, a statement reaches a row a ScalarDB transaction is writing;
+- a write would lose an update, made by a ScalarDB transaction or by another transaction through the
+  driver.
+
+Roll it back and retry it. A query timeout or a cancel during a write also leaves the transaction
+rollback-only. On the engines' own errors:
+
+- On MySQL and MariaDB, a lock wait timeout undoes the statement only, unless
+  `innodb_rollback_on_timeout` is on.
+- On SQL Server, any error that ends the transaction, a deadlock or a conversion error among them,
+  leaves it rollback-only too.
+
+When a transaction writes a row, it checks that the row is unchanged since the transaction read it.
+Rows read through a RIGHT or FULL JOIN, a derived table, a CTE or a UNION are read committed, but are
+not checked this way.
+
+## ScalarDB applications beside the driver
+
+- With ScalarDB at SERIALIZABLE, PostgreSQL may also abort a ScalarDB transaction's read with a
+  serialization failure. ScalarDB reports a failed read as `CrudException`, or as
+  `ValidationException` or `CommitException` at commit, not as a conflict exception. A ScalarDB
+  application retries those too when the cause's SQLState is `40001`.
+- At SERIALIZABLE on MySQL, MariaDB and SQL Server, ScalarDB's own connections wait on the locks the
+  driver's reads take. Give them a short lock wait ([MySQL and MariaDB](#mysql-and-mariadb),
+  [SQL Server](#sql-server)).
+
+## Read-only transactions
+
+Declare a transaction that only reads as read-only: `setReadOnly(true)`, or Spring's
+`@Transactional(readOnly = true)`.
+
+- At SERIALIZABLE on MySQL, MariaDB and SQL Server, it then reads without the locks the level
+  otherwise takes, and stays serializable: its reads neither wait on writers nor hold them off.
+- It runs reads only. A write of any table, SQL Server's `SELECT ... INTO`, any other kind of
+  statement, and passthrough are refused with `25006`.
+- `setReadOnly` fails with `25001` once the transaction has run a statement.
+
+## MySQL and MariaDB
+
+### SERIALIZABLE
+
+The driver runs the connection at REPEATABLE READ, and every SELECT, each subquery included, takes
+shared locks held to commit, as the engine's own SERIALIZABLE would. Tables ScalarDB does not manage
+are locked too. On ScalarDB tables:
+
+- A read of one ScalarDB table locks its rows one by one, and checks every row its `WHERE` matches,
+  regardless of its `LIMIT`, for a ScalarDB write in flight.
+- Any other read first locks the in-flight index of each ScalarDB table it reads. That holds off every
+  ScalarDB write to the table until commit, and fails with `40001` if the table has a row in flight
+  at all.
+
+A ScalarDB transaction that writes the rows read, or inserts into a range read, waits on these locks
+up to `innodb_lock_wait_timeout` (50 seconds by default) on ScalarDB's own connections, and then
+fails as a conflict. Give ScalarDB's connections a short lock wait.
+
+At this level the driver refuses:
+
+- a ScalarDB table in a derived table or a set operation, with `0AN01`;
+- a statement with a `#` comment, whose clause the comment would swallow, with `0AN01`;
+- a SELECT that joins `information_schema` to other tables;
+- a locking clause whose MySQL `OF` list leaves out one of the SELECT's tables.
+
+The driver puts the operands of a set operation in parentheses, where each takes a locking clause of
+its own. It does not lock `information_schema`, which MySQL refuses to lock; a view over it, `sys`'s
+among them, fails with MySQL's error 3550.
+
+### A level set in SQL
+
+A level set in SQL through passthrough is followed for the session. `SET TRANSACTION`, which sets
+the next transaction alone, and `SET GLOBAL` are not followed, and the driver clears the former.
+
+## SQL Server
+
+### REPEATABLE READ
+
+`TRANSACTION_REPEATABLE_READ` runs at SQL Server's SNAPSHOT level, which the database must allow
+(`ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON`, else `55000`).
+
+- Its update conflict, error 3960, comes as `40001`, even when it arrives with a row rather than at
+  the execute.
+- `READPAST` is not available at this level.
+
+### SERIALIZABLE
+
+`TRANSACTION_SERIALIZABLE` runs at SNAPSHOT and takes `HOLDLOCK` on every table each read reaches, as
+SQL Server's own SERIALIZABLE would. On ScalarDB tables it works as on
+[MySQL and MariaDB](#mysql-and-mariadb): a read of one ScalarDB table locks its rows one by one, any
+other read locks the in-flight index of each ScalarDB table it reads, and a ScalarDB table in a
+derived table or a set operation is refused.
+
+- A write to tables ScalarDB does not manage is held too, its target and every table it reads,
+  since SNAPSHOT would read them unlocked.
+- A table with a `NOLOCK` or `INDEX` hint is refused, and so is a call of a function of your own,
+  whose reads no hint reaches.
+- `sys` and `information_schema` are not locked.
+- ScalarDB's own connections wait on these locks up to their lock timeout, none by default. Give
+  them a short one, `lockTimeout` in their URL.
+
+A read-write transaction that scans a table ScalarDB keeps writing hardly progresses at this level:
+its range locks and ScalarDB's prepares wait on and deadlock with each other. The data stays
+correct. Declare a transaction that only reads read-only; otherwise read and write by key, or run
+such transactions at SNAPSHOT.
+
+### A level set in SQL
+
+A level set in SQL through passthrough is read back from the session. SQL Server's own REPEATABLE
+READ, which locks and keeps no snapshot, refuses statements on ScalarDB tables with `0AN01`.
+
+## Oracle
+
+- `TRANSACTION_REPEATABLE_READ` runs at Oracle's SERIALIZABLE, which is snapshot isolation, in a
+  transaction. In autocommit it runs at READ COMMITTED, where each statement's snapshot is its own.
+- ORA-08177 and ORA-08176 come as `40001` and leave the transaction rollback-only.
+- `TRANSACTION_SERIALIZABLE` is refused with `0AN01`.
+  `DatabaseMetaData.supportsTransactionIsolationLevel` reports it unsupported, and REPEATABLE READ
+  supported.
+- A level set in SQL through passthrough is not followed: the driver sets the connection's level
+  again.

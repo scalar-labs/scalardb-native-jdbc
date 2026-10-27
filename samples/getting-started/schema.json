@@ -1,0 +1,11 @@
+{
+  "warehouse.stock": {
+    "transaction": true,
+    "partition-key": ["item_id"],
+    "columns": {
+      "item_id": "INT",
+      "name": "TEXT",
+      "quantity": "INT"
+    }
+  }
+}

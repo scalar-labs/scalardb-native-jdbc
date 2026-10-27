@@ -23,6 +23,7 @@ Thumbs.db
 *.class
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
+!samples/getting-started/gradle/wrapper/gradle-wrapper.jar
 *.war
 hs_err_pid*
 

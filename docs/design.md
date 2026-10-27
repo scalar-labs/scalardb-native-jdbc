@@ -289,7 +289,7 @@ goes through the primary key.
   `set_config` counts as a `SET` wherever it appears, and is refused for a transaction setting, or a
   setting it does not name as a literal; `RESET ALL` and `RESET` of a transaction setting are refused,
   since they revert the level `setTransactionIsolation` set. A function of the application's own that
-  calls `set_config` on the level is not seen: the README says not to, and a statement that fails counts as one that
+  calls `set_config` on the level is not seen: docs/transactions.md says not to, and a statement that fails counts as one that
   ran, since it may have taken effect first. DDL invalidates the catalog's resolutions. A prepared
   statement keeps its route only while the session, the catalog's resolutions, the passthrough
   setting and, for a passthrough statement, autocommit are as they were when it was prepared; when

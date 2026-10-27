@@ -27,7 +27,7 @@ Version branches never merge back.
 ## Certifying a line
 
 Set `scalardb` in `gradle/libs.versions.toml` to the newest patch of the line and run the full check
-on all five engines (`./gradlew check`; the README's "Building" for the engine flags). A release is cut
+on all five engines (`./gradlew check`; CONTRIBUTING.md for the engine flags). A release is cut
 only from a commit that passed it. 3.20.0-beta.1 waits for this run against ScalarDB 3.20; until 3.20
 is published the tests run on 3.19.
 
