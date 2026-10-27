@@ -1979,3 +1979,58 @@ it kept is the sampling as well. With the fix the cell should move toward the ot
 block, at 9–13 gets an entry. The fix is unchanged: `FOR ALL COLUMNS SIZE REPEAT` before the fixed
 histogram in `Setup.ORACLE_FIXED_STATISTICS`, with its test; it reaches a table only through a setup
 run.
+
+### 2026-10-28: the sixth run's YCSB E scan at READ COMMITTED decoupled, read: the three items work as designed, the growth against the fifth run is the run's, not the code's (the design's note, for the morning)
+
+The benchmark session's question: the scan did not get cheaper, +610 µs of JVM CPU a transaction
+against +395 in the fifth run, the p50 +52% against +47%. Read from the flight recordings of both
+runs' READ COMMITTED decoupled YCSB E cells (`jdk.CPUTimeSample`, 1 ms a sample, the client's CPU a
+500-row scan; the fifth run's cell is `20261027-1948/a/y/bb-rc-d0`, not `bb-d0`, which is SNAPSHOT):
+
+| a scan, client CPU | vendor rep 1 | vendor rep 2 | driver rep 1 | driver rep 2 | driver − vendor |
+|---|---|---|---|---|---|
+| fifth run | 697 µs | 670 µs | 1,078 µs | 1,092 µs | +381 / +422 |
+| sixth run | 767 µs | 745 µs | 1,266 µs | 1,189 µs | +499 / +444 |
+
+Everything got slower between the runs: the vendor's own scan +10% on the client, the driver's +13%;
+the driver's scan statement on the server 621 → 700 µs of CPU a call with the same plan and the same
+119 gets (the vendor's 306 → 304); the p50s 1,983/1,916 → 2,055/2,075 (vendor) and 2,865/2,855 →
+3,134/3,182 (driver). Repetitions of one cell differ by up to 6%. The driver's excess over the vendor
+grew by about 70 µs a scan, under twice the repetition noise. Rows a scan (499), fetches and network
+waits a scan are identical in both runs; the client ran at 12% of its 16 vCPUs in both; garbage
+collection, deoptimizations and the parks are alike. The sixth run was a fresh stack after six hours
+of TPC-C cells; the fifth's followed its own load.
+
+By category, the driver's own code fell as designed: the proxy's dispatch, the anchors, `readKey`
+and the handler's own getters 248 → 205 µs a scan (reflection gone, the key reader once, the map
+unbuilt). What grew is the vendor driver's work under the proxy: the application's 5,000 `getString`
+calls a scan 450 → 563 µs where the vendor's own stayed 412 → 413, and `next` 380 → 498 against the
+vendor's 257 → 326 (the same +27%, the rows being 3 columns wider). In the sixth run's samples 11% of
+the driver's `getString` time sits at the vendor driver's lock release (`ReentrantLock.unlock`,
+`AbstractQueuedSynchronizer.signalNext`) and the getter's own frame, 2% in the fifth's and none in the
+vendor's; no other thread contends for a connection's lock (every other thread is an idle pool
+thread), so that is where the samples land, not a wait.
+
+The container (JDK 25, the same vendor driver, `ClientCostIntegrationTest` in the scratch worktree,
+3,000 scans of 500 rows of 10 × 100 chars, cc.u decoupled, the statement cache on) has main (A,
+f92b507) against the fifth run's code before the fast path and the lazy map (B, 0cf9ac0), the
+driver's client CPU a scan less the vendor's in the same run:
+
+| configuration | B | A |
+|---|---|---|
+| forward-only, getInt key, 1 thread | +475 µs | +332 µs |
+| BenchBase's shape (scroll-insensitive, getString × 11, the getter polluted by the metadata's result sets), 1 thread | +611 µs | +244 µs |
+| forward-only, 4 threads | +359 µs | +278 µs |
+| BenchBase's shape, 4 threads | +420 µs | +352 µs |
+
+Main is cheaper in every configuration, by 70–370 µs a scan. Nothing on the container reproduces the
+AWS growth, so the reading is that the sixth run's environment, not the three items, moved the
+driver's scan, and more than the vendor's because the driver's scan does more of everything (a
+wider row, the hash join on the server). The benchmark session's candidates are ruled out by the
+code: the 4,096-entry fold never triggers in a 500-row transaction, the flat lists are cleared at
+each commit, and the fast path boxes nothing the reflection did not.
+
+The proof, the user's call: the two builds on one stack back to back, YCSB E at READ COMMITTED
+decoupled, fast network, 60 s × 2 repetitions each, about 10 minutes of runtime; the fifth run's
+build is 313fd4e or 0cf9ac0 (item 1 only, which does not touch the scan), main's the current head.
+The design predicts main's excess under the fifth's by 50–150 µs a scan there, as on the container.
