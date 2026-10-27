@@ -148,6 +148,48 @@ public final class Proxies {
     }
   }
 
+  /** What {@link #getter} returns for a method it does not call. */
+  static final Object NONE = new Object();
+
+  /**
+   * The common getters of a result set by index, called on the vendor's rows directly rather than
+   * through reflection (todo 334); {@link #NONE} for any other method.
+   */
+  static @Nullable Object getter(ResultSet rs, String name, int i) throws SQLException {
+    switch (name) {
+      case "getString":
+        return rs.getString(i);
+      case "getObject":
+        return rs.getObject(i);
+      case "getInt":
+        return rs.getInt(i);
+      case "getLong":
+        return rs.getLong(i);
+      case "getDouble":
+        return rs.getDouble(i);
+      case "getBoolean":
+        return rs.getBoolean(i);
+      case "getBigDecimal":
+        return rs.getBigDecimal(i);
+      case "getTimestamp":
+        return rs.getTimestamp(i);
+      case "getDate":
+        return rs.getDate(i);
+      case "getTime":
+        return rs.getTime(i);
+      case "getBytes":
+        return rs.getBytes(i);
+      case "getShort":
+        return rs.getShort(i);
+      case "getFloat":
+        return rs.getFloat(i);
+      case "getByte":
+        return rs.getByte(i);
+      default:
+        return NONE;
+    }
+  }
+
   /** The methods of Object and java.sql.Wrapper, the same for every proxy; the rest is handle's. */
   private abstract static class Handler implements InvocationHandler {
     // a prepared statement's is replaced when it is prepared again; read by cancel() on any thread
@@ -1937,6 +1979,8 @@ public final class Proxies {
       return visible;
     }
 
+    // NONE, a sentinel, by reference
+    @SuppressWarnings("ReferenceEquality")
     @Override
     @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
       String name = method.getName();
@@ -1966,8 +2010,54 @@ public final class Proxies {
             }
             return i;
           }
+        case "next":
+          if (args == null) {
+            ResultSet rs = (ResultSet) target;
+            boolean row;
+            try {
+              row = rs.next();
+            } catch (SQLException e) {
+              throw failed.apply(e);
+            }
+            if (row) {
+              rowReached(rs);
+            }
+            return row;
+          }
+          break;
+        case "wasNull":
+          if (args == null) {
+            try {
+              return ((ResultSet) target).wasNull();
+            } catch (SQLException e) {
+              throw failed.apply(e);
+            }
+          }
+          break;
         default:
           break;
+      }
+      if (name.startsWith("get")
+          && args != null
+          && args.length == 1
+          && (args[0] instanceof Integer || args[0] instanceof String)) {
+        // the common getters called directly (todo 334), a label resolved once
+        ResultSet rs = (ResultSet) target;
+        int i = args[0] instanceof Integer ? (Integer) args[0] : rs.findColumn((String) args[0]);
+        if (i > visible()) {
+          throw new SQLException("no column " + args[0] + " in the result", "22023");
+        }
+        Object result;
+        try {
+          result = getter(rs, name, i);
+        } catch (SQLException e) {
+          throw failed.apply(e);
+        }
+        if (result != NONE) {
+          return result instanceof ResultSet
+              ? proxy(ResultSet.class, new ChildHandler(result, connection, null))
+              : result;
+        }
       }
       if ((name.startsWith("get") || name.startsWith("update"))
           && args != null
@@ -1989,15 +2079,26 @@ public final class Proxies {
       } catch (SQLException e) {
         throw failed.apply(e);
       }
-      if ((anchors != null || anchored.states)
-          && Boolean.TRUE.equals(result)
+      if (Boolean.TRUE.equals(result)
           && (name.equals("next")
               || name.equals("previous")
               || name.equals("first")
               || name.equals("last")
               || name.equals("absolute")
               || name.equals("relative"))) {
-        ResultSet rs = (ResultSet) target;
+        rowReached((ResultSet) target);
+      }
+      return result instanceof ResultSet
+          ? proxy(ResultSet.class, new ChildHandler(result, connection, null))
+          : result;
+    }
+
+    /**
+     * The row the rows moved to: at SNAPSHOT and SERIALIZABLE its state checked, in a transaction
+     * its key and version recorded (design 4.2).
+     */
+    private void rowReached(ResultSet rs) throws SQLException {
+      if (anchors != null || anchored.states) {
         int width = anchored.width();
         if (anchored.states) {
           // at SNAPSHOT and SERIALIZABLE a row in flight aborts the read (design 4.2)
@@ -2033,9 +2134,6 @@ public final class Proxies {
           at += keys + width;
         }
       }
-      return result instanceof ResultSet
-          ? proxy(ResultSet.class, new ChildHandler(result, connection, null))
-          : result;
     }
   }
 
@@ -2088,6 +2186,8 @@ public final class Proxies {
       this.type = type;
     }
 
+    // NONE, a sentinel, by reference
+    @SuppressWarnings("ReferenceEquality")
     @Override
     @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
       String name = method.getName();
@@ -2104,6 +2204,21 @@ public final class Proxies {
         if (booleans.columns.contains(i)) {
           boolean v = rs.getBoolean(i);
           return rs.wasNull() ? null : v;
+        }
+      }
+      // the common calls direct (todo 334), on rows that are the anchored proxy or the vendor's
+      if (args == null) {
+        if (name.equals("next")) {
+          return ((ResultSet) target).next();
+        }
+        if (name.equals("wasNull")) {
+          return ((ResultSet) target).wasNull();
+        }
+      } else if (name.startsWith("get") && args.length == 1 && args[0] instanceof Integer) {
+        // by index only: a label goes to the anchored rows as it is, which refuse a hidden one
+        Object v = getter((ResultSet) target, name, (Integer) args[0]);
+        if (v != NONE) {
+          return v;
         }
       }
       return forward(target, method, args);
@@ -2237,6 +2352,8 @@ public final class Proxies {
       this.failed = failed;
     }
 
+    // NONE, a sentinel, by reference
+    @SuppressWarnings("ReferenceEquality")
     @Override
     @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
       switch (method.getName()) {
@@ -2246,9 +2363,14 @@ public final class Proxies {
           return statement;
         default:
           {
-            Object result;
+            Object result = NONE;
             try {
-              result = forward(target, method, args);
+              if (target instanceof ResultSet) {
+                result = direct((ResultSet) target, method.getName(), args);
+              }
+              if (result == NONE) {
+                result = forward(target, method, args);
+              }
             } catch (SQLException e) {
               throw failed.apply(e);
             }
@@ -2257,6 +2379,30 @@ public final class Proxies {
                 : result;
           }
       }
+    }
+
+    /** A result set's common calls on the vendor's rows directly (todo 334); NONE for the rest. */
+    private static @Nullable Object direct(ResultSet rs, String name, @Nullable Object[] args)
+        throws SQLException {
+      if (args == null) {
+        switch (name) {
+          case "next":
+            return rs.next();
+          case "wasNull":
+            return rs.wasNull();
+          default:
+            return NONE;
+        }
+      }
+      if (name.startsWith("get")
+          && args.length == 1
+          && (args[0] instanceof Integer || args[0] instanceof String)) {
+        return getter(
+            rs,
+            name,
+            args[0] instanceof Integer ? (Integer) args[0] : rs.findColumn((String) args[0]));
+      }
+      return NONE;
     }
   }
 }

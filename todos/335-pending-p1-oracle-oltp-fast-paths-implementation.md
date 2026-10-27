@@ -1058,3 +1058,22 @@ counts V$SQL's executions of the table's INSERTs that carry the RETURNING: uncha
 without keys asked for, one more by one with `RETURN_GENERATED_KEYS` (inline). Without the fix
 the first check fails (expected 0, was 1). The measure is the next AWS run's YCSB E inline insert
 (expected +32% → about +21%).
+2026-10-28: the result set's common calls on the vendor's rows directly (todo 334's design at
+f26cdde, item 2 of the user's order). `AnchoredHandler`, `ChildHandler` (on result sets only: it
+wraps metadata too) and `BooleanColumns` call `next()`, `wasNull()` and the fourteen one-`int`
+getters through `Proxies.getter`, a switch returning `NONE` for any other method; the label form
+resolved by the vendor's `findColumn` once. `AnchoredHandler` keeps its bound check (22023) before
+the call and maps a vendor error through `failed`; its row hook is `rowReached(ResultSet)`, which
+the generic path calls too for the other cursor moves. `BooleanColumns` takes the fast getters by
+index only: a label through its `findColumn` on the anchored rows would refuse a hidden one as
+42703, so labels go on to the anchored rows as they are. Its existing widened `getObject(label)`
+already does that (42703 on MySQL and MariaDB for a hidden label; -89 notes it, to decide apart).
+`ReadIntegrationTest.fastGetters_returnTheVendorsValues`, both layouts on every engine: each fast
+getter by index and by label equals the vendor's on the data table for every ScalarDB type (no
+DECIMAL; `getBigDecimal` on the numbers), `wasNull` after each, at READ COMMITTED, SNAPSHOT and
+autocommit; the hidden columns refused through every fast getter; a getter on closed rows the
+vendor's exception; a scrollable READ COMMITTED read anchors the row `absolute` reaches (40001). A
+getString broken to return a constant fails it. PostgreSQL's refcursor: no test reaches one. The
+full suite on PostgreSQL, MySQL, MySQL lower case, MariaDB and Oracle passed; SQL Server's one
+failure, `InlineIntegrationTest`'s `FOR UPDATE` loop from 1070d98, fails on the base too and is
+fixed in the commit after. The measure is the next AWS run's JFR.

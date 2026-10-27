@@ -29,6 +29,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -495,6 +496,263 @@ class ReadIntegrationTest {
         tx.rollback();
       }
     }
+  }
+
+  /**
+   * The result set's common calls made on the vendor's rows directly (todo 334): every fast getter
+   * by index and by label returns what the vendor's own does on the data table, for each column
+   * type ScalarDB has (no DECIMAL: {@code getBigDecimal} on the numbers), and {@code wasNull} after
+   * each; the hidden columns refused by index and by label through every fast getter; a getter's
+   * vendor error raised as the vendor's; a scrollable read at READ COMMITTED still anchors the row
+   * {@code absolute} reaches. Read at READ COMMITTED and at SNAPSHOT in a transaction, and in
+   * autocommit. A PostgreSQL refcursor through {@code getObject} is not covered: no test reaches
+   * one.
+   */
+  @ParameterizedTest
+  @MethodSource("layouts")
+  @SuppressFBWarnings(
+      value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
+      justification = "fixture DDL and queries written in the test sources")
+  void fastGetters_returnTheVendorsValues(Engines e, boolean inline) throws Exception {
+    Engine engine = e.engine();
+    String ns = inline ? "fpi" : "fpd";
+    String sdb = e.storedSchema(ns);
+    boolean oracle = engine == Engine.ORACLE;
+    // the created table's names are lower case, which Oracle reads only quoted
+    java.util.function.UnaryOperator<String> q = n -> oracle ? "\"" + n + "\"" : n;
+    String[] cols = {"id", "s", "i", "l", "d", "f", "b", "ts", "dt", "tm", "bl"};
+    String[][] getters = {
+      {
+        "getInt",
+        "getLong",
+        "getShort",
+        "getByte",
+        "getDouble",
+        "getFloat",
+        "getBigDecimal",
+        "getString",
+        "getObject"
+      },
+      {"getString", "getObject"},
+      {
+        "getInt",
+        "getLong",
+        "getShort",
+        "getByte",
+        "getDouble",
+        "getFloat",
+        "getBigDecimal",
+        "getString",
+        "getObject"
+      },
+      {"getLong", "getDouble", "getBigDecimal", "getString", "getObject"},
+      {"getDouble", "getFloat", "getBigDecimal", "getString", "getObject"},
+      {"getFloat", "getDouble", "getObject"},
+      {"getBoolean", "getString", "getObject"},
+      {"getTimestamp", "getString", "getObject"},
+      {"getDate", "getString", "getObject"},
+      {"getTime", "getString", "getObject"},
+      {"getBytes", "getObject"}
+    };
+    String[] fast = {
+      "getString", "getObject", "getInt", "getLong", "getDouble", "getBoolean", "getBigDecimal",
+      "getTimestamp", "getDate", "getTime", "getBytes", "getShort", "getFloat", "getByte"
+    };
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace(sdb, true);
+      admin.createTable(
+          sdb,
+          "ty",
+          TableMetadata.newBuilder()
+              .addColumn("id", DataType.INT)
+              .addColumn("s", DataType.TEXT)
+              .addColumn("i", DataType.INT)
+              .addColumn("l", DataType.BIGINT)
+              .addColumn("d", DataType.DOUBLE)
+              .addColumn("f", DataType.FLOAT)
+              .addColumn("b", DataType.BOOLEAN)
+              .addColumn("ts", DataType.TIMESTAMP)
+              .addColumn("dt", DataType.DATE)
+              .addColumn("tm", DataType.TIME)
+              .addColumn("bl", DataType.BLOB)
+              .addPartitionKey("id")
+              .build(),
+          true,
+          inline ? Map.of() : DECOUPLED);
+    }
+    try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
+      DistributedTransaction tx = tm.begin();
+      tx.insert(
+          Insert.newBuilder()
+              .namespace(sdb)
+              .table("ty")
+              .partitionKey(Key.ofInt("id", 1))
+              .textValue("s", "fast")
+              .intValue("i", 7)
+              .bigIntValue("l", 1L << 40)
+              .doubleValue("d", 2.5)
+              .floatValue("f", 1.25f)
+              .booleanValue("b", true)
+              .timestampValue("ts", java.time.LocalDateTime.of(2026, 10, 27, 12, 34, 56))
+              .dateValue("dt", java.time.LocalDate.of(2026, 10, 27))
+              .timeValue("tm", java.time.LocalTime.of(12, 34, 56))
+              .blobValue("bl", new byte[] {1, 2, 3})
+              .build());
+      // every other column NULL
+      tx.insert(
+          Insert.newBuilder().namespace(sdb).table("ty").partitionKey(Key.ofInt("id", 2)).build());
+      tx.commit();
+    }
+    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog, c, t -> t.namespace().equals(sdb), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    TableInfo info = catalog.lookup(List.of(), sdb, q.apply("ty"));
+    String list = String.join(", ", java.util.Arrays.stream(cols).map(q).toList());
+    String data = engine.quote(info.namespace()) + "." + engine.quote(info.dataTable());
+    String order = " ORDER BY " + q.apply("id");
+    // the vendor's values on the data table, per row, column and getter
+    List<Map<String, Object>> expected = new ArrayList<>();
+    try (Connection v = e.open();
+        Statement st = v.createStatement();
+        ResultSet rs = st.executeQuery("SELECT " + list + " FROM " + data + order)) {
+      while (rs.next()) {
+        expected.add(values(rs, cols, getters));
+      }
+    }
+    assertThat(expected).hasSize(2);
+    String sql = "SELECT " + list + " FROM " + ns + "." + q.apply("ty") + order;
+    for (int level :
+        List.of(
+            Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ, -1)) {
+      try (Connection d = e.openDriver()) {
+        if (level > 0) {
+          d.setTransactionIsolation(level);
+          d.setAutoCommit(false);
+        }
+        String at = level < 0 ? "autocommit" : "level " + level;
+        try (Statement st = d.createStatement();
+            ResultSet rs = st.executeQuery(sql)) {
+          List<Map<String, Object>> got = new ArrayList<>();
+          while (rs.next()) {
+            got.add(values(rs, cols, getters));
+            if (level > 0) {
+              // the hidden columns, by index and by label, through every fast getter
+              for (String g : fast) {
+                for (Object hidden : List.of(cols.length + 1, "scalardb_native_x0")) {
+                  // on MySQL and MariaDB the widened BOOLEAN's getObject resolves a label with
+                  // the rows' findColumn first, which refuses a hidden one as no column (todo 304)
+                  boolean widened =
+                      g.equals("getObject")
+                          && hidden instanceof String
+                          && (engine == Engine.MYSQL || engine == Engine.MARIADB);
+                  assertThatThrownBy(() -> call(rs, g, hidden))
+                      .as("%s %s(%s)", at, g, hidden)
+                      .isInstanceOf(SQLException.class)
+                      .extracting("SQLState")
+                      .isEqualTo(widened ? "42703" : "22023");
+                }
+              }
+            }
+          }
+          assertThat(got).as(at).isEqualTo(expected);
+          rs.close();
+          // a getter on closed rows: the vendor's own exception, not a reflective wrapper
+          assertThatThrownBy(() -> rs.getString(1)).as(at).isInstanceOf(SQLException.class);
+        }
+        if (level > 0) {
+          d.rollback();
+        }
+      }
+    }
+    // a scrollable read at READ COMMITTED: the row absolute reaches is anchored, so a write after
+    // another connection moved its version is a conflict
+    try (Connection d = e.openDriver();
+        Connection other = e.openDriver()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(false);
+      try (Statement st =
+              d.createStatement(ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY);
+          ResultSet rs = st.executeQuery(sql)) {
+        assertThat(rs.absolute(1)).isTrue();
+        assertThat(rs.getInt(1)).isEqualTo(1);
+      }
+      try (Statement st = other.createStatement()) {
+        st.executeUpdate(
+            "UPDATE "
+                + ns
+                + "."
+                + q.apply("ty")
+                + " SET "
+                + q.apply("s")
+                + " = 'moved' WHERE "
+                + q.apply("id")
+                + " = 1");
+      }
+      // outside a lambda, which the method's SpotBugs suppression does not reach
+      String conflict = null;
+      try (Statement st = d.createStatement()) {
+        st.executeUpdate(
+            "UPDATE "
+                + ns
+                + "."
+                + q.apply("ty")
+                + " SET "
+                + q.apply("s")
+                + " = 'mine' WHERE "
+                + q.apply("id")
+                + " = 1");
+      } catch (SQLException ex) {
+        conflict = ex.getSQLState();
+      }
+      assertThat(conflict).isEqualTo("40001");
+      d.rollback();
+    }
+  }
+
+  /** Each getter's value by index and by label, and wasNull after it, keyed by the call. */
+  private static Map<String, Object> values(ResultSet rs, String[] cols, String[][] getters)
+      throws Exception {
+    Map<String, Object> out = new java.util.LinkedHashMap<>();
+    for (int c = 0; c < cols.length; c++) {
+      for (String g : getters[c]) {
+        for (Object at : List.of(c + 1, cols[c])) {
+          Object v = call(rs, g, at);
+          out.put(g + "(" + at + ")", comparable(v));
+          out.put(g + "(" + at + ").wasNull", rs.wasNull());
+        }
+      }
+    }
+    return out;
+  }
+
+  private static @org.jspecify.annotations.Nullable Object call(ResultSet rs, String g, Object at)
+      throws Exception {
+    try {
+      return ResultSet.class
+          .getMethod(g, at instanceof Integer ? int.class : String.class)
+          .invoke(rs, at);
+    } catch (InvocationTargetException ex) {
+      throw (Exception) ex.getCause();
+    }
+  }
+
+  /** A value as its class and text, bytes as hex: the vendor's objects compare by value. */
+  private static @org.jspecify.annotations.Nullable Object comparable(
+      @org.jspecify.annotations.Nullable Object v) throws SQLException {
+    if (v instanceof java.sql.Blob) {
+      java.sql.Blob b = (java.sql.Blob) v;
+      v = b.getBytes(1, (int) b.length());
+    }
+    if (v instanceof byte[]) {
+      return java.util.HexFormat.of().formatHex((byte[]) v);
+    }
+    return v == null ? null : v.getClass().getName() + ":" + v;
   }
 
   /**
