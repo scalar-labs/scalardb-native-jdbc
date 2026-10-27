@@ -38,6 +38,23 @@ final class DriverProperties {
           INFLIGHT_WAIT_MS,
           PREDICATE_CHECKS);
 
+  /**
+   * The prefix of the keys up to 3.19.0-alpha.1. Such a key is still the driver's, taken out of the
+   * URL and the connect properties, so that it is refused with its new name rather than handed to
+   * the vendor driver, which would ignore it and leave the setting silently at its default.
+   */
+  static final String OLD_PREFIX = "scalardbnative.";
+
+  private static final Map<String, String> RENAMED =
+      Map.of(
+          OLD_PREFIX + "metadataSchema", METADATA_SCHEMA,
+          OLD_PREFIX + "coordinatorNamespace", COORDINATOR_NAMESPACE,
+          OLD_PREFIX + "catalogTtlMs", CATALOG_TTL_MS,
+          OLD_PREFIX + "allowNoCatalog", ALLOW_NO_CATALOG,
+          OLD_PREFIX + "inflightWaitMs", INFLIGHT_WAIT_MS,
+          OLD_PREFIX + "predicateChecks", PREDICATE_CHECKS,
+          OLD_PREFIX + "passthrough", NativeJdbcDriver.PASSTHROUGH);
+
   /** A table registered with ScalarDB is protected after at most this long, whatever is set. */
   static final Duration MAX_CATALOG_TTL = Catalog.MAX_TTL;
 
@@ -78,6 +95,14 @@ final class DriverProperties {
    */
   static DriverProperties read(Map<String, String> urlParameters, @Nullable Properties info)
       throws SQLException {
+    for (String key : urlParameters.keySet()) {
+      refuseOldKey(key);
+    }
+    if (info != null) {
+      for (String key : info.stringPropertyNames()) {
+        refuseOldKey(key);
+      }
+    }
     for (String key : urlParameters.keySet()) {
       if (!key.equals(CATALOG_TTL_MS) && !key.equals(INFLIGHT_WAIT_MS)) {
         // a URL is often assembled from configuration someone else controls; the settings that
@@ -130,12 +155,39 @@ final class DriverProperties {
         bool(all, PREDICATE_CHECKS));
   }
 
+  /**
+   * Whether a key is this driver's, under its prefix or the old one, rather than the vendor's.
+   *
+   * @param key a URL parameter's or a connect property's key
+   * @return whether it is the driver's
+   */
+  static boolean isDriverKey(String key) {
+    return key.startsWith(PREFIX) || key.startsWith(OLD_PREFIX);
+  }
+
+  /**
+   * Refuses a key of 3.19.0-alpha.1, naming the key it became.
+   *
+   * @param key a URL parameter's, a connect property's or a client info's key
+   * @throws SQLException with SQLSTATE 08001 if the key has the old prefix
+   */
+  static void refuseOldKey(String key) throws SQLException {
+    if (key.startsWith(OLD_PREFIX)) {
+      String renamed = RENAMED.get(key);
+      throw new SQLException(
+          renamed != null
+              ? key + " is renamed " + renamed
+              : key + " is not a driver property; the driver's keys start with " + PREFIX,
+          SQLSTATE_UNABLE_TO_CONNECT);
+    }
+  }
+
   /** The connect properties without this driver's keys, for the vendor driver. */
   static Properties vendorProperties(@Nullable Properties info) {
     Properties out = new Properties();
     if (info != null) {
       for (String key : info.stringPropertyNames()) {
-        if (!key.startsWith(PREFIX)) {
+        if (!isDriverKey(key)) {
           out.setProperty(key, info.getProperty(key));
         }
       }

@@ -63,6 +63,12 @@ class NativeJdbcUrlTest {
             "jdbc:scalardb-native:mysql://h/db?scalar.db.native_jdbc.allow_no_catalog=true");
     assertThat(only.vendorUrl()).isEqualTo("jdbc:mysql://h/db");
 
+    // an old key too, for the driver to refuse with its new name rather than the vendor to ignore
+    NativeJdbcUrl old =
+        NativeJdbcUrl.parse("jdbc:scalardb-native:postgresql://h/db?scalardbnative.catalogTtlMs=1");
+    assertThat(old.vendorUrl()).isEqualTo("jdbc:postgresql://h/db");
+    assertThat(old.driverParameters()).containsEntry("scalardbnative.catalogTtlMs", "1");
+
     NativeJdbcUrl mssql =
         NativeJdbcUrl.parse(
             "jdbc:scalardb-native:sqlserver://h:1433;databaseName=db;"

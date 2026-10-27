@@ -418,7 +418,7 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   assembled from configuration someone else controls, so only the two settings that cannot weaken the
   protection, `catalog_ttl_millis` and `inflight_wait_millis`, may also come from the URL, in the vendor's parameter
   syntax (`?k=v&...`, or `;k=v` for SQL Server), the URL winning; `metadata_schema`, `coordinator_namespace` and
-  `allow_no_catalog` from the URL fail `connect` with `08001`, as does an unknown or malformed `scalar.db.native_jdbc.*` key. The
+  `allow_no_catalog` from the URL fail `connect` with `08001`, as does an unknown or malformed `scalar.db.native_jdbc.*` key, and a `scalardbnative.*` key of 3.19.0-alpha.1, named with its new name rather than left to the vendor driver, which would ignore it. The
   URL is split exactly as the vendor driver splits it: a SQL Server value is braced only when its first
   character is `{`, `}}` inside braces is a literal, and an unbalanced brace refuses the URL; a `?`
   inside the host part, which the vendor drivers read differently, refuses it too. `catalog_ttl_millis` is at

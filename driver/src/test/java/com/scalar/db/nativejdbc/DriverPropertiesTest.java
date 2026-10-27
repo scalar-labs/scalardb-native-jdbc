@@ -54,6 +54,32 @@ class DriverPropertiesTest {
   }
 
   @Test
+  void theOldKeys_areRefused_namingTheirNewName() {
+    Properties info = new Properties();
+    info.setProperty("scalardbnative.catalogTtlMs", "5000");
+    assertThatThrownBy(() -> DriverProperties.read(Map.of(), info))
+        .isInstanceOf(SQLException.class)
+        .hasMessage(
+            "scalardbnative.catalogTtlMs is renamed scalar.db.native_jdbc.catalog_ttl_millis")
+        .extracting("SQLState")
+        .isEqualTo("08001");
+    assertThatThrownBy(
+            () -> DriverProperties.read(Map.of("scalardbnative.inflightWaitMs", "50"), null))
+        .hasMessage(
+            "scalardbnative.inflightWaitMs is renamed scalar.db.native_jdbc.inflight_wait_millis");
+    Properties unknown = new Properties();
+    unknown.setProperty("scalardbnative.nope", "x");
+    assertThatThrownBy(() -> DriverProperties.read(Map.of(), unknown))
+        .hasMessageContaining("the driver's keys start with scalar.db.native_jdbc.")
+        .extracting("SQLState")
+        .isEqualTo("08001");
+    Properties passthrough = new Properties();
+    passthrough.setProperty("scalardbnative.passthrough", "true");
+    assertThatThrownBy(() -> DriverProperties.read(Map.of(), passthrough))
+        .hasMessage("scalardbnative.passthrough is renamed scalar.db.native_jdbc.passthrough");
+  }
+
+  @Test
   void theTtlIsCapped_andTheSchemaMustBeAnIdentifier() {
     Properties ttl = new Properties();
     ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "9223372036854775807");
@@ -77,6 +103,7 @@ class DriverPropertiesTest {
     info.setProperty("user", "u");
     info.setProperty("password", "p");
     info.setProperty("scalar.db.native_jdbc.metadata_schema", "s");
+    info.setProperty("scalardbnative.metadataSchema", "s");
     Properties vendor = DriverProperties.vendorProperties(info);
     assertThat(vendor.stringPropertyNames()).containsExactlyInAnyOrder("user", "password");
   }

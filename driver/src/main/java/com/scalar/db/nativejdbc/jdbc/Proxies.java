@@ -15,11 +15,13 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.sql.BatchUpdateException;
+import java.sql.ClientInfoStatus;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ParameterMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLClientInfoException;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
@@ -47,6 +49,10 @@ import org.slf4j.LoggerFactory;
 public final class Proxies {
 
   private static final String PASSTHROUGH = NativeJdbcDriver.PASSTHROUGH;
+
+  // its name up to 3.19.0-alpha.1: refused rather than handed to the vendor driver, which would
+  // ignore it and leave passthrough off without a word
+  private static final String OLD_PASSTHROUGH = "scalardbnative.passthrough";
 
   private Proxies() {}
 
@@ -125,6 +131,12 @@ public final class Proxies {
       throws Throwable {
     return Objects.requireNonNull(
         forward(target, method, args), () -> "the vendor driver's " + method.getName());
+  }
+
+  private static SQLClientInfoException oldPassthrough() {
+    return new SQLClientInfoException(
+        OLD_PASSTHROUGH + " is renamed " + PASSTHROUGH,
+        Map.of(OLD_PASSTHROUGH, ClientInfoStatus.REASON_UNKNOWN_PROPERTY));
   }
 
   private static @Nullable Object forward(Object target, Method method, @Nullable Object[] args)
@@ -511,6 +523,9 @@ public final class Proxies {
           }
         case "setClientInfo":
           if (args[0] instanceof String) {
+            if (OLD_PASSTHROUGH.equals(args[0])) {
+              throw oldPassthrough();
+            }
             if (PASSTHROUGH.equals(args[0])) {
               router.setPassthrough(Boolean.parseBoolean((String) args[1]));
               return null;
@@ -520,6 +535,9 @@ public final class Proxies {
           {
             // the set replaces all client info: a key left out is cleared, passthrough included
             Properties rest = (Properties) ((Properties) args[0]).clone();
+            if (rest.containsKey(OLD_PASSTHROUGH)) {
+              throw oldPassthrough();
+            }
             router.setPassthrough(Boolean.parseBoolean((String) rest.remove(PASSTHROUGH)));
             vendor.setClientInfo(rest);
             return null;

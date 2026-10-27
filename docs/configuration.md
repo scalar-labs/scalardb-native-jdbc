@@ -53,10 +53,14 @@ config.addDataSourceProperty("scalar.db.native_jdbc.catalog_ttl_millis", "30000"
 Only `catalog_ttl_millis` and `inflight_wait_millis` may also be given in the URL, in the vendor's
 parameter syntax (`?scalar.db.native_jdbc.catalog_ttl_millis=30000`, or
 `;scalar.db.native_jdbc.catalog_ttl_millis=30000` on SQL Server), and the URL wins over the connect
-properties. A URL is often assembled from configuration
-someone else controls, so the properties that could turn the protection off are taken from the
-connect properties only. The driver refuses the connection with `08001` when one of them is in the
-URL, when a `scalar.db.native_jdbc.` key is unknown, or when a value is malformed.
+properties. A URL is often assembled from configuration someone else controls, so the properties
+that could turn the protection off are taken from the connect properties only. The driver refuses
+the connection with `08001` when one of them is in the URL, when a `scalar.db.native_jdbc.` key is
+unknown, or when a value is malformed.
+
+Up to 3.19.0-alpha.1 the keys were `scalardbnative.` and camel case, such as
+`scalardbnative.catalogTtlMs`. The driver refuses such a key with `08001`, naming its new name, and
+`setClientInfo("scalardbnative.passthrough", ...)` with `SQLClientInfoException`.
 
 ## Passthrough
 

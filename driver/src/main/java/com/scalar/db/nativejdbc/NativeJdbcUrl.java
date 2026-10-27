@@ -116,7 +116,7 @@ public final class NativeJdbcUrl {
     for (String pair : url.substring(q + 1).split("&", -1)) {
       int eq = pair.indexOf('=');
       String key = URLDecoder.decode(eq < 0 ? pair : pair.substring(0, eq), StandardCharsets.UTF_8);
-      if (key.startsWith(DriverProperties.PREFIX)) {
+      if (DriverProperties.isDriverKey(key)) {
         into.put(
             key, eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8));
       } else {
@@ -187,7 +187,7 @@ public final class NativeJdbcUrl {
       String segment = url.substring(segments.get(k)[0], segments.get(k)[1]);
       int eq = segment.indexOf('=');
       String key = (eq < 0 ? segment : segment.substring(0, eq)).strip();
-      if (key.startsWith(DriverProperties.PREFIX)) {
+      if (DriverProperties.isDriverKey(key)) {
         into.put(key, eq < 0 ? "" : segment.substring(eq + 1).strip());
       } else {
         out.append(';').append(segment);

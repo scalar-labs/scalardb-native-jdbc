@@ -15,6 +15,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLClientInfoException;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
@@ -240,6 +241,14 @@ class RoutingIntegrationTest {
       // a set of client info without the key clears it, as JDBC says
       c.setClientInfo(NativeJdbcDriver.PASSTHROUGH, "true");
       c.setClientInfo(new Properties());
+      assertThat(c.getClientInfo(NativeJdbcDriver.PASSTHROUGH)).isEqualTo("false");
+      // the name up to 3.19.0-alpha.1 is refused with the new one, not ignored by the vendor
+      assertThatThrownBy(() -> c.setClientInfo("scalardbnative.passthrough", "true"))
+          .isInstanceOf(SQLClientInfoException.class)
+          .hasMessageContaining(NativeJdbcDriver.PASSTHROUGH);
+      Properties old = new Properties();
+      old.setProperty("scalardbnative.passthrough", "true");
+      assertThatThrownBy(() -> c.setClientInfo(old)).isInstanceOf(SQLClientInfoException.class);
       assertThat(c.getClientInfo(NativeJdbcDriver.PASSTHROUGH)).isEqualTo("false");
     }
   }
