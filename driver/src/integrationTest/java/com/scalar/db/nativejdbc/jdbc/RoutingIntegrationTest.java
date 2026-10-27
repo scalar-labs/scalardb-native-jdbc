@@ -254,6 +254,42 @@ class RoutingIntegrationTest {
   }
 
   @Test
+  void aWithItemThatWrites_isRefusedOnAScalarDbTable_atEveryLevel() throws SQLException {
+    // read as a SELECT, the UPDATE reached the decoupled data table itself at SNAPSHOT, and wrote
+    // it without its metadata (todo 288)
+    String onScalarDb =
+        "WITH u AS (UPDATE m1.s SET x = 'w' WHERE id = 1 RETURNING id) SELECT * FROM u";
+    String readsScalarDb =
+        "WITH u AS (DELETE FROM m1plain.s WHERE id = -1 RETURNING id) SELECT x FROM m1.s";
+    try (Connection c = connect();
+        Statement st = c.createStatement()) {
+      for (int level :
+          new int[] {
+            Connection.TRANSACTION_READ_COMMITTED,
+            Connection.TRANSACTION_REPEATABLE_READ,
+            Connection.TRANSACTION_SERIALIZABLE
+          }) {
+        c.setTransactionIsolation(level);
+        c.setAutoCommit(false);
+        assertRefused(() -> st.executeQuery(onScalarDb), "0AN01", "WITH item that writes");
+        c.rollback();
+        assertRefused(() -> st.executeQuery(readsScalarDb), "0AN01", "WITH item that writes");
+        c.rollback();
+        c.setAutoCommit(true);
+      }
+      c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      // on tables ScalarDB does not manage it runs as written
+      try (ResultSet rs =
+          st.executeQuery(
+              "WITH u AS (UPDATE m1plain.s SET x = x WHERE id = -1 RETURNING id)"
+                  + " SELECT count(*) FROM u")) {
+        assertThat(rs.next()).isTrue();
+        assertThat(rs.getInt(1)).isZero();
+      }
+    }
+  }
+
+  @Test
   void passthrough_refusesAStatementThatNamesAScalarDbTable_parsedOrNot() throws SQLException {
     try (Connection c = connect();
         Statement st = c.createStatement()) {

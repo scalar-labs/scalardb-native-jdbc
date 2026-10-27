@@ -210,6 +210,7 @@ public final class SqlAst {
   private final List<Select> selects;
   private final boolean setsSessionInAnExpression;
   private final boolean doubleQuotesQuoteIdentifiers;
+  private final boolean dmlInWith;
 
   // per table reference, the SQL Server hints blanked out of the source
   private final Map<TableRef, List<String>> hints = new IdentityHashMap<>();
@@ -231,7 +232,9 @@ public final class SqlAst {
       List<Table> forUpdateTables,
       List<Select> selects,
       boolean setsSessionInAnExpression,
-      boolean doubleQuotesQuoteIdentifiers) {
+      boolean doubleQuotesQuoteIdentifiers,
+      boolean dmlInWith) {
+    this.dmlInWith = dmlInWith;
     this.setsSessionInAnExpression = setsSessionInAnExpression;
     this.doubleQuotesQuoteIdentifiers = doubleQuotesQuoteIdentifiers;
     this.source = source;
@@ -643,7 +646,8 @@ public final class SqlAst {
             List.copyOf(forUpdateTables),
             List.copyOf(selects),
             setsSession,
-            doubleQuotesQuoteIdentifiers);
+            doubleQuotesQuoteIdentifiers,
+            walker.dmlInWith);
     if (hinted != null) {
       for (TableHints.Clause c : hinted.clauses) {
         TableRef ref = out.hintedTable(c);
@@ -1693,6 +1697,17 @@ public final class SqlAst {
       }
     }
     return false;
+  }
+
+  /**
+   * Returns whether a {@code WITH} item of the statement, nested ones included, is an INSERT, an
+   * UPDATE or a DELETE: PostgreSQL's data-modifying CTE, which a statement read as a SELECT would
+   * otherwise carry to whatever the rewrite puts in its table's place (todo 288).
+   *
+   * @return whether a WITH item writes
+   */
+  public boolean hasDmlInWith() {
+    return dmlInWith;
   }
 
   /** SQL Server's table hints that hold locks to the transaction's end. */
@@ -5263,6 +5278,7 @@ public final class SqlAst {
     final List<Object> parameters = new ArrayList<>();
     final List<Select> selects = new ArrayList<>();
     final Set<String> cteNames = new LinkedHashSet<>(); // as written
+    boolean dmlInWith;
 
     /** For each table node, the non-recursive CTEs whose bodies contain it, names as written. */
     final Map<Table, List<String>> enclosingCtes = new IdentityHashMap<>();
@@ -5311,6 +5327,10 @@ public final class SqlAst {
 
     @Override
     public <S> Void visit(WithItem<?> withItem, S context) {
+      // a WITH FUNCTION declaration has no statement
+      if (withItem.getStatement() != null && !(withItem.getStatement() instanceof Select)) {
+        dmlInWith = true;
+      }
       if (withItem.getAlias() != null) {
         cteNames.add(withItem.getAlias().getName());
       }

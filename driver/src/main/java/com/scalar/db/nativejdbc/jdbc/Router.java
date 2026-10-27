@@ -855,6 +855,13 @@ final class Router {
                 + ")");
       }
     }
+    if (!scalarDb.isEmpty() && ast.hasDmlInWith()) {
+      // a data-modifying CTE: read as a SELECT, its write would reach the read surface, on a
+      // decoupled table at SNAPSHOT the data table itself, without ScalarDB's protocol (todo 288)
+      throw Errors.unsupported(
+          "a WITH item that writes (INSERT, UPDATE or DELETE) is not supported in a statement on a"
+              + " ScalarDB table; write each table with its own statement, in one transaction");
+    }
     if (!scalarDb.isEmpty() && kind == SqlAst.Kind.DML) {
       return write(vendor, sql, ast, scalarDb);
     }

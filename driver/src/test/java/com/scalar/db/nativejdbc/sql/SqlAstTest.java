@@ -193,6 +193,22 @@ class SqlAstTest {
   }
 
   @Test
+  void hasDmlInWith_findsAWithItemThatWrites_nestedOnesIncluded() {
+    assertThat(parse("with c as (select id from a) select * from c").hasDmlInWith()).isFalse();
+    assertThat(parse("select * from a").hasDmlInWith()).isFalse();
+    for (String sql :
+        new String[] {
+          "with u as (update a set x = 1 where id = 1 returning id) select * from u",
+          "with d as (delete from a where id = 1 returning id) select * from d",
+          "with i as (insert into a (id) values (1) returning id) select * from i",
+          "select * from b where id in (with u as (update a set x = 1 returning id) select id from u)",
+          "with u as (update a set x = 1 returning id) update b set y = 2 where id in (select id from u)"
+        }) {
+      assertThat(parse(sql).hasDmlInWith()).as(sql).isTrue();
+    }
+  }
+
+  @Test
   void tableRef_exposesQualifierQuotingAndAlias() {
     SqlAst.TableRef t = parse("select x.id from s.\"Order\" x").tableRefs().get(0);
     assertThat(t.schema()).isEqualTo("s");
