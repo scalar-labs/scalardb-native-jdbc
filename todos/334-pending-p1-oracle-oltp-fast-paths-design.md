@@ -1413,3 +1413,89 @@ setters, the block then; `written > 1` is unreachable under the full key. The co
 the inline update at the vendor's cost (executes 1, server CPU +7 µs over the vendor); the
 decoupled form's one execution less did not show on the laptop. Next: c7 merges to main; 6e's
 YCSB single-key plan on the user's approval measures both layouts, a JFR cell with it.
+
+### 2026-10-27: the scan at READ COMMITTED on a decoupled table, where its +47% goes and what can go (the design's note)
+
+Run 20261027-1948's first cell (RC decoupled, YCSB at 1M rows, 60 s; main at 5cfffc3), 6e's
+reading: YCSB E's scan 2,031 → 2,979 µs p50 (+47%), its insert 443 → 564; A's update 327 → 418
+(+28%, from +34–38% before the statement first); F's RMW 420 → 551 (+31%); C's read 93 → 110
+(+18%). The scan's V$SQL: the vendor's range read 748 µs elapsed / 306 CPU / 104 gets a call for
+about 500 rows; the driver's 1,307 / 621 / 119: the server adds about +560 elapsed and +315 CPU a
+scan with nearly the same gets, the plan the right one (a HASH JOIN OUTER of the two range scans,
+UNION ALL the in-flight arm's INLIST ITERATOR), and the rest of the +950 µs, about +390, is the
+client, the JFR of the run to confirm. The form is 4.2's READ COMMITTED read of a decoupled table
+on Oracle: the committed copy `T LEFT JOIN T_meta m ON m.k = t.k WHERE COALESCE(m.tx_state, 3)
+NOT IN (1, 2)` carrying `m.tx_id, m.tx_version` per row for the anchors, UNION ALL the in-flight
+arm; the user's predicate pushed into both.
+
+**The server's part, taken apart on the container** (`ora/scan1.jsh`; 200,000 rows of ten 100-char
+fields and a metadata row each, 500-row ranges, fetch size 100, 200 executions a form after a
+warm-up, V$SQL per execution; the first run on a quiet laptop, the later ones under a load average
+of 25 at 2–3x the figures and noisy, used for the ordering only; `scan3.jsh`, `scan4.jsh`):
+
+| form, per 500-row scan | elapsed µs | CPU µs | gets |
+|---|---|---|---|
+| the vendor's `SELECT *` range | 1,002 | 416 | 83.6 |
+| the driver's form, hash join and the arm | 1,513 | 734 | 93.6 |
+| the join alone, no arm | 1,306 | 657 | 89.6 |
+| no join, the arm kept (no anchors, no exclusion) | 1,085 | 487 | 87.6 |
+| the join as MERGE (a SORT JOIN on the metadata side) | 2,023 | 1,064 | 93.6 |
+| the join as NESTED LOOPS (a unique probe a row) | 1,585 | 736 | 607.9 |
+| the join over a covering index `T_meta (k, tx_state, tx_id, tx_version)` | 1,362 | 663 | 92.7 |
+
+So the driver's +511 elapsed / +318 CPU on the container is AWS's +560 / +315, and of it the join
+is about +300 / +240 (the metadata range scan, its table access, the hash join over 500 rows), the
+arm and the union about +200 / +80. The optimizer's hash join is the right method: merge sorts,
+nested loops read 6x the blocks. The covering index saves −150 / −70 a scan and the optimizer takes
+it unhinted, but the metadata stamp then maintains it on every write: the stamp's UPDATE 98
+elapsed / 27 CPU / 10 gets against 36 / 10 / 5 without (+17 CPU a write, the data UPDATE not
+counted); a choice per table for a scan-heavy one, the user's index, not a driver change. Without
+anchors the committed copy still has to leave rows in flight out, as one anti-join against the
+in-flight index's range (`t.k NOT IN (SELECT q.k FROM T_meta q WHERE q.tx_state IN (1, 2))`, a
+HASH JOIN RIGHT ANTI whose build side is empty), which the loaded runs did not resolve against the
+join; the floor without anchors lies between the no-join row above (+71 CPU) and that.
+
+**The client's part** (the third run's note above, `ClientCostIntegrationTest` with a 500-row scan;
+the run's JFR to confirm): the driver adds 360–840 µs of CPU to a 500-row scan at READ COMMITTED,
+the three hidden columns read and an anchor recorded per row (+420 KB allocated), and 150–350 at
+SNAPSHOT, the proxied calls (about 6,000 a scan at 25–60 ns). The anchors' own share is the
+difference, 200–500 µs: per row `readKey` (which calls `getMetaData().getColumnTypeName()` per key
+column per row), `getString` of `tx_id`, `getObject` of `tx_version` as a BigDecimal, the key as a
+List, a `Version`, and a synchronized `HashMap` insert (`Anchors.read`, first read wins).
+
+**The three directions.** (a) A table known clear is not a READ COMMITTED fact across statements:
+each statement's snapshot is its own, and a ScalarDB prepare between two statements puts a row in
+flight that the first statement's probe did not see. Within a statement it holds and is in use:
+the arm is that probe. But the join is not there for the state; it carries the anchors, and
+without them the exclusion is the anti-join above. (b) The version can only be read with the row
+(nothing else holds what the transaction read; an SCN is out, a plain user reads none, the third
+run's note). What can be lazy is the map: record per row the raw key and version objects in a flat
+list per table, and build the key-to-version map at the first call that needs it
+(`recorded`, `version`, `unchanged`, at a write to the table). A scan never followed by a write,
+YCSB E's and most read-only scans, then pays the three columns' fetch and a list add, about 0.2–0.3
+µs a row against about 0.8, the per-row metadata lookups of `readKey` hoisted to one per result set
+with it: about −250 µs a 500-row scan, most of the client's +390. (c) The key appended per table is
+needed (the user's columns need not carry it); `tx_id` and `tx_version` are two getters and about
+40 bytes a row; one column for both (`tx_id || '|' || tx_version`) saves a getter a row, about
+0.1 µs; small. The server's analogue is the covering index above.
+
+**What the anchors of a scan are for, verified in ScalarDB's source today** (`CrudHandler`:
+`processScanResult` puts every scanned record into the read set through
+`putIntoReadSetInSnapshot` in read-write mode, READ_COMMITTED included, the first read of a key
+winning; `PrepareMutationComposer` conditions the prepare on the read set's `tx_id`;
+`readIfImplicitPreReadEnabled` reads only a record not in the read set): a record scanned and then
+written is prepared against the scan's version at READ_COMMITTED too. The driver's anchors do the
+same. Dropping them for scans would let a write after a scan overwrite a row changed in between,
+where ScalarDB aborts: a semantic change, the user's to make, not proposed.
+
+**Proposed:** (b), the lazy map with the hoisted key getters, on all engines (the anchors are
+engine-neutral); the texts unchanged. Expected: YCSB E's scan from +47% to about +30%, the server's
++560 µs staying as the layout's cost at READ COMMITTED (the inline layout's scan has none of it,
+its row carrying its own columns; the run's inline cell shows). Tests to keep: every anchored
+read-then-write test (the anchor still the first read's); to add: a scan then a write of a scanned
+key, the version moved by another connection in between, `40001`; a scan on a read-only
+connection records nothing. Measure: `ClientCostIntegrationTest`'s 500-row scan at READ
+COMMITTED, the client CPU and the allocation, then the next YCSB E cell. After it, the proxied
+calls' 150–350 µs a scan are the remaining client item at both levels (the fast path for
+`getXxx(int)` within the visible columns, the third run's note); the covering index goes into the
+Oracle notes as a per-table choice.
