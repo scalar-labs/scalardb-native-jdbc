@@ -692,6 +692,7 @@ public final class Catalog implements AutoCloseable {
     List<VirtualTable> virtualTables = new ArrayList<>();
     Map<String, List<MetadataColumn>> metadata = new HashMap<>();
     boolean present = true;
+    SQLException noVirtualTables = null;
     try (PreparedStatement ps =
             c.prepareStatement(
                 "SELECT "
@@ -713,11 +714,9 @@ public final class Catalog implements AutoCloseable {
       if (!engine.isMissingTable(e)) {
         throw e;
       }
-      LOG.warn(
-          "{}.virtual_tables is not visible: only inline-layout ScalarDB tables can be"
-              + " recognised ({})",
-          metadataSchema,
-          e.getMessage());
+      // ScalarDB creates it with the first decoupled table; told from a table this user may not
+      // read, which Oracle reports alike, once the metadata is read
+      noVirtualTables = e;
     }
     try (PreparedStatement ps =
             c.prepareStatement(
@@ -752,6 +751,24 @@ public final class Catalog implements AutoCloseable {
       present = false;
       absent(c, e);
     }
+    if (present && noVirtualTables != null) {
+      List<String> unpaired = decoupledMetadataTables(metadata);
+      if (unpaired.isEmpty()) {
+        LOG.debug(
+            "{}.virtual_tables does not exist: no decoupled ScalarDB tables ({})",
+            metadataSchema,
+            noVirtualTables.getMessage());
+      } else {
+        LOG.warn(
+            "{}.virtual_tables cannot be read, although {} hold ScalarDB's metadata for decoupled"
+                + " tables: those tables are treated as plain tables until this user may read"
+                + " {}.virtual_tables ({})",
+            metadataSchema,
+            unpaired,
+            metadataSchema,
+            noVirtualTables.getMessage());
+      }
+    }
     boolean caseInsensitive = present && engine.tableNamesCaseInsensitive(c);
     List<String> inline = inlineTables(virtualTables, metadata);
     SetupObjects setupObjects = setupObjects(c, virtualTables, inline, caseInsensitive);
@@ -764,6 +781,26 @@ public final class Catalog implements AutoCloseable {
    * transaction columns and that are no source of a virtual table, the metadata table of a
    * decoupled one holding them too.
    */
+  /**
+   * The tables in ScalarDB's metadata that hold a decoupled table's transaction metadata: every
+   * transaction column, without the data columns an inline table has. Without {@code
+   * virtual_tables} they are the sign that decoupled tables exist.
+   */
+  static List<String> decoupledMetadataTables(Map<String, List<MetadataColumn>> metadata) {
+    List<String> out = new ArrayList<>();
+    for (Map.Entry<String, List<MetadataColumn>> e : metadata.entrySet()) {
+      Set<String> names = new HashSet<>();
+      for (MetadataColumn c : e.getValue()) {
+        names.add(c.name);
+      }
+      if (names.containsAll(TRANSACTION_COLUMNS) && !inline(names)) {
+        out.add(e.getKey());
+      }
+    }
+    Collections.sort(out);
+    return out;
+  }
+
   private static List<String> inlineTables(
       List<VirtualTable> virtualTables, Map<String, List<MetadataColumn>> metadata) {
     Set<String> sources = new HashSet<>();

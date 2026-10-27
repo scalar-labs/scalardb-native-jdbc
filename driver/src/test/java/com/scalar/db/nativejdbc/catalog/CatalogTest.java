@@ -98,6 +98,11 @@ class CatalogTest {
     TableInfo t = s.classify(new QualifiedName("ns", "inline"));
     assertThat(t.layout()).isEqualTo(Layout.INLINE);
     assertThat(t.dataColumns()).containsExactly("id", "x", "before_y");
+    // what tells a database with decoupled tables from one where virtual_tables does not exist
+    metadata.put("app.storage_only", columns("id:PARTITION", "x"));
+    assertThat(Catalog.decoupledMetadataTables(metadata)).containsExactly("ns.Orders_tx_metadata");
+    metadata.remove("ns.Orders_tx_metadata");
+    assertThat(Catalog.decoupledMetadataTables(metadata)).isEmpty();
   }
 
   @Test
