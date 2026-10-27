@@ -860,3 +860,10 @@ drop and recreate the OO schema.
 
 On the way: a measured 3 round trips was the driver planning a statement text it had not seen
 (the catalog reads), not the fallback; the test now measures a prepared statement.
+
+The review (1272e9d) asked that only a key given as placeholders and literals take the single
+statement, since an expression would be evaluated again in the second INTO. That holds already:
+`StatementShape.insertKeyValues` takes only placeholders and literals, signed or cast
+(`isConstant`), and on Oracle an INSERT whose key is anything else is refused before the plan.
+`WritesTest.onOracle_aDecoupledInsertOfOneRowIsOneInsertAll` now asserts the refusal for
+`VALUES (ABS(?), 'a')`.

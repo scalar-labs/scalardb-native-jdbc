@@ -960,6 +960,12 @@ class WritesTest {
             "INSERT ALL INTO \"ns\".\"t_data\" (x, \"id\") VALUES ('a', 7) INTO \"ns\".\"t_meta\""
                 + " (\"id\", \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
                 + " \"tx_committed_at\") VALUES (7, ?, 3, 1, ?, ?) SELECT 1 FROM dual");
+    // a key given by an expression is evaluated once per INTO, so it never takes the form: the key
+    // values are placeholders and literals only (insertKeyValues), and on Oracle the INSERT is
+    // refused before
+    assertThatThrownBy(
+            () -> oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (ABS(?), 'a')", false))
+        .isInstanceOf(SQLException.class);
     // not for the inline layout, whose INSERT is one statement already
     assertThat(oraclePlan(inline(), "INSERT INTO t (id, x) VALUES (?, ?)", false).sql())
         .noneMatch(q -> q.startsWith("INSERT ALL"));
