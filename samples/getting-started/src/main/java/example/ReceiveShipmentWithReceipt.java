@@ -16,6 +16,9 @@ public final class ReceiveShipmentWithReceipt {
 
   public static void main(String[] args) throws SQLException {
     try (Connection c = DriverManager.getConnection(URL, "postgres", "postgres")) {
+      // SNAPSHOT, the level the order service's ScalarDB transactions run at (ScalarDB's default):
+      // the driver and ScalarDB run at the same level
+      c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       // 30 bolts and 20 nuts
       receive(c, new int[] {1, 2}, new int[] {30, 20});
       try (PreparedStatement ps =

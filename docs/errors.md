@@ -1,5 +1,8 @@
 # Errors
 
+This page describes the errors the driver raises, by SQLState: what causes each and what to do
+about it. Look up an SQLState here when an application gets an error from the driver.
+
 The driver's own errors carry these SQLStates. Errors from the database come through as the vendor
 driver reports them, except that SQL Server's update conflict (error 3960) and Oracle's
 serialization failures (ORA-08177, ORA-08176) come as `40001`.
@@ -11,10 +14,10 @@ serialization failures (ORA-08177, ORA-08176) come as `40001`.
 | `42000` | A statement names a synonym of a ScalarDB table, or one of the tables ScalarDB keeps for it: a decoupled table's `<table>_scalardb` view, data table or `<table>_tx_metadata` table | Name the ScalarDB table itself |
 | `25006` | A write in a read-only transaction or on a read-only connection | Run it in a read-write transaction ([Read-only transactions](transactions.md#read-only-transactions)) |
 | `25001` | `setTransactionIsolation` or `setReadOnly` after the open transaction has run a statement | Change them between transactions |
-| `55000` | A statement on a ScalarDB table the setup has not been run for, or whose read view this user cannot read. On SQL Server, also `setTransactionIsolation` to REPEATABLE READ or SERIALIZABLE on a database that does not allow snapshot isolation | Run `scalardb-native-tools setup`, with `--grant <user>` ([Setting up tables](setting-up-tables.md)); on SQL Server, `ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON` |
+| `55000` | A statement on a ScalarDB table [the setup](concepts.md#the-setup) has not been run for, or whose [read view](concepts.md#read-view) this user cannot read. On SQL Server, also `setTransactionIsolation` to REPEATABLE READ or SERIALIZABLE on a database that does not allow snapshot isolation | Run `scalardb-native-tools setup`, with `--grant <user>` ([Setting up tables](setting-up-tables.md)); on SQL Server, `ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON` |
 | `57014` | A write was cancelled, or its query timeout passed. The transaction is left rollback-only | Roll back |
 | `08001` | The URL or a `scalar.db.native_jdbc.` property is malformed, unknown, or not allowed in the URL; a key of 3.19.0-alpha.1, `scalardbnative.*`; or no vendor driver for the URL is on the class path | Fix the URL or the property ([Configuration](configuration.md)) |
-| `08004` | The connection is refused: the database has no ScalarDB catalog; or, on MySQL and MariaDB, `useAffectedRows` is true; or, on SQL Server, `READ_COMMITTED_SNAPSHOT` is off or `XACT_ABORT` is on | Fix the setting ([Database settings](configuration.md#database-settings-the-driver-needs)); for a database without ScalarDB, set `scalar.db.native_jdbc.allow_no_catalog` |
+| `08004` | The connection is refused: the database has no ScalarDB [catalog](concepts.md#catalog); or, on MySQL and MariaDB, `useAffectedRows` is true; or, on SQL Server, `READ_COMMITTED_SNAPSHOT` is off or `XACT_ABORT` is on | Fix the setting ([Database settings](configuration.md#database-settings-the-driver-needs)); for a database without ScalarDB, set `scalar.db.native_jdbc.allow_no_catalog` |
 | `42501` | ScalarDB's catalog exists but this user cannot read it | Grant the user SELECT on `scalardb.metadata` and `scalardb.virtual_tables` |
 
 A locking read with `NOWAIT` that finds a row locked fails with the engine's own error for it:

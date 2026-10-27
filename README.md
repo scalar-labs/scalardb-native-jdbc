@@ -18,24 +18,35 @@ touches other databases needs no special handling: the driver only meets the row
 prepares in this database, and those rows follow the same protocol as any other.
 
 To try it, from a database to a program through the driver, follow
-[docs/getting-started.md](docs/getting-started.md). Before the release, build it yourself:
-[docs/development-builds.md](docs/development-builds.md).
+[docs/getting-started.md](docs/getting-started.md).
 
 ## Getting it
 
-- **The driver**, `com.scalar-labs:scalardb-native-jdbc`. The application then needs the driver jar,
-  JSQLParser 5.4, slf4j-api and its vendor driver on the classpath, and connects with
-  `jdbc:scalardb-native:postgresql:...`. Not on Maven Central during the preview: the jar is attached
-  to the GitHub release.
-- **`snsql`**, the psql-like shell, `scalardb-native-shell-<version>.zip` on the GitHub release.
+**Before the release, build all three yourself:** [docs/development-builds.md](docs/development-builds.md).
+The driver is not on Maven Central yet, and there is no GitHub release to download from.
+
+- **The driver**, `com.scalar-labs:scalardb-native-jdbc`, which the application connects through with
+  `jdbc:scalardb-native:postgresql:...`. With Maven or Gradle, its POM brings its dependencies,
+  JSQLParser 5.4 and slf4j-api. With the jar alone, put those two on the classpath beside it. Either
+  way, add your database's own JDBC driver.
+- **`snsql`**, the psql-like shell, `scalardb-native-shell-<version>.zip`.
 - **`scalardb-native-tools`**, which sets ScalarDB tables up for the driver,
-  `scalardb-native-tools-<version>.zip` on the GitHub release.
+  `scalardb-native-tools-<version>.zip`.
+
+After the release, the driver comes from Maven Central and the two zips from the GitHub release.
+
+| Java | For |
+| --- | --- |
+| 11 or later | running the driver, `snsql` and `scalardb-native-tools` |
+| 17 or later | the Gradle build of the getting-started example |
+| JDK 25 | building this repository ([development builds](docs/development-builds.md)) |
 
 ## Documentation
 
 | Document | What it covers |
 | --- | --- |
 | [Getting started](docs/getting-started.md) | from an empty database to a program through the driver, in either of ScalarDB's layouts |
+| [Concepts](docs/concepts.md) | the terms the other pages use: ScalarDB table, layout, in flight, catalog, the setup, read view, passthrough, SNAPSHOT |
 | [Development builds](docs/development-builds.md) | building the driver, `snsql` and the tools yourself before a release, and using them |
 | [Setting up tables](docs/setting-up-tables.md) | `scalardb-native-tools`: setting ScalarDB tables up for the driver, checking them, adding a table while applications run |
 | [Configuration](docs/configuration.md) | the driver's URLs and properties, passthrough, the database settings and users the driver needs |

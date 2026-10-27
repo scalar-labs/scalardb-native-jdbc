@@ -1,5 +1,9 @@
 # Configuration
 
+This page describes how applications connect through the driver and how to configure it: the URL
+for each database, the driver's own properties, passthrough, and what the database, its users and
+ScalarDB need to be set to.
+
 ## Connection URLs
 
 The driver's URL is the vendor driver's URL with `scalardb-native:` after `jdbc:`. The driver
@@ -24,8 +28,8 @@ connect properties goes to the vendor driver unchanged.
 
 | Property | Default | In the URL | What it does |
 | --- | --- | --- | --- |
-| `scalar.db.native_jdbc.catalog_ttl_millis` | `60000` | yes | How long the driver trusts ScalarDB's catalog, the list of ScalarDB tables, in milliseconds; at most `3600000` (one hour). A table newly added to ScalarDB is protected after at most this long ([Adding a table while applications run](setting-up-tables.md#adding-a-table-to-scalardb-while-applications-run)) |
-| `scalar.db.native_jdbc.inflight_wait_millis` | `0` | yes | At READ COMMITTED, how long a write waits for a row a ScalarDB transaction is writing before it fails with `40001`; `0` fails at once. Other levels never wait |
+| `scalar.db.native_jdbc.catalog_ttl_millis` | `60000` | yes | How long the driver trusts its [catalog](concepts.md#catalog), the list of ScalarDB tables, in milliseconds; at most `3600000` (one hour). A table newly added to ScalarDB is protected after at most this long ([Adding a table while applications run](setting-up-tables.md#adding-a-table-to-scalardb-while-applications-run)) |
+| `scalar.db.native_jdbc.inflight_wait_millis` | `0` | yes | At READ COMMITTED, how long a write waits for a row [in flight](concepts.md#in-flight), one a ScalarDB transaction is writing, before it fails with `40001`; `0` fails at once. Other levels never wait |
 | `scalar.db.native_jdbc.metadata_schema` | `scalardb` | no | The schema where ScalarDB keeps its table metadata (`metadata`, and `virtual_tables` for the decoupled layout). Set it when ScalarDB uses another one |
 | `scalar.db.native_jdbc.coordinator_namespace` | `coordinator` | no | ScalarDB's namespace for its coordinator table, `scalar.db.consensus_commit.coordinator.namespace`; no statement through [passthrough](sql-support.md#passthrough) may name it |
 | `scalar.db.native_jdbc.allow_no_catalog` | `false` | no | Accept a database without ScalarDB's catalog, every table then ordinary. Otherwise such a database is refused at connect with `08004` |
@@ -82,7 +86,8 @@ it still refuses.
 
 `scalardb-native-tools check` reports the SQL Server settings. For SERIALIZABLE on MySQL, MariaDB
 and SQL Server, give ScalarDB's own connections a short lock wait, as
-[Transactions and isolation levels](transactions.md) explains.
+[Transactions and isolation levels](transactions.md#serializable-on-mysql-mariadb-and-sql-server)
+explains.
 
 ## Database users
 
@@ -96,6 +101,10 @@ and SQL Server, give ScalarDB's own connections a short lock wait, as
 
 ## ScalarDB settings
 
-ScalarDB needs `scalar.db.jdbc.isolation_level=REPEATABLE_READ` to create or import a table the
-driver serves. SERIALIZABLE needs more ScalarDB settings, per engine:
-[Isolation levels](transactions.md#isolation-levels).
+- Set `scalar.db.consensus_commit.isolation_level` to the level the driver's connections use, in
+  every ScalarDB application that writes the same tables. The driver starts at READ COMMITTED,
+  ScalarDB at SNAPSHOT.
+- ScalarDB needs `scalar.db.jdbc.isolation_level=REPEATABLE_READ` to create or import a table the
+  driver serves, and `SERIALIZABLE` where the driver runs at SERIALIZABLE on PostgreSQL.
+
+[Isolation levels](transactions.md#isolation-levels) has the table.

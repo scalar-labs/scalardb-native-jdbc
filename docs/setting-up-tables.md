@@ -1,6 +1,10 @@
 # Setting up tables
 
-The driver serves ScalarDB tables in both of ScalarDB's layouts:
+This guide explains how to set up ScalarDB tables for the driver: the layouts it serves, what the
+one-time setup creates, the `scalardb-native-tools` commands that run, check and undo it, and how to
+add a table while applications run.
+
+The driver serves ScalarDB tables in both of ScalarDB's [layouts](concepts.md#layout):
 
 - **inline**, ScalarDB's default, with ScalarDB's metadata columns in the row;
 - **decoupled**, created or imported with `transaction-metadata-decoupling` set to `true`.
@@ -14,16 +18,17 @@ ScalarDB itself needs `scalar.db.jdbc.isolation_level=REPEATABLE_READ` to create
 Before the driver serves a table, an operator with DDL privileges runs the setup once. For each
 ScalarDB table it creates:
 
-- the **in-flight index**, through which the driver finds the rows ScalarDB transactions are
+- the **[in-flight index](concepts.md#in-flight-index)**, through which the driver finds the rows ScalarDB transactions are
   writing;
-- the **read view**, which shows each row's committed image. The driver falls back to it, and
+- the **[read view](concepts.md#read-view)**, which shows each row's committed image. The driver falls back to it, and
   serves `SELECT *` on an inline table through it; other readers of the table may use it too.
 
 On an imported table it also writes the row metadata ScalarDB has not. The setup is re-runnable, and
 is run again after a table is added.
 
 `scalardb-native-tools` runs it. It comes in `scalardb-native-tools-<version>.zip`, with the vendor
-drivers whose licences allow bundling:
+drivers whose licences allow bundling; before the release, build it yourself
+([Development builds](development-builds.md)):
 
 ```sh
 export SCALARDB_NATIVE_PASSWORD=...   # it never prompts
@@ -42,7 +47,7 @@ Sets up every ScalarDB table, or those named with `--table ns.t`.
 
 - `--grant user` grants SELECT on the read views to the application's users.
 - `--dry-run` prints the statements instead of running them.
-- After setting up a table for the first time, it waits out the applications' catalog TTL,
+- After setting up a table for the first time, it waits out the applications' [catalog](concepts.md#catalog) TTL,
   `--catalog-ttl` seconds (60), and then says ScalarDB transactions may write it. `--no-wait` prints
   from when instead ([Adding a table](#adding-a-table-to-scalardb-while-applications-run)).
 

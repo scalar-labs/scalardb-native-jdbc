@@ -12,6 +12,9 @@ directory on your `PATH`. It needs Java 11 or later. The zip bundles the JDBC dr
 MariaDB (also used for MySQL), SQL Server and Oracle. To use another one, MySQL Connector/J for
 example, put its jar in the zip's `lib` directory.
 
+Before the release there is no zip to download: build `snsql` yourself
+([Development builds](development-builds.md)).
+
 ## Connecting
 
 Give the driver's URL, or the host, port and database with `--engine`:

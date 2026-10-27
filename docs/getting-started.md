@@ -63,6 +63,10 @@ URLs, the DDL and the vendor driver change ([Other databases](#other-databases))
 
 ## What you need
 
+> **Before the release,** the driver, `snsql` and the tools are not published yet. Build them first
+> ([Development builds](development-builds.md)), then come back here. That page also gives the
+> Schema Loader version to use until ScalarDB 3.20 is released.
+
 - Java 17 or later on your `PATH` or in `JAVA_HOME`, for the example's Gradle build. The driver
   itself needs Java 11 or later.
 - Docker, for the database in this guide. Any PostgreSQL you can create tables in will do.
@@ -78,10 +82,10 @@ URLs, the DDL and the vendor driver change ([Other databases](#other-databases))
   directories on your `PATH`. Both bundle the JDBC drivers of PostgreSQL, MariaDB (also used for
   MySQL), SQL Server and Oracle.
 
-You do not build the driver. The example program gets it from Maven Central as
-`com.scalar-labs:scalardb-native-jdbc`. Before the release, build the driver, `snsql` and the tools
-yourself instead, and take the Schema Loader version given there: [Development
-builds](development-builds.md).
+You do not build the driver after the release: the example program gets it from Maven Central as
+`com.scalar-labs:scalardb-native-jdbc`. Before the release, it takes your own build from your local
+Maven repository. It finds the version to use in the repository's `gradle.properties`, so keep
+`samples/getting-started` inside the repository.
 
 Run every command in this guide from `samples/getting-started`:
 
@@ -109,7 +113,8 @@ localhost:5432 - accepting connections
 
 ### Choose a layout
 
-ScalarDB keeps its transaction metadata in one of two layouts, and the driver serves both:
+ScalarDB keeps its [transaction metadata](concepts.md#transaction-metadata) in one of two
+[layouts](concepts.md#layout), and the driver serves both:
 
 | Layout | Where the metadata is | How you get the table |
 | --- | --- | --- |
@@ -135,9 +140,18 @@ scalar.db.password=postgres
 scalar.db.jdbc.isolation_level=REPEATABLE_READ
 ```
 
-ScalarDB needs `scalar.db.jdbc.isolation_level=REPEATABLE_READ` to create or import a table the
-driver serves. For SERIALIZABLE the settings differ ([Isolation levels](transactions.md#isolation-levels)).
-The order service's own ScalarDB configuration names both databases, with the same setting for the
+Two ScalarDB settings concern isolation. Both belong in the ScalarDB configuration of every
+application that writes these tables, the order service's included:
+
+- `scalar.db.jdbc.isolation_level`, the level of ScalarDB's own connections to the database.
+  ScalarDB needs `REPEATABLE_READ` here to create or import a table the driver serves.
+- `scalar.db.consensus_commit.isolation_level`, the level of ScalarDB's transactions. It must be the
+  level the driver's connections use, since a weaker level on either side breaks what the other
+  side's level protects. This guide leaves it at ScalarDB's default, SNAPSHOT, and runs `snsql` and
+  the program at SNAPSHOT too, which JDBC calls `REPEATABLE_READ` (steps 4 and 5).
+
+For SERIALIZABLE the settings differ ([Isolation levels](transactions.md#isolation-levels)). The
+order service's own ScalarDB configuration names both databases, with the same settings for the
 warehouse database ([multi-storage
 transactions](https://scalardb.scalar-labs.com/docs/latest/multi-storage-transactions/)).
 
@@ -250,9 +264,10 @@ for DDL and for ordinary tables.
 
 ## 3. Set `stock` up for the driver
 
-Before the driver serves a ScalarDB table, run the setup once, as a user that can run DDL. It adds
-what the driver needs to read the table fast and safely and, on an imported table, writes the row
-metadata the import did not. It is safe to run again, and you run it again whenever a table is added
+Before the driver serves a ScalarDB table, run [the setup](concepts.md#the-setup) once, as a user
+that can run DDL. It creates the table's [in-flight index](concepts.md#in-flight-index) and [read
+view](concepts.md#read-view), which the driver needs to read the table safely, and on an imported
+table writes the row metadata the import did not. It is safe to run again, and you run it again whenever a table is added
 to ScalarDB. The tools read the password from `SCALARDB_NATIVE_PASSWORD`, and `snsql`, in step 4,
 from `SNSQL_PASSWORD`, since the setup is often run as a different user from the application's.
 
@@ -272,9 +287,10 @@ In the decoupled layout (C), the line ends `analyzed stock_tx_metadata`, the tab
 keeps the metadata.
 
 Without `--no-wait`, the setup waits until that time, 60 seconds, before it returns. The wait is for
-ScalarDB transactions, not for the driver. An application that was already running before the setup
-loaded ScalarDB's list of tables earlier, and may treat `stock` as an ordinary table for up to 60
-seconds. So once applications using the driver run, start ScalarDB transactions on a new table, here
+ScalarDB transactions, not for the driver. The driver keeps a list of ScalarDB tables, its
+[catalog](concepts.md#catalog), and reads it again every 60 seconds. An application that was
+already running before the setup has the list from before, and may treat `stock` as an ordinary
+table for up to 60 seconds. So once applications using the driver run, start ScalarDB transactions on a new table, here
 the order service's, only after that time ([Adding a table to ScalarDB while applications
 run](setting-up-tables.md#adding-a-table-to-scalardb-while-applications-run)).
 
@@ -316,9 +332,13 @@ postgres=> \dt warehouse.*
 In the decoupled layout, `warehouse.stock_tx_metadata` is listed too, marked `internal`: ScalarDB's
 own table, which you don't use.
 
-Add two items, then correct both counts in one transaction, as after a stocktake:
+Run the session at SNAPSHOT, the level of the order service's ScalarDB transactions (step 2). A
+driver connection starts at READ COMMITTED, so set it first. Then add two items and correct both
+counts in one transaction, as after a stocktake:
 
 ```
+postgres=> SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+SET
 postgres=> INSERT INTO warehouse.stock (item_id, name, quantity) VALUES (1, 'bolt', 100), (2, 'nut', 50);
 INSERT 2
 postgres=> BEGIN;
@@ -340,7 +360,8 @@ postgres=> \q
 ```
 
 `SELECT *` returns `item_id`, `name` and `quantity` only, in every layout. `BEGIN`, `COMMIT` and
-`ROLLBACK` work as in psql, and `\?` lists the other commands.
+`ROLLBACK` work as in psql, and `\?` lists the other commands. The session level holds until
+`snsql` exits; each new `snsql` session starts at READ COMMITTED again.
 
 To run one statement and exit:
 
@@ -388,9 +409,9 @@ With Maven, the same dependencies are:
 `slf4j-simple` prints the driver's log, warnings included; any SLF4J 1.7 binding will do.
 
 `src/main/java/example/ReceiveShipment.java` receives a delivery of 30 bolts and 20 nuts in one
-transaction: both are added to `stock`, or neither is. It is plain JDBC. The only change from a
-program written for PostgreSQL alone is the URL, `jdbc:scalardb-native:postgresql:...` in place of
-`jdbc:postgresql:...`. This first version leaves `receipt` out; step 6 adds it.
+transaction: both are added to `stock`, or neither is. It is plain JDBC. The changes from a program
+written for PostgreSQL alone are the URL, `jdbc:scalardb-native:postgresql:...` in place of
+`jdbc:postgresql:...`, and the isolation level, set to SNAPSHOT as in step 4. This first version leaves `receipt` out; step 6 adds it.
 
 ```java
 public final class ReceiveShipment {
@@ -399,6 +420,8 @@ public final class ReceiveShipment {
 
   public static void main(String[] args) throws SQLException {
     try (Connection c = DriverManager.getConnection(URL, "postgres", "postgres")) {
+      // SNAPSHOT, the level of the order service's ScalarDB transactions
+      c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       // 30 bolts and 20 nuts
       receive(c, new int[] {1, 2}, new int[] {30, 20});
       ... // prints the stock
