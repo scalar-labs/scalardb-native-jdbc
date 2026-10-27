@@ -42,7 +42,7 @@ import org.junit.jupiter.params.provider.MethodSource;
  * in {@code ReadIntegrationTest}, by layout.
  */
 @SuppressFBWarnings(
-    value = "SQL_INJECTION_JDBC",
+    value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
     justification = "fixture DDL and queries written in the test sources")
 class InlineIntegrationTest {
 

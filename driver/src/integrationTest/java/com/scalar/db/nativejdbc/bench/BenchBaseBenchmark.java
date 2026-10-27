@@ -283,6 +283,11 @@ class BenchBaseBenchmark {
   }
 
   /** One run: fresh tables, loaded through the vendor URL, set up for (c), then executed. */
+  @SuppressFBWarnings(
+      value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
+      justification =
+          "the benchmark's own schema name, and the statement its operator gives as"
+              + " nativejdbc.benchbase.beforeExecute")
   private static Result run(Engines e, String workload, String run, Path dir) throws Exception {
     // BenchBase names its files by the time; a directory left from a run before holds others
     if (Files.exists(dir)) {
