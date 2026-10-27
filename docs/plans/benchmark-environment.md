@@ -258,7 +258,7 @@ threads and the execute phase's JVM options (`bench-env/plan.py` documents the f
 know plans, and ships the local file to the client, whichever tree `SOURCE` sends. A delay whose
 check fails skips its cells, and the client is left without a delay at the end. The
 report has a section per workload, and the plan and its expansion go with it (`plan.json`,
-`plan.txt`). A new experiment is a new plan file, not a script change. Locally, a 1M-row YCSB load
+`plan.txt`). A new experiment is a new plan file, not a script change. `STACK=<name>` gives a run a stack of its own (a terraform workspace, plan file `bench-<name>.tfplan`, placement group and run name `<time>-<name>`), so two runs, one an engine, can go at once; its `fetch` takes the same `STACK`. Locally, a 1M-row YCSB load
 took 12 s and the driver's import and backfill of it 6 s (PostgreSQL 16, 8 loader threads).
 
 With `profiling = true`, tier A's database hosts get perf, and `perf-tier-a.sh OUT RUN...`,

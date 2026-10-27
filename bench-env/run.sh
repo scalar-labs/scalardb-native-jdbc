@@ -18,7 +18,7 @@
 #
 # Before either: aws login --profile hiroyuki_yamada (the user signs in). run.sh then works only as
 # the role scalardb-bench (setup-account.sh), assumed anew on every refresh.
-# Environment: BENCH_DB_PASSWORD, SSH_KEY (the private key of bench.tfvars' public one), BENCH_BUCKET,
+# Environment: STACK (a stack beside others, see tf below), BENCH_DB_PASSWORD, SSH_KEY (the private key of bench.tfvars' public one), BENCH_BUCKET,
 # MAX_RUN_MINUTES (default 480, below a login session of 12 hours, with room for the destroy);
 # PLAN, a benchmark plan (plan.py, plans/) shipped to the client whichever tree goes, checked before
 # the apply; matrix.sh's REPS, INFLIGHT, CHANGED, WRITERS, READS, BENCHBASE, BB_WORKLOADS, BB_TIME, BB_RUNS,
@@ -43,26 +43,33 @@ refresh() {
     awk '{print "export AWS_ACCESS_KEY_ID=" $1 "\nexport AWS_SECRET_ACCESS_KEY=" $2 "\nexport AWS_SESSION_TOKEN=" $3}' > "$creds.new") &&
     [ -s "$creds.new" ] && mv "$creds.new" "$creds"
 }
-tf() { (. "$creds" && terraform -chdir="$here/terraform" "$@"); }
+# STACK=<name>: a stack of its own, beside others: its own terraform workspace (state), plan file
+# and run name, so that two runs (one an engine) can go at once; the same STACK for its fetch
+ws=${STACK:-default}
+planfile=bench${STACK:+-$STACK}.tfplan
+tf() { (. "$creds" && TF_WORKSPACE=$ws terraform -chdir="$here/terraform" "$@"); }
 recover() {
   cat >&2 <<EOF
 DESTROY FAILED: resources may still be running and costing money. Sign in again and destroy:
   aws login --profile $login
   eval "\$(aws configure export-credentials --profile $login --format env)"
-  TF_VAR_db_password=x terraform -chdir=$here/terraform destroy -var-file=${TFVARS:-bench.tfvars}
+  TF_VAR_db_password=x TF_WORKSPACE=$ws terraform -chdir=$here/terraform destroy -var-file=${TFVARS:-bench.tfvars}
 EOF
 }
 
 refresh || { echo "no credentials: aws login --profile $login first" >&2; exit 1; }
 case "${1:-}" in
   plan)
-    tf init -input=false >/dev/null
+    (. "$creds" && terraform -chdir="$here/terraform" init -input=false >/dev/null)
+    # a stack's workspace, made once; every call names it, so the selected one does not matter
+    [ "$ws" = default ] || terraform -chdir="$here/terraform" workspace list | grep -qw "$ws" ||
+      terraform -chdir="$here/terraform" workspace new "$ws" >/dev/null
     # the plan file holds the variables, the password included: no placeholder (*.tfplan is ignored)
-    TF_VAR_db_password=${BENCH_DB_PASSWORD:?} tf plan -input=false -var-file=${TFVARS:-bench.tfvars} -out=bench.tfplan
+    TF_VAR_db_password=${BENCH_DB_PASSWORD:?} tf plan -input=false -var-file=${TFVARS:-bench.tfvars} -out="$planfile"
     exit ;;
   apply)
     # the plan written by `plan` alone, as for a security group's new address while `run` waits
-    tf apply -input=false bench.tfplan
+    tf apply -input=false "$planfile"
     exit ;;
   fetch)
     out="${RESULTS_DIR:-$here/results}/${2:?usage: run.sh fetch RUN}"
@@ -108,13 +115,13 @@ for commit in ${PLAN:+${SOURCE:-} ${BASELINE:-}}; do
     { echo "PLAN: $commit predates benchmark plans" >&2; exit 2; }
 done
 echo "=== apply $(date +%T)"
-tf apply -input=false bench.tfplan
+tf apply -input=false "$planfile"
 client=$(tf output -raw client)
 ssh_() { ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 "ubuntu@$client" "$@"; }
 until ssh_ 'test -x /usr/lib/jvm/temurin-25-jdk-amd64/bin/java && test -x /snap/bin/aws' 2>/dev/null; do sleep 15; done
 
 urls=$(tf output -json urls)
-out="${RESULTS_DIR:-$here/results}/$(date +%Y%m%d-%H%M)"
+out="${RESULTS_DIR:-$here/results}/$(date +%Y%m%d-%H%M)${STACK:+-$STACK}"
 mkdir -p "$out"
 if [ -n "${NET_DELAYS:-}" ] && python3 -c 'import json, sys; sys.exit(len({k[0] for k in json.loads(sys.argv[1])}) < 2)' "$urls"; then
   echo "NET_DELAYS with one tier only: each tier's matrix.sh sets the client's delay" >&2; exit 2

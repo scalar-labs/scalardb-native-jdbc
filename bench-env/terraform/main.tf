@@ -205,7 +205,7 @@ locals {
 
 resource "aws_placement_group" "bench" {
   count    = var.placement_strategy == "" ? 0 : 1
-  name     = "scalardb-native-jdbc-bench"
+  name     = "scalardb-native-jdbc-bench-${terraform.workspace}" # one a stack (run.sh's STACK)
   strategy = var.placement_strategy
 }
 

@@ -1,0 +1,59 @@
+{
+  "description": "Overnight on Oracle: TPC-C scale 32 and YCSB A, C, E, F at 1M rows; READ COMMITTED and SNAPSHOT, both layouts; the fast network, then 250 \u00b5s more a round trip; a client flight recording of every run",
+  "workloads": {
+    "tpcc": {
+      "benchmark": "tpcc",
+      "scale": 32
+    },
+    "ycsb-a": {
+      "benchmark": "ycsb",
+      "weights": "50,0,0,50,0,0",
+      "scale": 1000
+    },
+    "ycsb-c": {
+      "benchmark": "ycsb",
+      "weights": "100,0,0,0,0,0",
+      "scale": 1000
+    },
+    "ycsb-e": {
+      "benchmark": "ycsb",
+      "weights": "0,5,95,0,0,0",
+      "scale": 1000
+    },
+    "ycsb-f": {
+      "benchmark": "ycsb",
+      "weights": "50,0,0,0,0,50",
+      "scale": 1000
+    }
+  },
+  "matrix": {
+    "workloads": [
+      "tpcc",
+      "ycsb-a",
+      "ycsb-c",
+      "ycsb-e",
+      "ycsb-f"
+    ],
+    "levels": [
+      "READ_COMMITTED",
+      "SNAPSHOT"
+    ],
+    "layouts": [
+      "decoupled",
+      "inline"
+    ],
+    "delays_us": [
+      0,
+      250
+    ]
+  },
+  "runs": "a,c",
+  "reps": 2,
+  "time_s": 60,
+  "terminals": 4,
+  "loader_threads": 8,
+  "jvm_args": [
+    "-Doracle.jdbc.implicitStatementCacheSize=128",
+    "-XX:StartFlightRecording:settings=profile,jdk.CPUTimeSample#enabled=true,jdk.CPUTimeSample#throttle=1ms,filename={dir}/execute.jfr"
+  ]
+}
