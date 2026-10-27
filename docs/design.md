@@ -1744,6 +1744,63 @@ m.k = t.k AND COALESCE(m.tx_state, 3) = 3)`, would leave nothing written when th
 under the DML's wait, since Oracle restarts a statement whose row changed under it; that restart is
 what the locking read's Oracle form has to verify, and this form does not rely on it.
 
+**The keyed write at READ COMMITTED on Oracle, the statement first and the block on a miss (todo
+334, 2026-10-27).** The fourth AWS run priced the block above at READ COMMITTED: 127 µs at the
+server against the vendor's 38 on an inline table (step 1's read 15, the UPDATE 52, the call and its
+two cursor executions the rest), 140 on a decoupled one, and 95 µs of client CPU against the
+vendor's 34 for its binds and OUT binds, where SNAPSHOT's one statement costs 28 at the server and
+58 at the client (todo 334's log). The block's two decisions matter only when the write does not go
+through: a DML whose WHERE carries step 1's conditions and that writes its row has said everything
+the row would have said. So at this level, on both layouts, without a locking clause, the driver
+runs first, as one statement:
+
+- on an inline table, the user's UPDATE or DELETE as written, the stamp in its SET list as the
+  SNAPSHOT statement below has it, its WHERE extended by `AND COALESCE(t.tx_state, 3) = 3` and, when
+  the transaction recorded a version of the key, by the anchor, `AND DECODE(t.tx_id, ?, 1, 0) = 1 AND
+  COALESCE(t.tx_version, 0) = COALESCE(?, 0)`, its two values bound;
+- on a decoupled table, the block above without step 1: the DML under the same conditions read from
+  the metadata row, `AND EXISTS (SELECT 1 FROM T_meta m WHERE m.k = t.k AND COALESCE(m.tx_state, 3) =
+  3 <AND the anchor>)`, then under `l_written = 1` the CAS of step 3 with the same conditions, the
+  anchor's values bound where `l_id` and `l_version` stood, the state alone without one; back
+  through OUT binds `written, stamped`.
+
+The anchor is the version the transaction's reads recorded for the key as the statement binds it
+(`Anchors.key` of the bind values). The reads record the key as the row spells it, and a key the
+statement spells otherwise, a CHAR key unpadded, finds none, so: with no version of any key of the
+table recorded (`Anchors.recorded` false) the statement runs with the state condition alone; with
+one found, with the anchor; with versions of the table recorded and the key not found, the block
+above runs instead, which matches the key as the row returns it. The outcomes: a count of 1
+(inline), or `written` 1 and `stamped` 1 (decoupled), is the row written while committed and at
+the anchor, count 1 and `anchors.wrote(tx_id)`; a count of 0, or `written` 0, runs the block above,
+which decides as its table says, no row a count of 0, a row in flight the wait and the block again,
+a version moved the abort, and a second write of a key this transaction wrote, whose row carries
+its own stamp and not the anchor, which the block passes (`Anchors.unchanged`); `written` 1 and
+`stamped` 0 is the block's abort. A miss costs one round trip more than today; a hit costs the
+vendor's executions, one. Why it is exact: Oracle evaluates a DML's WHERE on the row's current
+version under the row lock and restarts the statement when the row changed while it waited for
+that lock, which the inline block's CAS in its UPDATE's WHERE already rests on; a state of 1 or 2
+fails the condition, so nothing is written while the row is in flight and the wait of section 6
+holds no lock, the failed statement having locked nothing; and the version in the WHERE is the
+recorded anchor itself, the first read's, which the block compared afterwards. SNAPSHOT keeps its
+forms. Batches keep the forms of 4.4 until the merged form, whose entries take this statement's
+conditions per slot. With it, every nested statement of a block carries a hint comment naming the
+block's shape (`/*+ scalardb_native_<shape> */`): PL/SQL keeps one open cursor per nested text, and
+a text two blocks share, or one block repeats per entry, parses on every call, the MERGE stamp's
+44% of executions and the block of entries' every nested statement (todo 334's log, 2026-10-27,
+measured at `session_cached_cursors` 50 and 500 alike). Expected: the inline READ COMMITTED update
+from +30% to about SNAPSHOT's +7%, the decoupled one from +38% to about +25%, the RMW with them.
+
+What must keep holding: the keyed write's tests above, their expectation of the statement's
+executions now one on a hit at READ COMMITTED. To add, on both layouts: a key written without a
+read, one execution; a key read then written, its anchor in the statement, one execution; a
+missing key, count 0 in two executions; a row in flight, the wait and then the write; a version
+moved by another connection between the read and the write, `40001`; a key written twice in one
+transaction, the second through the block; the CHAR key of `reviewOf8d1` read then written, the
+anchor found or the block taken; and the nested texts told apart, parse calls 0 across the two
+update shapes in `V$SQL`. Measured through the driver on the container first, the READ COMMITTED
+update beside the vendor's and today's block, client CPU and server executions
+(`ClientCostIntegrationTest`), then on AWS in the YCSB single-key plan.
+
 **The vendor's statement with the stamp on Oracle**, at SNAPSHOT, in the inline layout, when the
 transaction recorded no anchor of the table and the statement has no locking clause: the user's
 UPDATE or DELETE as written, the stamp in its SET list ahead of the user's items, on a table the
