@@ -1825,3 +1825,44 @@ baseline):
 **The design's own text.** At the merge, design 4.2's anchors paragraph gains one sentence: the
 versions a read records are kept per table as read and indexed by key at the first write to the
 table (todo 334); nothing else changes.
+
+### 2026-10-28: e8f3436 reviewed, the lazy anchor map built as designed and on main (the design's note)
+
+c7's e8f3436 on `lazy-anchor-map` (based on c9c3120), read from `git show`: mergeable as it is, and
+on main by a fast-forward with this note, the user having said to land it once found so.
+
+- `Writes.KeyReader`: per key column one of six kinds (`getObject`, `OffsetDateTime`, `OffsetTime`,
+  `LocalDateTime`, `LocalTime`, `getString` for SQL Server's `time`), chosen by `of(rs, from,
+  width)` from the metadata with the same tests in the same order as the old per-row code (todos
+  148 and 254), `onSqlServer` included; `readKey(rs, from, KeyReader)` reads with no metadata call
+  and returns null on a NULL first column as before; `readKey(rs, from, width)` stays for the write
+  paths' read-backs, its callers untouched.
+- `AnchoredHandler`: `readers`, one `KeyReader` per anchored table, made at the first row the hook
+  reaches; `tx_version` by `getLong` then `wasNull`, the `Version` given a `Long` or null through
+  its `Object` constructor, `is()` unchanged; the key's getter `getObject`, as decided.
+- `Anchors`: per table a `Read` of parallel key and version lists and `byKey`; `read` appends the
+  driver's own key array under the epoch check, no `key()`, no hash; `index()` folds the lists into
+  `byKey` by `putIfAbsent` in order and clears them, so the first read of a key wins at the first
+  build and at every fold; `version` and `unchanged` build, `recorded` answers lists-or-map
+  non-empty with no build; the own-stamp check before the lookup and `transactionEnded` (`read`
+  cleared, the stamps, the epoch moved) as before.
+- c7's one addition, accepted: `Read.add` indexes once more than `UNINDEXED` (4096) entries wait,
+  so a transaction scanning the same rows again and again with no write holds an entry per key, not
+  per read, the bound the old map gave; a 500-row scan never reaches it, a scan past 4096 rows pays
+  one fold per 4096 rows, about what it paid per row before.
+- Tests: `AnchorsTest`, eight unit cases (the six of the design, plus 3×`UNINDEXED` reads of one
+  key keeping the first, and a NULL-metadata row matching one without); `ReadIntegrationTest.
+  scannedRows_areAnchored_atTheFirstWrite` on every engine and both layouts: 300 rows, a scan of
+  250 at READ COMMITTED, then a row the scan did not reach written through, a scanned row nobody
+  moved written through, a scanned row another connection moved since `40001`; after a rollback
+  two scans with a write between, a row of the second scan moved since `40001` (the fold). A fold
+  broken to drop the reads after the first build fails it (c7's check).
+- The full suite green on PostgreSQL, MySQL, MySQL lower case, MariaDB, SQL Server and Oracle
+  before the rebase; after the rebase onto c9c3120 the Read, Write, DecoupledReadCommitted,
+  Snapshot and Inline suites on the engines retested, OracleOltp 20 (2 skipped), OracleForms 15;
+  `check` down to the two SpotBugs findings of other work (c7's report).
+- The design's sentence (4.2's anchors paragraph) added with this note. All three items of the
+  user's order are on main: 0cf9ac0, 5be09a9 + bf83b4e, e8f3436. Next: the AWS run, the YCSB
+  single-key plan on Oracle and the same on PostgreSQL, 6e putting it to the user; its JFR the
+  measure (`Method.invoke` gone from the scan's stacks, `Anchors.*` and `readKey` toward 3% of the
+  driver's samples), its E cells the inline insert's p50 toward +21%.

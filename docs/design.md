@@ -822,15 +822,16 @@ union as a derived table.
   a subquery returns no row and takes no anchor, nor does any table of a grouped or DISTINCT read,
   nor a read through `rc_T`. The versions cost two lookups per anchored table and row, up to 11x
   on a join of 150k rows, so a read takes them only where they are recorded: in a transaction, on a
-  connection that is not read-only. On PostgreSQL each copy carries them as columns of its own
-  instead of lookups (todo 329): a committed copy of an inline table its row's `tx_id` and
-  `tx_version`, the copy kept to the rows whose own state is committed rather than probing the
-  in-flight index per row; a decoupled table's by a left join to its metadata row; an in-flight
-  copy its before image's. A key read of a decoupled table in a transaction then costs the vendor's
-  probe and the metadata row's, 8 against 5 µs warm, its in-flight arm a probe of an empty partial
-  index; a form reading both images from one join of `T` and `T_meta`, a `CASE` per non-key
-  column, measured the same and would hide those columns behind expressions (section 3), so there
-  is no cheaper anchored key read at this level (todo 337). A `*` or `t.*` over such a copy is
+  connection that is not read-only. The versions a read records are kept per table as read and
+  indexed by key at the first write to the table (todo 334). On PostgreSQL each copy carries them as
+  columns of its own instead of lookups (todo 329): a committed copy of an inline table its row's
+  `tx_id` and `tx_version`, the copy kept to the rows whose own state is committed rather than
+  probing the in-flight index per row; a decoupled table's by a left join to its metadata row; an
+  in-flight copy its before image's. A key read of a decoupled table in a transaction then costs the
+  vendor's probe and the metadata row's, 8 against 5 µs warm, its in-flight arm a probe of an empty
+  partial index; a form reading both images from one join of `T` and `T_meta`, a `CASE` per non-key
+  column, measured the same and would hide those columns behind expressions (section 3), so there is
+  no cheaper anchored key read at this level (todo 337). A `*` or `t.*` over such a copy is
   spelled out as the table's columns, which the copy would otherwise show; where it cannot be, a
   NATURAL or USING join, the lookups stay. A statement prepared in the other mode is prepared
   again when it
