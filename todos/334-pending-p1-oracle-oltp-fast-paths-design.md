@@ -784,3 +784,49 @@ has no PL/SQL form cheaper than the block; a form without a block, one SQL state
 exist on Oracle for two tables (a trigger stamping the metadata row from a session context would
 fire for ScalarDB's own writers too and is not proposed). The key read is within the goal already
 (+11 µs of wall on 197).
+
+### 2026-10-27: the driver's own cost at the client against raw ojdbc (the design)
+
+At the user's request, on the container through a measurement test in a scratch worktree
+(`scratchpad/wt2/.../ClientCostIntegrationTest.java`, run with gradle against `ofa-oracle`): a
+decoupled table of YCSB's shape created by ScalarDB with 1,000 rows and the driver's setup; the
+same read, update and insert through the driver (catalog TTL 600 s) and through raw ojdbc on the
+data table, one operation per transaction with its commit, SNAPSHOT (the vendor at SERIALIZABLE)
+and READ COMMITTED, ojdbc's implicit cache off and on at 128, 5,000 calls a cell after 300 warm,
+the whole matrix twice. Per call: wall at the client, the thread's CPU and allocation, GC time,
+the session's CPU, DB time, user calls, executes, parses and round trips (`V$SESSTAT` by SID).
+Round trips and user calls are equal on both sides in every cell; GC is 0–2 µs a call; the wall
+clock varies by about ±100 µs between rounds on the laptop (its Docker round trip is about 200
+µs), so the CPU counters are the figures to read.
+
+The driver less the vendor, cached, round 0 / round 1:
+
+| per call | client CPU | server CPU | DB time | allocation |
+|---|---|---|---|---|
+| read, SNAPSHOT | +20 / +5 µs | −2 / +22 | −20 / +8 | +1.2 KB |
+| read, READ COMMITTED | +7 / +10 | +8 / 0 | +10 / +20 | +1.7 KB |
+| update, SNAPSHOT | +38 / +45 | +24 / +40 | +96 / +162 | +4.6 KB |
+| update, READ COMMITTED | +63 / +35 | +22 / −30 | +124 / −38 | +9.2 KB |
+| insert, SNAPSHOT | +47 / +22 | +10 / +16 | −12 / +144 | +5.7 KB |
+| insert, READ COMMITTED | +35 / +36 | +30 / −6 | +54 / +64 | +5.6 KB |
+
+Uncached, the driver's client CPU exceeds the vendor's by 50–70 µs on a read and 105–166 on a
+write, with 56–86 KB allocated a call against the vendor's 15–18: ojdbc's preparation of the
+rewritten text each call, which the cache removes, and with it the driver's own per-call
+preparation, since cached the driver allocates 3–11 KB a call, so its routing is served from a
+cache by text.
+
+Reading. (1) With the cache the driver's own work at the client is about 5–20 µs on a key read
+and 35–50 µs on a single-row write, of which the block call's own handling in ojdbc (OUT binds,
+a callable statement) is about 10 (the forms measurement: the block's wall less its DB time
+against the plain statement's). The rest, 25–40 µs a write, is the driver's: bind translation to
+the block's 16 binds, the row read back, the anchors and the clear-table memory. (2) The server's
+share is the forms measurement's: +70 µs of DB time a write, of which a third the block, a third
+the metadata row. (3) GC and allocation are not a factor once cached.
+
+Against the user's 10–20% on YCSB's update (the vendor 380 µs at the fast round trip, the driver
++237 before the cache): the cache should take the client's uncached excess, about 100; what stays
+is about 70 at the server and 35–50 at the client, 105–120 µs or 28–32%, if the AWS client
+behaves as the laptop's. To reach 20% both must shrink: the client's by a profile of the driver's
+write path (JFR on this test), the server's only by a form without a block, which Oracle does
+not offer for two tables. The key read is within the goal at both levels.
