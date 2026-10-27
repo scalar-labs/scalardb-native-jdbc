@@ -916,3 +916,110 @@ distinct numbers would carry what the counts carry, but there is nothing to buy 
 update has no single-statement form on Oracle, no statement writing two tables, so the decoupled
 update keeps the block and its +136 µs on AWS stands at about +70 at the server and 35–50 at
 the client; the inline layout, at +8%, is the layout that meets the goal for updates.
+
+### 2026-10-27: the batch item designed; the commit-time stamp evaluated and measured; 1070d98 reviewed (the design)
+
+**The batch item, for the Opus session c7.** Design 4.4, the new paragraph "The entries merged
+on a clear table at SNAPSHOT": at SNAPSHOT on a decoupled table of which the transaction
+recorded no anchor, a batch of one keyed write's or one INSERT's parameter sets runs as one bulk
+block per write shape, the same text for every batch size up to 16 (slots bound NULL beyond
+`l_n`), the gate once per batch, the user's DML as `FORALL` with `RETURNING <key> BULK COLLECT`,
+the counts per entry from `SQL%BULK_ROWCOUNT`, the stamps as one `FORALL` over the keys returned;
+the INSERT as `FORALL`, its metadata insert as `FORALL` under the hint, the takeover as `FORALL i
+IN INDICES OF` the zeros; the outcomes and the duplicate's replay as the paragraph has them. The
+builder's order, as for todo 335: the confirmation tests first on the container, each saying
+which part it decides: (1) `SQL%BULK_ROWCOUNT(i)` after a `FORALL` UPDATE with `RETURNING ...
+BULK COLLECT INTO` gives each entry's count and the collection the keys in iteration order; (2)
+a duplicate in a `FORALL` INSERT raises ORA-00001 out of the block and leaves nothing, the call's
+atomicity; (3) `IGNORE_ROW_ON_DUPKEY_INDEX` holds per iteration under `FORALL` and the skipped
+row counts 0; (4) `FORALL i IN INDICES OF` a sparse index-by table runs the listed entries only;
+(5) a slot beyond `l_n` bound NULL is never touched; (6) the parse count of the nested statements
+stays 0 across calls of a 16-entry batch, the cursor cache no longer overflowing. Then the two
+forms (`Writes`, beside `oracleKeyedEntries` and `oracleInsertEntries`, chosen where the single
+form is the clear-table block), unit tests of the texts as `WritesTest.onOracle_*`, the
+outcome rows in `OracleOltpIntegrationTest` (a key without a row among the entries, the gate
+closed, a tombstone among the inserts, a duplicate), a local NewOrder-shaped before-and-after,
+and the review here before the AWS run.
+
+Measured on the container (`scratchpad/ora/forms3.jsh`, two rounds in opposite orders, fresh
+insert tables per round; the cache on at 128; per transaction):
+
+| NewOrder-shaped, 10 stock updates and 10 order-line inserts | wall µs | server CPU | DB time | parses | round trips |
+|---|---|---|---|---|---|
+| (V) the vendor, two array executions | 2,284 / 1,548 | 285 / 205 | 955 / 610 | 0 | 3 |
+| (E) today, two blocks of entries | 3,644 / 4,305 | 1,190 / 1,210 | 2,405 / 2,510 | 40 | 3 |
+| (B) two bulk blocks, 16 slots | 2,980 / 3,388 | 455 / 515 | 1,125 / 1,380 | 0 | 3 |
+| (B2) the same with index-by table binds | 2,152 / 3,178 | 500 / 645 | 1,205 / 1,630 | 0 | 3 |
+| (C) the vendor's array executions of the gated writes, the stamps at commit | 2,006 / 4,799 | 430 / 695 | 1,045 / 2,080 | 0 | 3 |
+
+The wall clock drifts between rounds on the laptop; the CPU and DB time read: the bulk block
+takes the server CPU from 1,190–1,210 to 455–515 against the vendor's 205–285, the DB time from
+2,405–2,510 to 1,125–1,380 against 610–955, and the nested parses from 40 a transaction to none.
+Index-by table binds in place of the slots are no better at the server and `setPlsqlIndexTable`
+is deprecated in ojdbc11 23.26: not taken.
+
+**The commit-time stamp, evaluated at the user's request.** The form: every write of the
+transaction a plain gated DML of the data row (the keyed write and the INSERT; the write beyond
+the key and a generated key keep their blocks), the keys written recorded by the driver, and at
+commit one block that stamps them all, a `FORALL` per table under the deemed-committed condition
+and the recorded anchor's version where the key was read, then `COMMIT`, in the round trip the
+commit costs. Safety, point by point. The data row is locked from the plain write to the commit,
+as the block's write locks it today, and every writer of the driver takes the data row before
+the metadata row, the lock read now too, so no cycle appears that is not there today. A conflict
+that the block raises at the write surfaces at commit instead: at SNAPSHOT the stamp's UPDATE
+fails with ORA-08177 for a metadata row changed since the snapshot, at READ COMMITTED the anchor's
+version condition finds the row moved, both `40001` and the transaction rolled back, later than
+today but the same outcome, and a commit that may fail with `40001` is what the application
+handles already. The in-flight check stays per write as the gate in each statement's WHERE, one
+probe each; a closed gate takes the write to the coarse check and the slow path as today. A
+savepoint the application sets and rolls back to undoes data writes whose keys the driver has
+recorded, so the driver must drop the keys recorded after it, through the JDBC savepoint API and
+the SQL `SAVEPOINT`/`ROLLBACK TO` it parses; a key missed there would be stamped at commit with
+no data change, a version raised for nothing, which concurrent readers would take as a move:
+the one new hazard, and a bookkeeping one. ScalarDB Core readers see the data uncommitted until
+the commit and the metadata row at its old version, consistent with each other as they are today
+before the commit, and both at the new version after; a Core writer's prepare of a key the
+transaction wrote blocks on the data row as it does today. READ COMMITTED against SNAPSHOT:
+the stamp's condition differs (the anchor's version against the deemed-committed condition
+alone), the rest is the same; a key written twice in the transaction is stamped once, one version
+per transaction as Core gives it, where today's blocks stamp at each write. In autocommit nothing
+changes: the write and its stamp-and-commit are two round trips as the block and its commit are.
+
+Measured (the same harness; per transaction, two or three rounds):
+
+| | wall µs | server CPU | DB time | round trips |
+|---|---|---|---|---|
+| Payment-shaped, 3 keyed updates and 1 insert: (V) the vendor | 1,920 / 1,964 | 123 / 148 | 530 / 578 | 5 |
+| (E) today, four blocks | 2,516 / 2,093 | 265 / 263 | 805 / 673 | 5 |
+| (C) plain gated writes, one stamp block at commit | 2,209 / 2,019 | 233 / 218 | 753 / 665 | 5 |
+| single update: (V) the vendor | 1,108 / 922 | 120 / 103 | 433 / 397 | 2 |
+| (E) today, the block and the commit | 1,444 / 1,301 | 148 / 147 | 582 / 512 | 2 |
+| (C) the plain write, the stamp-and-commit block | 1,316 / 1,091 | 160 / 158 | 568 / 507 | 2 |
+
+(A first Payment round ran while another session's suite ran on the container and is left out.)
+So the commit-time stamp saves about a block's own cost per write beyond the first: Payment 30–45
+µs of server CPU and 40–50 of DB time a transaction; NewOrder the same server cost as the bulk
+blocks, its data writes as the vendor's own array executions; a single write nothing, the block
+moved rather than removed. Against the batch item it is not an addition but another shape of the
+same protocol: with it the bulk blocks are not needed, the batched data writes going as the
+vendor's batches and every stamp to the commit. Verdict: not now. It reshapes the write protocol
+(stamps deferred, conflicts at commit, savepoint bookkeeping) for about 0.04 ms a Payment of a
+gap of 1.7 ms a commit, where the batch item takes most of NewOrder's with one new block form
+and no change of protocol. Revisit after the batch item is in and the flushed per-statement
+figures show what the single-write blocks still cost.
+
+**1070d98 reviewed: the inline whole-row lock at SNAPSHOT.** Read from the commit (the AWS
+session built it at the user's request). `SqlAst.stars()` places each `*` and `q.*` item;
+`Router.spellableStars` takes them for a one-table statement reading an inline table whole,
+re-parses the spelled text and keeps the steps when the columns read are still unknown (a
+NATURAL join, a whole-row reference); `spelled` replaces the items, last to first, in the
+`onDataTable` text and in the gated lock's, both edited only after the select list, so the
+offsets hold; the plain form's condition is `stars != null`, an empty list for a column list
+known, so a decoupled table and a known list route as before, and PostgreSQL's inline whole-row
+lock takes the one statement too. The routed texts name the user's columns and no metadata
+column, under the lock's marker, the gate kept. Matches the decision. The tests decide it on
+Oracle (`form5LocksAnInlineRowReadWholeInOneStatement`: `*`, `ti.*`, `a.*`; one round trip gated
+and one plain; the row the vendor's; a second connection's NOWAIT ORA-00054) and on PostgreSQL
+(`InlineIntegrationTest`'s three star forms at SNAPSHOT). One ask before the proof run: the
+Oracle `InlineIntegrationTest`, which failed on the container's leftover users and not on the
+change, on a fresh container.
