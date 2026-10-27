@@ -830,3 +830,50 @@ is about 70 at the server and 35–50 at the client, 105–120 µs or 28–32%, 
 behaves as the laptop's. To reach 20% both must shrink: the client's by a profile of the driver's
 write path (JFR on this test), the server's only by a form without a block, which Oracle does
 not offer for two tables. The key read is within the goal at both levels.
+
+### 2026-10-27: the second Oracle run read (the design): the inline whole-row lock at SNAPSHOT, the nested parses
+
+Run 20261027-0858 ("Second run" in `docs/benchmarks/benchbase-oracle-aws.md`, 6f8936d, by the AWS
+session): 1219aac, the statement cache at 128 on both sides, the shared pool flushed before each
+reading, fast network. TPC-C (c)/(a): READ COMMITTED inline 0.47 → 0.66, SNAPSHOT decoupled 0.47
+→ 0.64, SNAPSHOT inline 0.69 → 0.76; YCSB SNAPSHOT decoupled 0.86 → 1.04, READ COMMITTED inline
+0.62 → 0.90, SNAPSHOT inline 0.59 → 0.61. YCSB p50 at SNAPSHOT decoupled, the vendor → the
+driver: read 199 → 237, update 341 → 477 (+136; the client-cost entry above predicted +105–120),
+insert 354 → 449, read-modify-write 464 → 601. Packets a commit equal the vendor's. The decoupled
+READ COMMITTED cell failed before its first run (the harness's logon ran before the tablespace
+existed; fixed in the harness, 0298611), so the `FOR UPDATE OF` fix is still unproven.
+
+**The SNAPSHOT inline cell's row-lock waits are the whole-row lock taking the steps.** YCSB's
+read-modify-write locks with `SELECT * ... FOR UPDATE`. `Router.lockingRead` builds the plain and
+the gated one-statement forms at SNAPSHOT only when the columns read are known (`!n.inline ||
+ast.columnsReadFrom(readRef) != null`), so an inline table read whole takes the committed copy's
+form, which for a locking read is the steps: the predicate's in-flight check by either image
+(155,266 calls in the cell), the lock over the committed copy with its version lookups (79,405
+calls, 855 µs elapsed each against 40 of CPU), the keys and versions under the lock (75,859), the
+keyed block with the anchors (75,862), the check again; five round trips and a savepoint, the row
+held across them. Hot keys then queue: 1,440 row-lock waits for 98 s a run, the holder's own 36 s
+of buffer busy waits, read-modify-write p50 1,381 µs against 468. At READ COMMITTED on the same
+layout the one-statement form expands `*` to the columns (the cell's lock text shows them) and
+read-modify-write is 575 against 490; at SNAPSHOT on the decoupled layout the row-lock waits total
+0.3 s. Decided, design 4.3 "The locking read on Oracle", the SNAPSHOT paragraph: an inline table
+read whole takes the statement as written with `*` expanded to the user's columns from the
+catalog, the metadata columns left out, on either engine (the condition is engine-independent, so
+PostgreSQL's inline SNAPSHOT whole-row lock takes the steps today as well). The builder: in the
+plain and gated texts (`Writes.onDataTable` and `Writes.gatedLock` under `plainSql`/`gatedSql`),
+replace the `*` of the locked inline table by its user columns; tests: the routed text of `SELECT
+* FROM <inline> WHERE k = ? FOR UPDATE` at SNAPSHOT on Oracle and PostgreSQL names the columns and
+no metadata column, one statement, the row returned as the vendor's; the YCSB SNAPSHOT inline
+cell is the proof.
+
+**The batch blocks' nested statements parse on every call because the session's cursor cache
+overflows.** `session_cached_cursors` is 50 by default (the container: 50, `open_cursors` 300).
+Each entry's body in a block of entries is its own static SQL, so a 16-entry stock block holds 48
+nested cursors and the fifteen row-count texts hundreds, far past 50: the PL/SQL cursor cache
+evicts them between calls and each nested execution soft-parses (about 3–5 µs of CPU each from
+the forms measurement, where a block's two nested parses cost 7; about 50 a NewOrder, so of the
+order of 0.1 ms a commit). The single-row blocks' nested MERGEs parse on part of their calls for
+the same reason. The batch item above, one text with bulk statements, has three nested cursors
+and ends it; raising `session_cached_cursors` is the DBA's stopgap, for both sides alike in a
+benchmark, and not a change the driver makes. The remaining server CPU at SNAPSHOT decoupled,
+3.00 against 1.28 ms a commit, is mostly the nested statements' execution and the metadata rows'
+writes, which the batch item also addresses.

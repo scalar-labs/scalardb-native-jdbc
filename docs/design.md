@@ -2059,24 +2059,27 @@ statement at both levels, and say what each rests on.
 
 *At SNAPSHOT, in a transaction.* The argument of the PostgreSQL form holds unchanged: every
 statement of the transaction reads its one snapshot, so the check after the lock and the versions
-read under it would see what one check before sees, a row in flight aborts at once (section 6),
-its locks released with the transaction, no read records a version (4.2 on Oracle), and a row a
-ScalarDB prepare wrote after the snapshot fails the lock itself, `SELECT ... FOR UPDATE` raising
-ORA-08177 for a row changed since the snapshot as an UPDATE does (section 5). So no savepoint, no
-versions, and one check, which is the table's: on a table the transaction found clear the
-statement as written, the user's own text on the data table, as PostgreSQL's `applyPlain` runs it,
-and on a table not yet found clear the same statement with the write's gate in its WHERE clause,
-`AND NOT EXISTS (SELECT /*+ INDEX(m <T_inflight>) */ 1 FROM T_meta m WHERE m.tx_state IN (1, 2))`,
-one probe of the in-flight index, which Oracle locks nothing through, the lock reaching the
-statement's own table alone. A row returned proves the gate open and marks the table clear. No
-row returned is either the predicate matching nothing or the gate closed, which the coarse check
-of 4.2 then tells in a second round trip, as it does for a write: none found marks the table clear
-and the empty result is the vendor's; a row found runs the predicate's in-flight check by either
-image (`inFlightStep`), which aborts for a row in flight the statement matches, `NOWAIT` or not,
-and otherwise the lock over the committed copy as today, without its versions, its savepoint or
-its second check, one snapshot making them vacuous. An inline table read whole (`*`) takes the
-committed copy's form in place of the statement as written, which would show the metadata
-columns, as on PostgreSQL. `SKIP LOCKED` keeps the steps and their versions, as on PostgreSQL. An
+read under it would see what one check before sees, a row in flight aborts at once (section 6), its
+locks released with the transaction, no read records a version (4.2 on Oracle), and a row a ScalarDB
+prepare wrote after the snapshot fails the lock itself, `SELECT ... FOR UPDATE` raising ORA-08177
+for a row changed since the snapshot as an UPDATE does (section 5). So no savepoint, no versions,
+and one check, which is the table's: on a table the transaction found clear the statement as
+written, the user's own text on the data table, as PostgreSQL's `applyPlain` runs it, and on a table
+not yet found clear the same statement with the write's gate in its WHERE clause, `AND NOT EXISTS
+(SELECT /*+ INDEX(m <T_inflight>) */ 1 FROM T_meta m WHERE m.tx_state IN (1, 2))`, one probe of the
+in-flight index, which Oracle locks nothing through, the lock reaching the statement's own table
+alone. A row returned proves the gate open and marks the table clear. No row returned is either the
+predicate matching nothing or the gate closed, which the coarse check of 4.2 then tells in a second
+round trip, as it does for a write: none found marks the table clear and the empty result is the
+vendor's; a row found runs the predicate's in-flight check by either image (`inFlightStep`), which
+aborts for a row in flight the statement matches, `NOWAIT` or not, and otherwise the lock over the
+committed copy as today, without its versions, its savepoint or its second check, one snapshot
+making them vacuous. An inline table read whole (`*`), on either engine, takes the statement as
+written with `*` expanded to the user's columns from the catalog, the metadata columns left out, as
+the READ COMMITTED form expands it; the first design sent it to the committed copy's form, the steps
+with their savepoint and version lookups, which held the row across five round trips and queued
+YCSB's read-modify-write behind it (the second Oracle BenchBase run, 1,381 against 468 µs; todo
+334's log, 2026-10-27). `SKIP LOCKED` keeps the steps and their versions, as on PostgreSQL. An
 autocommit locking read runs in the transaction of its own of todo 283, at SERIALIZABLE, where
 nothing is remembered and the gated statement decides alone.
 
