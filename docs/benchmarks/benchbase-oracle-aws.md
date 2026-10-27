@@ -333,3 +333,67 @@ COMMITTED. At 1M rows the scan plans held: index range scans on both sides in ev
   (decoupled `INSERT ALL`) and +31 µs (inline), and no other statement runs once an insert. GC
   pauses are the vendor's too: about 0.4 s a run, longest 7 ms, on both sides. The rest is open
   (todo 334, eba2477).
+
+## Sixth run: overnight, TPC-C scale 32 and YCSB at 1M rows, fast and slow (2026-10-28)
+
+Run `20261028-0143-ora` from `bench-env/plans/overnight-oracle.json` on main `db0bf06`. It is the
+first with all three of the night's items:
+1. the inline INSERT without generated keys unless asked, `0cf9ac0`;
+2. the result-set fast path, `5be09a9`;
+3. the lazy anchor map, `e8f3436`.
+
+TPC-C scale 32 and YCSB A, C, E, F at 1M rows. READ COMMITTED and SNAPSHOT, both layouts, the fast
+network and then 250 µs more a round trip. 60 s a run, REPS 2, 4 terminals, statement cache 128, a
+client flight recording of every run. It ran on its own stack (`STACK=ora`) beside PostgreSQL's.
+All 8 cells passed, 40–49 min each.
+
+Throughput, (c)/(a):
+
+| cell | TPC-C | A | C | E | F |
+|---|---|---|---|---|---|
+| RC decoupled, fast | **0.13** | 0.80 | 0.84 | 0.66 | 0.77 |
+| RC inline, fast | 0.54 | 0.90 | 0.86 | 0.77 | 0.88 |
+| SNAPSHOT decoupled, fast | 0.63 | 0.76 | 0.85 | 0.88 | 0.79 |
+| SNAPSHOT inline, fast | 0.62 | 0.97 | 0.87 | 0.84 | 0.92 |
+| RC decoupled, +250 µs | **0.16** | 0.92 | 0.94 | 0.82 | 0.91 |
+| RC inline, +250 µs | 0.81 | 0.96 | 0.97 | 0.84 | 0.98 |
+| SNAPSHOT decoupled, +250 µs | 0.86 | 0.90 | 0.97 | 0.93 | 0.92 |
+| SNAPSHOT inline, +250 µs | 0.88 | 0.95 | 0.96 | 0.92 | 0.96 |
+
+YCSB p50 overhead, fast network (fifth run in brackets):
+
+| | read (C) | update | RMW | scan | insert |
+|---|---|---|---|---|---|
+| RC decoupled | +21% (+18) | +31% (+28) | +33% (+31) | +52% (+47) | +19% (+27) |
+| RC inline | +16% (+16) | +9% (+9) | +12% (+12) | +29% (+31) | **+15% (+32)** |
+| SNAPSHOT decoupled | +18% (+16) | +40% (+39) | +31% (+30) | +13% (+13) | +21% (+21) |
+| SNAPSHOT inline | +15% (+17) | +6% (+11) | +7% (+8) | +19% (+15) | +25% (+27) |
+
+The vendor's YCSB E insert ran at 483–540 µs here, against 425–443 in the fifth run.
+
+**TPC-C at READ COMMITTED decoupled collapses at scale 32 (0.13 fast, 0.16 slow).** The cause is
+Oracle's dynamic sampling at every hard parse of the metadata tables' keyed statements. The setup
+gathers and locks statistics on `tx_state` alone, so the key columns have none (todo 334, ac5eeec
+and 144c623). Measured from the live dictionary during the slow cell's driver run:
+- 361 `DS_SVC` sampling cursors, 3,280 executions and 100.5 s within the run. Each counts the key
+  predicate through `STOCK_INFLIGHT`: about 320 ms and 12,853 gets.
+- 392 SQL plan directives on `STOCK_tx_metadata`.
+- The setup's statistics operations completed in order before the schema gather. Every metadata
+  table has statistics on `tx_state` alone.
+
+A one-line fix (gather all columns, `SIZE REPEAT`, before the fixed histogram) is proposed. The
+design session expects the cell at about 0.19 with it; the rest is the RC block of entries (33–55 ms
+a call), the merged form's item. SNAPSHOT's TPC-C (bulk blocks) is 0.63 fast, as at scale 4, and
+0.86–0.88 slow.
+
+**The night's three items, from the flight recordings** (RC decoupled, YCSB E, driver run):
+- **Item 1:** the inline INSERT ends at `VALUES (...)`, with no `RETURNING ROWID`. The RC inline
+  insert's p50 overhead is +15%, from +32%.
+- **Item 2:** the samples under `Method.invoke` fell from 82.3% to 2.5%.
+- **Item 3:** `Anchors.*` plus `Writes.readKey` fell from 6.7% to 4.4%. `getMetaData` and
+  `getColumnTypeName` are about 0.
+- **But the scan did not get cheaper.** JVM CPU a transaction is 1.71 ms for the driver against
+  1.10 ms for the vendor, +610 µs, where the fifth run had +395 µs. The RC decoupled scan p50 is +52%
+  (+47%). Where the client's time moved is open (todo 334).
+
+At +250 µs every YCSB cell is 0.82–0.98.
