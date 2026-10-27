@@ -102,6 +102,35 @@ run, the bulk block's double fixed after it, 4834c21, not yet measured). At RC, 
 2.1–2.3 times the vendor's on both layouts, about 0.4 ms a transaction by share: the write beyond
 the key, as on PostgreSQL inline.
 
+Server time per call on PostgreSQL, YCSB fast, from each run's `server.txt` (`pg_stat_statements`):
+
+| statement, µs a call | vendor | decoupled SNAPSHOT | decoupled RC (tenth) | inline SNAPSHOT | inline RC |
+|---|---|---|---|---|---|
+| scan, 500 rows | 952 | 1003 | **1812** | 929 | 935 |
+| keyed update | 14.6 | 34.5–39.2 | 34.5 | | |
+
+So the decoupled RC scan's gap is mostly the server's (about 860 µs a scan, the metadata row
+joined for each of 500 rows, where SNAPSHOT checks the table once), and the rest of every RC scan's
+added latency is the client's (inline RC: the server equal to the vendor's, the latency +314 µs: the
+three hidden columns and an anchor recorded per row, through the proxies). The decoupled update's
+server share is about 20–25 µs of its +62; the rest is the client and the commit.
+
+Candidates, none designed:
+
+1. **Scan, server, decoupled RC:** where the transaction can take no anchor (autocommit, a
+   read-only transaction), SNAPSHOT's once-gated form (the table checked once for rows in flight,
+   the data rows read plain) instead of the per-row join; elsewhere a cheaper join plan for a key
+   range. On Oracle, the plan first (todo 334's third-run note: stale metadata statistics give
+   nested loops, 592 reads against 82).
+2. **Scan, client, RC both layouts:** the per-row hidden columns and anchors, and the reflection
+   under the proxies (12% of the driver's client samples on Oracle; a fast path in the handler for
+   `getXxx(int)`, or delegating classes). Todo 334 left it as not serving key operations; it serves
+   the scan.
+3. **Update, client:** a profile of the write path on both engines (the driver's 35–50 µs on
+   Oracle); the server's share is near the layout's floor (a second row, and on Oracle the block).
+4. **Update, Oracle:** the stamp's re-parsing seen only at AWS (todo 334), from the next run's
+   per-child `V$SQL`.
+
 The mixed runs keep contention and cache effects in these figures. A run with one operation at a
 time (YCSB with one weight at 100) would isolate each; the per-type series above already point at
 the items: the decoupled RC scan, the inline RC write beyond the key, the update on Oracle.
