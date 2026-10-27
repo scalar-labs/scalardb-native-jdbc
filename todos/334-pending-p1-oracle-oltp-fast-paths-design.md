@@ -1866,3 +1866,66 @@ on main by a fast-forward with this note, the user having said to land it once f
   single-key plan on Oracle and the same on PostgreSQL, 6e putting it to the user; its JFR the
   measure (`Method.invoke` gone from the scan's stacks, `Anchors.*` and `readKey` toward 3% of the
   driver's samples), its E cells the inline insert's p50 toward +21%.
+
+### 2026-10-28: the overnight run's first cell, TPC-C at READ COMMITTED on a decoupled table, 0.13 of the vendor: Oracle samples the in-flight index at every hard parse because the setup leaves the metadata table's key without column statistics (the design's note, for the morning)
+
+**The cell** (6e's report from 20261028-0143-ora, `tpcc-c-1`, read while it ran): the driver 198/s against
+the vendor's 1,579, 0.13; PostgreSQL's same cell 0.71. V$SQL holds `SELECT /* DS_SVC */ ...
+OPT_ESTIMATE(@"innerQuery", TABLE, "STOCK_tx_metadata", ROWS=1) ... INDEX("STOCK_tx_metadata"
+"STOCK_INFLIGHT") COUNT(*) ...` under several sql_ids, 371 executions, about 317 ms and 12,853 gets
+each, 120 s of the run's 395 s of V$SQL elapsed; the vendor's run has none. `STOCK_tx_metadata`:
+3,200,000 rows, 31,517 blocks, statistics gathered after the load and locked (the harness: BenchBase
+load, the import and the setup, `GATHER_SCHEMA_STATS`, a flush, the execute). `optimizer_dynamic_sampling`
+2, `optimizer_adaptive_statistics` FALSE. Waits: `cursor: pin S wait on X` 235 waits, 46.6 s. The RC
+NewOrder blocks of entries 33–55 ms a call, 22–32 ms CPU, 990–1,380 gets.
+
+**The cause, reproduced on the container** (`ora/ds.sql`, `ora/ds2.sql` and their outputs in the
+scratchpad): `DS_T` and `DS_T_META` with the setup's index `(tx_state, K)` and `ORACLE_FIXED_STATISTICS`
+as the setup runs it, 1,000,000 rows, the driver's statement shapes hard-parsed under tags.
+- The setup gathers the metadata table's statistics with `method_opt => 'FOR COLUMNS tx_state SIZE 1'`:
+  the table's and the indexes' statistics, and tx_state's column statistics, which the fixed
+  histogram then replaces; the key columns, `tx_id`, `tx_version` and the rest get none, whether the
+  gather runs on the empty table or after the load. A hard parse of any statement with a predicate on
+  the metadata table's key (the CAS, `UPDATE T_meta ... WHERE K = :1 AND COALESCE(tx_state, 3) = 3`;
+  step 1's `LEFT JOIN T_meta m ON m.K = d.K WHERE d.K = :1`) then runs dynamic statistics for the
+  key predicate, and for the in-flight index as an access path it counts the predicate through the
+  whole index: `INDEX("M" "DS_T_INFLIGHT") COUNT(*) AS C1, ..., SUM(CASE WHEN ("M"."K" = :B1) THEN 1
+  ELSE 0 END)` over `DS_T_META`, 80–98 ms and 2,377 gets at 1M rows (the CAS's hard parse 94 ms and
+  2,470 gets with the statistics gathered after the load, 398 ms and 17,409 with them gathered empty);
+  at 3.2M rows with a two-column key, the 317 ms and 12,853 gets seen. The primary key's own sample is
+  a range scan, 3 gets; the level-2 block samples 3 gets each.
+- `ALTER SESSION SET optimizer_dynamic_sampling = 0`: no sampling, the parses 1–30 ms.
+- `FOR ALL COLUMNS SIZE 1` or `SIZE REPEAT`, then the fixed histogram, locked: no sampling, 1–6 ms;
+  the gate `NOT EXISTS (SELECT /*+ INDEX(m ...) */ 1 FROM T_meta m WHERE m.tx_state IN (1, 2))` an
+  INDEX RANGE SCAN of the in-flight index, 1 row, cost 3, under the 10,000-row histogram.
+- The gather of tx_state alone over a table whose columns have statistics keeps theirs: an inline
+  table, the application's own with its own statistics, is not exposed unless it never had any.
+- Why a storm in TPC-C and not in YCSB: TPC-C at READ COMMITTED on decoupled tables has hundreds of
+  distinct texts (per table, per form, per batch size of the block of entries, each block's nested
+  statements cursors of their own), all hard-parsed inside the measured run after the harness's
+  flush, 1–2 samplings each; YCSB has a handful, parsed in the warm-up (the 21 SQL plan directives
+  on `USERTABLE_tx_metadata` show the same sampling ran there). The 235 `cursor: pin S wait on X`
+  waits are the other workers waiting on those parses. Deployed, the cost recurs at every re-parse
+  (an aged or invalidated cursor, a statistics gather, DDL): about 0.3 s a text at this size, more
+  as the metadata table grows.
+
+**The fix, proposed** (the user's call; one line in `Setup.ORACLE_FIXED_STATISTICS`): `method_opt =>
+'FOR ALL COLUMNS SIZE REPEAT'` in place of `'FOR COLUMNS ' || c || ' SIZE 1'`, the
+`SET_COLUMN_STATS` of the fixed histogram on tx_state after it as now. `SIZE REPEAT` keeps an
+application's histograms on an inline table and gathers the basic statistics every column lacks; on
+the driver's own metadata table it is `SIZE 1`. Its test, in `OracleOltpIntegrationTest`: after the
+setup of a decoupled table every column of `T_tx_metadata` has a row in `DBA_TAB_COL_STATISTICS`,
+and a hard parse of a keyed write (a fresh comment in the text) adds no `SELECT /* DS_SVC */` text
+naming the metadata table to V$SQL; the same for the inline table's tx_state. The fix reaches a
+database only through a setup run (`force` past the lock on a table set up before it), so the
+overnight run's decoupled cells keep the sampling; the next run after it measures the difference,
+and cell 5 (the same cell at +250 µs) confirms the cause from the live dictionary: `DBA_TAB_COL_STATISTICS`
+of `STOCK_tx_metadata` with only `TX_STATE`, the sampling texts' `SUM(CASE WHEN (key = :B1) ...)`
+through `STOCK_INFLIGHT`.
+
+**What it does not explain**: the block of entries at 33–55 ms and 990–1,380 gets a call. The
+sampling is per hard parse, one or two a text, under 2 ms a call averaged over its 500 calls; the
+rest is the block's own run, over 100 gets an entry, 10x what its statements should cost by the
+primary keys, which the nested statements' plans in the cell's `server.txt` will show when its
+files are fetched. That is the merged form's item (design 4.4) and a plan question beside it, TPC-C's
+turn after the single-key work. With the sampling gone the cell would be about 0.19, not 0.7.
