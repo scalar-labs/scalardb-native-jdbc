@@ -41,6 +41,31 @@ tasks.withType<AbstractArchiveTask>().configureEach {
     isReproducibleFileOrder = true
 }
 
+// The commit a build comes from, for a report against a -SNAPSHOT, whose version every build of the
+// line shares: Build-Commit in each jar's manifest, ending in -dirty when the working tree has
+// uncommitted changes. Left out where there is no git, as in a source archive.
+val buildCommit: String =
+    try {
+        providers
+            .exec {
+                commandLine("git", "describe", "--always", "--dirty", "--exclude", "*")
+                isIgnoreExitValue = true
+            }
+            .standardOutput
+            .asText
+            .get()
+            .trim()
+    } catch (e: Exception) {
+        ""
+    }
+extra["buildCommit"] = buildCommit
+
+tasks.jar {
+    if (buildCommit.isNotEmpty()) {
+        manifest.attributes("Build-Commit" to buildCommit)
+    }
+}
+
 tasks.withType<Javadoc>().configureEach {
     (options as StandardJavadocDocletOptions).isNoTimestamp = true
     // javadoc stops printing after its default of 100 warnings; raise the cap so the log states the

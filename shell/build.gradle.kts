@@ -65,9 +65,14 @@ distributions.main {
     }
 }
 
+// --version prints it, with the commit for a development build (java-conventions)
 tasks.jar {
+    val commit = project.extra["buildCommit"] as String
     manifest {
-        attributes("Implementation-Version" to project.version)
+        attributes(
+            "Implementation-Version" to
+                if (commit.isEmpty()) project.version else "${project.version} (commit $commit)"
+        )
     }
 }
 
