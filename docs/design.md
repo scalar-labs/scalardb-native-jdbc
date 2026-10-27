@@ -270,8 +270,11 @@ goes through the primary key.
   but its tables not visible is SQLSTATE `42501` naming the SELECT grants (Oracle reports a table it
   does not grant as absent), the schema not existing is `08004` naming the property, unless
   `scalar.db.native_jdbc.allow_no_catalog` says the database has no ScalarDB. A database whose `virtual_tables`
-  is missing but `metadata` is present (a ScalarDB older than virtual tables) is logged and has inline
-  layouts only.
+  is missing but `metadata` is present has inline layouts only: ScalarDB creates `virtual_tables` with
+  the first decoupled table, so the missing table is logged at DEBUG. Unless `metadata` lists a
+  decoupled table's metadata table (every transaction column, not an inline table): then the user may
+  not read `virtual_tables`, which Oracle reports as absent, and the catalog would serve the decoupled
+  tables as plain; that is `42501` too (todo 339).
 
   The `metadata` table has entries for physical tables only; a virtual table has none, and ScalarDB's
   own `getTableMetadata` merges the two source entries at read time. So for a decoupled table the

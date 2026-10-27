@@ -499,6 +499,41 @@ class CatalogIntegrationTest {
 
   @ParameterizedTest
   @MethodSource("engines")
+  void aUserWhoCannotSeeVirtualTables_getsAnError_notPlainDecoupledTables(Engines e)
+      throws Exception {
+    Assumptions.assumeTrue(
+        e == Engines.ORACLE, "Oracle reports a table it does not grant as absent");
+    prepare(e);
+    String url = e.url();
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          "CREATE USER limited_vt IDENTIFIED BY limited_vt",
+          "GRANT CREATE SESSION TO limited_vt",
+          "GRANT SELECT ON "
+              + e.engine().quote(Catalog.DEFAULT_METADATA_SCHEMA)
+              + "."
+              + e.engine().quote("metadata")
+              + " TO limited_vt",
+          "GRANT SELECT, INSERT, UPDATE, DELETE ON app.orders TO limited_vt");
+    }
+    // the metadata is readable and lists the decoupled tables' metadata tables, virtual_tables is
+    // not: every decoupled table would read as plain (todo 339)
+    try (Catalog asLimited =
+        new Catalog(
+            Engine.ORACLE,
+            Catalog.DEFAULT_METADATA_SCHEMA,
+            () -> DriverManager.getConnection(url, "limited_vt", "limited_vt"))) {
+      assertThatThrownBy(() -> asLimited.lookup(List.of("LIMITED_VT"), "app", "orders"))
+          .isInstanceOf(SQLException.class)
+          .hasMessageContaining("hold ScalarDB's metadata for decoupled tables")
+          .extracting("SQLState")
+          .isEqualTo("42501");
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("engines")
   void aReloadNeverBlocksCacheHits(Engines e) throws Exception {
     Assumptions.assumeTrue(e == Engines.POSTGRESQL, "one engine is enough");
     prepare(e);

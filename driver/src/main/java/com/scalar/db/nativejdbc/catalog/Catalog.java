@@ -759,14 +759,20 @@ public final class Catalog implements AutoCloseable {
             metadataSchema,
             noVirtualTables.getMessage());
       } else {
-        LOG.warn(
-            "{}.virtual_tables cannot be read, although {} hold ScalarDB's metadata for decoupled"
-                + " tables: those tables are treated as plain tables until this user may read"
-                + " {}.virtual_tables ({})",
-            metadataSchema,
-            unpaired,
-            metadataSchema,
-            noVirtualTables.getMessage());
+        // the catalog cannot be complete: without virtual_tables every decoupled table would read
+        // as plain, its uncommitted rows seen and its writes made without the protocol (todo 339).
+        // Oracle reports a table this user may not read as missing, so this is its "not allowed
+        // to look", which absent() refuses alike
+        throw new SQLSyntaxErrorException(
+            "ScalarDB's catalog table "
+                + metadataSchema
+                + ".virtual_tables cannot be seen, although "
+                + String.join(", ", unpaired)
+                + " hold ScalarDB's metadata for decoupled tables: this user lacks SELECT on "
+                + metadataSchema
+                + ".virtual_tables; the database's own error is the cause",
+            "42501",
+            noVirtualTables);
       }
     }
     boolean caseInsensitive = present && engine.tableNamesCaseInsensitive(c);
