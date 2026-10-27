@@ -4201,7 +4201,8 @@ final class Writes {
                     || rows.size() != 1
                     || type(engine, tableColumns, t.keyColumns().get(0)).endsWith(" generated")
                 ? null
-                : oracleInsertAll(n, ast, t, shape.insertRow(), rows.get(0), all, end);
+                : oracleInsertAll(
+                    n, ast, t, shape.insertRow(), rows.get(0), all, end, tableColumns);
       }
     }
     return new InsertPlan(
@@ -4229,9 +4230,10 @@ final class Writes {
   /**
    * The decoupled INSERT of one row on Oracle as one statement (design 4.3 "The decoupled INSERT as
    * one statement", todo 334): {@code INSERT ALL} into the data table as written and into the
-   * metadata table, its key the row's own values again, then the stamp, {@code SELECT 1 FROM dual}.
-   * The binds are the statement's, the key's again, the stamp's three after them. Null when the row
-   * is not the statement's last text, or not every placeholder is in it.
+   * metadata table, its key the row's own values again cast to the key columns' types, then the
+   * stamp, {@code SELECT 1 FROM dual}. The binds are the statement's, the key's again, the stamp's
+   * three after them. Null when the row is not the statement's last text, or not every placeholder
+   * is in it.
    */
   private static @Nullable Step oracleInsertAll(
       Names n,
@@ -4240,7 +4242,8 @@ final class Writes {
       @Nullable Expression row,
       List<Expression> keyValues,
       List<Integer> all,
-      int end) {
+      int end,
+      @Nullable Map<String, String> tableColumns) {
     if (!(row instanceof ParenthesedExpressionList)
         || ((ParenthesedExpressionList<?>) row).isEmpty()) {
       return null;
@@ -4267,13 +4270,17 @@ final class Writes {
     }
     List<String> keys = new ArrayList<>();
     List<Integer> binds = new ArrayList<>(all);
-    for (Expression v : keyValues) {
-      int[] span = ast.span(v);
+    for (int i = 0; i < keyValues.size(); i++) {
+      int[] span = ast.span(keyValues.get(i));
       List<Integer> in = span == null ? null : ast.placeholdersIn(span[0], span[1]);
       if (span == null || in == null) {
         return null;
       }
-      keys.add(source.substring(span[0], span[1]));
+      // as the data row holds it, which the block's RETURNING gives the metadata row: a CHAR key
+      // padded, a NUMBER(p) key rounded
+      String full = type(n.engine, tableColumns, t.keyColumns().get(i)).replace(" generated", "");
+      String value = source.substring(span[0], span[1]);
+      keys.add(full.isEmpty() ? value : "CAST(" + value + " AS " + full + ")");
       binds.addAll(in);
     }
     String data = onDataTable(n.engine, ast, t, false, source.substring(0, end), -1);

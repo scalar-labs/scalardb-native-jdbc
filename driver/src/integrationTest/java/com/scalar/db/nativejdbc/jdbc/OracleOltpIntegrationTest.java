@@ -1398,6 +1398,59 @@ class OracleOltpIntegrationTest {
   }
 
   /**
+   * Form 4's INSERT ALL on keys whose column changes the value given: a CHAR(5) key padded, a
+   * NUMBER(10) key rounded, and a TIMESTAMP(6) key of milliseconds, all ScalarDB's metadata table
+   * keeps of it (TIMESTAMP(3): a key of microseconds finds no metadata row by either form). The
+   * metadata row carries the key as the data row holds it, as the block's RETURNING gives it: every
+   * data row has its metadata row by the key.
+   */
+  @Test
+  void form4InsertAllKeysAsTheDataRowHoldsThem() throws Exception {
+    try (Connection d = driver();
+        Connection v = ORA.open()) {
+      d.setAutoCommit(false);
+      for (Object[] c :
+          List.of(
+              new Object[] {KeyType.K_CH, "b"},
+              new Object[] {KeyType.K_N10, new java.math.BigDecimal("7.6")},
+              new Object[] {KeyType.K_TS, java.sql.Timestamp.valueOf("2024-03-04 05:06:07.123")})) {
+        KeyType k = (KeyType) c[0];
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO " + k.table() + " (k, x) VALUES (?, 1)")) {
+          ps.setObject(1, c[1]);
+          assertThat(ps.executeUpdate()).as(k.name()).isEqualTo(1);
+        }
+        d.commit();
+        String meta =
+            NS
+                + "."
+                + Engine.ORACLE.quote(
+                    Objects.requireNonNull(
+                        catalog
+                            .lookup(
+                                List.of(), N(NS), N(k.name().toLowerCase(java.util.Locale.ROOT)))
+                            .metadataTable()));
+        List<String> orphans =
+            rows(
+                v,
+                "SELECT COUNT(*) FROM "
+                    + k.table()
+                    + " t WHERE NOT EXISTS (SELECT 1 FROM "
+                    + meta
+                    + " m WHERE m.k = t.k)");
+        log(
+            "form 4: INSERT ALL of "
+                + k.type
+                + " key "
+                + c[1]
+                + ", data rows without metadata "
+                + orphans);
+        assertThat(orphans).as(k.name()).containsExactly("0");
+      }
+    }
+  }
+
+  /**
    * Form 4's INSERT row the test map had none for: on an imported table a metadata row in flight
    * for a key with no data row (ScalarDB's insert between its metadata upsert and its data insert,
    * section 1), written here by the vendor connection. The block's MERGE finds it in flight, {@code

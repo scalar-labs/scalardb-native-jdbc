@@ -952,14 +952,14 @@ class WritesTest {
     String one =
         "INSERT ALL INTO \"ns\".\"t_data\" (\"id\", x) VALUES (?, ?) INTO \"ns\".\"t_meta\" (\"id\","
             + " \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\", \"tx_committed_at\")"
-            + " VALUES (?, ?, 3, 1, ?, ?) SELECT 1 FROM dual";
+            + " VALUES (CAST(? AS number), ?, 3, 1, ?, ?) SELECT 1 FROM dual";
     assertThat(oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (?, ?)", false).sql())
         .contains(one);
     assertThat(oraclePlan(created(), "INSERT INTO t (x, \"id\") VALUES ('a', 7)", false).sql())
         .contains(
             "INSERT ALL INTO \"ns\".\"t_data\" (x, \"id\") VALUES ('a', 7) INTO \"ns\".\"t_meta\""
                 + " (\"id\", \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
-                + " \"tx_committed_at\") VALUES (7, ?, 3, 1, ?, ?) SELECT 1 FROM dual");
+                + " \"tx_committed_at\") VALUES (CAST(7 AS number), ?, 3, 1, ?, ?) SELECT 1 FROM dual");
     // a key given by an expression is evaluated once per INTO, so it never takes the form: the key
     // values are placeholders and literals only (insertKeyValues), and on Oracle the INSERT is
     // refused before

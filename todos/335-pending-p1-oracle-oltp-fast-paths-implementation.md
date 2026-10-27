@@ -867,3 +867,14 @@ statement, since an expression would be evaluated again in the second INTO. That
 (`isConstant`), and on Oracle an INSERT whose key is anything else is refused before the plan.
 `WritesTest.onOracle_aDecoupledInsertOfOneRowIsOneInsertAll` now asserts the refusal for
 `VALUES (ABS(?), 'a')`.
+
+A fix found while building the batch form: INSERT ALL wrote the metadata row's key as the
+statement gives it, where the block writes the data row's own value through RETURNING. On a CHAR
+key the two differ. The imported `K_CH` is CHAR(5) with a VARCHAR2(128) metadata key, so `'b'`
+went into the metadata row while the data row holds `'b    '`, and the two did not match: a data
+row without its metadata row. The metadata VALUES now cast each key value to its data column's
+type, as the duplicate checks already do (`CAST(? AS char(5))`).
+`form4InsertAllKeysAsTheDataRowHoldsThem` inserts a CHAR(5), a NUMBER(10) (7.6, rounded) and a
+TIMESTAMP(6) key and checks that every data row has its metadata row by the key. The TIMESTAMP
+key is of milliseconds: ScalarDB's metadata key is TIMESTAMP(3), so a key of microseconds finds
+no metadata row by either form, as before.
