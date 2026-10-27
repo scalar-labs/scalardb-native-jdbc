@@ -1079,6 +1079,6 @@ there instead, which is right whatever the type. Noted, ScalarDB's, not ours: th
 a TIMESTAMP(6) column is TIMESTAMP(3), so a key of microseconds finds no metadata row by either
 form.
 
-The ask on bedbdb5 is done (5758c6a on the branch): `oracleInsertAll` returns null, the block,
+The ask on bedbdb5 is done (0072b54 on the branch): `oracleInsertAll` returns null, the block,
 when any key column's type is unknown, asserted with a column map lacking the key. The INSERT
 ALL review is closed again; the branch waits on the user's decision to land it.
