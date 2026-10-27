@@ -794,3 +794,33 @@ select list is unchanged, and the inline form keeps its clause. Tests:
 
 On ofa-oracle: the Oracle integration suite (141 tests, 65 run, none failing), plus the unit
 tests (397) and SpotBugs. The proof is the YCSB decoupled READ COMMITTED cell on AWS.
+
+### 2026-10-27: the inline whole-row lock at SNAPSHOT as one statement (Opus, the AWS session)
+
+As decided in design 4.3 "The locking read on Oracle" and todo 334's log (e2ee905): at SNAPSHOT
+on an inline table, a locking read that reads the row whole (`*` or `q.*`) now takes the plain and
+gated one-statement forms. Its stars are spelled out as the user's columns (`Names.star`), with
+no metadata column. Before, it fell to the steps over the committed copy: five round trips and a
+savepoint with the row held. That queued YCSB's read-modify-write in the second Oracle run (1,381
+against 468 µs).
+- `SqlAst.stars()` places each star item and its qualifier as written.
+- `Router.spellableStars` takes them for a one-table statement once the spelled text reads known
+  columns. A NATURAL join or a whole-row reference keeps the steps.
+- `Router.spelled` replaces them in the plain text and in `Writes.gatedLock`'s. Both edit only
+  after the select list.
+- The condition is engine-independent, so PostgreSQL's inline whole-row lock at SNAPSHOT and
+  SERIALIZABLE takes its plain form too.
+Tests:
+- `OracleOltpIntegrationTest.form5LocksAnInlineRowReadWholeInOneStatement`: for `*`, `ti.*` and
+  `a.*`, the routed plain and gated texts name the columns and no metadata column. Through the
+  driver, the lock is one round trip on a table not yet found clear and one after. The row equals
+  the vendor's `SELECT id, x, v`, three columns, and a second connection's `NOWAIT` gets ORA-00054.
+- `InlineIntegrationTest`: `*`, `imp.*` and `i.*` FOR UPDATE at SNAPSHOT give the user's two
+  columns and the row (PostgreSQL passed. On Oracle the class's fixture fails on the shared
+  container's leftover INL users, ORA-01920, before it gets there).
+- `SqlAstTest.stars_placeEachStarItemAndItsQualifierAsWritten`.
+Results:
+- On ofa-oracle: `OracleOltpIntegrationTest` 12 of 12 passed.
+- On bb-pgss: `InlineIntegrationTest` 3 of 3 passed.
+- Unit tests 397, none failing; spotless clean.
+The proof is the YCSB SNAPSHOT inline cell on AWS, and PostgreSQL's should move too.

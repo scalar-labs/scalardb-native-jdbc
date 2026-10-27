@@ -1189,6 +1189,70 @@ class OracleOltpIntegrationTest {
     }
   }
 
+  /**
+   * Form 5 at SNAPSHOT on an inline table read whole: the statement as written, gated or not, its
+   * {@code *} or {@code q.*} spelled out as the user's columns, no metadata column among them
+   * (design 4.3 "The locking read on Oracle", todo 334); one round trip a lock, the vendor's row.
+   * Before, the whole-row lock took the steps over the committed copy, five round trips with the
+   * row held (the second Oracle BenchBase run).
+   */
+  @Test
+  void form5LocksAnInlineRowReadWholeInOneStatement() throws Exception {
+    try (Connection v = ORA.open()) {
+      Router router = new Router(Engine.ORACLE, catalog, new Session(Engine.ORACLE));
+      router.setIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      for (String[] form :
+          List.of(new String[] {"*", ""}, new String[] {"ti.*", ""}, new String[] {"a.*", " a"})) {
+        String lock =
+            "SELECT " + form[0] + " FROM " + NS + ".ti" + form[1] + " WHERE id = ? FOR UPDATE";
+        Writes.LockPlan plan =
+            (Writes.LockPlan) Objects.requireNonNull(router.route(v, lock).write);
+        for (Writes.Step step :
+            List.of(
+                Objects.requireNonNull(plan.oraclePlain, "the plain lock"),
+                Objects.requireNonNull(plan.oracleGated, "the gated lock"))) {
+          log("form 5 at SNAPSHOT, read whole (" + form[0] + "): " + step.sql);
+          // the select list, after the mark's comment and before the first FROM: the gate's own
+          // probe names the state column
+          String items =
+              step.sql.substring(step.sql.indexOf("SELECT "), step.sql.indexOf(" FROM "));
+          assertThat(items)
+              .doesNotContain(form[0])
+              .doesNotContain("tx_")
+              .contains(Q(N("x")))
+              .contains(Q(N("v")));
+        }
+      }
+    }
+    try (Connection d = driver();
+        Connection v = ORA.open()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      d.setAutoCommit(false);
+      Counter rt = new Counter(d);
+      String lock = "SELECT * FROM " + NS + ".ti WHERE id = 64 FOR UPDATE";
+      List<String> expected = rows(v, "SELECT id, x, v FROM " + NS + ".ti WHERE id = 64");
+      List<?>[] got = new List<?>[1];
+      long gated = rt.measure(() -> got[0] = rows(d, lock));
+      assertThat(got[0]).isEqualTo(expected);
+      long plain = rt.measure(() -> got[0] = rows(d, lock));
+      assertThat(got[0]).isEqualTo(expected);
+      try (Statement st = d.createStatement();
+          ResultSet rs = st.executeQuery(lock)) {
+        assertThat(rs.getMetaData().getColumnCount()).isEqualTo(3);
+      }
+      log("form 5 at SNAPSHOT, read whole: " + gated + " round trip(s), then " + plain);
+      assertThat(gated).isEqualTo(1);
+      assertThat(plain).isEqualTo(1);
+      assertThatThrownBy(
+              () -> rows(v, "SELECT x FROM " + NS + ".ti WHERE id = 64 FOR UPDATE NOWAIT"))
+          .as("the row is locked")
+          .isInstanceOf(SQLException.class)
+          .satisfies(e -> assertThat(((SQLException) e).getErrorCode()).isEqualTo(54));
+      d.rollback();
+      d.setAutoCommit(true);
+    }
+  }
+
   /** The {@code x."k"} after the lock's {@code FOR UPDATE OF}, as the text spells it. */
   private static String exposedKey(String sql) {
     int of = sql.lastIndexOf(" FOR UPDATE OF ");

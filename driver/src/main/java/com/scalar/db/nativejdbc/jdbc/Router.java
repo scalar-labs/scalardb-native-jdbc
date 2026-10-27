@@ -1086,6 +1086,47 @@ final class Router {
   }
 
   /**
+   * The {@code *} and {@code q.*} items of a one-table statement that reads an inline table whole,
+   * when spelling them out as the table's user columns leaves a statement whose columns read are
+   * known; else null, a NATURAL join or a whole-row reference among them.
+   */
+  private @Nullable List<SqlAst.Star> spellableStars(SqlAst ast, Writes.Names n) {
+    List<SqlAst.Star> stars = ast.stars();
+    if (stars == null || stars.isEmpty() || ast.tableRefs().size() != 1) {
+      return null;
+    }
+    SqlAst spelled =
+        SqlAst.parse(
+                Objects.requireNonNull(spelled(ast.source(), stars, n)),
+                engine,
+                session.doubleQuotesQuoteIdentifiersAsLastRead())
+            .orElse(null);
+    return spelled == null
+            || spelled.tableRefs().size() != 1
+            || spelled.columnsReadFrom(spelled.tableRefs().get(0)) == null
+        ? null
+        : stars;
+  }
+
+  /**
+   * {@code text} with each of {@code stars} spelled out as the table's user columns: the text is
+   * the statement's source with edits only after its select list, so the items stand where they
+   * stood.
+   */
+  private static @Nullable String spelled(
+      @Nullable String text, List<SqlAst.Star> stars, Writes.Names n) {
+    if (text == null) {
+      return null;
+    }
+    for (int i = stars.size() - 1; i >= 0; i--) {
+      SqlAst.Star s = stars.get(i);
+      String q = s.qualifier();
+      text = text.substring(0, s.start()) + n.star(q == null ? "" : q) + text.substring(s.end());
+    }
+    return text;
+  }
+
+  /**
    * What each copy of an anchored read appends to its select list: the key, and the version of the
    * row it returns, read by key for those rows only; a committed copy's {@code tx_id}, an in-flight
    * copy's before image's (design 4.2). Without {@code versioned} only the state, with {@code
@@ -1330,18 +1371,21 @@ final class Router {
     List<Integer> inWhere = span == null ? List.of() : ast.placeholdersIn(span[0], span[1]);
     // at SNAPSHOT and SERIALIZABLE on PostgreSQL, and at SNAPSHOT on Oracle, the statement as
     // written, on the data table: the rows it locks are the committed rows where the table has
-    // none in flight (todo 329, todo 334); not for an inline table whose rows it reads whole,
-    // which would show the metadata columns. Marked, so that its text differs from the
+    // none in flight (todo 329, todo 334); an inline table read whole with its * spelled out as
+    // the user's columns, which would show the metadata columns as written (design 4.3 "The
+    // locking read on Oracle", todo 334). Marked, so that its text differs from the
     // application's own prepared statement of the same text: pgjdbc's statement cache holds one
     // entry per text, and two statements borrowing it in turn would drop each other's
     // server-side plan at every call
     List<Integer> all = ast.placeholdersIn(0, ast.source().length());
+    List<SqlAst.Star> stars =
+        n.inline && ast.columnsReadFrom(readRef) == null ? spellableStars(ast, n) : List.of();
     String plainSql =
         (engine == Engine.POSTGRESQL || engine == Engine.ORACLE)
                 && snapshot()
                 && all != null
-                && (!n.inline || ast.columnsReadFrom(readRef) != null)
-            ? Writes.onDataTable(engine, ast, t, true, ast.source(), -1)
+                && stars != null
+            ? spelled(Writes.onDataTable(engine, ast, t, true, ast.source(), -1), stars, n)
             : null;
     if (plainSql != null) {
       plainSql = "/* scalardb_native_lock */ " + plainSql;
@@ -1350,8 +1394,8 @@ final class Router {
     // table the transaction has not found clear yet (design 4.3 "The locking read on Oracle",
     // todo 334); SKIP LOCKED keeps the steps and their versions
     String gatedSql =
-        engine == Engine.ORACLE && plainSql != null && !shape.skipLocked()
-            ? Writes.gatedLock(engine, ast, t, n, span)
+        engine == Engine.ORACLE && plainSql != null && stars != null && !shape.skipLocked()
+            ? spelled(Writes.gatedLock(engine, ast, t, n, span), stars, n)
             : null;
     if (gatedSql != null) {
       gatedSql = "/* scalardb_native_lock */ " + gatedSql;

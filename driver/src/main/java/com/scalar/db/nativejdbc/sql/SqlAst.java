@@ -1017,6 +1017,69 @@ public final class SqlAst {
   }
 
   /**
+   * A {@code *} or {@code q.*} of a select list: where it stands in {@link #source}, its first
+   * character and one past its last, and its qualifier as written, or null for a bare {@code *}.
+   */
+  public static final class Star {
+    private final int start;
+    private final int end;
+    private final @Nullable String qualifier;
+
+    Star(int start, int end, @Nullable String qualifier) {
+      this.start = start;
+      this.end = end;
+      this.qualifier = qualifier;
+    }
+
+    public int start() {
+      return start;
+    }
+
+    public int end() {
+      return end;
+    }
+
+    public @Nullable String qualifier() {
+      return qualifier;
+    }
+  }
+
+  /**
+   * Returns the {@code *} and {@code q.*} items of a plain SELECT's select list, in the order
+   * written; empty without any.
+   *
+   * @return the items, or {@code null} for another statement or when one cannot be placed in the
+   *     text
+   */
+  public @Nullable List<Star> stars() {
+    if (!(statement instanceof PlainSelect)) {
+      return null;
+    }
+    List<Star> out = new ArrayList<>();
+    for (SelectItem<?> item : ((PlainSelect) statement).getSelectItems()) {
+      if (!(item.getExpression() instanceof AllColumns)) {
+        continue;
+      }
+      Node n = item.getASTNode();
+      Token first = n == null ? null : n.jjtGetFirstToken();
+      Token last = n == null ? null : n.jjtGetLastToken();
+      int[] at = first == null || last == null ? null : span(first, last);
+      if (at == null || source.charAt(at[1] - 1) != '*') {
+        return null;
+      }
+      int dot = source.lastIndexOf('.', at[1] - 1);
+      out.add(
+          new Star(
+              at[0],
+              at[1],
+              item.getExpression() instanceof AllTableColumns && dot > at[0]
+                  ? source.substring(at[0], dot).strip()
+                  : null));
+    }
+    return out;
+  }
+
+  /**
    * Returns where an expression stands in {@link #source}: its first character and one past its
    * last.
    *

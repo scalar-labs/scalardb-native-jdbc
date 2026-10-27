@@ -572,7 +572,8 @@ class BenchBaseBenchmark {
     /**
      * The counters at a run's start, after emptying the shared pool: a cursor the run before left
      * could drop out of {@code V$SQL} between this reading and the end's and come back with its
-     * counters, so that its earlier calls counted as this run's (the first Oracle run, 20261027-0133).
+     * counters, so that its earlier calls counted as this run's (the first Oracle run,
+     * 20261027-0133).
      */
     static Counters start(Engines e) throws SQLException {
       try (Connection c = e.open();

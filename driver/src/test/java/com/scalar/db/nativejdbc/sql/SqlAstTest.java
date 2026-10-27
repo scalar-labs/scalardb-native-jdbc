@@ -66,6 +66,19 @@ class SqlAstTest {
   }
 
   @Test
+  void stars_placeEachStarItemAndItsQualifierAsWritten() {
+    String sql = "SELECT  * , x.* ,\"s\".\"T\".* FROM t x WHERE id = ? FOR UPDATE";
+    List<SqlAst.Star> stars = parse(sql).stars();
+    assertThat(stars).hasSize(3);
+    assertThat(stars)
+        .extracting(s -> sql.substring(s.start(), s.end()))
+        .containsExactly("*", "x.*", "\"s\".\"T\".*");
+    assertThat(stars).extracting(SqlAst.Star::qualifier).containsExactly(null, "x", "\"s\".\"T\"");
+    assertThat(parse("SELECT id, x FROM t FOR UPDATE").stars()).isEmpty();
+    assertThat(parse("UPDATE t SET x = 1").stars()).isNull();
+  }
+
+  @Test
   void kind_isDecidedByTheTree_notTheFirstWord() {
     assertThat(parse("/* hint */ select 1 from t").kind()).isEqualTo(SqlAst.Kind.SELECT);
     assertThat(parse("-- note\nupdate t set x = 1").kind()).isEqualTo(SqlAst.Kind.DML);

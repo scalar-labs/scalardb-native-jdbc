@@ -20,6 +20,7 @@ import com.scalar.db.nativejdbc.testing.Engines;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLTransactionRollbackException;
 import java.sql.Statement;
@@ -130,6 +131,20 @@ class InlineIntegrationTest {
       d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       d.setAutoCommit(false);
       assertThat(rows(d, "SELECT x FROM inl.imp WHERE id = 1 FOR UPDATE")).containsExactly("z");
+      // read whole, the user's columns alone, as the vendor's SELECT * would give them without
+      // the metadata columns, a q.* too (design 4.3 "The locking read on Oracle", todo 334)
+      for (String items : List.of("*", "imp.*", "i.*")) {
+        String alias = items.equals("i.*") ? " i" : "";
+        try (Statement lock = d.createStatement();
+            ResultSet rs =
+                lock.executeQuery(
+                    "SELECT " + items + " FROM inl.imp" + alias + " WHERE id = 1 FOR UPDATE")) {
+          assertThat(rs.getMetaData().getColumnCount()).as(items).isEqualTo(2);
+          assertThat(rs.next()).isTrue();
+          assertThat(rs.getString(2)).isEqualTo("z");
+          assertThat(rs.next()).isFalse();
+        }
+      }
       d.rollback();
     }
   }
