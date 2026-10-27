@@ -354,3 +354,28 @@ Open, for the design: one whole-table probe of the in-flight index is not in the
 plan-choosing count `SELECT COUNT(*) FROM (SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) LIMIT
 301) x`. It is cached per table with a TTL rather than run per statement, but under default
 statistics it could scan the table too. Left as it is.
+
+### 2026-10-27: 62f0a59 reviewed (the design); the plan-choosing count takes the spelling too
+
+Read from the commit. `Writes.firstInFlight(n)` is the decided text, `SELECT 1 FROM T_meta WHERE
+tx_state IN (1, 2) ORDER BY <key columns> LIMIT 1`, and it stands where bc2077f put it: the
+coarse check (`inFlightCheck`) as itself, the clear gate and the committed copy's gate as `(...)
+IS NULL`, the states CASE as `CASE WHEN (...) IS NULL THEN 0 ...`; the other engines' texts are
+untouched; the setup's PostgreSQL branch runs `ANALYZE <meta>` through `execute`, so the dry run
+lists it. The batched coarse checks, which wrapped each check in `EXISTS (...)`, are `(<check>)
+IS NOT NULL` on PostgreSQL: right, since the planner drops a subquery's ORDER BY and LIMIT under
+EXISTS and would have undone the spelling; a scalar subquery keeps them. The tests decide what the
+design asked: the generic plan of each text the driver sends, on a never-analyzed 200,000-row copy
+with nothing in flight, is an Index Only Scan of the partial index with no Seq Scan, while the
+same probe without the order is a Seq Scan; the earlier plan test's filter is `($0 IS NULL) OR
+(NOT (SubPlan 2))` with the per-row probe never executed. Matches; nothing to send back.
+
+The open case, the plan-choosing count `SELECT COUNT(*) FROM (SELECT 1 FROM T_meta WHERE tx_state
+IN (1, 2) LIMIT 301) x`, cached per table under a TTL: it takes the spelling too, `ORDER BY <key
+columns>` before the `LIMIT 301`. It is a whole-table probe of the in-flight index like the
+others, and under default statistics it scans like them; that it runs once per TTL per table
+makes each scan rarer, not smaller, and on a large metadata table (TPC-C's order lines) a scan is
+tens of milliseconds to seconds. The order costs nothing: the partial index is in key order, and
+the limit reads at most 301 entries. 4.2's rule, "every probe of the whole in-flight index on
+PostgreSQL is spelled so", covers it without a change of text. For the builder, with a plan test
+on the unanalyzed copy as for the four texts.
