@@ -4277,10 +4277,12 @@ final class Writes {
         return null;
       }
       // as the data row holds it, which the block's RETURNING gives the metadata row: a CHAR key
-      // padded, a NUMBER(p) key rounded
+      // padded, a NUMBER(p) key rounded; a column of a type unknown here keeps the block
       String full = type(n.engine, tableColumns, t.keyColumns().get(i)).replace(" generated", "");
-      String value = source.substring(span[0], span[1]);
-      keys.add(full.isEmpty() ? value : "CAST(" + value + " AS " + full + ")");
+      if (full.isEmpty()) {
+        return null;
+      }
+      keys.add("CAST(" + source.substring(span[0], span[1]) + " AS " + full + ")");
       binds.addAll(in);
     }
     String data = onDataTable(n.engine, ast, t, false, source.substring(0, end), -1);

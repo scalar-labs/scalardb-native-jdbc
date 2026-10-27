@@ -878,3 +878,6 @@ type, as the duplicate checks already do (`CAST(? AS char(5))`).
 TIMESTAMP(6) key and checks that every data row has its metadata row by the key. The TIMESTAMP
 key is of milliseconds: ScalarDB's metadata key is TIMESTAMP(3), so a key of microseconds finds
 no metadata row by either form, as before.
+At the review's ask (254fac5), a key column whose type the driver does not know keeps the block,
+which takes the key as the data row stores it, rather than INSERT ALL with the value uncast;
+asserted in the unit test with a column map that lacks the key.

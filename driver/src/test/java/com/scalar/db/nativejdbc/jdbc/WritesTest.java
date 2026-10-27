@@ -966,6 +966,25 @@ class WritesTest {
     assertThatThrownBy(
             () -> oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (ABS(?), 'a')", false))
         .isInstanceOf(SQLException.class);
+    // a key column whose type the driver does not know keeps the block, which takes the key as the
+    // data row stores it
+    StatementShape unknown =
+        StatementShape.of(
+                SqlAst.parse("INSERT INTO t (\"id\", x) VALUES (?, ?)", Engine.ORACLE)
+                    .orElseThrow())
+            .orElseThrow();
+    assertThat(
+            Writes.plan(
+                    Engine.ORACLE,
+                    unknown,
+                    created(),
+                    "",
+                    false,
+                    false,
+                    null,
+                    Map.of("x", "number"))
+                .sql())
+        .noneMatch(q -> q.startsWith("INSERT ALL"));
     // not for the inline layout, whose INSERT is one statement already
     assertThat(oraclePlan(inline(), "INSERT INTO t (id, x) VALUES (?, ?)", false).sql())
         .noneMatch(q -> q.startsWith("INSERT ALL"));
