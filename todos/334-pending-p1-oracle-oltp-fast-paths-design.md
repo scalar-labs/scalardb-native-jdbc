@@ -1061,3 +1061,20 @@ The ask on 438d627 already held: the key's values reach the statement through
 (signed or cast), and on Oracle an INSERT whose key is any other expression is refused before any
 form is chosen. The builder added the assertion (`VALUES (ABS(?), 'a')` refused) as c94dd1a on
 the branch. The review of INSERT ALL is closed; it waits on the user's decision to land it.
+
+### 2026-10-27: bedbdb5 reviewed (the design): INSERT ALL's metadata key as the data row stores it
+
+The builder found, after the review above, that the metadata row's key was the value the
+statement gave while the data row holds the value its column makes of it: on the imported CHAR(5)
+key `'b'` the metadata row held `'b'` against the data row's `'b    '`, and CHAR against the
+metadata table's VARCHAR2 compares without padding, a data row without its metadata row,
+silently. The block never had it, its `RETURNING ... INTO` carrying the stored value. The fix
+casts each key value in the metadata `VALUES` to the data column's declared type (`CAST(? AS
+char(5))`, `CAST(? AS number(10))`, the spelling the duplicate checks use), and the test
+`form4InsertAllKeysAsTheDataRowHoldsThem` decides it on a CHAR(5) key, a NUMBER(10) key of 7.6 and
+a TIMESTAMP(6) key of milliseconds, none left without its metadata row. Matches; the design's
+paragraph now says the cast and why. One ask: where the column's type is not known to the driver
+(`type(...)` empty) the fix falls back to the uncast value, the case just found; take the block
+there instead, which is right whatever the type. Noted, ScalarDB's, not ours: the metadata key of
+a TIMESTAMP(6) column is TIMESTAMP(3), so a key of microseconds finds no metadata row by either
+form.
