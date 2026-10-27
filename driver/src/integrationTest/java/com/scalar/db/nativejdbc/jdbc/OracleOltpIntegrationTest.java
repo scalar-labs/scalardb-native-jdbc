@@ -1634,6 +1634,13 @@ class OracleOltpIntegrationTest {
               .containsExactly(".1/.1");
           assertThat(rows(v, "SELECT TO_CHAR(a) FROM " + NS + ".dbl WHERE k = " + (base + 2)))
               .containsExactly("2.68");
+        } else {
+          // bound as BINARY_DOUBLE, as the statement alone stores it: the iteration ran as binary
+          assertThat(rows(v, "SELECT TO_CHAR(a) FROM " + NS + ".dbl WHERE k = " + (base + 2)))
+              .containsExactly("2.67");
+          assertThat(rows(v, "SELECT TO_CHAR(b) FROM " + NS + ".dbl WHERE k = " + base))
+              .doesNotContain(".1")
+              .hasSize(1);
         }
         // a double against a NUMBER key and a BINARY_DOUBLE key: the rows the statement finds
         for (KeyType k : List.of(KeyType.K_N10, KeyType.K_BD)) {

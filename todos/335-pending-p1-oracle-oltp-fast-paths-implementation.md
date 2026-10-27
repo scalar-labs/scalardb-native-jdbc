@@ -986,7 +986,8 @@ Tests on a fresh private container:
   eleven INSERTs into `dbl` (the design's ten doubles into `NUMBER(6,2)`, `NUMBER`,
   `BINARY_DOUBLE` through `setObject`, and `BINARY_FLOAT`, then a row of `setNull`s) runs as the
   bulk block, 4 statements executed, and stores by DUMP exactly the rows of the statement alone;
-  unset, 2.675 is 2.68 and 0.1 is .1. A double against the `NUMBER(10)` and the `BINARY_DOUBLE`
+  unset, 2.675 is 2.68 and 0.1 is .1; true, 2.675 is 2.67 and 0.1 the double's expansion, so the
+  iteration proves it ran as binary (the design's review asked for the mirror). A double against the `NUMBER(10)` and the `BINARY_DOUBLE`
   key finds the rows the statement finds, counts [1, 0] both ways. The table needs a row before the
   tests: at SERIALIZABLE the first INSERT into a table without a segment is ORA-08177.
 - `ojdbcReportsSetFloatAndDoubleUseBinary`: false by default, true from a connect property, the
