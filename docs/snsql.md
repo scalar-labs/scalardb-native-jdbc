@@ -41,6 +41,10 @@ properties and the driver's own `scalar.db.native_jdbc.*` ones ([Configuration](
 | `-?`, `--help` | show the help, then exit |
 | `-V`, `--version` | show the version, then exit |
 
+`snsql` exits with 0 when it ends normally, at `\q` too, in a script as at the prompt; 1 on a fatal
+error, such as a malformed URL; 2 when it cannot connect, or for an option it does not know; 3 when
+a script stops at an error with `ON_ERROR_STOP`.
+
 ## Using it
 
 A statement ends at `;` and may span lines. The prompt is psql's: `db=>`, `db->` on a continuation

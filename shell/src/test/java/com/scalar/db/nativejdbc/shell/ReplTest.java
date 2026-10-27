@@ -58,6 +58,13 @@ class ReplTest {
   }
 
   @Test
+  void quit_endsTheSession_andSaysSo() {
+    assertThat(repl.quit()).isFalse();
+    assertThat(repl.feed("\\q")).isFalse();
+    assertThat(repl.quit()).isTrue();
+  }
+
+  @Test
   void beginAndCommit_becomeAutoCommitAndCommit() throws SQLException {
     assertThat(repl.prompt(false)).isEqualTo("shop=> ");
 

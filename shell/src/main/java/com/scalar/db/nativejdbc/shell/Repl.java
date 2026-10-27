@@ -99,6 +99,8 @@ final class Repl {
   private int sessionLevel;
   private boolean expanded;
   private boolean timing;
+  // \q ended the session, rather than an error under ON_ERROR_STOP
+  private boolean quit;
   private @Nullable Set<String> completions;
   // the one field Ctrl-C's signal thread reads; everything else stays on the session's thread
   private final AtomicReference<@Nullable Statement> running = new AtomicReference<>();
@@ -227,6 +229,15 @@ final class Repl {
   }
 
   /**
+   * Returns whether {@code \q} ended the session, which a script ends with status 0, as psql does.
+   *
+   * @return whether the session was quit
+   */
+  boolean quit() {
+    return quit;
+  }
+
+  /**
    * Runs what is left at the end of a script or a {@code -c} string, as psql does with a last
    * statement that has no {@code ;}.
    *
@@ -286,6 +297,7 @@ final class Repl {
     try {
       switch (command) {
         case "\\q":
+          quit = true;
           return false;
         case "\\?":
           help();

@@ -98,6 +98,11 @@ class ShellIntegrationTest {
     assertThat(run.exit).as(run.err).isEqualTo(3);
     assertThat(run.out).startsWith("ERROR:");
     assertThat(rows(e)).isEmpty();
+
+    // \q ends a script as psql's does, with 0, and what follows it is not run
+    Run quit = snsql(e, "-c", "\\q", "-c", "INSERT INTO sh.plain VALUES (4, 'not run')");
+    assertThat(quit.exit).as(quit.err).isZero();
+    assertThat(rows(e)).isEmpty();
   }
 
   @ParameterizedTest

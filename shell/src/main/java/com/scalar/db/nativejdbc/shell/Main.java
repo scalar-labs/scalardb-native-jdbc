@@ -459,7 +459,7 @@ public final class Main implements Callable<Integer> {
           goOn = read(repl, Files.newBufferedReader(Paths.get(action[1]), StandardCharsets.UTF_8));
         }
         if (!goOn) {
-          return EXIT_SCRIPT;
+          return repl.quit() ? EXIT_OK : EXIT_SCRIPT;
         }
       }
       return EXIT_OK;
