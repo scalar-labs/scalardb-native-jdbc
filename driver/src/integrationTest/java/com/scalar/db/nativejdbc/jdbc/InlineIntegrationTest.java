@@ -138,7 +138,18 @@ class InlineIntegrationTest {
         try (Statement lock = d.createStatement();
             ResultSet rs =
                 lock.executeQuery(
-                    "SELECT " + items + " FROM inl.imp" + alias + " WHERE id = 1 FOR UPDATE")) {
+                    // SQL Server locks with a table hint, which the driver asks for there
+                    e.engine() == Engine.SQLSERVER
+                        ? "SELECT "
+                            + items
+                            + " FROM inl.imp"
+                            + alias
+                            + " WITH (UPDLOCK) WHERE id = 1"
+                        : "SELECT "
+                            + items
+                            + " FROM inl.imp"
+                            + alias
+                            + " WHERE id = 1 FOR UPDATE")) {
           assertThat(rs.getMetaData().getColumnCount()).as(items).isEqualTo(2);
           assertThat(rs.next()).isTrue();
           assertThat(rs.getString(2)).isEqualTo("z");
