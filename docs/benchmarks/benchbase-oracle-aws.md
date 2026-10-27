@@ -152,3 +152,66 @@ YCSB medians, µs, vendor → driver:
   in a run; no ORA-00060): its read-modify-write at 1381 µs is the cell's 0.61.
 - Server CPU per commit, TPC-C: 3.00 ms decoupled against the vendor's 1.28, 2.12 inline against
   1.26; packets are now equal (22.0 against 21.9; inline 23.5).
+
+## Third run: the deadlock fix, the inline whole-row lock, INSERT ALL, the bulk block (2026-10-27)
+
+Run `20261027-1344` (`SOURCE=2162759`, main with `d56e87d`, `1070d98`, `INSERT ALL` 71277c0…16c9611
+and the bulk batch block 2660f5a…15d29a5), the statement cache at 128 on both sides, a client
+flight recording of every run (`-XX:StartFlightRecording`, CPU-time samples), fast network,
+REPS 2. All four cells ran; about 1 h 30 min of instances.
+
+| (c)/(a), TPC-C / YCSB | first run | second run (cache) | third run |
+|---|---|---|---|
+| READ COMMITTED, decoupled | 0.41 / 0.20 | (failed at setup) | **0.51 / 0.64** |
+| READ COMMITTED, inline | 0.47 / 0.62 | 0.66 / 0.90 | 0.62 / (1.29) |
+| SNAPSHOT, decoupled | 0.47 / 0.86 | 0.64 / 1.04 | 0.63 / 0.89 |
+| SNAPSHOT, inline | 0.69 / 0.59 | 0.76 / 0.61 | 0.74 / **0.86** |
+
+The vendor's YCSB rate drifted again from cell to cell (6333, 2773, 4748, 4503/s; its scan p50
+2.3 to 7.8 ms), so the YCSB ratios are indicative only. The READ COMMITTED inline one is not
+usable: the vendor's scans took 7.8 ms there. The single-key medians are the measure.
+
+YCSB p50, µs, vendor → driver:
+
+| | read | update | insert | read-modify-write | scan |
+|---|---|---|---|---|---|
+| READ COMMITTED, decoupled | 207 → 231 (+12%) | 391 → 525 (+34%) | 420 → 479 (+14%) | 532 → 675 (+27%) | 2306 → 4010 |
+| READ COMMITTED, inline | 199 → 228 (+15%) | 383 → 498 (+30%) | 420 → 485 (+15%) | 521 → 643 (+23%) | 7795 → 4411 |
+| SNAPSHOT, decoupled | 200 → 242 (+21%) | 357 → 521 (+46%) | 383 → 447 (+17%) | 488 → 648 (+33%) | 4453 → 4821 |
+| SNAPSHOT, inline | 203 → 236 (+16%) | 365 → 390 (**+7%**) | 400 → 448 (+12%) | 500 → 522 (**+4%**) | 5509 → 3050 |
+
+- **The deadlock fix holds.** READ COMMITTED decoupled YCSB has no ORA-00060 in either run, and
+  its row-lock waits are 0.26–0.28 s a run, against 316 s in the first run. YCSB is 0.20 → 0.64,
+  held back now by its scans (1.7 times the vendor's p50, server CPU 1.91 against 1.00 ms a
+  commit).
+- **The inline whole-row lock** (`1070d98`): SNAPSHOT inline read-modify-write is 522 µs against
+  the vendor's 500, down from 1,381 against 468. The cell's row-lock waits went from 98 s to 0.1 s
+  a run, and its YCSB from 0.61 to 0.86.
+- **INSERT ALL:** the decoupled insert is +14% (READ COMMITTED) and +17% (SNAPSHOT), against +27%
+  in the second run.
+- **The bulk block took NewOrder's stock batch but not its order_line batch.** At SNAPSHOT
+  decoupled, the stock block ran 43,241 times for 431,673 rows, its nested UPDATE and MERGE
+  parsed 4 times in all. The ORDER_LINE insert and its metadata insert still ran per row
+  (432,875 and 432,384 calls, as many parse calls), through the block of entries (40,038
+  single-entry and 3,970 multi-entry calls). BenchBase binds OL_AMOUNT with `setDouble`, which
+  design 4.4 kept off the bulk block while the driver did not know the connection's
+  `SetFloatAndDoubleUseBinary` (found by the builder). The design now reads ojdbc's effective
+  setting (4935bf4); a rerun of this cell is the batch item's proof. TPC-C stays at 0.63, server
+  CPU 3.20 against 1.57 ms a commit.
+- The decoupled update is still +34–46%, the largest single-key gap.
+- TPC-C's buffer busy waits are the vendor's too (45–54 s a run for (a), 45–86 s for (c)): the
+  hot district and warehouse rows at scale 4.
+
+**Where the driver's client CPU goes** (flight recording, SNAPSHOT decoupled, YCSB, first
+repetition). The JVM used 72.4 s of CPU for the vendor's run and 89.7 s for the driver's: 0.127
+against 0.177 ms a transaction, about +50 µs. Of the driver run's CPU-time samples:
+- 83% are in ojdbc (95% for the vendor), which is about +26 µs a transaction more ojdbc work:
+  longer texts, callable blocks and their binds.
+- 14% are the driver's own frames. Most of these, about 12% of the run (about 21 µs a
+  transaction), are the reflection under the driver's `java.lang.reflect.Proxy` wrappers:
+  `Proxies$Handler.invoke`, `Proxies$AnchoredHandler.handle`, `Invokers.checkCustomized`,
+  `AccessibleObject.verifyAccess` and `DirectMethodHandleAccessor.checkReceiver`, on every call
+  the application makes on a wrapped statement or result set.
+- The SQL rewrite itself is small: `Router.route` 0.4%, jsqlparser 0.1%.
+Plain delegating classes for the hot interfaces (`ResultSet`, `PreparedStatement`), instead of
+reflective proxies, would take most of the 12%, on every engine.

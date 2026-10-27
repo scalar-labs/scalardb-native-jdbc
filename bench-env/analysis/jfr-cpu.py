@@ -25,6 +25,9 @@ OWNERS = [
     ("jsqlparser", "net.sf.jsqlparser."),
     ("driver", "com.scalar.db.nativejdbc."),
     ("pgjdbc", "org.postgresql."),
+    ("ojdbc", "oracle.jdbc."),
+    ("ojdbc", "oracle.net."),
+    ("ojdbc", "oracle.sql."),
     ("benchbase", "com.oltpbenchmark."),
 ]
 
