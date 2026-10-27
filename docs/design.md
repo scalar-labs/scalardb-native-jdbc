@@ -2138,6 +2138,16 @@ block, since a key the first `INTO` generates is not the second's. The update ke
 single statement writes two tables, and the block without OUT binds, raising a number per outcome
 instead, measured within 5 µs of it.
 
+**The inline INSERT on Oracle (todo 334, 2026-10-27).** The inline layout's INSERT is the one plain
+statement with its stamp columns, and it asks ojdbc for the generated keys only when the
+application does (`RETURN_GENERATED_KEYS` under `wantsKeys()`, the ROWID being how the driver reads
+the key back for `getGeneratedKeys`, since ojdbc asked for key columns by name describes the table,
+which fails under a quoted name, milestone 9c). Asked always, as it was until 0cf9ac0, ojdbc
+appended ` RETURNING ROWID INTO :n` to every inline INSERT's text and tokenized the whole text at
+each prepare to classify it (`AutoKeyInfo`): 11 µs of client CPU an insert in the fifth AWS run's
+JFR and +47 µs of server elapsed on the container (todo 334's log, f767e74); the Oracle insert test
+counts V$SQL's INSERTs that carry the RETURNING on each side.
+
 **The locking read on Oracle (todo 334).** A user's `SELECT ... FOR UPDATE` of one ScalarDB table,
 `NOWAIT` or not, which on Oracle today runs the steps of 4.2 as five round trips, the predicate's
 in-flight check, a savepoint, the lock over the committed copy with two version lookups per row,
