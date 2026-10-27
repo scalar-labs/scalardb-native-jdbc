@@ -1770,25 +1770,33 @@ statement spells otherwise, a CHAR key unpadded, finds none, so: with no version
 table recorded (`Anchors.recorded` false) the statement runs with the state condition alone; with
 one found, with the anchor; with versions of the table recorded and the key not found, the block
 above runs instead, which matches the key as the row returns it. The outcomes: a count of 1
-(inline), or `written` 1 and `stamped` 1 (decoupled), is the row written while committed and at
-the anchor, count 1 and `anchors.wrote(tx_id)`; a count of 0, or `written` 0, runs the block above,
+(inline), or `written` 1 and `stamped` 1 (decoupled), is the row written while committed and at the
+anchor, count 1 and `anchors.wrote(tx_id)`; a count of 0, or `written` 0, runs the block above,
 which decides as its table says, no row a count of 0, a row in flight the wait and the block again,
-a version moved the abort, and a second write of a key this transaction wrote, whose row carries
-its own stamp and not the anchor, which the block passes (`Anchors.unchanged`); `written` 1 and
+a version moved the abort, and a second write of a key this transaction wrote, whose row carries its
+own stamp and not the anchor, which the block passes (`Anchors.unchanged`); `written` 1 and
 `stamped` 0 is the block's abort. A miss costs one round trip more than today; a hit costs the
 vendor's executions, one. Why it is exact: Oracle evaluates a DML's WHERE on the row's current
-version under the row lock and restarts the statement when the row changed while it waited for
-that lock, which the inline block's CAS in its UPDATE's WHERE already rests on; a state of 1 or 2
-fails the condition, so nothing is written while the row is in flight and the wait of section 6
-holds no lock, the failed statement having locked nothing; and the version in the WHERE is the
-recorded anchor itself, the first read's, which the block compared afterwards. SNAPSHOT keeps its
-forms. Batches keep the forms of 4.4 until the merged form, whose entries take this statement's
-conditions per slot. With it, every nested statement of a block carries a hint comment naming the
-block's shape (`/*+ scalardb_native_<shape> */`): PL/SQL keeps one open cursor per nested text, and
-a text two blocks share, or one block repeats per entry, parses on every call, the MERGE stamp's
-44% of executions and the block of entries' every nested statement (todo 334's log, 2026-10-27,
-measured at `session_cached_cursors` 50 and 500 alike). Expected: the inline READ COMMITTED update
-from +30% to about SNAPSHOT's +7%, the decoupled one from +38% to about +25%, the RMW with them.
+version under the row lock and restarts the statement when the row changed while it waited for that
+lock, which the inline block's CAS in its UPDATE's WHERE already rests on; a state of 1 or 2 fails
+the condition, so nothing is written while the row is in flight and the wait of section 6 holds no
+lock, the failed statement having locked nothing; and the version in the WHERE is the recorded
+anchor itself, the first read's, which the block compared afterwards. SNAPSHOT keeps its forms.
+Batches keep the forms of 4.4 until the merged form, whose entries take this statement's conditions
+per slot. With it, every nested statement of a block carries a hint comment naming the block's
+shape, the statement's place in it and the block's text (`/*+ scalardb_native_<shape><n>_<hash> */`,
+`Writes.hinted`; a shape alone would leave the clear-table stamp and a block's per-entry texts
+shared): PL/SQL keeps one open cursor per nested text, and a text two blocks share, or one block
+repeats per entry, parses on every call, the MERGE stamp's 44% of executions and the block of
+entries' every nested statement (todo 334's log, 2026-10-27, measured at `session_cached_cursors` 50
+and 500 alike). The name is a hint Oracle does not know, listed as a syntax error in `DBMS_XPLAN`'s
+hint report and ignored, the hints beside it in the same comment, a user's or
+`IGNORE_ROW_ON_DUPKEY_INDEX`, still applied, as the 19c documentation says and the 23ai container
+shows. Expected: the inline READ COMMITTED update from +30% to about SNAPSHOT's +7%, the decoupled
+one from +38% to about +25%, the RMW with them. A write without a read of the key has no anchor:
+waiting on another connection's write to the row, it writes over that write once committed, as the
+vendor's statement does at READ COMMITTED; the block aborted it on its own step 1's version, which
+the transaction had not read (`form2RowWrittenByAnotherWhileTheStatementWaits`).
 
 What must keep holding: the keyed write's tests above, their expectation of the statement's
 executions now one on a hit at READ COMMITTED. To add, on both layouts: a key written without a

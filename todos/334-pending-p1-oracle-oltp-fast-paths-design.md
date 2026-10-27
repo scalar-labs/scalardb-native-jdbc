@@ -1370,3 +1370,46 @@ its WHERE, today's block on a miss; the anchor looked up by the key as bound, th
 the table has versions recorded and the key is not found (the CHAR-key hazard); the decoupled form
 the block without step 1, two OUT binds; a hint per block shape in every nested text. Sent to c7 to
 build with the tests and the measurement the design lists; review from `git show` when it comes.
+
+### 2026-10-27: ca325c8 reviewed, the statement first built as designed (the design's note)
+
+c7's ca325c8 on `oracle-rc-cas-first` (rebased on cc17393), read from `git show`: mergeable as it
+stands. Checked against the design: the inline texts (the stamp first in the SET list, `(predicate)
+AND COALESCE(tx_state, 3) = 3` and the anchor by `DECODE`/`COALESCE`, the DELETE without a stamp);
+the decoupled block (the DML under `EXISTS` of the committed metadata row and the anchor in `l_ai`,
+`l_av`, `RETURNING` the key into `l_k<i>` of the data column's type, the CAS by it under the same
+conditions, `written` and `stamped` out; a created table's DELETE deletes the metadata row, an
+imported one stamps it, as `keyedStampAfter` has the block do); the bind order on both (inline: the
+stamp, the user's, the anchor; decoupled: the anchor, the user's, the stamp, the two outs);
+`applyRcFirst`'s rule (not recorded: plain; recorded and found: anchored; recorded and not found,
+or a bind the proxy does not read back: the block); the outcomes (0: the block; 1 and 0: abort;
+more than 1: abort); `anchors.wrote` on the hit. `hinted` runs once per text (`Block.steps`, the
+`Entries` and `Bulk` caches); the fast path is reached with the default in-flight wait of 0, since
+`clearRc` and `predicateRc` are PostgreSQL forms (`rc`); `keySources` accepts what `fullKey` does.
+
+c7's five points. (1) The key conversion holds: `readKey` records a NUMBER key by `getObject`, and
+ojdbc 23 returns NUMBER, NUMBER(10) and NUMBER(19) integers at scale 0 (5, 500, 1000000,
+12300000000 and -700 checked on the container), which `BigDecimal.valueOf(long)` equals. (2) The
+CHAR literal to the block, the padded bind to the statement, as the design says. (3) Confirmed: a
+write without a read has no anchor, and the vendor's statement at READ COMMITTED writes over the
+other's committed row once the lock is given; the block's 40001 there was its own step 1 taken as
+an anchor the transaction never read; the design's abort is "between the read and the write"; one
+sentence added to the design. (4) The name per occurrence with the block's hash is right, a shape
+alone leaving the clear-table stamp and the per-entry texts shared. A name merged into an existing
+hint comment is safe: Oracle 19c's documentation ("the database does consider other correctly
+specified hints in the same comment") and the 23ai container (`FULL(t)` applied with the name
+before it and after it; `INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(..) scalardb_native_k2_dead */`
+still ignores the duplicate); the hint report lists the name as `E - Syntax error`, cosmetic, noted
+in the design. (5) The CAS by the data row's key: the `EXISTS` compares `m.k = t.k` and the CAS
+`k = l_k0` of the data column's type under the same comparison semantics (nonpadded where the
+metadata key is VARCHAR2 and the data key CHAR), so a match of the one is a match of the other; an
+imported CHAR key cannot abort falsely, it takes the block where the metadata spells the key
+otherwise.
+
+Notes, no change asked: a second write of a key read and written goes through the block (the
+anchor is the first read's, `putIfAbsent`; the row carries the own stamp), 2 round trips, rare in
+YCSB and TPC-C; `Context.value` returns null for the three-argument `setObject` and the temporal
+setters, the block then; `written > 1` is unreachable under the full key. The container figures:
+the inline update at the vendor's cost (executes 1, server CPU +7 µs over the vendor); the
+decoupled form's one execution less did not show on the laptop. Next: c7 merges to main; 6e's
+YCSB single-key plan on the user's approval measures both layouts, a JFR cell with it.
