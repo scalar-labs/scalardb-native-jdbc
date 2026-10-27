@@ -231,7 +231,7 @@ goes through the primary key.
   key. It is created only after the caller's own connection has logged in, so a failed login leaves
   nothing behind. The driver keeps at most 64 catalogs, least recently used first; one pushed out
   releases its database session, and a connection still holding it reopens one when it needs to. It reads two ordinary tables in ScalarDB's system schema, `scalardb` by default
-  (`scalar.db.system_namespace_name`, the `scalardbnative.metadataSchema` property): `virtual_tables`
+  (`scalar.db.system_namespace_name`, the `scalar.db.native_jdbc.metadata_schema` property): `virtual_tables`
   and `metadata`. They sit in the same database as the user's tables, carry no transaction metadata and
   are written only by ScalarDB's admin API; the driver reads them whole, with plain SELECTs on a
   connection of its own in autocommit, never on the user's connection, and never writes them. A query on
@@ -269,7 +269,7 @@ goes through the primary key.
   as well. A database without ScalarDB's catalog is an **error unless allowed**: the schema existing
   but its tables not visible is SQLSTATE `42501` naming the SELECT grants (Oracle reports a table it
   does not grant as absent), the schema not existing is `08004` naming the property, unless
-  `scalardbnative.allowNoCatalog` says the database has no ScalarDB. A database whose `virtual_tables`
+  `scalar.db.native_jdbc.allow_no_catalog` says the database has no ScalarDB. A database whose `virtual_tables`
   is missing but `metadata` is present (a ScalarDB older than virtual tables) is logged and has inline
   layouts only.
 
@@ -404,24 +404,24 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   isolation level explicitly, and on SQL Server checks `sys.databases.is_read_committed_snapshot_on` and
   `snapshot_isolation_state`, refusing the connection without the first and SNAPSHOT without the second.
 - Vendor properties pass through untouched. Driver properties are namespaced and few:
-  `scalardbnative.inflightWaitMs`, the bounded wait of section 6 under READ COMMITTED, 0 to abort at
-  once; `scalardbnative.passthrough`, settable **only** through `setClientInfo`, never from the URL or
+  `scalar.db.native_jdbc.inflight_wait_millis`, the bounded wait of section 6 under READ COMMITTED, 0 to abort at
+  once; `scalar.db.native_jdbc.passthrough`, settable **only** through `setClientInfo`, never from the URL or
   the connect properties, since it turns the protection off; after a passthrough statement whose text
-  may set or reset the isolation level, the driver reads the level back from the session; `scalardbnative.metadataSchema`,
+  may set or reset the isolation level, the driver reads the level back from the session; `scalar.db.native_jdbc.metadata_schema`,
   where ScalarDB keeps `virtual_tables` and its table metadata, `scalardb` by default;
-  `scalardbnative.coordinatorNamespace`, ScalarDB's namespace for its coordinator table
+  `scalar.db.native_jdbc.coordinator_namespace`, ScalarDB's namespace for its coordinator table
   (`scalar.db.consensus_commit.coordinator.namespace`), `coordinator` by default, which no statement
   sent as written may name;
-  `scalardbnative.catalogTtlMs`, how long a loaded catalog and a resolved name are trusted, 60000 by
-  default (4.4); `scalardbnative.allowNoCatalog`, `false` by default, to accept a database without
+  `scalar.db.native_jdbc.catalog_ttl_millis`, how long a loaded catalog and a resolved name are trusted, 60000 by
+  default (4.4); `scalar.db.native_jdbc.allow_no_catalog`, `false` by default, to accept a database without
   ScalarDB's catalog, every table then plain. They are read from the connect `Properties`. A URL is often
   assembled from configuration someone else controls, so only the two settings that cannot weaken the
-  protection, `catalogTtlMs` and `inflightWaitMs`, may also come from the URL, in the vendor's parameter
-  syntax (`?k=v&...`, or `;k=v` for SQL Server), the URL winning; `metadataSchema`, `coordinatorNamespace` and
-  `allowNoCatalog` from the URL fail `connect` with `08001`, as does an unknown or malformed `scalardbnative.*` key. The
+  protection, `catalog_ttl_millis` and `inflight_wait_millis`, may also come from the URL, in the vendor's parameter
+  syntax (`?k=v&...`, or `;k=v` for SQL Server), the URL winning; `metadata_schema`, `coordinator_namespace` and
+  `allow_no_catalog` from the URL fail `connect` with `08001`, as does an unknown or malformed `scalar.db.native_jdbc.*` key. The
   URL is split exactly as the vendor driver splits it: a SQL Server value is braced only when its first
   character is `{`, `}}` inside braces is a literal, and an unbalanced brace refuses the URL; a `?`
-  inside the host part, which the vendor drivers read differently, refuses it too. `catalogTtlMs` is at
+  inside the host part, which the vendor drivers read differently, refuses it too. `catalog_ttl_millis` is at
   most one hour. The driver strips its own keys before handing the rest to the vendor driver, and
   `getPropertyInfo` lists them ahead of the vendor's.
 - **What the application holds.** Every JDBC object the driver hands out is its own proxy, and so is
@@ -760,7 +760,7 @@ runs a second lookup on the before image index; for other columns it uses the OR
 | A name through a synonym, `T_data`, `T_tx_metadata` or `T_scalardb` | **refuse** (`42000`), naming the table to use (section 1, "The catalog") |
 | DDL, `TRUNCATE` | on plain tables only: passed through, and the catalog's resolutions are dropped. On a ScalarDB table **refuse** (`0AN01`), in passthrough mode too, where the driver cannot see it but the operator contract forbids it: run raw, it would leave ScalarDB's table metadata, and the read view and in-flight index the setup made (section 3) behind, and on decoupled tables ScalarDB refuses schema changes such as adding a column (`throwIfTransactionMetadataDecouplingApplied`). Change or truncate the table through ScalarDB's admin, then run the setup again and refresh the catalog (4.4). DDL that names no ScalarDB table but reaches one is refused the same way (todo 331): one whose target is a ScalarDB namespace unqualified (`DROP SCHEMA shop`, MySQL `DROP DATABASE shop`) or the setup's read view or in-flight index, PostgreSQL's `DROP OWNED`, and DDL the parser reads without its targets (`ALTER SCHEMA`, `ALTER INDEX`) whose words name a namespace, a setup object or a name passthrough protects. A plain table in a ScalarDB namespace (`CREATE TABLE shop.audit`) stays plain |
 | Bulk maintenance that leaves the schema alone (`ANALYZE`, `VACUUM`, statistics) | on plain tables, passthrough mode, in autocommit; on a ScalarDB table, a connection of the database's own driver with ScalarDB's transactions on the table stopped, since passthrough refuses it (below) |
-| Any statement in passthrough mode | sent as written, unless it names a ScalarDB table, its data, metadata or virtual table, ScalarDB's catalog schema or its coordinator namespace (`scalardbnative.coordinatorNamespace`, todo 332), or on Oracle a synonym a parsed statement could not use (4.7): then **refuse** (`0AN01`), since sent as written it would read prepared records as committed and write rows without their metadata (todo 323). The names are found by the text's words, in any case, comments and string literals kept, a word also split at `#`, `@` and `$`, so that no engine's reading of a comment or a dollar quote hides one (todo 330), and so that an unparsed statement, a function body or SQL built from a literal is checked as a parsed statement is; a plain table of the same name in another schema, or a name in a comment, is refused too. A procedure, a view, a trigger or SQL built at run time reaches a table without naming it, and stays the application's (section 7) |
+| Any statement in passthrough mode | sent as written, unless it names a ScalarDB table, its data, metadata or virtual table, ScalarDB's catalog schema or its coordinator namespace (`scalar.db.native_jdbc.coordinator_namespace`, todo 332), or on Oracle a synonym a parsed statement could not use (4.7): then **refuse** (`0AN01`), since sent as written it would read prepared records as committed and write rows without their metadata (todo 323). The names are found by the text's words, in any case, comments and string literals kept, a word also split at `#`, `@` and `$`, so that no engine's reading of a comment or a dollar quote hides one (todo 330), and so that an unparsed statement, a function body or SQL built from a literal is checked as a parsed statement is; a plain table of the same name in another schema, or a name in a comment, is refused too. A procedure, a view, a trigger or SQL built at run time reaches a table without naming it, and stays the application's (section 7) |
 
 **What "the parser can interpret" means.** The text is exactly one statement; JSQLParser parses it;
 every table node of the parser's public syntax tree is a reference the walk visited, a column qualifier
@@ -1254,7 +1254,7 @@ union as a derived table.
   run as a locking read through `rc_T`, `LOCK IN SHARE MODE` or `WITH (HOLDLOCK)`, which these engines
   apply to the base rows and ranges behind the view, giving two-phase locking between driver
   transactions. Coarse and correct, phantoms included.
-- **The predicate's check** (experimental, `scalardbnative.predicateChecks`, off by default;
+- **The predicate's check** (experimental, `scalar.db.native_jdbc.predicate_checks`, off by default;
   measured in `docs/benchmarks/inflight-check.md`). The per-table check aborts on a row in flight
   anywhere in the table, which with ScalarDB writing the table aborts most such reads (one writer,
   a quarter of them; four, most). Under SNAPSHOT, and SERIALIZABLE on PostgreSQL, a read of one
@@ -1452,7 +1452,7 @@ joined to the CTE. Timed on the server alone that statement is a few microsecond
 clear-table statement; under the benchmark's four terminals it is half as much again to twice
 (AWS, the ninth run, decoupled: district 42.6 µs against 29.4, customer 46 to 55 against 41 to 43;
 the laptop 56.6 against 26.8), its materialized CTE and its extra executor nodes paying for the
-contention. Where no wait is configured (`scalardbnative.inflightWaitMs` unset or 0) the write by
+contention. Where no wait is configured (`scalar.db.native_jdbc.inflight_wait_millis` unset or 0) the write by
 key on PostgreSQL is instead the clear-table statement with the CAS of step 3 in its stamp, and the
 key's metadata row as the snapshot read it beside it:
 
@@ -1575,7 +1575,7 @@ committed before the lock was granted shows there as state 1 or 2, and one that 
 cannot change the metadata row, since it needs the data row's lock the driver now holds; a row the
 read shows in flight with a before image, or among the locked rows, aborts or fails as NOWAIT
 fails, as the steps' checks before and after the lock would. Only where no wait is configured, as a
-wait would hold the lock; with `scalardbnative.inflightWaitMs` set, the locking read keeps its
+wait would hold the lock; with `scalar.db.native_jdbc.inflight_wait_millis` set, the locking read keeps its
 steps and savepoint at this level.
 
 The other engines still run the steps one by one, each write under a savepoint of its own. They have
@@ -1722,7 +1722,7 @@ What the driver does with the row:
 |---|---|
 | `rows` 0 | nothing written; the count is 0, as the vendor's statement finds no row; no abort (a tombstone's metadata row, 4.5, is not looked at) |
 | `rows` 1, `meta` 0 (an imported table before its backfill) | nothing written; the steps one by one, which write the version-1 metadata row (4.4) and then the DML |
-| `tx_state` 1 or 2 | nothing written; at READ COMMITTED with `scalardbnative.inflightWaitMs` set, the bounded sleep of section 6 and the block again, which reads the row afresh; otherwise, and at SNAPSHOT always, abort `40001` |
+| `tx_state` 1 or 2 | nothing written; at READ COMMITTED with `scalar.db.native_jdbc.inflight_wait_millis` set, the bounded sleep of section 6 and the block again, which reads the row afresh; otherwise, and at SNAPSHOT always, abort `40001` |
 | `tx_state` neither 1, 2, 3 nor NULL | nothing written, count 0, no committed image, as the fused statement counts it on PostgreSQL |
 | the version read is not the one the transaction read for the key (`Anchors.unchanged` false, READ COMMITTED) | abort `40001`, whatever else the row says; a write left applied is undone with the rollback |
 | `written` 1, `stamped` 1 | the key is written: count 1, `anchors.wrote(tx_id)` |
@@ -1930,7 +1930,7 @@ many keys were skipped, and the abort code. What the driver does with it:
 |---|---|
 | `after` 1 (SNAPSHOT), decided first | nothing written; abort `40001`, "a row the statement writes is being written by a ScalarDB transaction": a row in flight that only its after image matches is `found` 0 with `after` 1, and aborts as the fused statement's CTE does on PostgreSQL |
 | `found` 0 | nothing matched: count 0, as the vendor's statement finds no row; no abort |
-| `held` above 0 | nothing written; at READ COMMITTED with `scalardbnative.inflightWaitMs` set, the bounded sleep of section 6 and the block again, which reads the keys afresh; otherwise, and at SNAPSHOT always, abort `40001` |
+| `held` above 0 | nothing written; at READ COMMITTED with `scalar.db.native_jdbc.inflight_wait_millis` set, the bounded sleep of section 6 and the block again, which reads the keys afresh; otherwise, and at SNAPSHOT always, abort `40001` |
 | `missing` above 0 | nothing written; the steps one by one, which write the version-1 metadata rows (4.4) and then each key |
 | `abort` 1, 2, 3, 4 or 5 | abort `40001`: a key the DML skipped was deleted since it was read, went in flight, is still at its version (an image in flight showed), still matches the inline DELETE's predicate at another version, or matched several rows; the rows written before it stay until the rollback |
 | `stamped` below `written` | abort `40001`, "a row the statement writes changed after it was read": a metadata row moved, went in flight or lost its metadata between the read and the CAS, or an inline row moved under the lock and still matched (its version -1) |
@@ -2162,7 +2162,7 @@ returned must carry A's `tx_id` and version, which `committedWhileItWaits` then 
 A third, the lock's scope: with a key locked through the decoupled form, a second connection's
 `SELECT ... FOR UPDATE NOWAIT` of its metadata row returns the row, and of its data row fails with
 ORA-00054 (checked on the container, 2026-10-27: the form without `OF` fails both, `OF x.k` and `OF
-k` alike free the metadata row). With `scalardbnative.inflightWaitMs` set, `SKIP LOCKED`, a
+k` alike free the metadata row). With `scalar.db.native_jdbc.inflight_wait_millis` set, `SKIP LOCKED`, a
 predicate beyond the key columns, or a non-pure one, the locking read keeps its steps and savepoint,
 as on PostgreSQL.
 What the driver reads back and does:
@@ -2475,7 +2475,7 @@ vendor's own statement, then on AWS with the rest.
   15000`, served by the in-flight index, read-only and in autocommit, and report per table the count and
   the oldest age. It never settles a row: whether a prepared row's transaction committed is known only to
   the coordinator, and the driver depends on neither the coordinator nor ScalarDB's runtime (section 6).
-- **Catalog cache.** ScalarDB's catalog is loaded whole and trusted for `scalardbnative.catalogTtlMs`;
+- **Catalog cache.** ScalarDB's catalog is loaded whole and trusted for `scalar.db.native_jdbc.catalog_ttl_millis`;
   each resolved name is trusted for the same time and cached with its classification, in a bounded LRU.
   No lock is held across a round trip: while one thread reloads, the others are served the previous
   catalog, and a stale resolution is served while the catalog connection is busy. The catalog
@@ -2488,7 +2488,7 @@ vendor's own statement, then on AWS with the rest.
   shorter but not zero, and its query runs every interval while plain tables are used. ScalarDB refuses schema changes on
   decoupled tables, but index creation and drop are not guarded, so changes come from registering,
   importing or dropping a table and from index DDL. `virtual_tables` and ScalarDB's table metadata live
-  in ScalarDB's metadata schema, `scalardb` by default, given by the `scalardbnative.metadataSchema`
+  in ScalarDB's metadata schema, `scalardb` by default, given by the `scalar.db.native_jdbc.metadata_schema`
   property.
 
 ### 4.5 Tombstones: why a DELETE of a metadata-less row keeps a metadata row
@@ -3012,7 +3012,7 @@ lock wait where it waits on the driver.
   DML, so a wait there holds no lock on the row. On PostgreSQL step 1 is part of the write's own
   statement, whose gate writes nothing while a key is in flight (4.3, one round trip per write), so the
   wait holds no lock there either. State 1 or 2 at that point: default abort with SQLSTATE
-  `40001`, or optionally, with `scalardbnative.inflightWaitMs` set, read the keys of step 1 again about
+  `40001`, or optionally, with `scalar.db.native_jdbc.inflight_wait_millis` set, read the keys of step 1 again about
   every 20 ms up to that limit and the statement's query timeout, then continue with the same anchor
   for a key this transaction read, or a fresh one for a key it never read; on timeout abort. For a key already read, the wait only helps when the
   ScalarDB transaction rolls back, since a commit keeps the writer's `tx_id` and the anchored CAS fails
@@ -3025,7 +3025,7 @@ lock wait where it waits on the driver.
   from earlier statements that the ScalarDB transaction it is waiting for needs for one of its own
   prepares.
 - **SNAPSHOT and SERIALIZABLE**: abort immediately with `40001`, reads, writes and locking reads alike;
-  `scalardbnative.inflightWaitMs` applies to READ COMMITTED only. A fixed snapshot cannot be refreshed by
+  `scalar.db.native_jdbc.inflight_wait_millis` applies to READ COMMITTED only. A fixed snapshot cannot be refreshed by
   waiting. The retry helper may poll the meta row before re-running the transaction so the retry does not
   land on the same row.
 - **Who settles a row**: ScalarDB's own record commit (normal path, milliseconds); a later SNAPSHOT or

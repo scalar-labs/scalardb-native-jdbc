@@ -459,7 +459,7 @@ class InterleavingIntegrationTest {
     StringBuilder trace = new StringBuilder();
     try {
       Properties waits = new Properties();
-      waits.setProperty("scalardbnative.inflightWaitMs", "2000");
+      waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "2000");
       waits.setProperty("ApplicationName", "d0");
       actors.add(new DriverActor("d0", e.openDriver(waits), t));
       Properties plain = new Properties();

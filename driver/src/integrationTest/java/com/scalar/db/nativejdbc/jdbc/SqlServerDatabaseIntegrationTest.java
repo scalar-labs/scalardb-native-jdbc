@@ -41,7 +41,7 @@ class SqlServerDatabaseIntegrationTest {
     props.setProperty("user", MS.username());
     props.setProperty("password", MS.password());
     // the catalog is not what these tests are about
-    props.setProperty("scalardbnative.allowNoCatalog", "true");
+    props.setProperty("scalar.db.native_jdbc.allow_no_catalog", "true");
   }
 
   @Test
@@ -108,17 +108,17 @@ class SqlServerDatabaseIntegrationTest {
   void aSwitchThroughThePassthroughSetting_stopsTheNextStatement() throws SQLException {
     try (Connection c = DriverManager.getConnection(appdb, props);
         Statement st = c.createStatement()) {
-      c.setClientInfo("scalardbnative.passthrough", "true");
+      c.setClientInfo("scalar.db.native_jdbc.passthrough", "true");
       st.execute("USE nosnap");
-      c.setClientInfo("scalardbnative.passthrough", "false");
+      c.setClientInfo("scalar.db.native_jdbc.passthrough", "false");
       assertThatThrownBy(() -> one(st))
           .isInstanceOf(SQLException.class)
           .hasMessageContaining("opened in appdb")
           .extracting("SQLState")
           .isEqualTo("0AN01");
-      c.setClientInfo("scalardbnative.passthrough", "true");
+      c.setClientInfo("scalar.db.native_jdbc.passthrough", "true");
       st.execute("USE appdb");
-      c.setClientInfo("scalardbnative.passthrough", "false");
+      c.setClientInfo("scalar.db.native_jdbc.passthrough", "false");
       assertThat(one(st)).isEqualTo("appdb");
     }
   }

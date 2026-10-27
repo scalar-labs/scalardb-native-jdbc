@@ -30,7 +30,7 @@ class IsolationIntegrationTest {
       p.setProperty("user", direct.getMetaData().getUserName().split("@", 2)[0]);
     }
     p.setProperty("password", e.password());
-    p.setProperty("scalardbnative.allowNoCatalog", "true");
+    p.setProperty("scalar.db.native_jdbc.allow_no_catalog", "true");
     String url = "jdbc:scalardb-native:" + e.url().substring("jdbc:".length());
     try (Connection c = DriverManager.getConnection(url, p)) {
       // the vendor drivers read the level from the server, not from a cached value

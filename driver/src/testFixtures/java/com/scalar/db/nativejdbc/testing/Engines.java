@@ -290,7 +290,7 @@ public enum Engines {
   public Connection openDriver(Properties extra) throws SQLException {
     Started s = started();
     Properties p = new Properties();
-    p.setProperty("scalardbnative.catalogTtlMs", "0");
+    p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "0");
     p.putAll(extra);
     p.setProperty("user", s.username);
     p.setProperty("password", s.password);

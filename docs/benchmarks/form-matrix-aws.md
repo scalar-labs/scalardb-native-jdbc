@@ -156,7 +156,7 @@ committed 90/s at 72 retries per commit. On a join, 44-53% of reads abort at one
 
 | Shape | Check | Status |
 |---|---|---|
-| One table, pure WHERE clause | **Predicate check**: the WHERE clause over the in-flight rows' before and after images; abort only on a match | Built (`scalardbnative.predicateChecks`, `predicate-checks` branch), measured on AWS |
+| One table, pure WHERE clause | **Predicate check**: the WHERE clause over the in-flight rows' before and after images; abort only on a match | Built (`scalar.db.native_jdbc.predicate_checks`, `predicate-checks` branch), measured on AWS |
 | Joins and semi-joined subqueries the split read covers | **In-flight pairs**: the statement as `SELECT 1` over every combination with at least one table's row in flight, by its before or after image, and the data tables for the rest | Built for PostgreSQL and MariaDB (main) and for Oracle and SQL Server (branch `pairs-oracle-sqlserver`), two or three tables; measured on EC2 for PostgreSQL and MariaDB; on AWS, Oracle 19c and SQL Server gain less: Oracle 19c, with the driver's in-flight index hint, 0 → 177-182 reads/s at four writers and 18% fewer at one; SQL Server, with the setup's kept statistics and `FORCESEEK` while rows are in flight, 420-511 reads/s at four writers and 254-259 at sixteen (`inflight-check.md`, run `20261024-1049`) |
 | Scalar subqueries, CTEs, past the copy limit | Table-wide check, as today | - |
 
@@ -420,7 +420,7 @@ A second run on the same AWS setup, 2026-10-21 16:01 to 16:48 (reports in
 CORR, OVER and DRIVER on the 12 aggregate, DISTINCT and paging queries, `plainCaseFilter=true`, 100
 and 10,000 rows in flight, three timed repetitions and one run with changed images each. The
 repetitions agree within a few percent; the figures are their medians. The working tree it ran
-from held another session's uncommitted `predicateChecks` property, off by default.
+from held another session's uncommitted `predicate_checks` property, off by default.
 
 **Correct everywhere.** With changed images, CORR and OVER return VIEW_LJ's rows on all seven
 databases at both counts. The only errors are SPLIT_DRVN's on the keyset and 3-table pages.

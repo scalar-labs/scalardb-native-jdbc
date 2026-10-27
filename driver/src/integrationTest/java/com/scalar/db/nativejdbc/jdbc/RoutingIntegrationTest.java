@@ -468,7 +468,7 @@ class RoutingIntegrationTest {
       }
     }
     Properties shortTtl = (Properties) props.clone();
-    shortTtl.setProperty("scalardbnative.catalogTtlMs", "300");
+    shortTtl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "300");
     try (Connection c = DriverManager.getConnection(url, shortTtl);
         PreparedStatement ps = c.prepareStatement("SELECT x FROM m1.late")) {
       assertThat(outcome(ps::executeQuery)).isEqualTo("read nothing"); // a plain table

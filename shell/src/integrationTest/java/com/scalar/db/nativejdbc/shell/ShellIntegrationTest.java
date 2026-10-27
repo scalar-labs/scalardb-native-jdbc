@@ -266,7 +266,7 @@ class ShellIntegrationTest {
         snsql(
             e,
             "--property",
-            "scalardbnative.allowNoCatalog=true",
+            "scalar.db.native_jdbc.allow_no_catalog=true",
             "-c",
             "\\c nope",
             "-c",
@@ -368,7 +368,7 @@ class ShellIntegrationTest {
             "--property",
             "password=" + e.password(),
             "--property",
-            "scalardbnative.catalogTtlMs=0"));
+            "scalar.db.native_jdbc.catalog_ttl_millis=0"));
     StringWriter out = new StringWriter();
     StringWriter err = new StringWriter();
     int exit =
@@ -396,7 +396,7 @@ class ShellIntegrationTest {
     Properties p = new Properties();
     p.setProperty("user", e.username());
     p.setProperty("password", e.password());
-    p.setProperty("scalardbnative.catalogTtlMs", "0");
+    p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "0");
     return p;
   }
 

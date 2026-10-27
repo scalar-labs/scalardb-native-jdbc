@@ -60,7 +60,7 @@ class DriverIntegrationTest {
   @Test
   void aDatabaseWithoutTheCatalog_isRefusedAtConnect_unlessAllowed() throws SQLException {
     Properties p = (Properties) credentials.clone();
-    p.setProperty("scalardbnative.metadataSchema", "nosuch");
+    p.setProperty("scalar.db.native_jdbc.metadata_schema", "nosuch");
     assertThatThrownBy(
             () -> {
               try (Connection c = DriverManager.getConnection(url, p)) {
@@ -72,7 +72,7 @@ class DriverIntegrationTest {
         .extracting("SQLState")
         .isEqualTo("08004");
     Properties allowed = (Properties) p.clone();
-    allowed.setProperty("scalardbnative.allowNoCatalog", "true");
+    allowed.setProperty("scalar.db.native_jdbc.allow_no_catalog", "true");
     try (Connection c = DriverManager.getConnection(url, allowed)) {
       assertThat(c.isValid(5)).isTrue();
     }
@@ -82,7 +82,7 @@ class DriverIntegrationTest {
               try (Connection c =
                   DriverManager.getConnection(
                       url
-                          + "?scalardbnative.metadataSchema=nosuch&scalardbnative.allowNoCatalog=true",
+                          + "?scalar.db.native_jdbc.metadata_schema=nosuch&scalar.db.native_jdbc.allow_no_catalog=true",
                       credentials)) {
                 c.isValid(1);
               }
@@ -130,7 +130,7 @@ class DriverIntegrationTest {
   @Test
   void connectionsToOneDatabaseAsOneUser_shareOneCatalog() throws SQLException {
     Properties p = (Properties) credentials.clone();
-    p.setProperty("scalardbnative.catalogTtlMs", "12345"); // a key no other test uses
+    p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "12345"); // a key no other test uses
     try (Connection a = DriverManager.getConnection(url, p)) {
       int after = NativeJdbcDriver.catalogCount();
       try (Connection b = DriverManager.getConnection(url, p)) {
@@ -142,7 +142,7 @@ class DriverIntegrationTest {
   @Test
   void getPropertyInfo_listsTheDriversPropertiesFirst() throws SQLException {
     DriverPropertyInfo[] infos = DriverManager.getDriver(url).getPropertyInfo(url, credentials);
-    assertThat(infos[0].name).isEqualTo("scalardbnative.metadataSchema");
+    assertThat(infos[0].name).isEqualTo("scalar.db.native_jdbc.metadata_schema");
     assertThat(infos).extracting(i -> i.name).contains("user"); // pgjdbc's own follow
   }
 }

@@ -11,23 +11,23 @@ import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The driver's own properties, {@code scalardbnative.*}, read from the connect {@link Properties}
- * and, for the two that cannot weaken the protection ({@code catalogTtlMs}, {@code
- * inflightWaitMs}), also from the URL's parameters, a URL parameter winning as the vendor drivers
- * do. They are removed before the rest is handed to the vendor driver (design section 1, "URL
- * scheme").
+ * The driver's own properties, {@code scalar.db.native_jdbc.*}, read from the connect {@link
+ * Properties} and, for the two that cannot weaken the protection ({@code catalog_ttl_millis},
+ * {@code inflight_wait_millis}), also from the URL's parameters, a URL parameter winning as the
+ * vendor drivers do. They are removed before the rest is handed to the vendor driver (design
+ * section 1, "URL scheme").
  */
 final class DriverProperties {
 
   /** The prefix of every property of this driver. */
-  static final String PREFIX = "scalardbnative.";
+  static final String PREFIX = "scalar.db.native_jdbc.";
 
-  static final String METADATA_SCHEMA = PREFIX + "metadataSchema";
-  static final String COORDINATOR_NAMESPACE = PREFIX + "coordinatorNamespace";
-  static final String CATALOG_TTL_MS = PREFIX + "catalogTtlMs";
-  static final String ALLOW_NO_CATALOG = PREFIX + "allowNoCatalog";
-  static final String INFLIGHT_WAIT_MS = PREFIX + "inflightWaitMs";
-  static final String PREDICATE_CHECKS = PREFIX + "predicateChecks";
+  static final String METADATA_SCHEMA = PREFIX + "metadata_schema";
+  static final String COORDINATOR_NAMESPACE = PREFIX + "coordinator_namespace";
+  static final String CATALOG_TTL_MS = PREFIX + "catalog_ttl_millis";
+  static final String ALLOW_NO_CATALOG = PREFIX + "allow_no_catalog";
+  static final String INFLIGHT_WAIT_MS = PREFIX + "inflight_wait_millis";
+  static final String PREDICATE_CHECKS = PREFIX + "predicate_checks";
 
   private static final Set<String> KNOWN =
       Set.of(

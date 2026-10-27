@@ -295,8 +295,8 @@ class OracleOltpIntegrationTest {
   @Test
   void form2KeyedWriteAsOneBlock() throws Exception {
     Properties waits = new Properties();
-    waits.setProperty("scalardbnative.inflightWaitMs", "10000");
-    waits.setProperty("scalardbnative.catalogTtlMs", "60000");
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "10000");
+    waits.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "60000");
     try (Connection d = driver();
         Connection other = driver();
         Connection waiting = ORA.openDriver(waits);
@@ -682,7 +682,7 @@ class OracleOltpIntegrationTest {
     // a catalog TTL, so that the INSERT's plan, which reads the table's columns and triggers, is
     // made once at prepare rather than again at each execute (the fixture's TTL of 0 re-plans)
     Properties ttl = new Properties();
-    ttl.setProperty("scalardbnative.catalogTtlMs", "60000");
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "60000");
     try (Connection d = ORA.openDriver(ttl);
         Connection v = ORA.open();
         TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
@@ -862,10 +862,10 @@ class OracleOltpIntegrationTest {
   @Test
   void form4BatchesAsOneBlock() throws Exception {
     Properties ttl = new Properties();
-    ttl.setProperty("scalardbnative.catalogTtlMs", "60000");
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "60000");
     Properties waits = new Properties();
     waits.putAll(ttl);
-    waits.setProperty("scalardbnative.inflightWaitMs", "10000");
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "10000");
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try (Connection d = ORA.openDriver(ttl);
         Connection waiting = ORA.openDriver(waits);
@@ -1036,7 +1036,7 @@ class OracleOltpIntegrationTest {
   @Test
   void form5LockingReadAsOneStatement() throws Exception {
     Properties ttl = new Properties();
-    ttl.setProperty("scalardbnative.catalogTtlMs", "60000");
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "60000");
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try (Connection d = ORA.openDriver(ttl);
         Connection other = ORA.openDriver(ttl);
@@ -1355,7 +1355,7 @@ class OracleOltpIntegrationTest {
    */
   private static Connection driver() throws SQLException {
     Properties ttl = new Properties();
-    ttl.setProperty("scalardbnative.catalogTtlMs", "60000");
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "60000");
     return ORA.openDriver(ttl);
   }
 
@@ -1587,7 +1587,7 @@ class OracleOltpIntegrationTest {
       if (binary) {
         p.setProperty("oracle.jdbc.SetFloatAndDoubleUseBinary", "true");
       }
-      p.setProperty("scalardbnative.catalogTtlMs", "600000");
+      p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "600000");
       int base = binary ? 2000 : 1000;
       try (Connection d = ORA.openDriver(p);
           Connection v = ORA.open()) {
@@ -1870,7 +1870,7 @@ class OracleOltpIntegrationTest {
     int n = Integer.getInteger("nativejdbc.oracle.neworder", 0);
     Assumptions.assumeTrue(n > 0, "-Dnativejdbc.oracle.neworder not set");
     Properties p = new Properties();
-    p.setProperty("scalardbnative.catalogTtlMs", "600000");
+    p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "600000");
     p.setProperty("oracle.jdbc.implicitStatementCacheSize", "128");
     try (Connection d = ORA.openDriver(p)) {
       d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);

@@ -459,7 +459,7 @@ kept on runs 1 and 3, automatic on 2 and 4), reads committed/s with the check on
 
 ## Reads beside ScalarDB writers (stage 1, one table)
 
-`scalardbnative.predicateChecks` (design 4.2, the predicate's check) off and on:
+`scalar.db.native_jdbc.predicate_checks` (design 4.2, the predicate's check) off and on:
 `-Dnativejdbc.bench.writers=true`. Four driver transactions at SNAPSHOT, each two grouped reads
 `SELECT region, SUM(amount) FROM o WHERE region = ? GROUP BY region` by a random region, retried
 on `40001`, for 10 s, alongside ScalarDB writers updating random rows of `o`. Committed

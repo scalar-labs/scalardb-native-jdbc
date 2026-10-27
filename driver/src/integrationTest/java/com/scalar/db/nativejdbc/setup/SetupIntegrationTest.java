@@ -305,7 +305,7 @@ class SetupIntegrationTest {
     }
     p.setProperty("password", e.password());
     // a catalog of its own, read afresh on every lookup
-    p.setProperty("scalardbnative.catalogTtlMs", "0");
+    p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "0");
     String url = "jdbc:scalardb-native:" + e.url().substring("jdbc:".length());
     try (Connection c = DriverManager.getConnection(url, p);
         Statement st = c.createStatement();

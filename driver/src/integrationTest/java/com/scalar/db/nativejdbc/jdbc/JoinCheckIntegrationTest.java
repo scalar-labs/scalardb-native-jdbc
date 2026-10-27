@@ -35,11 +35,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * With {@code scalardbnative.predicateChecks}, a join or a semi-join of ScalarDB tables that takes
- * the per-table check at SNAPSHOT, and at SERIALIZABLE on PostgreSQL, aborts on a row in flight
- * only where a combination of the tables' pieces with that row, by its before image or its after
- * image, gives the statement a row (design 4.2, the in-flight pairs), on every engine but MySQL: a
- * row in flight on either side, on both, moved out of the predicate, inserted, deleted; a
+ * With {@code scalar.db.native_jdbc.predicate_checks}, a join or a semi-join of ScalarDB tables
+ * that takes the per-table check at SNAPSHOT, and at SERIALIZABLE on PostgreSQL, aborts on a row in
+ * flight only where a combination of the tables' pieces with that row, by its before image or its
+ * after image, gives the statement a row (design 4.2, the in-flight pairs), on every engine but
+ * MySQL: a row in flight on either side, on both, moved out of the predicate, inserted, deleted; a
  * placeholder's value; comma and CROSS joins, a star. An outer join, an anti-join, USING, an IN
  * under an OR and a WITH clause keep the table-wide check, and so does MySQL. Orders 1 to 10 are in
  * region 'a', 11 to 20 in 'b', order i of customer i, amount i; customer i of tier i % 2.
@@ -359,7 +359,7 @@ class JoinCheckIntegrationTest {
 
   private static Connection driver(Engines e, boolean predicateChecks) throws Exception {
     Properties p = new Properties();
-    p.setProperty("scalardbnative.predicateChecks", Boolean.toString(predicateChecks));
+    p.setProperty("scalar.db.native_jdbc.predicate_checks", Boolean.toString(predicateChecks));
     return e.openDriver(p);
   }
 

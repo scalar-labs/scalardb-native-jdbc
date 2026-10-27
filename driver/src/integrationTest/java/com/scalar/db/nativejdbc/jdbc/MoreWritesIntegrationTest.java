@@ -1316,7 +1316,7 @@ class MoreWritesIntegrationTest {
   private static void inFlightWait(Engines e, TwoPhaseCommitTransactionManager tpc, Table t)
       throws Exception {
     Properties waits = new Properties();
-    waits.setProperty("scalardbnative.inflightWaitMs", "20000");
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "20000");
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try (Connection d = e.openDriver(waits)) {
       // rolled back while the write waits: the write goes on, on the committed row
@@ -1349,7 +1349,7 @@ class MoreWritesIntegrationTest {
       pool.shutdownNow();
     }
     // the wait runs out: an abort once it has
-    waits.setProperty("scalardbnative.inflightWaitMs", "500");
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "500");
     TwoPhaseCommitTransaction held = prepared(tpc, t, 3, "held");
     try (Connection d = e.openDriver(waits)) {
       long start = System.nanoTime();
@@ -1646,7 +1646,7 @@ class MoreWritesIntegrationTest {
     }
     // 153: a cancel during the bounded wait ends the statement, and nothing is written
     Properties waits = new Properties();
-    waits.setProperty("scalardbnative.inflightWaitMs", "20000");
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "20000");
     ExecutorService one = Executors.newSingleThreadExecutor();
     TwoPhaseCommitTransaction held = prepared(tpc, t, 62, "held");
     try (Connection d = e.openDriver(waits)) {
@@ -1732,7 +1732,7 @@ class MoreWritesIntegrationTest {
       Engines e, TwoPhaseCommitTransactionManager tpc, Table t, boolean oneStatement)
       throws Exception {
     Properties waits = new Properties();
-    waits.setProperty("scalardbnative.inflightWaitMs", "20000");
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "20000");
     ExecutorService pool = Executors.newCachedThreadPool();
     try (Connection d = e.openDriver(waits);
         Connection locker = e.open();

@@ -45,7 +45,7 @@ public final class NativeJdbcDriver implements Driver {
    * pool must not hand a connection out with it on; a statement that names a ScalarDB table is
    * refused still (todo 323). Never read from the URL or the connect properties.
    */
-  public static final String PASSTHROUGH = "scalardbnative.passthrough";
+  public static final String PASSTHROUGH = "scalar.db.native_jdbc.passthrough";
 
   private static final String SQLSTATE_UNABLE_TO_CONNECT = "08001";
 

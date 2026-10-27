@@ -87,7 +87,8 @@ class RouteCostBenchmark {
     }
     // the driver's own catalog TTL, not the tests' 0, which reads the catalog on every route
     Properties ttl = new Properties();
-    ttl.setProperty("scalardbnative.catalogTtlMs", String.valueOf(Catalog.DEFAULT_TTL.toMillis()));
+    ttl.setProperty(
+        "scalar.db.native_jdbc.catalog_ttl_millis", String.valueOf(Catalog.DEFAULT_TTL.toMillis()));
     StringBuilder out =
         new StringBuilder(
             "\n"

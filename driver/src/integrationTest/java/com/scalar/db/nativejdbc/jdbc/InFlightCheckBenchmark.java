@@ -1502,8 +1502,8 @@ class InFlightCheckBenchmark {
   /**
    * With {@code -Dnativejdbc.bench.writers=true} only: {@link #READERS} driver transactions at
    * SNAPSHOT, each two grouped reads of o by a random region, retried on {@code 40001}, alongside
-   * ScalarDB writers on o, with {@code scalardbnative.predicateChecks} off and on; written to
-   * {@code build/bench/inflight-writers-<engine>.md}. With {@code
+   * ScalarDB writers on o, with {@code scalar.db.native_jdbc.predicate_checks} off and on; written
+   * to {@code build/bench/inflight-writers-<engine>.md}. With {@code
    * -Dnativejdbc.bench.writersRead=join} as well, the reads are of o JOIN c on c.id = o.cid and the
    * writers write both tables; written to {@code build/bench/inflight-writers-<engine>-join.md}.
    */
@@ -1567,10 +1567,10 @@ class InFlightCheckBenchmark {
       @Nullable StringBuilder breakdown)
       throws Exception {
     Properties props = new Properties();
-    props.setProperty("scalardbnative.predicateChecks", Boolean.toString(on));
+    props.setProperty("scalar.db.native_jdbc.predicate_checks", Boolean.toString(on));
     // the driver's own catalog TTL, not the tests' 0, which reads the catalog on every route
     props.setProperty(
-        "scalardbnative.catalogTtlMs", String.valueOf(Catalog.DEFAULT_TTL.toMillis()));
+        "scalar.db.native_jdbc.catalog_ttl_millis", String.valueOf(Catalog.DEFAULT_TTL.toMillis()));
     String sql =
         JOIN_READ
             ? "SELECT o.region, SUM(o.amount) FROM ck.o o JOIN ck.c c ON c.id = o.cid"

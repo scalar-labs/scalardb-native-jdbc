@@ -297,7 +297,7 @@ public final class MaelstromNode {
     Connection c = CONNECTIONS.get();
     if (c == null || c.isClosed()) {
       Properties p = new Properties();
-      p.setProperty("scalardbnative.catalogTtlMs", "60000");
+      p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "60000");
       c = vendor ? engine.open() : engine.openDriver(p);
       c.setTransactionIsolation(level);
       c.setAutoCommit(false);
@@ -311,7 +311,7 @@ public final class MaelstromNode {
     Connection c = READ_ONLY.get();
     if (c == null || c.isClosed()) {
       Properties p = new Properties();
-      p.setProperty("scalardbnative.catalogTtlMs", "60000");
+      p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "60000");
       c = vendor ? engine.open() : engine.openDriver(p);
       c.setTransactionIsolation(readOnlyLevel);
       c.setReadOnly(true);

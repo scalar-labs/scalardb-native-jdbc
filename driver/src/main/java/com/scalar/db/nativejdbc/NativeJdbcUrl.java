@@ -94,7 +94,10 @@ public final class NativeJdbcUrl {
     return new NativeJdbcUrl(subProtocol, vendor, Map.copyOf(driverParameters));
   }
 
-  /** {@code ?a=b&scalardbnative.x=y}: removes the driver's keys, keeps the vendor's as written. */
+  /**
+   * {@code ?a=b&scalar.db.native_jdbc.x=y}: removes the driver's keys, keeps the vendor's as
+   * written.
+   */
   private static String extractQueryParameters(String url, Map<String, String> into) {
     int q = url.indexOf('?');
     if (q < 0) {
@@ -124,9 +127,9 @@ public final class NativeJdbcUrl {
   }
 
   /**
-   * SQL Server's {@code ;a=b;scalardbnative.x=y}: removes the driver's keys, reading the URL the
-   * way mssql-jdbc does: a value is braced only when its first non-blank character is {@code {};
-   * inside braces {@code }}} is a literal {@code }} and a single {@code }} closes; after the
+   * SQL Server's {@code ;a=b;scalar.db.native_jdbc.x=y}: removes the driver's keys, reading the URL
+   * the way mssql-jdbc does: a value is braced only when its first non-blank character is {@code
+   * {}; inside braces {@code }}} is a literal {@code }} and a single {@code }} closes; after the
    * closing brace only blanks may come before the next {@code ;}. A URL that breaks these rules is
    * refused rather than split in a place the vendor driver would not split it.
    */
@@ -217,7 +220,7 @@ public final class NativeJdbcUrl {
 
   /**
    * Returns the vendor driver's URL: the given URL with this driver's prefix replaced by {@code
-   * jdbc:} and this driver's own {@code scalardbnative.*} parameters removed.
+   * jdbc:} and this driver's own {@code scalar.db.native_jdbc.*} parameters removed.
    *
    * @return the vendor URL
    */
@@ -226,8 +229,8 @@ public final class NativeJdbcUrl {
   }
 
   /**
-   * Returns this driver's own parameters found in the URL, {@code scalardbnative.*} keys in the
-   * vendor's parameter syntax ({@code ?a=b&c=d}, or {@code ;a=b} for SQL Server).
+   * Returns this driver's own parameters found in the URL, {@code scalar.db.native_jdbc.*} keys in
+   * the vendor's parameter syntax ({@code ?a=b&c=d}, or {@code ;a=b} for SQL Server).
    *
    * @return the parameters, keys with their prefix
    */

@@ -36,7 +36,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * With {@code scalardbnative.predicateChecks}, a read of one ScalarDB table that takes the
+ * With {@code scalar.db.native_jdbc.predicate_checks}, a read of one ScalarDB table that takes the
  * per-table check at SNAPSHOT, and at SERIALIZABLE on PostgreSQL, aborts on a row in flight only
  * where its predicate matches the row's before image or its after image (design 4.2): a prepared
  * update, one that moves a row out of the predicate, an insert, a delete, a NULL; a placeholder's
@@ -213,7 +213,7 @@ class PredicateCheckIntegrationTest {
 
   private static Connection driver(Engines e, boolean predicateChecks) throws Exception {
     Properties p = new Properties();
-    p.setProperty("scalardbnative.predicateChecks", Boolean.toString(predicateChecks));
+    p.setProperty("scalar.db.native_jdbc.predicate_checks", Boolean.toString(predicateChecks));
     return e.openDriver(p);
   }
 

@@ -102,7 +102,7 @@ class JdbcSampleIntegrationTest {
     config.setMaximumPoolSize(4);
     // the table was imported moments ago, in this JVM: in place of the restart of the application
     // that the README asks for after adding a table (todo 298), no loaded catalog is trusted
-    config.addDataSourceProperty("scalardbnative.catalogTtlMs", "0");
+    config.addDataSourceProperty("scalar.db.native_jdbc.catalog_ttl_millis", "0");
     try (HikariDataSource ds = new HikariDataSource(config);
         DistributedTransactionManager tm = e.scalarDb().getTransactionManager();
         TwoPhaseCommitTransactionManager tpc = e.scalarDb().getTwoPhaseCommitTransactionManager()) {

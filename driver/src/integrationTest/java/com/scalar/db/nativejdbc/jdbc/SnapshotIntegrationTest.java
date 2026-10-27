@@ -189,7 +189,7 @@ class SnapshotIntegrationTest {
     boolean coarse = !pg && level == Connection.TRANSACTION_SERIALIZABLE;
     String duplicate = pg ? "23505" : "23000";
     Properties waits = new Properties();
-    waits.setProperty("scalardbnative.inflightWaitMs", "5000");
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "5000");
     try (Connection d = e.openDriver(waits)) {
       d.setTransactionIsolation(level);
       d.setAutoCommit(false);
@@ -425,11 +425,11 @@ class SnapshotIntegrationTest {
 
         // passthrough may set the level in SQL; the driver follows the session (todo 184)
         d.setAutoCommit(true);
-        d.setClientInfo("scalardbnative.passthrough", "true");
+        d.setClientInfo("scalar.db.native_jdbc.passthrough", "true");
         try (Statement st = d.createStatement()) {
           st.execute("SELECT set_config('default_transaction_isolation', 'read committed', false)");
         }
-        d.setClientInfo("scalardbnative.passthrough", "false");
+        d.setClientInfo("scalar.db.native_jdbc.passthrough", "false");
         assertThat(d.nativeSQL("SELECT x FROM " + SN + ".t WHERE id = 1"))
             .as("%s: read as READ COMMITTED after passthrough", at)
             .doesNotContain("\"scalardb_native_meta\".\"tx_state\"");
@@ -459,7 +459,7 @@ class SnapshotIntegrationTest {
         // passthrough may set the level in SQL here too (todos 222, 232): SERIALIZABLE as
         // setTransactionIsolation sets it, REPEATABLE READ as SNAPSHOT
         d.setAutoCommit(true);
-        d.setClientInfo("scalardbnative.passthrough", "true");
+        d.setClientInfo("scalar.db.native_jdbc.passthrough", "true");
         try (Statement st = d.createStatement()) {
           st.execute("SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE");
           assertThat(d.getTransactionIsolation())
@@ -479,7 +479,7 @@ class SnapshotIntegrationTest {
           assertThat(d.getTransactionIsolation())
               .as("%s: after SET TRANSACTION", at)
               .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
-          d.setClientInfo("scalardbnative.passthrough", "false");
+          d.setClientInfo("scalar.db.native_jdbc.passthrough", "false");
           d.setAutoCommit(false);
           rows(d, text);
           assertThat(
@@ -491,7 +491,7 @@ class SnapshotIntegrationTest {
               .containsExactly("REPEATABLE READ");
           d.rollback();
           d.setAutoCommit(true);
-          d.setClientInfo("scalardbnative.passthrough", "true");
+          d.setClientInfo("scalar.db.native_jdbc.passthrough", "true");
           // the level is read, not the text, which may start with a comment (todo 249)
           st.execute("/* note */ SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ");
           assertThat(d.getTransactionIsolation())
@@ -499,7 +499,7 @@ class SnapshotIntegrationTest {
               .isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
           st.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
         }
-        d.setClientInfo("scalardbnative.passthrough", "false");
+        d.setClientInfo("scalar.db.native_jdbc.passthrough", "false");
         assertThat(d.nativeSQL(text))
             .as("%s: read as READ COMMITTED after passthrough", at)
             .isNotEqualTo(snapshotText);
@@ -947,7 +947,7 @@ class SnapshotIntegrationTest {
       Engines e, Connection d, int level, String at, String text, String snapshotText)
       throws Exception {
     d.setAutoCommit(true);
-    d.setClientInfo("scalardbnative.passthrough", "true");
+    d.setClientInfo("scalar.db.native_jdbc.passthrough", "true");
     try (Statement st = d.createStatement()) {
       st.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
       assertThat(d.getTransactionIsolation())
@@ -959,16 +959,16 @@ class SnapshotIntegrationTest {
           .isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
       st.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
     }
-    d.setClientInfo("scalardbnative.passthrough", "false");
+    d.setClientInfo("scalar.db.native_jdbc.passthrough", "false");
     assertThat(d.nativeSQL(text))
         .as("%s: read as READ COMMITTED after passthrough", at)
         .isNotEqualTo(snapshotText);
     // SQL Server's own REPEATABLE READ locks and has no snapshot: refused
-    d.setClientInfo("scalardbnative.passthrough", "true");
+    d.setClientInfo("scalar.db.native_jdbc.passthrough", "true");
     try (Statement st = d.createStatement()) {
       st.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
     }
-    d.setClientInfo("scalardbnative.passthrough", "false");
+    d.setClientInfo("scalar.db.native_jdbc.passthrough", "false");
     assertThatThrownBy(() -> rows(d, text))
         .as("%s: at SQL Server's REPEATABLE READ", at)
         .isInstanceOf(SQLFeatureNotSupportedException.class);
@@ -978,18 +978,18 @@ class SnapshotIntegrationTest {
     assertThat(rows(d, session)).as("%s: at SNAPSHOT again", at).containsExactly("5");
     // SERIALIZABLE runs at SNAPSHOT, which naming SQL Server's own SERIALIZABLE keeps
     if (level == Connection.TRANSACTION_SERIALIZABLE) {
-      d.setClientInfo("scalardbnative.passthrough", "true");
+      d.setClientInfo("scalar.db.native_jdbc.passthrough", "true");
       try (Statement st = d.createStatement()) {
         st.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
       }
-      d.setClientInfo("scalardbnative.passthrough", "false");
+      d.setClientInfo("scalar.db.native_jdbc.passthrough", "false");
       assertThat(d.getTransactionIsolation())
           .as("%s: SERIALIZABLE set in SQL", at)
           .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
       assertThat(rows(d, session)).as("%s: run at SNAPSHOT", at).containsExactly("5");
       // a statement that names the level and sets none keeps SERIALIZABLE; SNAPSHOT named is
       // followed, as REPEATABLE READ (todo 273)
-      d.setClientInfo("scalardbnative.passthrough", "true");
+      d.setClientInfo("scalar.db.native_jdbc.passthrough", "true");
       try (Statement st = d.createStatement()) {
         st.execute("SELECT 'isolation' AS word");
         assertThat(d.getTransactionIsolation())
@@ -1000,7 +1000,7 @@ class SnapshotIntegrationTest {
             .as("%s: SNAPSHOT set in SQL at SERIALIZABLE", at)
             .isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
       }
-      d.setClientInfo("scalardbnative.passthrough", "false");
+      d.setClientInfo("scalar.db.native_jdbc.passthrough", "false");
       d.setTransactionIsolation(level);
     }
 

@@ -210,7 +210,7 @@ class SerializableIntegrationTest {
     assumeTrue(e.engine() == Engine.ORACLE, "Oracle only");
     // refused, Oracle's SERIALIZABLE being snapshot isolation: REPEATABLE READ is that (design 5)
     Properties none = new Properties();
-    none.setProperty("scalardbnative.allowNoCatalog", "true");
+    none.setProperty("scalar.db.native_jdbc.allow_no_catalog", "true");
     try (Connection c = e.openDriver(none)) {
       assertThatThrownBy(() -> c.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE))
           .isInstanceOf(SQLFeatureNotSupportedException.class)

@@ -68,7 +68,7 @@ public final class Main implements Callable<Integer> {
   static final int EXIT_FOUND = 1;
   static final int EXIT_ERROR = 2;
 
-  private static final String METADATA_SCHEMA = "scalardbnative.metadataSchema";
+  private static final String METADATA_SCHEMA = "scalar.db.native_jdbc.metadata_schema";
   private static final String PASSWORD_ENV = "SCALARDB_NATIVE_PASSWORD";
 
   /** What the command does. */
@@ -129,7 +129,7 @@ public final class Main implements Callable<Integer> {
       paramLabel = "SECONDS",
       description =
           "setup: how long the applications' drivers trust ScalarDB's catalog, their"
-              + " scalardbnative.catalogTtlMs in seconds, rounded up, to wait out after a new table;"
+              + " scalar.db.native_jdbc.catalog_ttl_millis in seconds, rounded up, to wait out after a new table;"
               + " 0 to 3600 (default: 60)")
   private long catalogTtl = Catalog.DEFAULT_TTL.toSeconds();
 
@@ -207,7 +207,7 @@ public final class Main implements Callable<Integer> {
       throw new IllegalArgumentException(
           "--catalog-ttl is between 0 and "
               + Catalog.MAX_TTL.toSeconds()
-              + " seconds, as the driver's catalogTtlMs is");
+              + " seconds, as the driver's catalog_ttl_millis is");
     }
     int exit = connectAndRun();
     // after the connections closed: the wait holds none (todo 298)

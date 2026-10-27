@@ -328,7 +328,7 @@ class BankIntegrationTest {
         c = e.open();
       } else {
         Properties p = new Properties();
-        p.setProperty("scalardbnative.catalogTtlMs", catalogTtl);
+        p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", catalogTtl);
         c = e.openDriver(p);
       }
       c.setTransactionIsolation(level.jdbc);

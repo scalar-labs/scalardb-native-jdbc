@@ -525,7 +525,7 @@ class DecoupledReadCommittedIntegrationTest {
   @Test
   void form2_theKeyedWriteThroughTheDriver() throws Exception {
     java.util.Properties waits = new java.util.Properties();
-    waits.setProperty("scalardbnative.inflightWaitMs", "10000");
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "10000");
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try (Connection d = PG.openDriver();
         Connection other = PG.openDriver();

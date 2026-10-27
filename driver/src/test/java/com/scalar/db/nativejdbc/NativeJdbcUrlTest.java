@@ -51,34 +51,36 @@ class NativeJdbcUrlTest {
   void driverParameters_areTakenOutOfTheVendorUrl() {
     NativeJdbcUrl pg =
         NativeJdbcUrl.parse(
-            "jdbc:scalardb-native:postgresql://h/db?ssl=true&scalardbnative.inflightWaitMs=50"
-                + "&scalardbnative.catalogTtlMs=1000");
+            "jdbc:scalardb-native:postgresql://h/db?ssl=true&scalar.db.native_jdbc.inflight_wait_millis=50"
+                + "&scalar.db.native_jdbc.catalog_ttl_millis=1000");
     assertThat(pg.vendorUrl()).isEqualTo("jdbc:postgresql://h/db?ssl=true");
     assertThat(pg.driverParameters())
-        .containsEntry("scalardbnative.inflightWaitMs", "50")
-        .containsEntry("scalardbnative.catalogTtlMs", "1000");
+        .containsEntry("scalar.db.native_jdbc.inflight_wait_millis", "50")
+        .containsEntry("scalar.db.native_jdbc.catalog_ttl_millis", "1000");
 
     NativeJdbcUrl only =
-        NativeJdbcUrl.parse("jdbc:scalardb-native:mysql://h/db?scalardbnative.allowNoCatalog=true");
+        NativeJdbcUrl.parse(
+            "jdbc:scalardb-native:mysql://h/db?scalar.db.native_jdbc.allow_no_catalog=true");
     assertThat(only.vendorUrl()).isEqualTo("jdbc:mysql://h/db");
 
     NativeJdbcUrl mssql =
         NativeJdbcUrl.parse(
             "jdbc:scalardb-native:sqlserver://h:1433;databaseName=db;"
-                + "scalardbnative.metadataSchema=meta;encrypt=false");
+                + "scalar.db.native_jdbc.metadata_schema=meta;encrypt=false");
     assertThat(mssql.vendorUrl())
         .isEqualTo("jdbc:sqlserver://h:1433;databaseName=db;encrypt=false");
-    assertThat(mssql.driverParameters()).containsEntry("scalardbnative.metadataSchema", "meta");
+    assertThat(mssql.driverParameters())
+        .containsEntry("scalar.db.native_jdbc.metadata_schema", "meta");
 
     // a braced SQL Server value is one value: nothing inside it is taken for a driver key
     NativeJdbcUrl braced =
         NativeJdbcUrl.parse(
             "jdbc:scalardb-native:sqlserver://h;databaseName=db;"
-                + "password={a;scalardbnative.allowNoCatalog=true;b};encrypt=false");
+                + "password={a;scalar.db.native_jdbc.allow_no_catalog=true;b};encrypt=false");
     assertThat(braced.vendorUrl())
         .isEqualTo(
             "jdbc:sqlserver://h;databaseName=db;"
-                + "password={a;scalardbnative.allowNoCatalog=true;b};encrypt=false");
+                + "password={a;scalar.db.native_jdbc.allow_no_catalog=true;b};encrypt=false");
     assertThat(braced.driverParameters()).isEmpty();
 
     NativeJdbcUrl none = NativeJdbcUrl.parse("jdbc:scalardb-native:postgresql://h/db?ssl=true");
@@ -91,17 +93,18 @@ class NativeJdbcUrlTest {
     // }} inside braces is a literal }: everything up to the real closing brace is the password
     NativeJdbcUrl escaped =
         NativeJdbcUrl.parse(
-            "jdbc:scalardb-native:sqlserver://h;password={a}};scalardbnative.catalogTtlMs=1;"
+            "jdbc:scalardb-native:sqlserver://h;password={a}};scalar.db.native_jdbc.catalog_ttl_millis=1;"
                 + "x=};encrypt=false");
     assertThat(escaped.driverParameters()).isEmpty();
     assertThat(escaped.vendorUrl())
         .isEqualTo(
-            "jdbc:sqlserver://h;password={a}};scalardbnative.catalogTtlMs=1;x=};encrypt=false");
+            "jdbc:sqlserver://h;password={a}};scalar.db.native_jdbc.catalog_ttl_millis=1;x=};encrypt=false");
     // a brace not at the start of a value is an ordinary character
     NativeJdbcUrl inner =
         NativeJdbcUrl.parse(
-            "jdbc:scalardb-native:sqlserver://h;applicationName=a{b;scalardbnative.catalogTtlMs=1");
-    assertThat(inner.driverParameters()).containsEntry("scalardbnative.catalogTtlMs", "1");
+            "jdbc:scalardb-native:sqlserver://h;applicationName=a{b;scalar.db.native_jdbc.catalog_ttl_millis=1");
+    assertThat(inner.driverParameters())
+        .containsEntry("scalar.db.native_jdbc.catalog_ttl_millis", "1");
     // an unclosed brace, or text after a closing one, is refused
     assertThatThrownBy(() -> NativeJdbcUrl.parse("jdbc:scalardb-native:sqlserver://h;password={a"))
         .isInstanceOf(IllegalArgumentException.class)
@@ -116,7 +119,7 @@ class NativeJdbcUrlTest {
     assertThatThrownBy(
             () ->
                 NativeJdbcUrl.parse(
-                    "jdbc:scalardb-native:mysql://u:p?scalardbnative.catalogTtlMs=1@h/db"))
+                    "jdbc:scalardb-native:mysql://u:p?scalar.db.native_jdbc.catalog_ttl_millis=1@h/db"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("ambiguous");
     // a query after the path may hold an '@', as in a user name

@@ -147,7 +147,8 @@ class WriteCorpusIntegrationTest {
     System.out.printf(
         Locale.ROOT, "WriteCorpusIntegrationTest %s: -Dnativejdbc.seed=%d%n", engine, seed);
     Properties noWait = new Properties();
-    noWait.setProperty("scalardbnative.inflightWaitMs", "0"); // a row in flight aborts at once
+    noWait.setProperty(
+        "scalar.db.native_jdbc.inflight_wait_millis", "0"); // a row in flight aborts at once
     List<TwoPhaseCommitTransaction> held = new ArrayList<>();
     Map<String, Set<List<String>>> heldKeys = new HashMap<>();
     Map<String, Integer> abortsByLayout = new HashMap<>();

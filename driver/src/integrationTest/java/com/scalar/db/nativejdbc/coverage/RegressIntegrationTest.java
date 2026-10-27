@@ -245,7 +245,8 @@ class RegressIntegrationTest {
           new Random(seed),
           held,
           new HashMap<>());
-      noWait.setProperty("scalardbnative.inflightWaitMs", "0"); // a row in flight aborts at once
+      noWait.setProperty(
+          "scalar.db.native_jdbc.inflight_wait_millis", "0"); // a row in flight aborts at once
       try (Connection c = e.open()) {
         for (String t : IMPORTED) {
           String states =

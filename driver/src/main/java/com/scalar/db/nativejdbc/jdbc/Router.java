@@ -505,7 +505,8 @@ final class Router {
   // the checks that found a row in flight in the open transaction's snapshot, which keeps it:
   // not run again, the predicate's check run at once
   private final Set<String> found = new HashSet<>();
-  // scalardbnative.predicateChecks: a read of one table checks its predicate's rows in flight
+  // scalar.db.native_jdbc.predicate_checks: a read of one table checks its predicate's rows in
+  // flight
   // before it aborts on its table's
   private final boolean predicateChecks;
 
@@ -1929,10 +1930,10 @@ final class Router {
   }
 
   /**
-   * With {@code scalardbnative.predicateChecks}, for a read of one ScalarDB table alone with a pure
-   * predicate on its own columns, the check for rows in flight that predicate matches by either
-   * image (design 4.2): a row in flight neither image brings into the statement's rows changes
-   * nothing, whichever is true. Null otherwise.
+   * With {@code scalar.db.native_jdbc.predicate_checks}, for a read of one ScalarDB table alone
+   * with a pure predicate on its own columns, the check for rows in flight that predicate matches
+   * by either image (design 4.2): a row in flight neither image brings into the statement's rows
+   * changes nothing, whichever is true. Null otherwise.
    */
   private Writes.@Nullable Step fallback(
       SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {

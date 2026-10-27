@@ -105,7 +105,7 @@ public final class Main implements Callable<Integer> {
   @Option(
       names = "--property",
       paramLabel = "KEY=VALUE",
-      description = "a connect property, for the vendor driver or scalardbnative.*")
+      description = "a connect property, for the vendor driver or scalar.db.native_jdbc.*")
   private Map<String, String> properties = new LinkedHashMap<>();
 
   @Option(
