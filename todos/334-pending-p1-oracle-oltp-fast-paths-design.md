@@ -1709,3 +1709,40 @@ all engines, so the whole suite is the regression net, and these are the ones to
 **The design's own text.** At the merge, the architecture bullet of design section 1 gains:
 "the result set's `next`, `wasNull` and the common getters are called on the vendor object
 directly, everything else through reflection (todo 334)"; nothing else in the design changes.
+
+### 2026-10-28: 6865e55 reviewed, the fast path built as designed (the design's note)
+
+c7's 6865e55 on `result-set-fast-path` (based on f26cdde; 25c52e4 after it, test fixes only: SQL
+Server's `WITH (UPDLOCK)` in `InlineIntegrationTest`'s inline whole-row lock loop, which sent `FOR
+UPDATE` there, and the SpotBugs suppressions of todo 335's two findings), read from `git show`:
+mergeable as it is, the user deciding the landing.
+
+- `Proxies.getter(rs, name, i)`: the fourteen getters, `NONE` otherwise, shared by the three
+  handlers. `AnchoredHandler`: `next()` and `wasNull()` direct under `failed`, `next` then
+  `rowReached(rs)`, the row hook factored and still reached by `previous`, `first`, `last`,
+  `absolute`, `relative` through the generic path (its guard, `anchors != null || states`, moved
+  inside the hook, equivalent); a one-argument getter by index or label resolved once with the
+  vendor's `findColumn`, the bound check `22023` before the call, the call under `failed`, a
+  `ResultSet` result wrapped. `ChildHandler`: the same through `direct`, on result sets only (it
+  wraps metadata too), under `failed`. `BooleanColumns`: `next`, `wasNull` and the getters by index
+  direct on its target (the anchored proxy, whose own fast path then runs), its widened `getObject`
+  first, labels forwarded.
+- A nit, not blocking: a getter that is not one of the fourteen (`getClob(int)`, `getNString`,
+  `getArray`, ...) runs the bound check twice, and by label resolves the label twice, in the fast
+  block and then in the generic one; the methods are rare and the second lookup is the vendor's
+  hash. Fold the generic block's resolution into the fast block's when the path is next touched
+  (item 3 touches `rowReached`, not this).
+- The test, `ReadIntegrationTest.fastGetters_returnTheVendorsValues`, on every engine and both
+  layouts: every fast getter by index and by label against the vendor's values on the data table
+  for each ScalarDB type, `wasNull` after each, at READ COMMITTED, SNAPSHOT and autocommit; the
+  hidden columns refused through every fast getter by index and by label; a getter on closed rows
+  the vendor's exception; a scrollable READ COMMITTED read whose row `absolute` reached anchored
+  (`40001` after another connection moved its version). A fast `getString` broken to a constant
+  fails it. No test reaches a PostgreSQL refcursor; noted in the javadoc.
+- Noted apart: on MySQL and MariaDB a widened BOOLEAN read's `getObject(label)` of a hidden column
+  is refused `42703` (through the anchored rows' `findColumn`) where every other getter says
+  `22023`; on main before this change; the test accepts it; a one-line choice to make separately.
+- The full suite green on PostgreSQL, MySQL, MySQL lower case, MariaDB, Oracle and SQL Server
+  (after 25c52e4); unit tests 402 of 402; spotbugsIntegrationTest down to the two findings of
+  other work (6e's report).
+- The design's sentence (section 1's architecture bullet) added with this note.

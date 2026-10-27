@@ -192,7 +192,9 @@ goes through the primary key.
 - **A JDBC driver in front of the vendor driver, nothing in between.** A `java.sql.Driver` registered
   under its own URL prefix opens the connection with the vendor driver named by the URL and returns proxies for
   `Connection`, `Statement`, `PreparedStatement` and `ResultSet`, each an `InvocationHandler` over the
-  vendor object that forwards every method it does not intercept.
+  vendor object that forwards every method it does not intercept. The result set's `next`, `wasNull`
+  and the common getters by index or label are called on the vendor object directly, everything
+  else through reflection (todo 334).
 - **One logical connection is one physical connection to one database.** Every statement on it, plain or
   ScalarDB, goes to that database in that database's own dialect. The driver translates no dialect and
   routes nothing per query. A connection pool wraps the driver like any other, and an ORM sees plain
