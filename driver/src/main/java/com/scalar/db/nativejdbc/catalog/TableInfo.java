@@ -106,9 +106,25 @@ public final class TableInfo {
    * @return the expression
    */
   public String beforeImage(Engine engine, String alias, String column) {
-    String b = alias + "." + engine.quote("before_" + column);
+    return cast(alias + "." + engine.quote("before_" + column), column);
+  }
+
+  /**
+   * Returns a key column as the metadata table holds it, as a select-list expression with the
+   * column's own type: ScalarDB keeps a {@code SMALLINT} key there as {@code INT} (todo 356).
+   *
+   * @param engine the engine
+   * @param alias the metadata table's alias
+   * @param column the key column
+   * @return the expression
+   */
+  public String metadataKey(Engine engine, String alias, String column) {
+    return cast(alias + "." + engine.quote(column), column);
+  }
+
+  private String cast(String expression, String column) {
     String type = beforeTypes.get(column);
-    return type == null ? b : "CAST(" + b + " AS " + type;
+    return type == null ? expression : "CAST(" + expression + " AS " + type;
   }
 
   /**

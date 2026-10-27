@@ -107,11 +107,13 @@ public final class SetupObjects {
    * Returns the type to cast each column's before image to, where ScalarDB keeps it in a wider type
    * than the column's own, which a {@code UNION} of the two would report: on MySQL and MariaDB a
    * {@code CHAR} or {@code VARCHAR} column, whose before image is a {@code LONGTEXT}, and a {@code
-   * DATETIME} or {@code TIMESTAMP} column, whose before image has three fractional digits.
+   * DATETIME} or {@code TIMESTAMP} column, whose before image has three fractional digits; on
+   * PostgreSQL and SQL Server a {@code SMALLINT} or {@code TINYINT} column, whose before image and
+   * metadata-table key are {@code INT} (todo 356).
    *
    * @param schema the schema
    * @param dataTable the data table
-   * @return the cast's {@code AS} part and collation, by column; empty for the other engines
+   * @return the cast's {@code AS} part and collation, by column; empty on Oracle
    */
   public Map<String, String> beforeTypes(String schema, String dataTable) {
     return beforeTypes.getOrDefault(key(schema, dataTable), Map.of());

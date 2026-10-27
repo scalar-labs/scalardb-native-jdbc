@@ -1089,6 +1089,83 @@ class ReadIntegrationTest {
   }
 
   /**
+   * Todo 356, on PostgreSQL and SQL Server: an imported table's {@code SMALLINT} columns, key and
+   * not, and SQL Server's {@code TINYINT}, which ScalarDB keeps as {@code INT} in the metadata
+   * table and the before images, read with the plain table's types while a row is in flight, and
+   * the before image's values.
+   */
+  @ParameterizedTest
+  @MethodSource("layouts")
+  @SuppressFBWarnings(
+      value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
+      justification = "fixture DDL and queries written in the test sources")
+  void narrowIntegers_keepTheirType_whileRowsAreInFlight(Engines e, boolean inline)
+      throws Exception {
+    Engine engine = e.engine();
+    assumeTrue(engine == Engine.POSTGRESQL || engine == Engine.SQLSERVER, "ScalarDB widens these");
+    String ns = inline ? "nxi" : "nxd";
+    String sdb = e.storedSchema(ns);
+    String w = engine == Engine.SQLSERVER ? "TINYINT" : "SMALLINT";
+    try (Connection c = e.open()) {
+      e.execute(c, e.createSchema(ns));
+      for (String t : List.of("nx", "pl")) {
+        e.execute(
+            c,
+            "CREATE TABLE " + ns + "." + t + " (k SMALLINT PRIMARY KEY, v SMALLINT, w " + w + ")",
+            "INSERT INTO " + ns + "." + t + " VALUES (1, 10, 100)",
+            "INSERT INTO " + ns + "." + t + " VALUES (2, 20, 200)");
+      }
+    }
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace(sdb, true);
+      admin.importTable(sdb, "nx", inline ? Map.of() : DECOUPLED, Map.of());
+    }
+    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    String nxScalarDb =
+        Objects.requireNonNullElse(catalog.lookup(List.of(), sdb, "nx").virtualTable(), "nx");
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog, c, t -> t.namespace().equals(sdb), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    try (TwoPhaseCommitTransactionManager tm = scalarDb.getTwoPhaseCommitTransactionManager()) {
+      TwoPhaseCommitTransaction tx = tm.begin();
+      tx.update(
+          Update.newBuilder()
+              .namespace(sdb)
+              .table(nxScalarDb)
+              .partitionKey(Key.ofInt("k", 1))
+              .intValue("v", 11)
+              .intValue("w", 101)
+              .build());
+      tx.prepare();
+      try (Connection v = e.open();
+          Connection c = e.openDriver();
+          Statement plain = v.createStatement();
+          Statement driver = c.createStatement();
+          ResultSet want = plain.executeQuery("SELECT * FROM " + ns + ".pl ORDER BY k");
+          ResultSet got = driver.executeQuery("SELECT * FROM " + ns + ".nx ORDER BY k")) {
+        for (int i = 1; i <= 3; i++) {
+          assertThat(got.getMetaData().getColumnType(i))
+              .as("column %d's type", i)
+              .isEqualTo(want.getMetaData().getColumnType(i));
+        }
+        while (want.next()) {
+          assertThat(got.next()).isTrue();
+          for (int i = 1; i <= 3; i++) {
+            assertThat(got.getObject(i)).isEqualTo(want.getObject(i));
+          }
+        }
+        assertThat(got.next()).isFalse();
+      }
+      tx.rollback();
+    }
+  }
+
+  /**
    * Fails when a committed ScalarDB transaction left records prepared. ScalarDB writes the records'
    * commit after the coordinator's on a best-effort basis: a failure is logged as "Committing
    * records failed" and left to lazy recovery, and until then the driver reads the before images

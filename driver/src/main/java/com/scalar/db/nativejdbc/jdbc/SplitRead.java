@@ -507,7 +507,11 @@ final class SplitRead {
     List<String> keys = t.keyColumns();
     for (String c : read) {
       String q = engine.quote(c);
-      cols.add(keys.contains(c) ? "m." + q : t.beforeImage(engine, "m", c) + " AS " + q);
+      String key = keys.contains(c) ? t.metadataKey(engine, "m", c) : null;
+      cols.add(
+          key == null
+              ? t.beforeImage(engine, "m", c) + " AS " + q
+              : key.equals("m." + q) ? key : key + " AS " + q);
     }
     return "(SELECT "
         + inflightHint(engine, t, hinted)
