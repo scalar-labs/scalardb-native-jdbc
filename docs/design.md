@@ -2392,7 +2392,7 @@ vendor's own statement, then on AWS with the rest.
   of entries. Up to 64 entries per text, as on PostgreSQL. Built after the block of entries and
   measured against it: what it saves is executions inside one call, not round trips.
 
-  *The entries merged on a clear table at SNAPSHOT (todo 334, 2026-10-27).* Where the write's single
+    *The entries merged on a clear table at SNAPSHOT (todo 334, 2026-10-27).* Where the write's single
   form is the clear-table block, at SNAPSHOT on a decoupled table of which the transaction recorded
   no anchor, the entries need no step 1 and no CAS, so the merged form above loses them: one
   anonymous block per write shape, the same text for every batch size up to 16, the slots beyond the
@@ -2412,18 +2412,20 @@ vendor's own statement, then on AWS with the rest.
   `FORALL` under `IGNORE_ROW_ON_DUPKEY_INDEX`, and the takeover as a `FORALL i IN INDICES OF` the
   entries whose metadata insert counted 0. Back through OUT binds: `l_g`, the rows stamped, and the
   count per slot (0 beyond `l_n`); for the INSERT the rows taken over and the rows stamped among
-  them. The outcomes: `l_g` 1 is the gate closed and nothing written, the coarse check of 4.2 then
-  telling as for the single form, a row found sending the entries to the block of entries; `l_g` 0
-  gives each entry the vendor's count, 1 or 0 for a key without a row, and fewer rows stamped than
-  returned is an abort as a zero-row CAS; for the INSERT a duplicate data row raises ORA-00001 out
-  of the block, which undoes it whole, and the driver runs the entries one by one as above, and rows
-  taken over short of stamped are an abort, the tombstone in flight. The entries beyond 16 go in
-  further blocks. Measured on the container (todo 334's log): a NewOrder-shaped transaction of ten
-  stock updates and ten order-line inserts, today's two blocks of entries against the two bulk
-  blocks, server CPU 1,190–1,210 → 455–515 µs against the vendor's two array executions at 205–285,
-  DB time 2,405–2,510 → 1,125–1,380 against 610–955, parse calls 40 → 0; index-by table binds in
-  place of the slots (ojdbc's `setPlsqlIndexTable`) measured no better at the server and are not
-  taken.
+  them. The outcomes: `l_g` 1 is the gate closed and nothing written, and the entries go to the
+  block of entries at once, the coarse check of 4.2 being the same snapshot's at this level and sure
+  to find the row; `l_g` 0 gives each entry the vendor's count, 1 or 0 for a key without a row, and
+  fewer rows stamped than returned is an abort as a zero-row CAS; for the INSERT a duplicate data
+  row raises ORA-00001 out of the block, which undoes it whole, and the driver runs the entries one
+  by one as above, and rows taken over short of stamped are an abort, the tombstone in flight. The
+  entries beyond 16 go in further blocks. A `setDouble` or `setFloat` among the binds keeps the
+  block of entries, the driver not knowing whether the connection sets `SetFloatAndDoubleUseBinary`,
+  as does a placeholder whose entries bind different types (built as todo 335 has it). Measured on
+  the container (todo 334's log): a NewOrder-shaped transaction of ten stock updates and ten order-
+  line inserts, today's two blocks of entries against the two bulk blocks, server CPU 1,190–1,210 →
+  455–515 µs against the vendor's two array executions at 205–285, DB time 2,405–2,510 → 1,125–1,380
+  against 610–955, parse calls 40 → 0; index-by table binds in place of the slots (ojdbc's
+  `setPlsqlIndexTable`) measured no better at the server and are not taken.
 
   What the driver does with the rows of a block of entries, per entry in order:
 

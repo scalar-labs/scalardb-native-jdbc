@@ -1082,3 +1082,35 @@ form.
 The ask on bedbdb5 is done (0072b54 on the branch): `oracleInsertAll` returns null, the block,
 when any key column's type is unknown, asserted with a column map lacking the key. The INSERT
 ALL review is closed again; the branch waits on the user's decision to land it.
+
+### 2026-10-27: the batch item's build reviewed (the design): oracle-bulk-batches at 9bbacd2
+
+Read from the commits (afbd1e6 the six confirmation tests, a02b072 the stamp factored out of the
+clear-table block with its text unchanged, ace0d6e the forms, 9bbacd2 the measurement; on
+oracle-insert-all, merging cleanly with main). The texts are the design's: one block per shape
+and set of slot types, cached, 16 slots; the probe once (`SELECT COUNT(*) INTO l_g ... AND
+ROWNUM = 1`), `FORALL i IN 1 .. l_n` over the DML without the per-row gate with `RETURNING ...
+BULK COLLECT`, the `SQL%BULK_ROWCOUNT` loop, the stamp as one `FORALL` over the keys returned
+through the clear-table stamp the single form uses; the INSERT as `FORALL`, the metadata insert
+as `FORALL` under the hint with the keys cast to their columns' types, the takeover as `FORALL i
+IN INDICES OF` the zeros; OUT `l_g`, the keys returned, the rows stamped, the 16 counts. Chosen
+in `applyOracleEntries` before the block of entries, at SNAPSHOT, on a decoupled table without a
+recorded anchor, the keyed plan where the fast form exists and the INSERT where INSERT ALL does,
+not when generated keys are wanted; one stamp for the block, the lead run's; the anchors told of
+it. The six confirmation tests decide the facts the paragraph rests on (per-entry counts with the
+keys in order, the duplicate's atomicity, the hint per iteration, `INDICES OF`, NULL slots
+untouched, no parse calls over 20 calls of a 16-slot block), and the form tests the outcomes (a
+missing key among the entries, the gate closed, a tombstone among the inserts, a duplicate as a
+`BatchUpdateException` with the counts before it and `23000`). Matches.
+
+Two deviations, both accepted and written into the paragraph: `setDouble` and `setFloat` keep the
+block of entries, since the driver cannot tell whether the connection sets
+`SetFloatAndDoubleUseBinary`, as does a placeholder whose entries bind different types; and
+`l_g` 1 sends the entries to the block of entries at once without the coarse check, which at
+SNAPSHOT reads the same snapshot as the gate and would find the row, a round trip saved.
+
+Measured through the driver (todo 335's log, a NewOrder-shaped transaction, 1,000 after 50 warm,
+before/after/after/before): server CPU 760/890 → 350/260 µs, DB time 1,780/1,590 → 930/830,
+parse calls 50 → 0, wall 2,752/2,608 → 1,767/1,582, three round trips either way. In line with
+the harness above. Landing the two branches waits on the user; the proof is the TPC-C SNAPSHOT
+decoupled cell of the next AWS run.
