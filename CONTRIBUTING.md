@@ -2,7 +2,9 @@
 
 ## Building
 
-Requires JDK 25 to build; the driver artifact is compiled for Java 11 with `--release`.
+Requires JDK 25 to build; the driver artifact is compiled for Java 11 with `--release`. To build the
+driver, `snsql` and the tools for use rather than for development, see
+[docs/development-builds.md](docs/development-builds.md).
 
 ```bash
 ./gradlew check          # unit and integration tests, javadoc, Spotless, SpotBugs with FindSecBugs, Error Prone, NullAway

@@ -18,7 +18,8 @@ touches other databases needs no special handling: the driver only meets the row
 prepares in this database, and those rows follow the same protocol as any other.
 
 To try it, from a database to a program through the driver, follow
-[docs/getting-started.md](docs/getting-started.md).
+[docs/getting-started.md](docs/getting-started.md). Before the release, build it yourself:
+[docs/development-builds.md](docs/development-builds.md).
 
 ## Getting it
 
@@ -35,6 +36,7 @@ To try it, from a database to a program through the driver, follow
 | Document | What it covers |
 | --- | --- |
 | [Getting started](docs/getting-started.md) | from an empty database to a program through the driver, in either of ScalarDB's layouts |
+| [Development builds](docs/development-builds.md) | building the driver, `snsql` and the tools yourself before a release, and using them |
 | [Setting up tables](docs/setting-up-tables.md) | `scalardb-native-tools`: setting ScalarDB tables up for the driver, checking them, adding a table while applications run |
 | [Configuration](docs/configuration.md) | the driver's URLs and properties, passthrough, the database settings and users the driver needs |
 | [Transactions and isolation levels](docs/transactions.md) | the levels per engine, the ScalarDB settings each needs, conflicts and retries, read-only transactions |

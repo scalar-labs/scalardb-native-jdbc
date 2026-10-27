@@ -63,26 +63,46 @@ URLs, the DDL and the vendor driver change ([Other databases](#other-databases))
 
 ## What you need
 
-- Java 17 or later, for the example's Gradle build. The driver itself needs Java 11 or later.
+- Java 17 or later on your `PATH` or in `JAVA_HOME`, for the example's Gradle build. The driver
+  itself needs Java 11 or later.
 - Docker, for the database in this guide. Any PostgreSQL you can create tables in will do.
 - This repository's [`samples/getting-started`](../samples/getting-started) directory. It holds every
-  file the guide uses, so you don't copy any from this page. Run the guide's commands from that
-  directory.
+  file the guide uses, so you don't copy any from this page.
 - From the [ScalarDB releases](https://github.com/scalar-labs/scalardb/releases), the Schema Loader
   of the ScalarDB line the driver is certified against, `scalardb-schema-loader-<SCALARDB_VERSION>.jar`
-  ([Compatibility](../README.md#compatibility)). Put it in `samples/getting-started`.
+  ([Compatibility](../README.md#compatibility)), about 170 MB. Take `scalardb-schema-loader`, not
+  `scalardb-cluster-schema-loader`, which is for ScalarDB Cluster. Put it in
+  `samples/getting-started`.
 - From the ScalarDB Native JDBC GitHub release, `scalardb-native-shell-<VERSION>.zip` (`snsql`) and
   `scalardb-native-tools-<VERSION>.zip` (`scalardb-native-tools`). Unzip both and put their `bin`
   directories on your `PATH`. Both bundle the JDBC drivers of PostgreSQL, MariaDB (also used for
   MySQL), SQL Server and Oracle.
 
 You do not build the driver. The example program gets it from Maven Central as
-`com.scalar-labs:scalardb-native-jdbc`.
+`com.scalar-labs:scalardb-native-jdbc`. Before the release, build the driver, `snsql` and the tools
+yourself instead, and take the Schema Loader version given there: [Development
+builds](development-builds.md).
+
+Run every command in this guide from `samples/getting-started`:
+
+```sh
+cd samples/getting-started
+```
 
 ## 1. Start the warehouse database
 
 ```sh
 docker run -d --name native-pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:17
+```
+
+Wait until PostgreSQL accepts connections, a few seconds after the container starts:
+
+```sh
+until docker exec native-pg pg_isready -U postgres -h localhost; do sleep 1; done
+```
+
+```
+localhost:5432 - accepting connections
 ```
 
 ## 2. Make `stock` a ScalarDB table
@@ -103,7 +123,8 @@ table. Otherwise inline is the simpler choice.
 
 In the scenario `stock` already exists, so B or C is the usual path. A is for a table that is new.
 
-Follow **one** of A, B or C below. All three run the Schema Loader with `scalardb.properties`, which
+Follow **one** of A, B or C below. To try another, start over from step 1
+([Start over and clean up](#start-over-and-clean-up)). All three run the Schema Loader with `scalardb.properties`, which
 names the warehouse database:
 
 ```properties
@@ -183,6 +204,11 @@ java -jar scalardb-schema-loader-<SCALARDB_VERSION>.jar \
 
 The import adds ScalarDB's metadata columns to `warehouse.stock`.
 
+Among the Schema Loader's log lines, `Data type larger than that of underlying database is assigned:
+warehouse.stock name (varchar to TEXT)` is expected: ScalarDB reads `VARCHAR(50)` as its `TEXT`
+type, and the column stays as it is. `Schema path: null` from the `--coordinator` run is expected
+too, since that run takes no schema file.
+
 ### C. Decoupled, created with your database's DDL and imported
 
 Create the table with `psql` as in B:
@@ -213,7 +239,8 @@ java -jar scalardb-schema-loader-<SCALARDB_VERSION>.jar \
 
 `warehouse.stock` is left as it was. ScalarDB adds a table `warehouse.stock_tx_metadata` for the
 metadata, and a view `warehouse.stock_scalardb`, the name the order service uses for the table. The
-warehouse application's SQL keeps using `warehouse.stock`.
+warehouse application's SQL keeps using `warehouse.stock`. The Schema Loader logs the same lines as
+in B.
 
 ### Once `stock` is ScalarDB's
 
@@ -226,7 +253,8 @@ for DDL and for ordinary tables.
 Before the driver serves a ScalarDB table, run the setup once, as a user that can run DDL. It adds
 what the driver needs to read the table fast and safely and, on an imported table, writes the row
 metadata the import did not. It is safe to run again, and you run it again whenever a table is added
-to ScalarDB.
+to ScalarDB. The tools read the password from `SCALARDB_NATIVE_PASSWORD`, and `snsql`, in step 4,
+from `SNSQL_PASSWORD`, since the setup is often run as a different user from the application's.
 
 ```sh
 export SCALARDB_NATIVE_PASSWORD=postgres
@@ -239,6 +267,9 @@ warehouse.stock: created in-flight index stock_inflight, backfilled 0 rows, crea
 New ScalarDB table: warehouse.stock.
 ScalarDB transactions may write warehouse.stock from 2026-10-27 13:47:08 GMT+09:00, or after every application using the driver on this database has restarted.
 ```
+
+In the decoupled layout (C), the line ends `analyzed stock_tx_metadata`, the table where ScalarDB
+keeps the metadata.
 
 Without `--no-wait`, the setup waits until that time, 60 seconds, before it returns. The wait is for
 ScalarDB transactions, not for the driver. An application that was already running before the setup
@@ -346,7 +377,15 @@ With Maven, the same dependencies are:
   <version>42.7.14</version>
   <scope>runtime</scope>
 </dependency>
+<dependency>
+  <groupId>org.slf4j</groupId>
+  <artifactId>slf4j-simple</artifactId>
+  <version>1.7.36</version>
+  <scope>runtime</scope>
+</dependency>
 ```
+
+`slf4j-simple` prints the driver's log, warnings included; any SLF4J 1.7 binding will do.
 
 `src/main/java/example/ReceiveShipment.java` receives a delivery of 30 bolts and 20 nuts in one
 transaction: both are added to `stock`, or neither is. It is plain JDBC. The only change from a
@@ -484,6 +523,16 @@ postgres=> SELECT item_id, quantity FROM warehouse.receipt ORDER BY receipt_id;
 ```
 
 If the transaction rolls back, on a conflict or an error, neither `stock` nor `receipt` changes.
+
+## Start over and clean up
+
+Remove the database, and with it everything the guide created:
+
+```sh
+docker rm -f native-pg
+```
+
+To try another of A, B and C, start again from step 1.
 
 ## Other databases
 
