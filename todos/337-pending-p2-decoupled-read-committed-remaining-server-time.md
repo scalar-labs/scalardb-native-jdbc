@@ -397,3 +397,25 @@ SQL Server branch of the per-row plan choice, and PostgreSQL never sends it, so 
 is PostgreSQL's, does not reach it. Nothing to build. Whether those engines' probe wants an order
 is a separate question under their own indexes (MySQL's `(tx_state, key)` with its histogram, SQL
 Server's filtered index) and is not opened.
+
+### 2026-10-27: the follow-up measured locally, no slowdown (Opus)
+
+TPC-C on bb-pgss: decoupled, scale 4, 4 terminals, 60 s a run, one repetition, exported trees
+1219aac (before) and 62f0a59 (after), container-quiet waits between runs, load average 5 to 7.
+Throughput against the vendor's, (c)/(a):
+
+| level | first pair (after, then before) | second pair (before, then after) |
+|---|---|---|
+| READ COMMITTED | before 0.82, after 0.84 | - |
+| SNAPSHOT | before 0.91, after 0.88 | before 0.78, after 0.89 |
+
+Per-call server time (pg_stat_statements, run (c)):
+- READ COMMITTED: within ±5% either way. The one statement that carries the probe, StockLevel's
+  count, went 1235 → 1186 µs.
+- SNAPSHOT: the sign follows the run order, not the tree. In the first pair (after ran first)
+  every statement of the later run (before) was 5-10% faster, the item read and the inserts with
+  no probe as much as the gated writes (Delivery's order_line +8%, its customer update +13%). In
+  the second pair (before ran first) every statement of the later run (after) was 3-14% faster:
+  order_line -3%, customer update -14%, item read -11%.
+The vendor's own runs moved as much (575-610/s). Machine drift dominates; no effect of the change
+shows at either level.
