@@ -211,7 +211,10 @@ class BenchBaseBenchmark {
 
   /**
    * On Oracle, the database, which on its own host may still be starting: Enterprise Edition's
-   * image creates it on first start, about 20 minutes; elsewhere a refused logon fails at once.
+   * image creates it on first start, about 20 minutes; elsewhere a refused logon fails at once. A
+   * logon can work before the creation ends: the pluggable database opens before its USERS
+   * tablespace exists, which ScalarDB's quota needs (ORA-00959, run 20261027-0858), so the wait
+   * lasts until that tablespace is there too.
    */
   private static void awaitOracle(Engines e) throws Exception {
     if (e.engine() != Engine.ORACLE) {
@@ -219,15 +222,23 @@ class BenchBaseBenchmark {
     }
     long deadline = System.nanoTime() + Duration.ofMinutes(45).toNanos();
     while (true) {
-      try {
-        e.open().close();
-        return;
+      try (Connection c = e.open();
+          Statement st = c.createStatement();
+          ResultSet rs =
+              st.executeQuery(
+                  "SELECT COUNT(*) FROM dba_tablespaces WHERE tablespace_name = 'USERS'")) {
+        if (rs.next() && rs.getInt(1) == 1) {
+          return;
+        }
+        if (System.nanoTime() > deadline) {
+          throw new IllegalStateException("Oracle has no USERS tablespace after 45 minutes");
+        }
       } catch (SQLException ex) {
         if (System.nanoTime() > deadline) {
           throw ex;
         }
-        Thread.sleep(15_000);
       }
+      Thread.sleep(15_000);
     }
   }
 
