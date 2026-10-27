@@ -4186,6 +4186,7 @@ final class Writes {
     // its metadata row as one block (todo 334)
     Step oracleInline = null;
     Block oracleBlock = null;
+    Step oracleInsertAll = null;
     if (engine == Engine.ORACLE && returning == null && shape.insertRow() != null) {
       if (n.inline) {
         InlineInsert one = inlineInsert(n, ast, t, shape.insertRow(), end, false, false);
@@ -4193,6 +4194,14 @@ final class Writes {
         oracleInline = one == null ? null : new Step(one.one, all, Set.of(), all.size());
       } else {
         oracleBlock = oracleInsertBlock(n, ast, t, all, end, oracleKeyTypes(tableColumns, n));
+        // a key the statement gives, not one the first INTO would generate for itself alone
+        oracleInsertAll =
+            oracleBlock == null
+                    || rows == null
+                    || rows.size() != 1
+                    || type(engine, tableColumns, t.keyColumns().get(0)).endsWith(" generated")
+                ? null
+                : oracleInsertAll(n, ast, t, shape.insertRow(), rows.get(0), all, end);
       }
     }
     return new InsertPlan(
@@ -4213,7 +4222,87 @@ final class Writes {
         oracleInline,
         oracleBlock == null
             ? null
-            : oracleInsertEntries(n, ast, t, all, end, oracleKeyTypes(tableColumns, n)));
+            : oracleInsertEntries(n, ast, t, all, end, oracleKeyTypes(tableColumns, n)),
+        oracleInsertAll);
+  }
+
+  /**
+   * The decoupled INSERT of one row on Oracle as one statement (design 4.3 "The decoupled INSERT as
+   * one statement", todo 334): {@code INSERT ALL} into the data table as written and into the
+   * metadata table, its key the row's own values again, then the stamp, {@code SELECT 1 FROM dual}.
+   * The binds are the statement's, the key's again, the stamp's three after them. Null when the row
+   * is not the statement's last text, or not every placeholder is in it.
+   */
+  private static @Nullable Step oracleInsertAll(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      @Nullable Expression row,
+      List<Expression> keyValues,
+      List<Integer> all,
+      int end) {
+    if (!(row instanceof ParenthesedExpressionList)
+        || ((ParenthesedExpressionList<?>) row).isEmpty()) {
+      return null;
+    }
+    ParenthesedExpressionList<?> items = (ParenthesedExpressionList<?>) row;
+    String source = ast.source();
+    int[] first = ast.span((Expression) items.get(0));
+    int[] last = ast.span((Expression) items.get(items.size() - 1));
+    int insert = ast.afterFirst("INSERT");
+    if (first == null || last == null || insert < 0) {
+      return null;
+    }
+    int close = last[1];
+    while (close < end && Character.isWhitespace(source.charAt(close))) {
+      close++;
+    }
+    List<Integer> inside = ast.placeholdersIn(first[0], last[1]);
+    if (close >= end
+        || source.charAt(close) != ')'
+        || !source.substring(close + 1, end).isBlank()
+        || inside == null
+        || inside.size() != ast.parameterCount()) {
+      return null;
+    }
+    List<String> keys = new ArrayList<>();
+    List<Integer> binds = new ArrayList<>(all);
+    for (Expression v : keyValues) {
+      int[] span = ast.span(v);
+      List<Integer> in = span == null ? null : ast.placeholdersIn(span[0], span[1]);
+      if (span == null || in == null) {
+        return null;
+      }
+      keys.add(source.substring(span[0], span[1]));
+      binds.addAll(in);
+    }
+    String data = onDataTable(n.engine, ast, t, false, source.substring(0, end), -1);
+    if (data == null) {
+      return null;
+    }
+    // the data table's INSERT keeps the offsets before its table: ALL after its first keyword
+    String sql =
+        data.substring(0, insert)
+            + " ALL"
+            + data.substring(insert)
+            + " INTO "
+            + n.meta
+            + " ("
+            + n.columns("")
+            + ", "
+            + n.txId
+            + ", "
+            + n.txState
+            + ", "
+            + n.txVersion
+            + ", "
+            + n.preparedAt
+            + ", "
+            + n.committedAt
+            + ") VALUES ("
+            + String.join(", ", keys)
+            + ", ?, 3, 1, ?, ?) SELECT 1 FROM dual";
+    return new Step(sql, binds, Set.of(), binds.size());
   }
 
   /**
@@ -4604,6 +4693,12 @@ final class Writes {
   }
 
   /** An Oracle constraint as its messages name it, {@code (OWNER.NAME)}. */
+  /**
+   * The table of each Oracle constraint an INSERT ALL has met, quoted, by {@code OWNER.NAME}: a
+   * constraint's name stays its table's while the table stands (todo 334).
+   */
+  private static final Map<String, String> CONSTRAINT_TABLES = new ConcurrentHashMap<>();
+
   private static final Pattern ORA_CONSTRAINT =
       Pattern.compile("\\(([A-Za-z0-9_$#]+)\\.([A-Za-z0-9_$#]+)\\)");
 
@@ -6618,6 +6713,8 @@ final class Writes {
     final @Nullable Step oracleInline;
     // the INSERT block over a batch's entries (design 4.4, todo 334)
     final @Nullable Entries entries;
+    // the decoupled INSERT of one row as one INSERT ALL statement, the block its fallback
+    final @Nullable Step oracleInsertAll;
 
     InsertPlan(
         Names n,
@@ -6633,8 +6730,10 @@ final class Writes {
         boolean generatedKey,
         @Nullable Block oracleBlock,
         @Nullable Step oracleInline,
-        @Nullable Entries entries) {
+        @Nullable Entries entries,
+        @Nullable Step oracleInsertAll) {
       super(n);
+      this.oracleInsertAll = oracleInsertAll;
       this.oracleBlock = oracleBlock;
       this.oracleInline = oracleInline;
       this.entries = entries;
@@ -6670,7 +6769,8 @@ final class Writes {
               oracleBlock == null
                   ? null
                   : oracleBlock.step(oracleBlock.keyTypes == null ? Variant.CURSOR : Variant.OUT),
-              oracleInline)) {
+              oracleInline,
+              oracleInsertAll)) {
         if (s != null) {
           out.add(s.sql);
         }
@@ -6747,6 +6847,10 @@ final class Writes {
 
     @Override
     long apply(Run run) throws SQLException {
+      // the keys the application asks for come back from the block alone
+      if (oracleInsertAll != null && oracleBlock != null && !run.context.wantsKeys()) {
+        return applyOracleInsertAll(run, oracleInsertAll, oracleBlock);
+      }
       if (oracleBlock != null) {
         return applyOracleBlock(run, oracleBlock);
       }
@@ -6812,6 +6916,61 @@ final class Writes {
       run.context.anchors().wrote(run.txId);
       run.context.inserted(keys);
       return 1;
+    }
+
+    /**
+     * The decoupled INSERT of one row on Oracle as one {@code INSERT ALL} (design 4.3, todo 334):
+     * its count, the two rows, reported as the one the application wrote. A metadata row already
+     * there, a tombstone or an orphan, in flight or not, fails it with ORA-00001 on the metadata
+     * table's constraint, which leaves no data row: the block then takes that row over or aborts, a
+     * second round trip only then. The data row's own duplicate is classified as the block's.
+     */
+    private long applyOracleInsertAll(Run run, Step step, Block block) throws SQLException {
+      try (PreparedStatement ps = run.prepare(step, null)) {
+        ps.executeUpdate();
+      } catch (SQLException e) {
+        if (!n.engine.isDuplicateKey(e)) {
+          throw e;
+        }
+        if (onMetadataTable(run, e)) {
+          return applyOracleBlock(run, block);
+        }
+        if (inFlight == null) {
+          throw e;
+        }
+        throw duplicate(run, e);
+      }
+      run.context.anchors().wrote(run.txId);
+      return 1;
+    }
+
+    /**
+     * Whether ORA-00001 names a constraint of the table's metadata table: its table read from the
+     * dictionary once per constraint, so that the tombstone's INSERT is two round trips after it.
+     */
+    private boolean onMetadataTable(Run run, SQLException e) throws SQLException {
+      Matcher m = ORA_CONSTRAINT.matcher(String.valueOf(e.getMessage()));
+      if (!m.find()) {
+        return false;
+      }
+      String constraint = m.group(1) + "." + m.group(2);
+      String table = CONSTRAINT_TABLES.get(constraint);
+      if (table == null) {
+        try (PreparedStatement ps =
+            run.v.prepareStatement(
+                "SELECT table_name FROM all_constraints WHERE owner = ? AND constraint_name = ?")) {
+          ps.setString(1, m.group(1));
+          ps.setString(2, m.group(2));
+          try (ResultSet rs = ps.executeQuery()) {
+            if (!rs.next()) {
+              return false;
+            }
+            table = n.engine.quote(m.group(1)) + "." + n.engine.quote(rs.getString(1));
+          }
+        }
+        CONSTRAINT_TABLES.put(constraint, table);
+      }
+      return table.equals(n.meta);
     }
 
     /**

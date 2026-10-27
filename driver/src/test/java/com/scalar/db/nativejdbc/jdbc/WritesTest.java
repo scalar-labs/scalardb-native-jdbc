@@ -945,6 +945,26 @@ class WritesTest {
                 + " \"tx_committed_at\") VALUES (?, ?, ?, 3, 1, ?, ?)");
   }
 
+  @Test
+  void onOracle_aDecoupledInsertOfOneRowIsOneInsertAll() throws Exception {
+    // the row into the data table as written, the metadata row from the key's own values again,
+    // then the stamp (design 4.3 "The decoupled INSERT as one statement", todo 334)
+    String one =
+        "INSERT ALL INTO \"ns\".\"t_data\" (\"id\", x) VALUES (?, ?) INTO \"ns\".\"t_meta\" (\"id\","
+            + " \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\", \"tx_committed_at\")"
+            + " VALUES (?, ?, 3, 1, ?, ?) SELECT 1 FROM dual";
+    assertThat(oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (?, ?)", false).sql())
+        .contains(one);
+    assertThat(oraclePlan(created(), "INSERT INTO t (x, \"id\") VALUES ('a', 7)", false).sql())
+        .contains(
+            "INSERT ALL INTO \"ns\".\"t_data\" (x, \"id\") VALUES ('a', 7) INTO \"ns\".\"t_meta\""
+                + " (\"id\", \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+                + " \"tx_committed_at\") VALUES (7, ?, 3, 1, ?, ?) SELECT 1 FROM dual");
+    // not for the inline layout, whose INSERT is one statement already
+    assertThat(oraclePlan(inline(), "INSERT INTO t (id, x) VALUES (?, ?)", false).sql())
+        .noneMatch(q -> q.startsWith("INSERT ALL"));
+  }
+
   /** The declared types a table of one NUMBER key and a text column has on Oracle. */
   private static final Map<String, String> ORACLE_COLUMNS =
       Map.of("id", "number", "x", "varchar2(10 char)");

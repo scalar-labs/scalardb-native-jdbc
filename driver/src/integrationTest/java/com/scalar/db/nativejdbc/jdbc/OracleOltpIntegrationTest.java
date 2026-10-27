@@ -707,9 +707,8 @@ class OracleOltpIntegrationTest {
                 + " round trip(s), in a transaction");
         assertThat(insert).isEqualTo(1);
         assertThat(scalarDbX(table, 101)).isEqualTo("n");
-        // the table's first INSERT block in the process, the check of the OUT binds: the key
-        // through the binds and the cursor both, one round trip more, once (decoupled; the inline
-        // INSERT is the vendor's statement, without a block)
+        // the table's first INSERT in the process: the decoupled one is INSERT ALL, a statement
+        // without OUT binds, so no first-use check of them either (design 4.3, todo 334)
         Writes.OutBindCheck.reset();
         long checked;
         try (PreparedStatement ps =
@@ -730,7 +729,7 @@ class OracleOltpIntegrationTest {
                 + "): the table's first INSERT in the process, the check of the OUT binds, "
                 + checked
                 + " round trip(s)");
-        assertThat(checked).isEqualTo(table.equals("t") ? 2 : 1);
+        assertThat(checked).isEqualTo(1);
         assertThat(scalarDbX(table, 105)).isEqualTo("o");
         // the application's duplicate, SQLState 23000, the transaction still open
         assertThatThrownBy(
@@ -798,6 +797,35 @@ class OracleOltpIntegrationTest {
       assertThat(rows(v, "SELECT \"tx_state\", \"tx_version\" FROM " + meta + " WHERE k = 7"))
           .containsExactly("3/3");
       assertThat(rows(d, "SELECT x FROM " + NS + ".imp WHERE k = 7")).containsExactly("10");
+      // INSERT ALL meets the tombstone on the metadata table's constraint and leaves no data row,
+      // and the block takes the row over: the INSERT ALL and the block, of which Oracle's count
+      // shows the block alone, a failed call adding no round trip to it (checked on ojdbc: a
+      // failing INSERT ALL then an UPDATE count 1). Measured on a statement already planned and
+      // past its block's first-use check, with the constraint's table known
+      d.setAutoCommit(false);
+      long overTombstone = 0;
+      try (PreparedStatement ins = d.prepareStatement("INSERT INTO " + NS + ".imp VALUES (?, ?)");
+          PreparedStatement del = d.prepareStatement("DELETE FROM " + NS + ".imp WHERE k = ?")) {
+        for (int x : List.of(11, 12)) {
+          del.setInt(1, 7);
+          assertThat(del.executeUpdate()).isEqualTo(1);
+          d.commit();
+          Counter trips = new Counter(d);
+          ins.setInt(1, 7);
+          ins.setInt(2, x);
+          overTombstone = trips.measure(() -> assertThat(ins.executeUpdate()).isEqualTo(1));
+          d.commit();
+        }
+      }
+      d.setAutoCommit(true);
+      log(
+          "form 4: the INSERT over a tombstone, INSERT ALL then the block, "
+              + overTombstone
+              + " round trip(s) counted");
+      assertThat(overTombstone).isEqualTo(1);
+      assertThat(rows(v, "SELECT \"tx_state\", \"tx_version\" FROM " + meta + " WHERE k = 7"))
+          .containsExactly("3/7");
+      assertThat(rows(d, "SELECT x FROM " + NS + ".imp WHERE k = 7")).containsExactly("12");
       // an IDENTITY key, returned into the block's locals, and read back when asked for
       try (PreparedStatement ps =
           d.prepareStatement(

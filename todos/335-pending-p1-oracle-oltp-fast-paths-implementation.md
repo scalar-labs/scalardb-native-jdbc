@@ -824,3 +824,39 @@ Results:
 - On bb-pgss: `InlineIntegrationTest` 3 of 3 passed.
 - Unit tests 397, none failing; spotless clean.
 The proof is the YCSB SNAPSHOT inline cell on AWS, and PostgreSQL's should move too.
+### 2026-10-27: the decoupled INSERT of one row as one INSERT ALL (Opus)
+
+As decided in design 4.3 "The decoupled INSERT as one statement" and todo 334's log (f0fcc50).
+Built on branch `oracle-insert-all` in a worktree; the shared checkout was in use.
+
+`Writes.oracleInsertAll` emits `INSERT ALL INTO <data> (<the user's columns>) VALUES (<the
+user's values>) INTO <meta> (<key>, tx_id, tx_state, tx_version, tx_prepared_at,
+tx_committed_at) VALUES (<the key's values again>, ?, 3, 1, ?, ?) SELECT 1 FROM dual`. Its binds
+are the statement's, then the key's again, then the stamp's three. It is built where the decoupled
+block is, for one row of VALUES whose key the statement gives (`insertKeyValues`) and is not
+generated, with nothing after the row. `InsertPlan.apply` runs it unless the application asked for
+the generated keys, which only the block returns; the batch's block of entries is unchanged.
+
+On ORA-00001, the constraint's table is read from `all_constraints` once per constraint and kept
+in `CONSTRAINT_TABLES`. If it is the metadata table (a tombstone or an orphan, in flight or not),
+no data row is left and the block runs: it takes the row over or aborts. Any other duplicate is
+classified as the block's (`duplicate`).
+
+Tests:
+- `WritesTest.onOracle_aDecoupledInsertOfOneRowIsOneInsertAll`: the text, and the key given as a
+  literal; none on the inline layout.
+- `OracleOltpIntegrationTest.form4InsertAsOneStatement`: the table's first INSERT is now 1 round
+  trip, with no OUT-bind check, where the block took 2.
+- The INSERT over a tombstone, on a statement already planned, takes the row over at the next
+  version. Oracle's `SQL*Net roundtrips` counts 1 for it, the block, because a failed call adds no
+  round trip to the statistic (checked with plain ojdbc: a failing INSERT ALL then an UPDATE count
+  1, two UPDATEs 2).
+- The duplicate, the in-flight key, the in-flight tombstone (`form4InsertOverAMetadataRowInFlight`,
+  abort) and the generated keys asked for (the block) pass as before.
+
+Unit tests, SpotBugs, and the Oracle integration suite (142 tests, 65 run, 0 failing) pass, on a
+private container (`c7-oracle`, port 1522). ofa-oracle was taken by another session's runs, which
+drop and recreate the OO schema.
+
+On the way: a measured 3 round trips was the driver planning a statement text it had not seen
+(the catalog reads), not the fallback; the test now measures a prepared statement.
