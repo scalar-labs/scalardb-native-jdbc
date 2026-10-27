@@ -388,3 +388,12 @@ javadoc says. PostgreSQL never sends it, so 4.2's rule for PostgreSQL's probes d
 and nothing was built. MySQL's in-flight index is `(tx_state, key)`, read with a histogram from
 the setup, and SQL Server's is filtered with `OPTION (RECOMPILE)` on the locked form. My mistake
 in raising it, sent back to the design.
+
+### 2026-10-27: the plan-choosing count, corrected (the design)
+
+The entry above decided the ordered spelling for `Router.inflightCount`'s text; the builder
+withdrew the case (e2262a0), rightly: the count has two callers, the MySQL/MariaDB branch and the
+SQL Server branch of the per-row plan choice, and PostgreSQL never sends it, so 4.2's rule, which
+is PostgreSQL's, does not reach it. Nothing to build. Whether those engines' probe wants an order
+is a separate question under their own indexes (MySQL's `(tx_state, key)` with its histogram, SQL
+Server's filtered index) and is not opened.
