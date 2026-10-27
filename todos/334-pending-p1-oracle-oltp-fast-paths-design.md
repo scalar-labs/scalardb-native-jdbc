@@ -1114,3 +1114,15 @@ before/after/after/before): server CPU 760/890 → 350/260 µs, DB time 1,780/1,
 parse calls 50 → 0, wall 2,752/2,608 → 1,767/1,582, three round trips either way. In line with
 the harness above. Landing the two branches waits on the user; the proof is the TPC-C SNAPSHOT
 decoupled cell of the next AWS run.
+
+### 2026-10-27: both Oracle branches on main (the design's note)
+
+At the user's request the Opus session rebased the two branches onto main at 481f143 and
+fast-forwarded main to d13f78f; nothing is pushed. The hashes the reviews above name, as
+rebased: INSERT ALL 438d627 → 71277c0, c94dd1a → 1168704, bedbdb5 → ba51b0b, 0072b54 →
+9bea11a; the bulk block afbd1e6 → 2660f5a, a02b072 → 9f98181, ace0d6e → 15d29a5, 9bbacd2 →
+d13f78f. Unit tests, SpotBugs, the Oracle OLTP and forms classes pass on the rebased code. With
+the inline whole-row lock (1070d98) and the `FOR UPDATE OF` fix (d56e87d) already on main, the
+Oracle proof run can go from main: the decoupled READ COMMITTED cell for the lock's scope, the
+inline SNAPSHOT cell for the whole-row lock, and the decoupled cells at SNAPSHOT for INSERT ALL
+and the bulk block.
