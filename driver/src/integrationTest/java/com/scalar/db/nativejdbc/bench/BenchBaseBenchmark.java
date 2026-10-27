@@ -348,7 +348,8 @@ class BenchBaseBenchmark {
     boolean oracle = e.engine() == Engine.ORACLE;
     long[] roundTrip = stats(e) ? Server.roundTrip(e) : null;
     Server.@Nullable Snapshot start = stats(e) && !oracle ? Server.snapshot(e) : null;
-    OracleStats.@Nullable Counters oracleStart = stats(e) && oracle ? OracleStats.start(e) : null;
+    OracleStats.@Nullable Counters oracleStart =
+        stats(e) && oracle ? OracleStats.start(e, ns) : null;
     Sampler sampler = stats(e) && !oracle ? new Sampler(e) : null;
     Path histograms = dir.resolve("histograms.json");
     try {
@@ -567,7 +568,8 @@ class BenchBaseBenchmark {
         long roundTrips,
         Map<String, double[]> sql,
         Map<String, String> sqlText,
-        Map<String, double[]> waits) {}
+        Map<String, double[]> waits,
+        String tables) {}
 
     /**
      * The counters at a run's start, after emptying the shared pool: a cursor the run before left
@@ -575,12 +577,78 @@ class BenchBaseBenchmark {
      * counters, so that its earlier calls counted as this run's (the first Oracle run,
      * 20261027-0133).
      */
-    static Counters start(Engines e) throws SQLException {
+    static Counters start(Engines e, String ns) throws SQLException {
+      String tables;
       try (Connection c = e.open();
           Statement st = c.createStatement()) {
         st.execute("ALTER SYSTEM FLUSH SHARED_POOL");
+        tables = tableStatistics(c, ns);
       }
-      return read(e);
+      Counters r = read(e);
+      return new Counters(
+          r.commits(),
+          r.dbTimeUs(),
+          r.redo(),
+          r.dbCpuUs(),
+          r.busyCs(),
+          r.roundTrips(),
+          r.sql(),
+          r.sqlText(),
+          r.waits(),
+          tables);
+    }
+
+    /**
+     * The optimizer's statistics of the schema's tables and of their primary key columns, as the
+     * run starts with them (todo 334: a plan is read against the statistics it was chosen under).
+     */
+    private static String tableStatistics(Connection c, String ns) throws SQLException {
+      StringBuilder out =
+          new StringBuilder("table	rows	blocks	locked	analyzed (at the run's start)\n");
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "SELECT table_name, num_rows, blocks, stattype_locked,"
+                  + " TO_CHAR(last_analyzed, 'YYYY-MM-DD HH24:MI:SS') FROM all_tab_statistics"
+                  + " WHERE owner = ? AND object_type = 'TABLE' ORDER BY table_name")) {
+        ps.setString(1, ns);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            out.append(
+                    String.join(
+                        "\t",
+                        rs.getString(1),
+                        String.valueOf(rs.getString(2)),
+                        String.valueOf(rs.getString(3)),
+                        String.valueOf(rs.getString(4)),
+                        String.valueOf(rs.getString(5))))
+                .append('\n');
+          }
+        }
+      }
+      out.append("\nkey column\tdistinct\tnulls\thistogram\n");
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "SELECT s.table_name || '.' || s.column_name, s.num_distinct, s.num_nulls,"
+                  + " s.histogram FROM all_tab_col_statistics s JOIN all_cons_columns cc"
+                  + " ON cc.owner = s.owner AND cc.table_name = s.table_name"
+                  + " AND cc.column_name = s.column_name JOIN all_constraints k"
+                  + " ON k.owner = cc.owner AND k.constraint_name = cc.constraint_name"
+                  + " AND k.constraint_type = 'P' WHERE s.owner = ? ORDER BY 1")) {
+        ps.setString(1, ns);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            out.append(
+                    String.join(
+                        "\t",
+                        rs.getString(1),
+                        String.valueOf(rs.getString(2)),
+                        String.valueOf(rs.getString(3)),
+                        String.valueOf(rs.getString(4))))
+                .append('\n');
+          }
+        }
+      }
+      return out.toString();
     }
 
     static Counters read(Engines e) throws SQLException {
@@ -617,7 +685,8 @@ class BenchBaseBenchmark {
         try (PreparedStatement ps =
             c.prepareStatement(
                 "SELECT sql_id, SUM(executions), SUM(elapsed_time), SUM(cpu_time),"
-                    + " SUM(parse_calls), SUM(rows_processed), MAX(SUBSTR(sql_text, 1, 400))"
+                    + " SUM(parse_calls), SUM(rows_processed), MAX(SUBSTR(sql_text, 1, 400)),"
+                    + " SUM(buffer_gets)"
                     + " FROM v$sql WHERE parsing_user_id ="
                     + " (SELECT user_id FROM all_users WHERE username = ?) GROUP BY sql_id")) {
           ps.setString(1, ORACLE_RUNNER);
@@ -630,7 +699,8 @@ class BenchBaseBenchmark {
                     rs.getDouble(3),
                     rs.getDouble(4),
                     rs.getDouble(5),
-                    rs.getDouble(6)
+                    rs.getDouble(6),
+                    rs.getDouble(8)
                   });
               text.put(rs.getString(1), rs.getString(7));
             }
@@ -654,7 +724,8 @@ class BenchBaseBenchmark {
             sys.getOrDefault("SQL*Net roundtrips to/from client", -1L),
             sql,
             text,
-            waits);
+            waits,
+            "");
       }
     }
 
@@ -662,14 +733,15 @@ class BenchBaseBenchmark {
       Thread.sleep(1000);
       Counters end = read(e);
       StringBuilder out =
-          new StringBuilder("calls\telapsed ms\tcpu ms\tparse calls\trows\tquery\n");
+          new StringBuilder(
+              "calls\telapsed ms\tcpu ms\tparse calls\trows\tquery\tbuffer gets a call\n");
       List<Map.Entry<String, double[]>> grown = new ArrayList<>();
       end.sql()
           .forEach(
               (id, v) -> {
-                double[] b = start.sql().getOrDefault(id, new double[5]);
-                double[] d = new double[5];
-                for (int i = 0; i < 5; i++) {
+                double[] b = start.sql().getOrDefault(id, new double[6]);
+                double[] d = new double[6];
+                for (int i = 0; i < 6; i++) {
                   d[i] = v[i] - b[i];
                 }
                 if (d[0] > 0) {
@@ -682,13 +754,14 @@ class BenchBaseBenchmark {
         out.append(
             String.format(
                 Locale.ROOT,
-                "%.0f\t%.1f\t%.1f\t%.0f\t%.0f\t%s%n",
+                "%.0f\t%.1f\t%.1f\t%.0f\t%.0f\t%s\t%.1f%n",
                 d[0],
                 d[1] / 1000,
                 d[2] / 1000,
                 d[3],
                 d[4],
-                String.valueOf(end.sqlText().get(g.getKey())).replaceAll("\\s+", " ")));
+                String.valueOf(end.sqlText().get(g.getKey())).replaceAll("\\s+", " "),
+                d[5] / d[0]));
       }
       out.append("\nwait event\twaits\tms\n");
       List<Map.Entry<String, double[]>> waited = new ArrayList<>();
@@ -710,6 +783,51 @@ class BenchBaseBenchmark {
                 w.getValue()[0],
                 w.getValue()[1] / 1000));
       }
+      // the ten statements of most elapsed time: their cursors by child, then their plans; lines
+      // indented, so that a reader of the statements above (a count in the first column) skips
+      // them (todo 334)
+      List<String> top = new ArrayList<>();
+      for (Map.Entry<String, double[]> g : grown.subList(0, Math.min(10, grown.size()))) {
+        top.add(g.getKey());
+      }
+      try (Connection c = e.open()) {
+        out.append(
+            "\nsql_id\tchild\texecutions\tparse calls\tloads\tinvalidations\tbind sensitive"
+                + "\tbind aware\tshareable\tbuffer gets\n");
+        try (PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT sql_id, child_number, executions, parse_calls, loads, invalidations,"
+                    + " is_bind_sensitive, is_bind_aware, is_shareable, buffer_gets FROM v$sql"
+                    + " WHERE sql_id = ? ORDER BY child_number")) {
+          for (String id : top) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                StringBuilder line = new StringBuilder("  ");
+                for (int i = 1; i <= 10; i++) {
+                  line.append(i == 1 ? "" : "\t").append(rs.getString(i));
+                }
+                out.append(line).append('\n');
+              }
+            }
+          }
+        }
+        out.append("\nplans\n");
+        try (PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT plan_table_output FROM"
+                    + " TABLE(DBMS_XPLAN.DISPLAY_CURSOR(?, NULL, 'TYPICAL -BYTES'))")) {
+          for (String id : top) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                out.append("  ").append(rs.getString(1)).append('\n');
+              }
+            }
+          }
+        }
+      }
+      out.append('\n').append(start.tables());
       Files.writeString(to, out);
       double dbCpuMs = (end.dbCpuUs() - start.dbCpuUs()) / 1000;
       long busyUs =

@@ -213,5 +213,22 @@ against 0.177 ms a transaction, about +50 µs. Of the driver run's CPU-time samp
   `AccessibleObject.verifyAccess` and `DirectMethodHandleAccessor.checkReceiver`, on every call
   the application makes on a wrapped statement or result set.
 - The SQL rewrite itself is small: `Router.route` 0.4%, jsqlparser 0.1%.
-Plain delegating classes for the hot interfaces (`ResultSet`, `PreparedStatement`), instead of
-reflective proxies, would take most of the 12%, on every engine.
+The design session measured what that 12% is (todo 334's log, "the third run read"). A
+reflective proxy call over ojdbc's `ResultSet` costs 21 ns against 18 ns direct on JDK 25, so the
+samples reflect the number of calls, not the cost of reflection. A 500-row scan makes about 6,000
+proxied calls. Through the driver on the container, such a scan costs the client 150–350 µs more
+than raw ojdbc at SNAPSHOT, and 360–840 µs at READ COMMITTED, where the anchors are read and
+recorded per row. That is about the SNAPSHOT decoupled scan's whole +368 µs here; a key read's
+twenty calls cost under a microsecond. Delegating classes in place of the proxies would therefore
+help scans by about 5–8% and single-key operations not at all, and are not proposed.
+
+The design session's other readings of this run:
+- **The READ COMMITTED decoupled scan** uses 3.5 times the vendor's server CPU. Its plan could not
+  be explained from the container: there, under the harness's statistics, the join of the
+  metadata rows plans as a hash join with about the vendor's reads.
+- **The decoupled update's MERGE stamp** parsed on 44,232 of its 99,150 executions, with 588 ms of
+  `cursor: pin S wait on X`, where the container parses it once.
+- For both, the harness's `server.txt` now also records the top ten statements' cursors per child
+  (executions, parse calls, loads, invalidations, bind sensitivity, shareability), their plans
+  (`DBMS_XPLAN.DISPLAY_CURSOR`), buffer gets per call, and the schema's table and key-column
+  statistics at the run's start.
