@@ -950,3 +950,21 @@ Tests:
 Unit tests, SpotBugs, and the Oracle integration suite (151 tests, 74 run, 0 failing) pass on a
 fresh private container. A reused one failed 25 tests with ORA-01920, the users an earlier full
 run left.
+
+### 2026-10-27: the bulk block measured locally (Opus)
+
+`OracleOltpIntegrationTest.newOrderShapedMeasure` runs only with
+`-Dnativejdbc.oracle.neworder=<n>`. Through the driver at SNAPSHOT on `t`, each transaction is a
+batch of ten keyed UPDATEs, a batch of ten INSERTs and the commit; 50 transactions warm it up, then
+1,000 are read from `V$MYSTAT`. On the private container, the trees `oracle-insert-all` (d9e36d8,
+the block of entries) and `oracle-bulk-batches` (ace0d6e) ran in the order before, after, after,
+before:
+
+| per transaction | wall µs | server CPU µs | DB time µs | parse calls | round trips |
+|---|---|---|---|---|---|
+| before | 2,752 / 2,608 | 760 / 890 | 1,780 / 1,590 | 50 | 3 |
+| after | 1,767 / 1,582 | 350 / 260 | 930 / 830 | 0 / 0.02 | 3 |
+
+The block's own cost goes, as the design's harness measured (1,190–1,210 → 455–515 there): server
+CPU 760–890 → 260–350, DB time about halved, and the nested statements' parses 50 → 0, in the same
+round trips.

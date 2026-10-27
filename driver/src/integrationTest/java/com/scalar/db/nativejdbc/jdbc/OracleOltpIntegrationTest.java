@@ -1668,6 +1668,88 @@ class OracleOltpIntegrationTest {
     }
   }
 
+  /**
+   * A NewOrder-shaped transaction through the driver at SNAPSHOT on the decoupled table, measured
+   * from the session's statistics (todo 334's before-and-after for the bulk block): a batch of ten
+   * keyed UPDATEs and a batch of ten INSERTs, then the commit. Run only with {@code
+   * -Dnativejdbc.oracle.neworder=<transactions>}; it prints per transaction the server CPU, the DB
+   * time, the parse calls and the round trips.
+   */
+  @Test
+  void newOrderShapedMeasure() throws Exception {
+    int n = Integer.getInteger("nativejdbc.oracle.neworder", 0);
+    Assumptions.assumeTrue(n > 0, "-Dnativejdbc.oracle.neworder not set");
+    Properties p = new Properties();
+    p.setProperty("scalardbnative.catalogTtlMs", "600000");
+    p.setProperty("oracle.jdbc.implicitStatementCacheSize", "128");
+    try (Connection d = ORA.openDriver(p)) {
+      d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      d.setAutoCommit(false);
+      int[] next = {1_000_000};
+      Action tx =
+          () -> {
+            try (PreparedStatement up =
+                    d.prepareStatement("UPDATE " + NS + ".t SET x = ?, v = v + ? WHERE id = ?");
+                PreparedStatement ins =
+                    d.prepareStatement("INSERT INTO " + NS + ".t (id, x, v) VALUES (?, ?, ?)")) {
+              for (int l = 0; l < 10; l++) {
+                up.setString(1, "s");
+                up.setInt(2, 1);
+                up.setInt(3, 1 + (next[0] + l) % 60);
+                up.addBatch();
+              }
+              up.executeBatch();
+              for (int l = 0; l < 10; l++) {
+                ins.setInt(1, next[0]++);
+                ins.setString(2, "ol");
+                ins.setInt(3, l);
+                ins.addBatch();
+              }
+              ins.executeBatch();
+            }
+            d.commit();
+          };
+      for (int i = 0; i < 50; i++) {
+        tx.run();
+      }
+      Map<String, Long> a = sessionStats(d);
+      long t0 = System.nanoTime();
+      for (int i = 0; i < n; i++) {
+        tx.run();
+      }
+      double wall = (System.nanoTime() - t0) / 1000.0 / n;
+      Map<String, Long> b = sessionStats(d);
+      double per = n;
+      System.out.printf(
+          "[334] NewOrder-shaped at SNAPSHOT, %d transactions: wall %.0f µs, server CPU %.0f µs, DB"
+              + " time %.0f µs, parse calls %.2f, round trips %.2f a transaction%n",
+          n,
+          wall,
+          (b.get("CPU used by this session") - a.get("CPU used by this session")) * 10000.0 / per,
+          (b.get("DB time") - a.get("DB time")) * 10000.0 / per,
+          (b.get("parse count (total)") - a.get("parse count (total)")) / per,
+          (b.get("SQL*Net roundtrips to/from client") - a.get("SQL*Net roundtrips to/from client"))
+              / per);
+      d.setAutoCommit(true);
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+    }
+  }
+
+  private static Map<String, Long> sessionStats(Connection c) throws SQLException {
+    Map<String, Long> out = new java.util.HashMap<>();
+    try (Statement st = c.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT n.name, s.value FROM v$mystat s JOIN v$statname n ON n.statistic# ="
+                    + " s.statistic# WHERE n.name IN ('parse count (total)', 'CPU used by this"
+                    + " session', 'DB time', 'SQL*Net roundtrips to/from client')")) {
+      while (rs.next()) {
+        out.put(rs.getString(1), rs.getLong(2));
+      }
+    }
+    return out;
+  }
+
   private static int update(Connection c, String sql) throws SQLException {
     try (Statement st = c.createStatement()) {
       return st.executeUpdate(sql);
