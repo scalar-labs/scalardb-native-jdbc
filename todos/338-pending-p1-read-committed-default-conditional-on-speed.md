@@ -32,6 +32,21 @@ writing at the time of this todo.
 | Oracle, decoupled | 0.51 | 0.63 | third Oracle run, 2162759 |
 | Oracle, inline | 0.62 | 0.74 | third Oracle run, 2162759 |
 
+YCSB, (c)/(a), fast round trip:
+
+| engine, layout | READ COMMITTED | SNAPSHOT | source |
+|---|---|---|---|
+| PostgreSQL, decoupled | 0.66 | 0.85 | tenth run, 816f506, before todo 336; no YCSB cell since |
+| PostgreSQL, inline | 0.86 | 0.88 | ninth run, 6c19378 |
+| Oracle, decoupled | 0.64 | 0.89 | third Oracle run; the vendor's rate drifted, indicative only |
+| Oracle, inline | not usable | 0.86 | third Oracle run; the vendor's scans 7.8 ms in the RC cell |
+
+On Oracle the single-key medians are the measure (third run, p50 above the vendor's): READ
+COMMITTED decoupled read +12%, update +34%, insert +14%; SNAPSHOT decoupled +21%, +46%, +17%;
+READ COMMITTED inline +15%, +30%, +15%; SNAPSHOT inline +16%, +7%, +12%. Decoupled READ COMMITTED's
+ratio is held back by its scans (1.7 times the vendor's p50). The next PostgreSQL run should include
+YCSB for decoupled READ COMMITTED.
+
 ## Where each row stands
 
 1. **PostgreSQL, decoupled.** Todo 337's design reading expects `cb16d83` to bring READ COMMITTED to
