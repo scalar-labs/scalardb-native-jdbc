@@ -1360,3 +1360,13 @@ deltas and V$SYSSTAT's `CR blocks created` and `data blocks consistent reads - u
 per cell, cheap and the serializable artifact's signature; and the client's CPU per operation if the
 plan-file harness can run a JFR cell, the READ COMMITTED update's 95 µs being the one client figure
 that matters now.
+
+### 2026-10-27: the CAS-first keyed write handed to the implementation session (the design's note)
+
+The user chose proposal 1 with proposal 2 folded in, the floor (proposal 3) left as the record.
+The form is in design 4.3 at b50c8db ("The keyed write at READ COMMITTED on Oracle, the statement
+first and the block on a miss"): the statement with the state condition and the recorded anchor in
+its WHERE, today's block on a miss; the anchor looked up by the key as bound, the block kept where
+the table has versions recorded and the key is not found (the CHAR-key hazard); the decoupled form
+the block without step 1, two OUT binds; a hint per block shape in every nested text. Sent to c7 to
+build with the tests and the measurement the design lists; review from `git show` when it comes.
