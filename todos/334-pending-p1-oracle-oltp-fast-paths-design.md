@@ -1234,3 +1234,129 @@ commits reviewed above (`git range-diff`). Unit tests, SpotBugs and the two Orac
 the rebased tree; nothing is pushed. Main now holds every Oracle item of todo 334 and the harness
 captures of 804b9e8; the proof is the SNAPSHOT decoupled TPC-C rerun, the order_line batch as
 bulk block calls.
+
+### 2026-10-27: the fourth run read; the update by part, and what is left of it (the design's note)
+
+Run 20261027-1617 (bdbdd21, decoupled at both levels; the benchmark session's write-up in
+docs/benchmarks/benchbase-oracle-aws.md, 0774142), read with the harness's new sections and
+measured on the container where the run left a question. The user's order is YCSB's single-key
+operations first, the update above all: the latest p50 gaps against the vendor are inline SNAPSHOT
++16/+7/+12/+4 (read/update/insert/RMW), inline READ COMMITTED +15/+30/+15/+23, decoupled READ
+COMMITTED +13/+38/+16/+30, decoupled SNAPSHOT +19/+46/+18/+33. Reads and inserts are within the
+goal; the update and the RMW, which is the update again, are not.
+
+**What the READ COMMITTED update sends, and why inline READ COMMITTED is +30% where inline SNAPSHOT
+is +7%.** At SNAPSHOT on an inline table the update is the vendor's statement with the stamp in its
+SET list and the gate in its WHERE (`UPDATE usertable SET tx_id = :1, ..., FIELD1 = ... WHERE
+YCSB_KEY = ... AND NOT EXISTS (in-flight probe)`): one execution, 28 µs elapsed and 14 of CPU at the
+server against the vendor's 35/22 (third run, bb-inline-d0), the gap the client's. At READ
+COMMITTED the update is the keyed block (`Writes.keyedBody`): step 1 `SELECT 1, tx_id, tx_version,
+tx_state, key INTO ...` on the predicate, then under `rows = 1 AND COALESCE(state, 3) = 3` the UPDATE
+with the stamp and the CAS on the version just read (`COALESCE(tx_state, 3) = 3 AND DECODE(tx_id,
+l_id, 1, 0) = 1 AND COALESCE(tx_version, 0) = COALESCE(l_version, 0)`), and the row back through OUT
+binds (rows, written, id, version, state, the key), the client comparing the version with its
+anchor. One round trip but two executions and a PL/SQL call: 127 µs elapsed, 69 of CPU, of which the
+read 15 and the UPDATE 52 (bb-inline-rc-d0), against the vendor's 38; and at the client 95 µs of CPU
+against the vendor's 34 (the container, clientcost3), the block's binds and OUT binds, where the
+SNAPSHOT form costs 58. The decoupled READ COMMITTED block is the same shape with the metadata read
+and stamped: 140 µs = the read-back 16 + `UPDATE T_meta` 34 + `UPDATE T` 28 + about 62 of the call.
+
+**The decoupled SNAPSHOT update by part (fourth run, bb-d0 YCSB).** The block 130 µs elapsed, 62 of
+CPU, 7.8 gets: the nested `UPDATE USERTABLE` 23 (11 CPU, 3.3 gets), the nested `MERGE INTO
+USERTABLE_tx_metadata` 50 (23 CPU, 4.5 gets, a parse call on 44% of executions), the PL/SQL call and
+the two cursor executions the remaining 57; the vendor's UPDATE 31. The RMW's update is a second
+block shape, ungated after the locking read, 171 µs with its nested UPDATE at 54 (9 gets, 826 parse
+calls), which I have not explained. At the client +17 µs of CPU (58 against 41).
+
+**The MERGE's parse calls are not the cursor cache's size.** On the container (forms4, forms5: the
+instance's `session_cached_cursors` at 50 and at 500, set `DEFERRED` before the session opens) the
+block of entries parses 40 nested statements a call at either setting, and the bulk block 0; the
+parse calls are session-cursor-cache hits. The rule, measured (cc, cc2): one anonymous block whose
+nested text occurs once keeps that cursor open across calls, 0 parse calls; the same text in k
+places of one block parses k times a call; two or three blocks sharing one nested text parse once a
+call, each evicting the other's; a hint comment per occurrence (`/*+ o1 */`, since PL/SQL strips
+plain comments) makes the texts distinct and the parse calls 0. The cost is small: at k = 20, 293–313
+µs of CPU a call with the parses against 260–320 without, a few µs an execution. So the decoupled
+update's MERGE parses on 44% of executions because the two block shapes (gated, and ungated after the
+locking read) share its text; the district stamp in TPC-C on 50% for the same reason; and the block
+of entries at READ COMMITTED parses every nested statement of every entry (2,363,298 parse calls in
+the RC TPC-C run's 5.1 M calls, 449,183 on 449,310 executions of each nested statement). The design's
+sentence on `session_cached_cursors` is corrected by this: the storm is the texts' repetition, not
+the cache's size, and `ALTER SESSION SET session_cached_cursors` would not remove it.
+
+**The stamp as a row trigger, measured (forms6), the one packaging that makes the decoupled update one
+DML.** A trigger `AFTER UPDATE ON T FOR EACH ROW` stamping `T_meta` from `SYS_CONTEXT('USERENV',
+'CLIENT_IDENTIFIER')` and MODULE/ACTION, which ojdbc's `setClientInfo("OCSID.CLIENTID")` sends with
+the next call: round trips 2 a transaction as the vendor's (the identifier rides along), executions
+2. Per transaction, three rounds: the vendor 52–65 µs of server CPU, DB time 198–265; today's block
+93–105, 297–330; the trigger 87–123, 270–337 with the identifier set each transaction, 88–107,
+248–320 set once. The server cost is the block's: a nested DML in a PL/SQL context costs the same
+whether the block or the trigger holds it. What the trigger saves is the client's CallableStatement
+and OUT binds. Not proposed: a trigger per decoupled table, a stamp carried in session attributes
+of 64 bytes, and firing rules for sessions that are not the driver's, for a client-side gain the
+fast path below gets without any of it.
+
+**Proposals for the update.**
+1. *The CAS-first fast path at READ COMMITTED, the update as one statement.* The vendor's UPDATE
+   with the stamp (inline) or the stamp's UPDATE of `T_meta` then the DML (decoupled, in the block
+   without the read-back), its WHERE carrying the deemed-committed condition and, when the
+   transaction recorded an anchor for the key, `tx_id = :anchor_id AND tx_version = :anchor_version`;
+   a count of 1 settles the row (the anchor held, the row was committed, the first use records
+   `wrote(tx_id)`); a count of 0 goes to today's block, which classifies it (no row, in flight and the
+   wait, the anchor moved and the abort), the rare path paying the round trip. Expected: inline READ
+   COMMITTED's update from 127 to about 30 µs at the server and from 95 to about 58 µs at the client,
+   the +30% to about SNAPSHOT inline's +7–10%; decoupled READ COMMITTED's block from 140 to about 120
+   and the client's 95 to 58, the +38% to about +25%; the RMW the same way. This also makes READ
+   COMMITTED run about as fast as SNAPSHOT on the update, todo 338's condition for it to stay the
+   default.
+2. *Distinct nested texts.* A hint comment per block shape in the stamp (`MERGE /*+
+   scalardb_native_gated */`, ...) and per entry in the block of entries: the MERGE's 44% and the
+   district's 50% parse calls gone, about 15 µs an update at SNAPSHOT decoupled; the READ COMMITTED
+   batches' 2.36 M parse calls gone even before item 4 below. One line in the builders.
+3. *The decoupled update's floor.* Two DMLs in one call: the data UPDATE 23, the stamp 34–50, the
+   call about 45 lean (fewer OUT binds, no read-back) against the vendor's 31, about +70 µs at the
+   server and +17 at the client, +25% at the fast network's 345 µs base. Not 20%: the layout's second
+   row costs a second DML, and no Oracle statement writes two tables. Smaller levers, unmeasured: the
+   metadata table of an imported table as an index-organized table (the stamp's 4.5 gets to about 2,
+   the driver creates that table); the RMW block's nested UPDATE at 54 µs and 9 gets against the
+   plain shape's 23 and 3.3, worth a plan. The inline layout is the one that meets +20% on the update.
+
+**TPC-C, from the same run (for later, the user's order being YCSB first).**
+- *READ COMMITTED's NewOrder batches are the block of entries, at 1,159 and 984 µs a call.* The stock
+  updates: 11 texts (one per batch size), 44,853 calls, 897 µs of CPU and 161 gets a call; the
+  order_line inserts: 11 texts, 44,855 calls, 559 µs of CPU, 137 gets; together 2.1 ms of server
+  elapsed a NewOrder against SNAPSHOT's two bulk blocks at 414 + 371 and the vendor's two array
+  executions at 102 + 74. The merged form of 4.4 ("the entries merged, one statement for all") is
+  the item, with the CAS-first shape of proposal 1 per entry: FORALL over the slots with the anchor
+  per entry in the WHERE, `SQL%BULK_ROWCOUNT(i)` per entry, the entries counting 0 to the block of
+  entries. Local figures (forms5): the block of entries 767–813 µs of CPU and 1,760–1,787 of DB time
+  a NewOrder pair, the bulk block 267–333 and 807–960. Expected at AWS: about 1.2 ms a NewOrder, the
+  READ COMMITTED cell from 0.51 toward SNAPSHOT's 0.62.
+- *SNAPSHOT's TPC-C is Oracle's SERIALIZABLE on two hot blocks.* Scale 4 with 4 terminals puts the
+  four warehouse rows in one block and the forty district rows in one; Payment's plain reads after
+  its own updates wait on `buffer busy waits` (55 s a run for the driver, 49 for the vendor, 3.5 ms a
+  wait; the district read 838 µs elapsed for 13 of CPU, the vendor's 402; the warehouse read 265
+  against 260). Reproduced on the container (bbw, bbw2): four sessions on their own rows of the two
+  blocks, Payment's four statements, at READ COMMITTED the reads 23–25 µs at the server; at
+  SERIALIZABLE the warehouse read 828 µs of which 771 concurrency wait, the district read 49, and
+  with twenty reads before them (an older snapshot) 940 and 2,360; the waits in V$WAITSTAT's data
+  block class, V$SESSION naming no blocking session, p3 65537 and 1 on the warehouse block; `CR blocks
+  created` 2.7 a transaction. The same runs raise ORA-08177 on 18–25% of transactions with no two
+  sessions on one row (INITRANS 16 changes nothing), and the AWS run's parse-call counts place its
+  failures at the district row: the vendor's `SELECT ... FOR UPDATE` 6,292 and `UPDATE district`
+  5,116 parse calls, its 15,831 "unexpected" transactions 8.2% of the run, the driver's 5,477 4.5%.
+  Both sides pay; the driver's Payment reaches the district read later, so its district wait is twice
+  the vendor's. Not a driver item: the benchmark's shape at this scale under Oracle's SERIALIZABLE
+  (one row a block for warehouse and district, PCTFREE 99, would isolate the driver's own cost).
+- *The YCSB scan at scale 1 is bind peeking on 1,000-row statistics.* The driver's READ COMMITTED
+  scan is a hash join of two full scans (1,660 gets, 3.65 ms); the vendor's own scan is a full scan
+  in one cell (1,560 gets, 4.9 ms) and an index range scan in the other (104 gets, 788 µs), by the
+  binds peeked at the first parse; the table grows from 1,000 to about 19,000 rows in the run. The
+  next run's 1 M rows settle it; with correct statistics the driver's join is +8% reads (the third
+  run's note).
+
+For the next run (YCSB A/C/E/F at 1 M rows): keep the cursor and plan sections; add V$WAITSTAT's
+deltas and V$SYSSTAT's `CR blocks created` and `data blocks consistent reads - undo records applied`
+per cell, cheap and the serializable artifact's signature; and the client's CPU per operation if the
+plan-file harness can run a JFR cell, the READ COMMITTED update's 95 µs being the one client figure
+that matters now.
