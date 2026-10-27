@@ -113,7 +113,15 @@ class OracleFormsIntegrationTest {
           "INSERT INTO ofa.bi VALUES (3, 'c', 'T0', 3, 1, 0, 0)",
           // 8: round trips
           "CREATE TABLE ofa.m1 (k NUMBER(10) PRIMARY KEY, x NUMBER(10))",
-          "INSERT INTO ofa.m1 VALUES (1, 0)");
+          "INSERT INTO ofa.m1 VALUES (1, 0)",
+          // 9: the bulk block's FORALL forms, a decoupled table and its metadata table
+          "CREATE TABLE ofa.bk (k NUMBER(10) PRIMARY KEY, x NUMBER(10))",
+          "CREATE TABLE ofa.bk_meta (k NUMBER(10) PRIMARY KEY, tx_id VARCHAR2(100),"
+              + " tx_state NUMBER(3), tx_version NUMBER(10), tx_prepared_at NUMBER(19),"
+              + " tx_committed_at NUMBER(19))",
+          "CREATE INDEX ofa.bk_inflight ON ofa.bk_meta (tx_state, k)",
+          "INSERT INTO ofa.bk SELECT level, 0 FROM dual CONNECT BY level <= 40",
+          "INSERT INTO ofa.bk_meta SELECT level, 'T0', 3, 1, 0, 0 FROM dual CONNECT BY level <= 40");
     }
   }
 
@@ -936,6 +944,249 @@ class OracleFormsIntegrationTest {
           counter.measure("8 " + mode + ": the commit after a block", c::commit);
         }
       }
+    }
+  }
+
+  /**
+   * 9a. {@code SQL%BULK_ROWCOUNT(i)} after a {@code FORALL} UPDATE with {@code RETURNING ... BULK
+   * COLLECT INTO}: each entry's count, 0 for a key without a row, and the collection the keys
+   * written in iteration order. Decides: the bulk block's per-entry counts and the stamp's keys
+   * (design 4.4 "The entries merged on a clear table at SNAPSHOT"). A failure sends the form back.
+   */
+  @Test
+  void bulkRowcountWithReturningBulkCollect() throws Exception {
+    try (Connection c = ORA.open()) {
+      c.setAutoCommit(false);
+      String row =
+          cursorRow(
+              c,
+              "DECLARE TYPE t_n IS TABLE OF NUMBER INDEX BY PLS_INTEGER; l_k t_n; TYPE t_w IS TABLE"
+                  + " OF ofa.bk.k%TYPE; l_w t_w; l_n PLS_INTEGER := 3; l_t NUMBER; l_c"
+                  + " VARCHAR2(100); l_ks VARCHAR2(100); BEGIN l_k(1) := 5; l_k(2) := 999; l_k(3)"
+                  + " := 3; FORALL i IN 1 .. l_n UPDATE ofa.bk SET x = x + 1 WHERE k = l_k(i)"
+                  + " RETURNING k BULK COLLECT INTO l_w; l_t := SQL%ROWCOUNT; FOR i IN 1 .. l_n LOOP"
+                  + " l_c := l_c || SQL%BULK_ROWCOUNT(i) || ','; END LOOP; FOR j IN 1 .. l_w.COUNT"
+                  + " LOOP l_ks := l_ks || l_w(j) || ','; END LOOP; OPEN ? FOR SELECT l_c, l_ks, l_t"
+                  + " FROM dual; END;",
+              cs -> {});
+      log(
+          "9a FORALL UPDATE of keys 5, 999, 3 with RETURNING BULK COLLECT: counts/keys/total "
+              + row);
+      assertThat(row).isEqualTo("1,0,1,/5,3,/2");
+      c.rollback();
+    }
+  }
+
+  /**
+   * 9b. A duplicate in a {@code FORALL} INSERT raises ORA-00001 out of the block and leaves nothing
+   * of the call, the entries before it and the block's other writes included, the transaction
+   * usable after it. Decides: the bulk INSERT's duplicate, replayed entry by entry after the block
+   * undid itself whole.
+   */
+  @Test
+  void duplicateInAForallInsert() throws Exception {
+    try (Connection c = ORA.open()) {
+      c.setAutoCommit(false);
+      SQLException e =
+          fails(
+              () -> {
+                try (CallableStatement cs =
+                    c.prepareCall(
+                        "DECLARE TYPE t_n IS TABLE OF NUMBER INDEX BY PLS_INTEGER; l_k t_n; BEGIN"
+                            + " INSERT INTO ofa.bk_meta VALUES (100, 'X', 3, 1, 0, 0); l_k(1) := 101;"
+                            + " l_k(2) := 102; l_k(3) := 7; l_k(4) := 103; FORALL i IN 1 .. 4 INSERT"
+                            + " INTO ofa.bk VALUES (l_k(i), 0); END;")) {
+                  cs.execute();
+                }
+              });
+      List<String> left = query(c, "SELECT COUNT(*) FROM ofa.bk WHERE k > 100");
+      List<String> meta = query(c, "SELECT COUNT(*) FROM ofa.bk_meta WHERE k = 100");
+      log(
+          "9b FORALL INSERT of 101, 102, 7 (a duplicate), 103 after a metadata insert: ORA-"
+              + e.getErrorCode()
+              + ", data rows left "
+              + left
+              + ", metadata rows left "
+              + meta);
+      assertThat(e.getErrorCode()).isEqualTo(1);
+      assertThat(left).containsExactly("0");
+      assertThat(meta).containsExactly("0");
+      // the transaction goes on
+      assertThat(query(c, "SELECT x FROM ofa.bk WHERE k = 7")).containsExactly("0");
+      c.rollback();
+    }
+  }
+
+  /**
+   * 9c. {@code IGNORE_ROW_ON_DUPKEY_INDEX} under {@code FORALL}, per iteration: a key with a row is
+   * skipped and counted 0 by {@code SQL%BULK_ROWCOUNT}, the others inserted. Decides: the bulk
+   * INSERT's metadata insert and the list the takeover runs over.
+   */
+  @Test
+  void ignoreRowOnDupkeyIndexPerIteration() throws Exception {
+    try (Connection c = ORA.open()) {
+      c.setAutoCommit(false);
+      String row =
+          cursorRow(
+              c,
+              "DECLARE TYPE t_n IS TABLE OF NUMBER INDEX BY PLS_INTEGER; l_k t_n; l_t NUMBER; l_c"
+                  + " VARCHAR2(100); BEGIN l_k(1) := 201; l_k(2) := 8; l_k(3) := 202; FORALL i IN 1"
+                  + " .. 3 INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (k)) */ INTO ofa.bk_meta x (k,"
+                  + " tx_id, tx_state, tx_version, tx_prepared_at, tx_committed_at) VALUES (l_k(i),"
+                  + " 'N', 3, 1, 0, 0); l_t := SQL%ROWCOUNT; FOR i IN 1 .. 3 LOOP l_c := l_c ||"
+                  + " SQL%BULK_ROWCOUNT(i) || ','; END LOOP; OPEN ? FOR SELECT l_c, l_t FROM dual;"
+                  + " END;",
+              cs -> {});
+      log(
+          "9c FORALL metadata INSERT of 201, 8 (has a row), 202 under the hint: counts/total "
+              + row);
+      assertThat(row).isEqualTo("1,0,1,/2");
+      assertThat(query(c, "SELECT k, tx_id FROM ofa.bk_meta WHERE k IN (8, 201, 202) ORDER BY k"))
+          .containsExactly("8/T0", "201/N", "202/N");
+      c.rollback();
+    }
+  }
+
+  /**
+   * 9d. {@code FORALL i IN INDICES OF} a sparse index-by table runs the entries it lists only, with
+   * {@code i} the entry's index into the other collections. Decides: the takeover over the entries
+   * whose metadata insert counted 0.
+   */
+  @Test
+  void forallIndicesOfASparseTable() throws Exception {
+    try (Connection c = ORA.open()) {
+      c.setAutoCommit(false);
+      String row =
+          cursorRow(
+              c,
+              "DECLARE TYPE t_n IS TABLE OF NUMBER INDEX BY PLS_INTEGER; l_k t_n; l_todo t_n; l_t"
+                  + " NUMBER; BEGIN l_k(1) := 11; l_k(2) := 12; l_k(3) := 13; l_todo(1) := 1;"
+                  + " l_todo(3) := 3; FORALL i IN INDICES OF l_todo UPDATE ofa.bk SET x = 7 WHERE k ="
+                  + " l_k(i); l_t := SQL%ROWCOUNT; OPEN ? FOR SELECT l_t FROM dual; END;",
+              cs -> {});
+      List<String> rows = query(c, "SELECT k, x FROM ofa.bk WHERE k IN (11, 12, 13) ORDER BY k");
+      log(
+          "9d FORALL INDICES OF entries 1 and 3 of keys 11, 12, 13: count "
+              + row
+              + ", rows "
+              + rows);
+      assertThat(row).isEqualTo("2");
+      assertThat(rows).containsExactly("11/7", "12/0", "13/7");
+      c.rollback();
+    }
+  }
+
+  /**
+   * 9e. The slots beyond {@code l_n} are never touched: a {@code FORALL i IN 1 .. l_n} INSERT whose
+   * next slot holds a NULL key raises no ORA-01400, and an UPDATE whose next slot holds a real key
+   * leaves that row alone. Decides: one text for every batch size, its slots bound NULL past the
+   * entries.
+   */
+  @Test
+  void slotsBeyondTheCountUntouched() throws Exception {
+    try (Connection c = ORA.open()) {
+      c.setAutoCommit(false);
+      String row =
+          cursorRow(
+              c,
+              "DECLARE TYPE t_n IS TABLE OF NUMBER INDEX BY PLS_INTEGER; l_k t_n; l_u t_n; l_n"
+                  + " PLS_INTEGER; l_a NUMBER; l_b NUMBER; BEGIN l_n := ?; l_k(1) := ?; l_k(2) := ?;"
+                  + " l_k(3) := ?; l_u(1) := ?; l_u(2) := ?; l_u(3) := ?; FORALL i IN 1 .. l_n"
+                  + " INSERT INTO ofa.bk VALUES (l_k(i), 0); l_a := SQL%ROWCOUNT; FORALL i IN 1 .."
+                  + " l_n UPDATE ofa.bk SET x = 9 WHERE k = l_u(i); l_b := SQL%ROWCOUNT; OPEN ? FOR"
+                  + " SELECT l_a, l_b FROM dual; END;",
+              cs -> {
+                cs.setInt(1, 2);
+                cs.setInt(2, 301);
+                cs.setInt(3, 302);
+                cs.setNull(4, java.sql.Types.NUMERIC);
+                cs.setInt(5, 21);
+                cs.setInt(6, 22);
+                cs.setInt(7, 23);
+              });
+      List<String> rows = query(c, "SELECT k, x FROM ofa.bk WHERE k IN (21, 22, 23) ORDER BY k");
+      log(
+          "9e l_n 2 of 3 slots, the third a NULL key for the INSERT and key 23 for the UPDATE: "
+              + row
+              + ", rows "
+              + rows);
+      assertThat(row).isEqualTo("2/2");
+      assertThat(rows).containsExactly("21/9", "22/9", "23/0");
+      c.rollback();
+    }
+  }
+
+  /**
+   * 9f. The nested statements of a 16-slot bulk block (the gate, the FORALL UPDATE, the stamp's
+   * FORALL) parse no more across calls of one text: the session's parse count stays flat over 20
+   * calls of 10 to 15 entries, where a block of 16 entries held a nested statement per entry, past
+   * {@code session_cached_cursors}, and parsed them on every call. Decides: one text per shape, its
+   * slots bound NULL.
+   */
+  @Test
+  void nestedParsesOfABulkBlock() throws Exception {
+    java.util.Properties cached = new java.util.Properties();
+    cached.setProperty("user", ORA.username());
+    cached.setProperty("password", ORA.password());
+    cached.setProperty("oracle.jdbc.implicitStatementCacheSize", "128");
+    try (Connection c = DriverManager.getConnection(ORA.url(), cached)) {
+      c.setAutoCommit(false);
+      StringBuilder b =
+          new StringBuilder(
+              "DECLARE TYPE t_n IS TABLE OF NUMBER INDEX BY PLS_INTEGER; l_k t_n; l_x t_n; TYPE t_w"
+                  + " IS TABLE OF ofa.bk.k%TYPE; l_w t_w; l_n PLS_INTEGER; l_g NUMBER := 0; l_s"
+                  + " NUMBER := 0; BEGIN l_n := ?;");
+      for (int e = 1; e <= 16; e++) {
+        b.append(" l_k(").append(e).append(") := ?; l_x(").append(e).append(") := ?;");
+      }
+      b.append(
+          " SELECT COUNT(*) INTO l_g FROM (SELECT /*+ INDEX(m bk_inflight) */ 1 FROM ofa.bk_meta m"
+              + " WHERE m.tx_state IN (1, 2) AND ROWNUM = 1); IF l_g = 0 THEN FORALL i IN 1 .. l_n"
+              + " UPDATE ofa.bk SET x = l_x(i) WHERE k = l_k(i) RETURNING k BULK COLLECT INTO l_w;"
+              + " FORALL j IN 1 .. l_w.COUNT UPDATE ofa.bk_meta SET tx_version = tx_version + 1"
+              + " WHERE k = l_w(j) AND COALESCE(tx_state, 3) = 3; l_s := SQL%ROWCOUNT; END IF; ? :="
+              + " l_g; ? := l_s; END;");
+      String block = b.toString();
+      long before = 0;
+      for (int call = 0; call < 25; call++) {
+        if (call == 5) {
+          before = parseCount(c);
+        }
+        try (CallableStatement cs = c.prepareCall(block)) {
+          int n = 10 + call % 6;
+          cs.setInt(1, n);
+          for (int e = 0; e < 16; e++) {
+            if (e < n) {
+              cs.setInt(2 + 2 * e, 1 + e);
+              cs.setInt(3 + 2 * e, call);
+            } else {
+              cs.setNull(2 + 2 * e, java.sql.Types.NUMERIC);
+              cs.setNull(3 + 2 * e, java.sql.Types.NUMERIC);
+            }
+          }
+          cs.registerOutParameter(34, java.sql.Types.NUMERIC);
+          cs.registerOutParameter(35, java.sql.Types.NUMERIC);
+          cs.execute();
+          assertThat(cs.getLong(34)).isZero();
+          assertThat(cs.getLong(35)).isEqualTo(n);
+        }
+      }
+      // the count's own query, once
+      long parses = parseCount(c) - before - 1;
+      log("9f a 16-slot bulk block, 20 calls of 10 to 15 entries: parse calls " + parses);
+      assertThat(parses).isLessThanOrEqualTo(1);
+      c.rollback();
+    }
+  }
+
+  private static long parseCount(Connection c) throws SQLException {
+    try (Statement st = c.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT s.value FROM v$mystat s JOIN v$statname n ON n.statistic# = s.statistic#"
+                    + " WHERE n.name = 'parse count (total)'")) {
+      rs.next();
+      return rs.getLong(1);
     }
   }
 

@@ -881,3 +881,23 @@ no metadata row by either form, as before.
 At the review's ask (254fac5), a key column whose type the driver does not know keeps the block,
 which takes the key as the data row stores it, rather than INSERT ALL with the value uncast;
 asserted in the unit test with a column map that lacks the key.
+### 2026-10-27: the bulk block's confirmation tests (Opus)
+
+For design 4.4 "The entries merged on a clear table at SNAPSHOT" (0f83694), the six tests of
+todo 334's log, in `OracleFormsIntegrationTest` (vendor connections, `ofa.bk` and `ofa.bk_meta`
+with `bk_inflight`), on a private container (gvenzl/oracle-free:23-slim-faststart). All pass:
+- 9a `bulkRowcountWithReturningBulkCollect`: a FORALL UPDATE of keys 5, 999, 3 with `RETURNING k
+  BULK COLLECT INTO`: `SQL%BULK_ROWCOUNT` 1, 0, 1, the collection 5, 3 in iteration order,
+  `SQL%ROWCOUNT` 2.
+- 9b `duplicateInAForallInsert`: a block that inserts a metadata row, then a FORALL INSERT of
+  101, 102, 7 (a duplicate), 103. ORA-00001 comes out of the block, no data row and no metadata row
+  are left, and the transaction goes on.
+- 9c `ignoreRowOnDupkeyIndexPerIteration`: the hint under FORALL over 201, 8 (has a row), 202:
+  counts 1, 0, 1, total 2, row 8 untouched.
+- 9d `forallIndicesOfASparseTable`: INDICES OF entries 1 and 3 of keys 11, 12, 13: count 2, row 12
+  untouched.
+- 9e `slotsBeyondTheCountUntouched`: `l_n` 2 of three slots, the third a NULL key for the INSERT
+  (no ORA-01400) and key 23 for the UPDATE, untouched.
+- 9f `nestedParsesOfABulkBlock`: a 16-slot block (the gate, the FORALL UPDATE, the stamp's
+  FORALL), 20 calls of 10 to 15 entries with the implicit statement cache at 128: 0 parse calls.
+Next, the two forms in `Writes`.
