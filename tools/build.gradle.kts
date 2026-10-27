@@ -46,3 +46,10 @@ tasks.jar {
         attributes("Implementation-Version" to project.version)
     }
 }
+
+// lib/* rather than the runtime classpath's jars, which leave out the bundled drivers above: without
+// them the tools find no vendor driver. A user can also drop a driver of their own into lib/, as in
+// the shell.
+tasks.startScripts {
+    classpath = files("*")
+}
