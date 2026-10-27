@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "344"
 tags: [code-review, docs, getting-started]
@@ -23,11 +23,19 @@ Accuracy review items 4, 6 and two unverified claims.
 
 ## Recommended Action
 
+Solution 1.
+
 ## Acceptance Criteria
 
-- [ ] Each note is confirmed in the code or on the engine's container.
+- [x] Each note is confirmed in the code or on the engine's container.
 
 ## Work Log
 
 - 2026-10-27: found in the review of the user-facing docs (ce:review: an accuracy reviewer against the code and the
   design, and a first-time-user reviewer).
+- 2026-10-27: done. MySQL alone lacks RETURNING; SQL Server lists READ_COMMITTED_SNAPSHOT,
+  ALLOW_SNAPSHOT_ISOLATION and XACT_ABORT with a link to configuration.md's database settings (all three
+  reported by setup/Check.java). The two unverified notes are confirmed by the crud samples' integration
+  tests, which run on the engines (JdbcSampleIntegrationTest: SQL Server keys from a sequence since
+  ScalarDB's prepare inserts the key explicitly; Oracle's names upper case, NUMBER as BIGINT); the Oracle
+  note now says it is the unquoted DDL that makes the names upper case.

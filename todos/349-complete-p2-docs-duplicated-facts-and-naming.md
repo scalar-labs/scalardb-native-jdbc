@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "349"
 tags: [code-review, docs, consistency]
@@ -22,11 +22,19 @@ READ COMMITTED/REPEATABLE_READ/REPEATABLE READ spellings. First-time-user review
 
 ## Recommended Action
 
+Solution 1.
+
 ## Acceptance Criteria
 
-- [ ] Each listed fact has one home page.
+- [x] Each listed fact has one home page.
 
 ## Work Log
 
 - 2026-10-27: found in the review of the user-facing docs (ce:review: an accuracy reviewer against the code and the
   design, and a first-time-user reviewer).
+- 2026-10-27: done. The lock wait lives in transactions.md's per-engine SERIALIZABLE sections (348);
+  configuration.md's ScalarDB settings and Passthrough sections are now pointers; setting-up-tables keeps
+  a one-line pointer; catalog_ttl_millis is defined in configuration.md, used in setting-up-tables'
+  procedure and concepts' definition. "Row metadata" and "ScalarDB's metadata" renamed to transaction
+  metadata / table catalog; "class path" to classpath. CONTRIBUTING.md has a "Writing the user docs"
+  section: each fact's home page, the level names, the terms.

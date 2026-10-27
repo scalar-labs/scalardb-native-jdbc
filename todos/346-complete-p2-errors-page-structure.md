@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "346"
 tags: [code-review, docs, errors]
@@ -20,11 +20,18 @@ other pages. First-time-user review item 12.
 
 ## Recommended Action
 
+Solution 1.
+
 ## Acceptance Criteria
 
-- [ ] Each row has one cause and one action.
+- [x] Each row has one cause and one action.
 
 ## Work Log
 
 - 2026-10-27: found in the review of the user-facing docs (ce:review: an accuracy reviewer against the code and the
   design, and a first-time-user reviewer).
+- 2026-10-27: done. errors.md is grouped as "Retry the transaction", "Change the statement or the call"
+  and "Fix the setup or the connection"; 55000, 08001, 08004 and 42501 have one row per cause (08001's
+  vendor-driver case checked in NativeJdbcDriver.vendorDriver); "The database's own errors" lists the
+  duplicate-key codes, the NOWAIT codes and MySQL's lock wait timeout, with links. The group headings
+  stand in for a Retry? column.

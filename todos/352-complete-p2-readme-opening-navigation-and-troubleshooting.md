@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "352"
 tags: [code-review, docs, readme]
@@ -21,11 +21,19 @@ First-time-user review items 7, 16.
 
 ## Recommended Action
 
+Solution 1.
+
 ## Acceptance Criteria
 
-- [ ] A newcomer can tell from README which page to read first.
+- [x] A newcomer can tell from README which page to read first.
 
 ## Work Log
 
 - 2026-10-27: found in the review of the user-facing docs (ce:review: an accuracy reviewer against the code and the
   design, and a first-time-user reviewer).
+- 2026-10-27: done. README opens with the scenario in two sentences, then what the driver does and is
+  not, in short sentences, and "Start with Getting started" in bold. The documentation index is
+  Guides / Reference / Design, with a reading order. "Troubleshooting a first run": no suitable driver,
+  08001 vendor driver, 08004, 42501, 55000, 0AN01, and how to tell a connection goes through the driver
+  (the URL, and SELECT * on an inline table without tx_/before_ columns); linked from getting-started's
+  introduction.

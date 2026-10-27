@@ -1,69 +1,89 @@
 # Setting up tables
 
-This guide explains how to set up ScalarDB tables for the driver: the layouts it serves, what the
-one-time setup creates, the `scalardb-native-tools` commands that run, check and undo it, and how to
-add a table while applications run.
+This guide explains how to set up ScalarDB tables for the driver: what the one-time setup creates,
+the `scalardb-native-tools` commands that run, check and undo it, and how to add a table while
+applications run.
 
-The driver serves ScalarDB tables in both of ScalarDB's [layouts](concepts.md#layout):
+## What the setup does
 
-- **inline**, ScalarDB's default, with ScalarDB's metadata columns in the row;
-- **decoupled**, created or imported with `transaction-metadata-decoupling` set to `true`.
-
-ScalarDB itself needs `scalar.db.jdbc.isolation_level=REPEATABLE_READ` to create or import them, or
-`SERIALIZABLE` where the driver runs at SERIALIZABLE on PostgreSQL
-([Isolation levels](transactions.md#isolation-levels)).
-
-## The setup
-
-Before the driver serves a table, an operator with DDL privileges runs the setup once. For each
-ScalarDB table it creates:
+Before the driver serves a ScalarDB table, an operator with DDL privileges runs [the
+setup](concepts.md#the-setup) once. For each ScalarDB table, in either of ScalarDB's
+[layouts](concepts.md#layout), inline or decoupled, it creates:
 
 - the **[in-flight index](concepts.md#in-flight-index)**, through which the driver finds the rows ScalarDB transactions are
   writing;
 - the **[read view](concepts.md#read-view)**, which shows each row's committed image. The driver falls back to it, and
   serves `SELECT *` on an inline table through it; other readers of the table may use it too.
 
-On an imported table it also writes the row metadata ScalarDB has not. The setup is re-runnable, and
-is run again after a table is added.
+It also:
 
-`scalardb-native-tools` runs it. It comes in `scalardb-native-tools-<version>.zip`, with the vendor
-drivers whose licences allow bundling; before the release, build it yourself
-([Development builds](development-builds.md)):
+- on an imported table, writes the transaction metadata ScalarDB has not;
+- on PostgreSQL, MySQL and Oracle, gathers or sets the statistics of the transaction metadata, so
+  that the database plans the driver's in-flight checks through the index. On Oracle it locks the
+  statistics of a decoupled table's `<table>_tx_metadata`, so that the nightly job does not replace
+  them;
+- grants SELECT on the read views to the users given with `--grant`.
+
+The setup is re-runnable, and is run again after a table is added. The tables themselves are
+ScalarDB's to create or import, with `scalar.db.jdbc.isolation_level` as
+[Isolation levels](transactions.md#isolation-levels) gives.
+
+## Running it
+
+`scalardb-native-tools` runs the setup. It comes in `scalardb-native-tools-<version>.zip`, with the
+vendor drivers whose licences allow bundling; before the release, build it yourself
+([Development builds](development-builds.md)).
 
 ```sh
 export SCALARDB_NATIVE_PASSWORD=...   # it never prompts
-bin/scalardb-native-tools setup jdbc:scalardb-native:postgresql://host:5432/db -U admin
+bin/scalardb-native-tools setup jdbc:scalardb-native:postgresql://host:5432/db -U admin --grant app
 bin/scalardb-native-tools check jdbc:scalardb-native:postgresql://host:5432/db -U admin
 ```
 
 It takes the application's URL or the vendor's. It exits with 0 when all is well, 1 when `check`
 finds something to fix, and 2 on an error; `--json` prints the outcome as JSON. The same is available
-in Java as `Setup.run`, `Setup.plan`, `Setup.teardown` and `Check` in
-`com.scalar.db.nativejdbc.setup`.
+in Java as `Setup.run`, `Setup.plan`, `Setup.teardown` and `Check` in the driver's
+`com.scalar.db.nativejdbc.setup` package; their Javadoc has the details.
+
+The commands act on every ScalarDB table, or on those named with `--table ns.t`, which may be
+repeated.
 
 ### `setup`
 
-Sets up every ScalarDB table, or those named with `--table ns.t`.
-
-- `--grant user` grants SELECT on the read views to the application's users.
+- `--grant user` grants SELECT on the read views to an application's user or role; repeat it for
+  several, `--grant app1 --grant app2`. On PostgreSQL before 15, SQL Server and Oracle the view runs
+  with its owner's rights, so grant it only to users that may read every column of the table
+  ([Database users](configuration.md#database-users)).
 - `--dry-run` prints the statements instead of running them.
 - After setting up a table for the first time, it waits out the applications' [catalog](concepts.md#catalog) TTL,
   `--catalog-ttl` seconds (60), and then says ScalarDB transactions may write it. `--no-wait` prints
   from when instead ([Adding a table](#adding-a-table-to-scalardb-while-applications-run)).
+- It warns of the objects `check` reports below, and sets the tables up regardless.
 
 ### `check`
 
-Read-only. It reports:
+Read-only. It reports, and exits with 1 for any of them:
 
 - the database settings the driver needs (SQL Server's);
-- whether each table is set up;
+- each table that is not set up;
 - the rows ScalarDB left prepared longer ago than `--lifetime` seconds (15). The driver cannot settle
-  them; a ScalarDB read of the rows, or ScalarDB's recovery, settles them.
+  them; a ScalarDB read of the rows, or ScalarDB's recovery, settles them;
+- the database's own objects that reach a ScalarDB table around the driver: a view, trigger,
+  procedure or function that names it, a trigger on it, and a foreign key on it with a cascading
+  action ([Objects over ScalarDB tables](sql-support.md#objects-over-scalardb-tables)). It matches
+  names by their words, so an object that names a plain table of the same name in another schema
+  counts too.
 
 ### `teardown`
 
-Drops the read view and the in-flight index, as ScalarDB's `dropTable` needs on PostgreSQL.
-`--dry-run` prints the statements instead.
+Drops the read view and the in-flight index, and on MySQL and Oracle undoes the setup's statistics:
+it deletes the histogram and unlocks the statistics. ScalarDB's `dropTable` and `dropNamespace` need
+it first on PostgreSQL, where the view depends on the table. `--dry-run` prints the statements
+instead.
+
+```sh
+bin/scalardb-native-tools teardown jdbc:scalardb-native:postgresql://host:5432/db -U admin --table warehouse.stock
+```
 
 ## Adding a table to ScalarDB while applications run
 

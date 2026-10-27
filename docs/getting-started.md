@@ -59,7 +59,9 @@ orders database are ScalarDB as usual, and not part of the guide. You will:
 6. optionally, add `receipt` to the program's transaction.
 
 The guide uses PostgreSQL. The steps are the same on MySQL, MariaDB, SQL Server and Oracle; only the
-URLs, the DDL and the vendor driver change ([Other databases](#other-databases)).
+URLs, the DDL and the vendor driver change ([Other databases](#other-databases)). If a step fails
+with an error, [Troubleshooting a first run](../README.md#troubleshooting-a-first-run) has the usual
+causes.
 
 ## What you need
 
@@ -267,7 +269,7 @@ for DDL and for ordinary tables.
 Before the driver serves a ScalarDB table, run [the setup](concepts.md#the-setup) once, as a user
 that can run DDL. It creates the table's [in-flight index](concepts.md#in-flight-index) and [read
 view](concepts.md#read-view), which the driver needs to read the table safely, and on an imported
-table writes the row metadata the import did not. It is safe to run again, and you run it again whenever a table is added
+table writes the transaction metadata the import did not. It is safe to run again, and you run it again whenever a table is added
 to ScalarDB. The tools read the password from `SCALARDB_NATIVE_PASSWORD`, and `snsql`, in step 4,
 from `SNSQL_PASSWORD`, since the setup is often run as a different user from the application's.
 
@@ -559,24 +561,19 @@ To try another of A, B and C, start again from step 1.
 
 ## Other databases
 
-| Database | Driver URL | Vendor driver |
-| --- | --- | --- |
-| PostgreSQL | `jdbc:scalardb-native:postgresql://host:5432/db` | `org.postgresql:postgresql` |
-| MySQL | `jdbc:scalardb-native:mysql://host:3306/db` | `com.mysql:mysql-connector-j` |
-| MariaDB | `jdbc:scalardb-native:mariadb://host:3306/db` | `org.mariadb.jdbc:mariadb-java-client` |
-| SQL Server | `jdbc:scalardb-native:sqlserver://host:1433;databaseName=db` | `com.microsoft.sqlserver:mssql-jdbc` |
-| Oracle | `jdbc:scalardb-native:oracle:thin:@host:1521/db` | `com.oracle.database.jdbc:ojdbc11` |
+[Connection URLs](configuration.md#connection-urls) has each database's driver URL and vendor
+driver. `scalar.db.contact_points` in `scalardb.properties` is the vendor URL. Some details differ
+from PostgreSQL:
 
-`scalar.db.contact_points` in `scalardb.properties` is the same URL without `scalardb-native:`.
-Some details differ from PostgreSQL:
-
-- **MySQL and MariaDB.** A namespace is a database, so `CREATE DATABASE warehouse`. An `INSERT` has
-  no `RETURNING`.
-- **SQL Server.** For `TRANSACTION_REPEATABLE_READ` the database needs
-  `ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON`; `scalardb-native-tools check` reports it. A
-  key the database generates comes from a sequence default, not `IDENTITY`, which ScalarDB cannot
-  write.
-- **Oracle.** ScalarDB stores names in upper case, and imports `NUMBER` columns as `BIGINT`.
+- **MySQL and MariaDB.** A namespace is a database, so `CREATE DATABASE warehouse`. On MySQL an
+  `INSERT` has no `RETURNING`; MariaDB has it.
+- **SQL Server.** The database needs `READ_COMMITTED_SNAPSHOT ON`, and `ALLOW_SNAPSHOT_ISOLATION ON`
+  for `TRANSACTION_REPEATABLE_READ` and `TRANSACTION_SERIALIZABLE`; sessions need `XACT_ABORT` off
+  ([Database settings](configuration.md#database-settings-the-driver-needs)).
+  `scalardb-native-tools check` reports them. A key the database generates in a ScalarDB table comes
+  from a sequence default, not `IDENTITY`, which ScalarDB cannot write.
+- **Oracle.** A table created with Oracle's own DDL and unquoted names has upper-case names, and
+  ScalarDB's API uses them so. ScalarDB imports `NUMBER` columns as `BIGINT`.
   `TRANSACTION_SERIALIZABLE` is not available.
 
 [SQL support](sql-support.md) and [Transactions and isolation levels](transactions.md) have the

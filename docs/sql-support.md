@@ -15,10 +15,11 @@ run, in part or as written.
 | Statement | Notes |
 | --- | --- |
 | `SELECT`, also joined with ordinary tables, with subqueries, aggregates, CTEs and window functions | |
-| `INSERT ... VALUES`, one row or several | key rules on MySQL and Oracle ([below](#mysql-and-mariadb)) |
+| `INSERT ... VALUES`, one row or several | key rules on [MySQL](#insert-on-mysql) and [Oracle](#insert-on-oracle) |
 | `UPDATE` and `DELETE` of one table, by key or by any `WHERE` on that table | not of a key column |
-| Locking reads: `FOR UPDATE`, `FOR SHARE` | of one ScalarDB table; each engine's spelling ([below](#mysql-and-mariadb)) |
-| Batches and generated keys (`getGeneratedKeys`) | |
+| Locking reads: `FOR UPDATE`, `FOR SHARE` | of one ScalarDB table; each engine's spelling: [MySQL and MariaDB](#settings-and-locking-reads-on-mysql-and-mariadb), [SQL Server](#locking-reads-on-sql-server), [Oracle](#locking-reads-on-oracle) |
+| Batches | |
+| Generated keys (`getGeneratedKeys`) from an `INSERT` | with `RETURN_GENERATED_KEYS` or column names; by column index, or of a `tx_` or `before_` column, refused with `0AN01` |
 | `RETURNING` on an `INSERT` | PostgreSQL and MariaDB, which have it |
 
 ### What the driver refuses
@@ -42,6 +43,54 @@ run, in part or as written.
 
 Each engine adds a few rules of its own ([MySQL and MariaDB](#mysql-and-mariadb),
 [SQL Server](#sql-server), [Oracle](#oracle)).
+
+## Inline layout
+
+In the inline [layout](concepts.md#layout), ScalarDB's metadata columns are in the table's own rows. The driver keeps
+them from the application:
+
+- `SELECT *` and `RETURNING *` give the data columns only.
+- An `INSERT` without a column list gives its values to the data columns, and is refused where they
+  would reach a metadata column.
+- A write that names a `tx_` or `before_` column ScalarDB keeps is refused with `0AN01`. A read that
+  names one fails as the database's "no such column" (`42703` on PostgreSQL).
+
+## Statements the driver cannot parse
+
+| Statement | What the driver does |
+| --- | --- |
+| A statement on a ScalarDB table that the driver cannot parse or rewrite | refuses it with `0AN01` |
+| A statement the parser cannot read, whose words name no ScalarDB table, comments and literals included, and that is a single query, a DML statement, or DDL of a table, index, view, schema, sequence or domain | sends it as written, in a transaction too; on SQL Server, and at SERIALIZABLE on MySQL and MariaDB, refuses it with `0AN01` |
+| Any other statement the parser cannot read | refuses it with `0AN01` |
+| A name holding an invisible formatting character, such as a zero-width space | refuses it: SQL Server reads the character as whitespace where the parser keeps it in the name |
+
+## Passthrough
+
+[Passthrough](concepts.md#passthrough) sends statements as written, for what the driver refuses on tables ScalarDB does not
+manage. Turn it on with `setClientInfo("scalar.db.native_jdbc.passthrough", "true")`, in
+autocommit, or `\passthrough on` in `snsql`.
+
+- A statement that names a ScalarDB table, or ScalarDB's own schema or coordinator namespace, is still
+  refused with `0AN01`, wherever the name stands, a comment or a plain table of the same name in
+  another schema included.
+- Set `scalar.db.native_jdbc.coordinator_namespace` in the connect properties when ScalarDB's
+  `scalar.db.consensus_commit.coordinator.namespace` is not `coordinator`.
+- DDL or maintenance on a ScalarDB table goes through a connection of the database's own driver, with
+  ScalarDB's transactions on the table stopped.
+
+## Objects over ScalarDB tables
+
+Don't create any of these over a ScalarDB table:
+
+- a view;
+- a trigger, on it or on another table that writes it;
+- a procedure or function that reads or writes it;
+- a foreign key on it with `ON DELETE` or `ON UPDATE` `CASCADE`, `SET NULL` or `SET DEFAULT`.
+
+Through the driver, DDL that names a ScalarDB table is refused, but the database's own tools run it.
+A statement through one of these objects, or the database itself, reaches the table without
+ScalarDB's protocol, outside passthrough too: the driver sees only the name the statement uses. The
+tools' `check` reports those it finds, and `setup` warns of them; SQL built at run time is not seen.
 
 ## Upserts
 
@@ -86,74 +135,23 @@ c.commit();
 [Getting started](getting-started.md#5-run-the-warehouse-application) shows a retry loop around
 such a transaction.
 
-## Inline layout
-
-In the inline [layout](concepts.md#layout), ScalarDB's metadata columns are in the table's own rows. The driver keeps
-them from the application:
-
-- `SELECT *` and `RETURNING *` give the data columns only.
-- An `INSERT` without a column list gives its values to the data columns, and is refused where they
-  would reach a metadata column.
-- A write that names a `tx_` or `before_` column ScalarDB keeps is refused with `0AN01`. A read that
-  names one fails as the database's "no such column" (`42703` on PostgreSQL).
-
-## Statements the driver cannot parse
-
-- A statement on a ScalarDB table that the driver cannot parse or rewrite is refused with `0AN01`.
-- A statement the parser cannot read is sent as written, in a transaction too, when both hold:
-  - its words name no ScalarDB table, comments and literals included;
-  - it is a single query, a DML statement, or DDL of a table, index, view, schema, sequence or
-    domain.
-
-  Not on SQL Server, nor at SERIALIZABLE on MySQL and MariaDB, where it is refused.
-- A name holding an invisible formatting character, such as a zero-width space, is refused: SQL
-  Server reads it as whitespace where the parser keeps it in the name.
-
-## Passthrough
-
-[Passthrough](concepts.md#passthrough) sends statements as written, for what the driver refuses on tables ScalarDB does not
-manage. Turn it on with `setClientInfo("scalar.db.native_jdbc.passthrough", "true")`, in
-autocommit, or `\passthrough on` in `snsql`.
-
-- A statement that names a ScalarDB table, or ScalarDB's own schema or coordinator namespace, is still
-  refused with `0AN01`, wherever the name stands, a comment or a plain table of the same name in
-  another schema included.
-- Set `scalar.db.native_jdbc.coordinator_namespace` in the connect properties when ScalarDB's
-  `scalar.db.consensus_commit.coordinator.namespace` is not `coordinator`.
-- DDL or maintenance on a ScalarDB table goes through a connection of the database's own driver, with
-  ScalarDB's transactions on the table stopped.
-
-## Objects over ScalarDB tables
-
-Don't create any of these over a ScalarDB table:
-
-- a view;
-- a trigger, on it or on another table that writes it;
-- a procedure or function that reads or writes it;
-- a foreign key on it with `ON DELETE` or `ON UPDATE` `CASCADE`, `SET NULL` or `SET DEFAULT`.
-
-Through the driver, DDL that names a ScalarDB table is refused, but the database's own tools run it.
-A statement through one of these objects, or the database itself, reaches the table without
-ScalarDB's protocol, outside passthrough too: the driver sees only the name the statement uses. The
-tools' `check` reports those it finds, and `setup` warns of them; SQL built at run time is not seen.
-
 ## MySQL and MariaDB
 
-**INSERT, on MySQL**
+### INSERT on MySQL
 
 - It has no `RETURNING`.
 - It gives each key column a literal or a placeholder of the column's type, or leaves out an
   `AUTO_INCREMENT` key; not NULL or 0 for it.
 - It needs a strict `sql_mode`, and no `BEFORE INSERT` trigger on the table.
 
-**Types, on MySQL and MariaDB**
+### Types on MySQL and MariaDB
 
 - A `CHAR` column of a ScalarDB table reads as `VARCHAR`.
 - A `BOOLEAN` column that a SELECT returns as it is, by name or through `*`, reads as on the
   database. One returned through a derived table, a CTE, or a `*` that also covers a plain table
   reads as `TINYINT`, whose `getObject` is an `Integer`: read it with `getBoolean`.
 
-**Settings and locking reads, on MySQL and MariaDB**
+### Settings and locking reads on MySQL and MariaDB
 
 - `useAffectedRows` must stay false, the drivers' default; the driver refuses a connection with it
   true (`08004`).
@@ -161,12 +159,14 @@ tools' `check` reports those it finds, and `setup` warns of them; SQL built at r
 
 ## SQL Server
 
-**INSERT**
+### INSERT on SQL Server
 
 - It has no `RETURNING`. The driver reads its keys back with `OUTPUT`, which a table with a trigger
   refuses.
 
-**Locking reads** take table hints:
+### Locking reads on SQL Server
+
+Locking reads take table hints:
 
 | Hint | Works as |
 | --- | --- |
@@ -178,18 +178,18 @@ Any other hint on a ScalarDB table, `NOLOCK` and `READUNCOMMITTED` among them, w
 without, is refused. So is a hint the parser cannot read on another table of a statement that reads
 a ScalarDB table.
 
-**Other rules**
+### Other rules on SQL Server
 
 - `XACT_ABORT` must be off; the driver refuses a connection with it on (`08004`).
 - T-SQL's own transaction statements (`BEGIN TRANSACTION`, `SAVE TRANSACTION`) are refused: use the
   JDBC methods.
-- The setup refuses an imported table keyed by a `datetime`, which ScalarDB's metadata holds as
+- The setup refuses an imported table keyed by a `datetime`, which ScalarDB's table catalog records as
   `datetime2(3)` and SQL Server does not compare equal for values ending in .003 or .007. Use
   `datetime2(3)`.
 
 ## Oracle
 
-**INSERT**
+### INSERT on Oracle
 
 - It has no `RETURNING`; `RETURNING ... INTO` does not parse.
 - The keys are read back by the values the statement gives them, as on MySQL, or come from an
@@ -197,13 +197,13 @@ a ScalarDB table.
   ORA-63809).
 - No `BEFORE INSERT` or `COMPOUND` trigger on the table.
 
-**Locking reads**
+### Locking reads on Oracle
 
 - `FOR UPDATE`, with `OF` a column, `NOWAIT` and `SKIP LOCKED`; not `WAIT n`.
 - No row limit, which Oracle refuses with `FOR UPDATE`.
 - Oracle has no `FOR SHARE`, and the driver refuses it.
 
-**Other rules**
+### Other rules on Oracle
 
 - A synonym of a table ScalarDB does not manage, `DUAL` among them, reads as that table. A synonym of
   a ScalarDB table is refused, with `42000`.

@@ -34,3 +34,21 @@ Server runs under emulation on Apple Silicon.
 
 The build follows the conventions of ScalarDB Saga and the ScalarDB PostgreSQL frontend, and the code
 follows the [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html).
+
+## Writing the user docs
+
+Each fact has one home page, and other pages link to it rather than restate it:
+
+| Fact | Home |
+| --- | --- |
+| The terms (ScalarDB table, layout, catalog, the setup, read view, passthrough, ...) | `docs/concepts.md` |
+| Which ScalarDB settings go with each isolation level; SERIALIZABLE per engine, its lock waits | `docs/transactions.md` |
+| What runs and what is refused; passthrough's rules | `docs/sql-support.md` |
+| The driver's properties, the database settings and users | `docs/configuration.md` |
+| What each SQLState means and what to do | `docs/errors.md` |
+
+Name the levels READ COMMITTED, SNAPSHOT and SERIALIZABLE in prose; write a JDBC constant
+(`TRANSACTION_REPEATABLE_READ`) or a ScalarDB value (`REPEATABLE_READ`) only where it is what the
+reader types. "Transaction metadata" is what ScalarDB keeps per row; ScalarDB's "table catalog" is
+`scalardb.metadata` and `scalardb.virtual_tables`; "the setup" is the preparation, `setup` the
+subcommand that runs it.

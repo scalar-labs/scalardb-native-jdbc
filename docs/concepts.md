@@ -6,7 +6,7 @@ entry here where it first uses it.
 ## ScalarDB table
 
 A table ScalarDB manages: created through ScalarDB, or created with the database's own DDL and then
-imported into ScalarDB. ScalarDB lists it in its metadata and keeps [transaction
+imported into ScalarDB. ScalarDB lists it in its table catalog, `scalardb.metadata`, and keeps [transaction
 metadata](#transaction-metadata) for each of its rows. Any other table in the database is an
 **ordinary table**, which the driver leaves alone: statements on it run as written.
 
@@ -39,8 +39,8 @@ row waits or fails with `40001` ([Conflicts and retries](transactions.md#conflic
 
 ## Catalog
 
-The driver's list of ScalarDB tables, which it reads from ScalarDB's metadata, in the `scalardb`
-schema by default. The driver keeps the list in memory, shared by the JVM's connections to the same
+The driver's list of ScalarDB tables, which it reads from ScalarDB's table catalog, `metadata` and `virtual_tables`, in the
+`scalardb` schema by default. The driver keeps the list in memory, shared by the JVM's connections to the same
 database, and reads it again after `scalar.db.native_jdbc.catalog_ttl_millis`, 60 seconds by
 default. Until then it does not know a table newly added to ScalarDB ([Adding a table to ScalarDB while applications
 run](setting-up-tables.md#adding-a-table-to-scalardb-while-applications-run)).

@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "350"
 tags: [code-review, docs, setup, sqlserver]
@@ -26,11 +26,19 @@ Accuracy review items 11, 12; first-time-user review item 17.
 
 ## Recommended Action
 
+Solution 1.
+
 ## Acceptance Criteria
 
-- [ ] Each subcommand's documented effects match the tools' code.
+- [x] Each subcommand's documented effects match the tools' code.
 
 ## Work Log
 
 - 2026-10-27: found in the review of the user-facing docs (ce:review: an accuracy reviewer against the code and the
   design, and a first-time-user reviewer).
+- 2026-10-27: done. setting-up-tables.md reordered: what the setup does (index, view, backfill,
+  statistics, grants), running it, the commands, adding a table. check's object report and its exit 1
+  (Check.objects, Main.check), setup's warning of them (Main), teardown's statistics undo (design 4.x:
+  histogram deleted, statistics unlocked on MySQL and Oracle) with an example, --table and --grant
+  repeated (Main's options), the Java API's package. configuration.md's database settings have SQL
+  Server's four session options for the filtered index (design 4.x).

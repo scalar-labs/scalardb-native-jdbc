@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "345"
 tags: [code-review, docs, configuration, security]
@@ -25,11 +25,18 @@ Accuracy review items 5, 7; first-time-user review item 11.
 
 ## Recommended Action
 
+Solution 1.
+
 ## Acceptance Criteria
 
-- [ ] configuration.md, setting-up-tables.md and errors.md state the same privileges.
+- [x] configuration.md, setting-up-tables.md and errors.md state the same privileges.
 
 ## Work Log
 
 - 2026-10-27: found in the review of the user-facing docs (ce:review: an accuracy reviewer against the code and the
   design, and a first-time-user reviewer).
+- 2026-10-27: done. configuration.md's Database users: virtual_tables when the database has decoupled
+  tables (matching Catalog's 339 refusal), the usual ScalarDB privileges on the table and its
+  _tx_metadata, and the owner's-rights caveat of design 4.x "Privileges". setting-up-tables.md's
+  --grant carries the caveat with a link. errors.md's 42501 row names both causes of Catalog.absent
+  (not readable, not created yet) and the same grants, with a link.

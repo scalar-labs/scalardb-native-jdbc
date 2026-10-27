@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "343"
 tags: [code-review, docs, transactions]
@@ -25,11 +25,19 @@ Accuracy review items 2, 8, 9; confirmed in the code.
 
 ## Recommended Action
 
+Solution 1.
+
 ## Acceptance Criteria
 
-- [ ] Each stated refusal matches the code path that raises it.
+- [x] Each stated refusal matches the code path that raises it.
 
 ## Work Log
 
 - 2026-10-27: found in the review of the user-facing docs (ce:review: an accuracy reviewer against the code and the
   design, and a first-time-user reviewer).
+- 2026-10-27: done. transactions.md's "Read-only transactions" now says: a ScalarDB table's write is
+  refused at every level (Writes.within); ordinary tables are the vendor driver's; the reads-only rule
+  and its list hold at SERIALIZABLE on MySQL, MariaDB and SQL Server (Router.readOnlySerializable: the
+  non-query kinds, SQL Server's locking or INTO clause, unparsed statements, passthrough); MySQL's
+  locking read refusal (Writes.within, todo 301); 25001 only on a change (Proxies setReadOnly).
+  errors.md's 25006 and 25001 rows match.

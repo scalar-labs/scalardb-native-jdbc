@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "347"
 tags: [code-review, docs, sql-support]
@@ -23,11 +23,19 @@ First-time-user review item 13; accuracy review item 14.
 
 ## Recommended Action
 
+Solution 1.
+
 ## Acceptance Criteria
 
-- [ ] Every in-page link lands on the section it names.
+- [x] Every in-page link lands on the section it names.
 
 ## Work Log
 
 - 2026-10-27: found in the review of the user-facing docs (ce:review: an accuracy reviewer against the code and the
   design, and a first-time-user reviewer).
+- 2026-10-27: done. Engine topics are H3 headings, each named for its engine so the anchors are unique
+  (insert-on-mysql, locking-reads-on-sql-server, ...), and the at-a-glance rows link to each. Generated
+  keys: RETURN_GENERATED_KEYS or column names, from an INSERT; by index or of a metadata column refused
+  (Writes.keysAsked). The parse rules are a table, including the "any other unparsed statement" case
+  (Router.unparsed). Upserts moved after the reference sections, before the engines; Statement cost kept
+  under its heading. Link checker: 0 broken.
