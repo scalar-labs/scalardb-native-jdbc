@@ -1360,8 +1360,6 @@ final class Writes {
             .append("%TYPE;");
     List<String> returned = new ArrayList<>();
     List<String> into = new ArrayList<>();
-    List<String> byKey = new ArrayList<>();
-    List<String> keyed = new ArrayList<>();
     for (int i = 0; i < width; i++) {
       String k = engine.quote(n.keyColumns.get(i));
       b.append(" TYPE t_w")
@@ -1377,8 +1375,6 @@ final class Writes {
           .append(";");
       returned.add(k);
       into.add("l_w" + i);
-      byKey.add(k + " = l_w" + i + "(i)");
-      keyed.add("l_w" + i + "(i) AS " + k);
     }
     b.append(" l_written NUMBER := 0; l_stamped NUMBER := 0; BEGIN l_i := ?; l_p := ?; l_c := ?; ")
         .append(dml)
@@ -1387,6 +1383,27 @@ final class Writes {
         .append(" BULK COLLECT INTO ")
         .append(String.join(", ", into))
         .append("; l_written := SQL%ROWCOUNT; FORALL i IN 1 .. l_w0.COUNT ");
+    b.append(clearTableStamp(n, delete, imported));
+    b.append("; l_stamped := SQL%ROWCOUNT; ? := l_written; ? := l_stamped; END;");
+    return new Step(b.toString(), all, Set.of(), 0, List.of(Types.NUMERIC, Types.NUMERIC), false);
+  }
+
+  /**
+   * The clear-table form's stamp over the keys the DML returned into {@code l_w0, l_w1, ...},
+   * {@code i} their index, the stamp's three values in {@code l_i, l_p, l_c}: a created table's
+   * UPDATE under the deemed-committed condition, its DELETE removing the metadata row, an imported
+   * table's MERGE, which also writes a row a key had none of and a DELETE's tombstone.
+   */
+  private static String clearTableStamp(Names n, boolean delete, boolean imported) {
+    Engine engine = n.engine;
+    StringBuilder b = new StringBuilder();
+    List<String> byKey = new ArrayList<>();
+    List<String> keyed = new ArrayList<>();
+    for (int i = 0; i < n.keyColumns.size(); i++) {
+      String k = engine.quote(n.keyColumns.get(i));
+      byKey.add(k + " = l_w" + i + "(i)");
+      keyed.add("l_w" + i + "(i) AS " + k);
+    }
     String stamp =
         n.txId
             + " = l_i, "
@@ -1468,8 +1485,7 @@ final class Writes {
           .append(n.txState)
           .append(", 3) = 3");
     }
-    b.append("; l_stamped := SQL%ROWCOUNT; ? := l_written; ? := l_stamped; END;");
-    return new Step(b.toString(), all, Set.of(), 0, List.of(Types.NUMERIC, Types.NUMERIC), false);
+    return b.toString();
   }
 
   /**
