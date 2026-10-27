@@ -1947,3 +1947,35 @@ rest is the block's own run, over 100 gets an entry, 10x what its statements sho
 primary keys, which the nested statements' plans in the cell's `server.txt` will show when its
 files are fetched. That is the merged form's item (design 4.4) and a plan question beside it, TPC-C's
 turn after the single-key work. With the sampling gone the cell would be about 0.19, not 0.7.
+
+### 2026-10-28: the sixth run's TPC-C cell at READ COMMITTED decoupled, the blocks' own cost explained: the sampling at every nested text's hard parse is counted inside the nested cursors and so inside the blocks; the fix's expected effect revised upward (the design's note, for the morning)
+
+What ac5eeec left unexplained, the block of entries at 33–55 ms a call and over 100 gets an entry,
+is the sampling too. In the cell's `server.txt` the blocks' nested statements cost, per call, 1.4 ms
+of CPU and 55–58 gets for the CAS on `STOCK_tx_metadata` and 0.7 ms and 33.5 gets for step 1's read
+of the row and its metadata, about 490 calls each, where a unique scan by the primary key should cost
+under 0.1 ms and 5–10 gets. Reproduced on the container with STOCK's shape (3.2M rows, the primary
+key `(S_W_ID, S_I_ID)`, the in-flight index, 20 rows in flight; `ora/st.sql` in the scratchpad): 300
+executions of each nested statement from PL/SQL, the shared pool flushed before, under the setup's
+statistics as deployed and under the proposed gather of every column:
+
+| statistics | step 1's read | the CAS | sampling cursors |
+|---|---|---|---|
+| as deployed (tx_state alone) | 46.7 gets, 1,113 µs CPU a call | 42.3 gets, 983 µs | 10, 521 ms |
+| the fix (every column, then the histogram) | 8.6 gets, 91 µs | 12.6 gets, 83 µs | none |
+
+The plans are the same under both: nested loops of two unique scans, and a unique scan with the
+update. The difference is the hard parse: its sampling runs as recursive SQL and Oracle counts that
+work in the parsed cursor's own CPU and gets, so the first execution of each nested text carries
+about 300 ms, and the average over 300 executions is twelve times the statement's cost. On AWS the
+CAS's 1.4 ms a call over 493 calls is about two sampling runs of 310 ms, the same accounting. The
+blocks' time includes their nested statements', so the same sampling appears a third time in the
+blocks' 17–55 ms a call. Without it a nested statement is about 90 µs and 9–13 gets, and a block of
+ten entries two to three milliseconds, not thirty to fifty.
+
+So the estimate in ac5eeec, the cell at about 0.19 without the sampling, was wrong: the blocks' cost
+it kept is the sampling as well. With the fix the cell should move toward the other TPC-C cells
+(0.54–0.63 on the fast network), and the merged form's item (design 4.4) is what remains of the
+block, at 9–13 gets an entry. The fix is unchanged: `FOR ALL COLUMNS SIZE REPEAT` before the fixed
+histogram in `Setup.ORACLE_FIXED_STATISTICS`, with its test; it reaches a table only through a setup
+run.
