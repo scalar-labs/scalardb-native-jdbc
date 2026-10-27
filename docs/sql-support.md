@@ -135,6 +135,19 @@ c.commit();
 [Getting started](getting-started.md#5-run-the-warehouse-application) shows a retry loop around
 such a transaction.
 
+## Column types
+
+ScalarDB has no integer type narrower than its `INT`: its metadata keeps a `SMALLINT` column's key
+and before image as `INT`, and the driver's reads take rows from both. Give the columns of a
+ScalarDB table, the key above all, `INTEGER` or `BIGINT` rather than `SMALLINT`, `TINYINT` or
+`MEDIUMINT`.
+
+- On PostgreSQL and SQL Server, a `SMALLINT` column, and SQL Server's `TINYINT`, reads with its own
+  type. With a `SMALLINT` key, a read by key reads every row of the table in flight, not only the
+  key's: on PostgreSQL, about 0.2 ms with 1,000 rows in flight and 5 ms with 30,000.
+- On MySQL and MariaDB, a `TINYINT`, `SMALLINT` or `MEDIUMINT` column reads as `INT`, and so does an
+  expression over it. `BOOLEAN` is [handled](#types-on-mysql-and-mariadb).
+
 ## MySQL and MariaDB
 
 ### INSERT on MySQL

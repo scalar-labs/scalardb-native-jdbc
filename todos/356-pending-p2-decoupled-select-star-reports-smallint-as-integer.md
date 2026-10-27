@@ -29,8 +29,9 @@ run of 2026-10-21 had 1 failure in each layout.
 - The bisect (cd2223d good, e8f3436 bad) named 202e467, todo 316 (`SELECT *` in the table's
   order). The arm reading the key from the metadata table alone came earlier, with eef0e86; why
   the suite showed it only from 202e467 is not traced.
-- MySQL and MariaDB widen `SMALLINT`, `TINYINT` and `MEDIUMINT` the same way, but their `CAST`
-  has no `SMALLINT` target; left as is.
+- MySQL and MariaDB widen `SMALLINT`, `TINYINT` and `MEDIUMINT` the same way (checked on MySQL
+  8.4: a `UNION ALL` of each with `INT` is `int`), but their `CAST` has no `SMALLINT` target; left
+  as is, documented in sql-support.md's Column types.
 - An application calling `getShort` read the value either way; one switching on
   `ResultSetMetaData.getColumnType`, or an ORM mapping by it, saw another type.
 
@@ -39,9 +40,18 @@ run of 2026-10-21 had 1 failure in each layout.
 ### Option 1: cast as todo 303 does, the key too
 The catalog lists each `SMALLINT` and SQL Server `TINYINT` column of a data table
 (`Engine.addBeforeTypes`), and the split read casts the before image and the metadata table's key
-to it (`TableInfo.metadataKey`). On a key-only read, the predicate on the cast key no longer uses
-the metadata table's key index; the in-flight index still finds the rows in flight.
+to it (`TableInfo.metadataKey`). A predicate on the cast key cannot use the metadata table's key
+index: a read by key reads every row of the table in flight through the in-flight index. Measured
+on PostgreSQL 16, 65,536 rows (a `SMALLINT` key's most), the before-image arm of `k = 5000`: 0.010
+against 0.012 ms with 10 rows in flight, 0.010 against 0.21 ms with 1,000, 0.017 against 4.6 ms (a
+full scan) with 30,000. The arm for the rows not in flight keeps the data table's key index.
 **Effort:** Small.
+
+### Option 2: report the source column's type in the result's metadata, as todo 304 does
+Keeps the key index, but only for plain column references: `MAX(k)` or `COALESCE(k, 0)` still
+report `INTEGER`, `k + k` no longer overflows where the table raises "smallint out of range",
+`pg_typeof(k)` returns `integer`, and `CREATE TABLE ... AS` would make an `integer` column.
+**Effort:** Medium. Not chosen (2026-10-28, the user): the cast, and the docs advise `INTEGER`.
 
 ## Recommended Action
 
