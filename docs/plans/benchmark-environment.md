@@ -253,8 +253,10 @@ one), the reports prefixed `-rc` and `-ser` beside REPEATABLE_READ's.
 with its weights and scale, so YCSB A, C, E and F are four workloads of one benchmark) and the
 matrix of levels, layouts and delays to run them at, with repetitions, run time, terminals, loader
 threads and the execute phase's JVM options (`bench-env/plan.py` documents the format).
-`python3 -I bench-env/plan.py PLAN show` prints what a plan will run. `run.sh` checks the plan
-before the apply and ships the local file to the client, whichever tree `SOURCE` sends. The
+`python3 -I bench-env/plan.py PLAN show` prints what a plan will run. A plan implies `BENCHBASE=1`.
+`run.sh` checks the plan before the apply, and that `SOURCE` and `BASELINE` are commits that
+know plans, and ships the local file to the client, whichever tree `SOURCE` sends. A delay whose
+check fails skips its cells, and the client is left without a delay at the end. The
 report has a section per workload, and the plan and its expansion go with it (`plan.json`,
 `plan.txt`). A new experiment is a new plan file, not a script change. Locally, a 1M-row YCSB load
 took 12 s and the driver's import and backfill of it 6 s (PostgreSQL 16, 8 loader threads).

@@ -58,6 +58,8 @@ failures() {
     failures "i$n-$rep"
   done
 done
+# a plan is BenchBase's
+[ -z "${PLAN:-}" ] || BENCHBASE=1
 if [ -n "${BENCHBASE:-}" ]; then
   # BenchBase at the commit the harness was written against, built once per client
   bb=$HOME/benchbase-dist/benchbase-postgres
@@ -78,6 +80,11 @@ if [ -n "${BENCHBASE:-}" ]; then
   cells=(); bbprops=()
   if [ -n "${PLAN:-}" ]; then
     python3 -I bench-env/plan.py "$PLAN" show | tee "$results/plan.txt" || exit 1
+    # a baseline tree older than plans would take a workload's id for its benchmark
+    if [ -n "${BASE_DIR:-}" ] && ! grep -q 'benchbase.benchmark.' \
+        "$BASE_DIR/driver/src/integrationTest/java/com/scalar/db/nativejdbc/bench/BenchBaseBenchmark.java"; then
+      echo "=== $tier PLAN with a baseline tree that predates plans FAILED"; exit 1
+    fi
     cp "$PLAN" "$results/plan.json"
     while IFS= read -r line; do cells+=("$line"); done < <(python3 -I bench-env/plan.py "$PLAN" cells)
     while IFS= read -r line; do bbprops+=("$line"); done < <(python3 -I bench-env/plan.py "$PLAN" props)
@@ -97,20 +104,25 @@ if [ -n "${BENCHBASE:-}" ]; then
     [ -z "${BB_JVM_ARGS:-}" ] || bbprops+=("-Dnativejdbc.benchbase.jvmArgs=$BB_JVM_ARGS")
   fi
   # the client's delay as it stands: a plan's first cells at 0 need no change of it
+  # set as soon as net-delay.sh is called, which may leave its delay on even when its check fails
   current=none; [ -z "${PLAN:-}" ] || current=0
+  failed=" "
   for cell in "${cells[@]}"; do
   IFS=$'\t' read -r delay isolation layout cellprefix <<< "$cell"
+  # a delay that failed its check: its other cells skipped, not tried again
+  case $failed in *" $delay "*) continue ;; esac
   if [ "$delay" != none ] && [ "$delay" != "$current" ]; then
     echo "=== $tier network delay $delay µs $(date +%T)"
-    sudo bash bench-env/net-delay.sh "$delay" "${targets[@]}" 2>&1 | tee "results/net-delay-$delay.txt" ||
-      { echo "=== $tier network delay $delay FAILED"; continue; }
     current=$delay
+    sudo bash bench-env/net-delay.sh "$delay" "${targets[@]}" 2>&1 | tee "results/net-delay-$delay.txt" ||
+      { echo "=== $tier network delay $delay FAILED"; failed="$failed$delay "; continue; }
   fi
   for tree in . ${BASE_DIR:-}; do
     prefix=$cellprefix; [ "$tree" = . ] || prefix=base${cellprefix#bb}
     echo "=== $tier $prefix $(date +%T)"
     # this invocation's runs alone in the archive below
-    (cd "$tree" && rm -rf driver/build/bench && ./gradlew "${btasks[@]}" "${props[@]}" -Dnativejdbc.bench=true \
+    (cd "$tree" || { echo "=== $tier $prefix: no tree $tree FAILED"; exit 1; }
+    rm -rf driver/build/bench && ./gradlew "${btasks[@]}" "${props[@]}" -Dnativejdbc.bench=true \
       "-Dnativejdbc.benchbase=$bb" "${bbprops[@]}" \
       "-Dnativejdbc.benchbase.layout=$layout" "-Dnativejdbc.benchbase.isolation=$isolation" \
       "-Dnativejdbc.bench.netDelayUs=${delay/none/0}" -Dnativejdbc.benchbase.serverStats=true \

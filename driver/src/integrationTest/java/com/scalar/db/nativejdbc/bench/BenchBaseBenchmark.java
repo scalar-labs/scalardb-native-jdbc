@@ -580,6 +580,7 @@ class BenchBaseBenchmark {
         Map<String, double[]> sql,
         Map<String, String> sqlText,
         Map<String, double[]> waits,
+        Map<String, double[]> blocks,
         String tables) {}
 
     /**
@@ -606,6 +607,7 @@ class BenchBaseBenchmark {
           r.sql(),
           r.sqlText(),
           r.waits(),
+          r.blocks(),
           tables);
     }
 
@@ -669,7 +671,8 @@ class BenchBaseBenchmark {
         try (ResultSet rs =
             st.executeQuery(
                 "SELECT name, value FROM v$sysstat WHERE name IN ('user commits', 'redo size',"
-                    + " 'SQL*Net roundtrips to/from client')")) {
+                    + " 'SQL*Net roundtrips to/from client', 'CR blocks created',"
+                    + " 'data blocks consistent reads - undo records applied')")) {
           while (rs.next()) {
             sys.put(rs.getString(1), rs.getLong(2));
           }
@@ -726,6 +729,18 @@ class BenchBaseBenchmark {
             waits.put(rs.getString(1), new double[] {rs.getDouble(2), rs.getDouble(3)});
           }
         }
+        // waits by block class, and the consistent reads' work, for the hot blocks of TPC-C at a
+        // small scale (todo 334)
+        Map<String, double[]> blocks = new HashMap<>();
+        try (ResultSet rs = st.executeQuery("SELECT class, count, time FROM v$waitstat")) {
+          while (rs.next()) {
+            blocks.put("wait: " + rs.getString(1), new double[] {rs.getDouble(2), rs.getDouble(3)});
+          }
+        }
+        for (String name :
+            List.of("CR blocks created", "data blocks consistent reads - undo records applied")) {
+          blocks.put(name, new double[] {sys.getOrDefault(name, 0L), 0});
+        }
         return new Counters(
             sys.getOrDefault("user commits", 0L),
             time.getOrDefault("DB time", 0.0),
@@ -736,6 +751,7 @@ class BenchBaseBenchmark {
             sql,
             text,
             waits,
+            blocks,
             "");
       }
     }
@@ -836,6 +852,17 @@ class BenchBaseBenchmark {
               }
             }
           }
+        }
+      }
+      out.append("\nblock class waits and consistent reads\tcount\tcs\n");
+      List<String> names = new ArrayList<>(end.blocks().keySet());
+      names.sort(null);
+      for (String name : names) {
+        double[] v = end.blocks().get(name);
+        double[] b = start.blocks().getOrDefault(name, new double[2]);
+        if (v[0] - b[0] > 0) {
+          out.append(
+              String.format(Locale.ROOT, "  %s\t%.0f\t%.0f%n", name, v[0] - b[0], v[1] - b[1]));
         }
       }
       out.append('\n').append(start.tables());

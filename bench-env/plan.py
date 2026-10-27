@@ -38,6 +38,10 @@ WORKLOAD = {"benchmark", "weights", "scale"}
 MATRIX = {"workloads", "levels", "layouts", "delays_us"}
 
 
+def positive(x):
+    return isinstance(x, int) and not isinstance(x, bool) and x > 0
+
+
 def fail(message):
     sys.exit(f"plan: {message}")
 
@@ -50,14 +54,34 @@ def load(path):
     for key in ("workloads", "matrix", "reps", "time_s", "terminals"):
         if key not in p:
             fail(f"missing {key!r}")
+    for key in ("reps", "time_s", "terminals", "loader_threads"):
+        if key in p and not positive(p[key]):
+            fail(f"{key}: a positive whole number")
+    if "runs" in p and not (isinstance(p["runs"], str)
+                            and set(p["runs"].split(",")) <= {"a", "b", "c", "d"}):
+        fail("runs: a comma-separated subset of a, b, c, d")
+    if not isinstance(p.get("jvm_args", []), list) or not all(
+            isinstance(a, str) and a for a in p.get("jvm_args", [])):
+        fail("jvm_args: a list of non-empty strings")
     for wid, w in p["workloads"].items():
         if set(w) - WORKLOAD or "benchmark" not in w:
             fail(f"workload {wid!r}: keys are {sorted(WORKLOAD)}, benchmark required")
-        if " " in wid or "," in wid:
-            fail(f"workload id {wid!r}: no spaces or commas")
+        if not wid or any(c in wid for c in " ,\t"):
+            fail(f"workload id {wid!r}: no spaces, tabs or commas")
+        if "weights" in w and not (isinstance(w["weights"], str) and all(
+                x.strip().isdigit() for x in w["weights"].split(","))):
+            fail(f"workload {wid!r}: weights a string of comma-separated whole numbers")
+        if "scale" in w and (isinstance(w["scale"], bool)
+                             or not isinstance(w["scale"], (int, float)) or w["scale"] <= 0):
+            fail(f"workload {wid!r}: scale a positive number")
     m = p["matrix"]
     if set(m) - MATRIX or set(MATRIX) - set(m):
         fail(f"matrix: keys are exactly {sorted(MATRIX)}")
+    for key in MATRIX:
+        if not isinstance(m[key], list) or not m[key]:
+            fail(f"matrix.{key}: a non-empty list")
+        if len(set(map(str, m[key]))) != len(m[key]):
+            fail(f"matrix.{key}: an entry twice, whose cells would overwrite each other's reports")
     for wid in m["workloads"]:
         if wid not in p["workloads"]:
             fail(f"matrix names workload {wid!r}, which the plan does not define")
@@ -68,9 +92,9 @@ def load(path):
         if layout not in ("decoupled", "inline"):
             fail(f"layout {layout!r}: decoupled or inline")
     for d in m["delays_us"]:
-        if not isinstance(d, int) or d < 0:
+        if isinstance(d, bool) or not isinstance(d, int) or d < 0:
             fail(f"delay {d!r}: a whole number of microseconds")
-    if any(" " in a for a in p.get("jvm_args", [])):
+    if any(" " in a or "\t" in a for a in p.get("jvm_args", [])):
         fail("a JVM argument with a space, which the harness splits on")
     return p
 

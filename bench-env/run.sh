@@ -100,6 +100,13 @@ trap 'exit 1' INT TERM
 
 # a plan with a mistake fails here, before anything is created
 [ -z "${PLAN:-}" ] || python3 -I "$here/plan.py" "$PLAN" show || exit 2
+# and a SOURCE or BASELINE tree older than plans, which would run something else or fail on the
+# client
+for commit in ${PLAN:+${SOURCE:-} ${BASELINE:-}}; do
+  (cd "$repo" && git show "$commit:driver/src/integrationTest/java/com/scalar/db/nativejdbc/bench/BenchBaseBenchmark.java" |
+    grep -q 'benchbase.benchmark.' && git cat-file -e "$commit:bench-env/plan.py") ||
+    { echo "PLAN: $commit predates benchmark plans" >&2; exit 2; }
+done
 echo "=== apply $(date +%T)"
 tf apply -input=false bench.tfplan
 client=$(tf output -raw client)
