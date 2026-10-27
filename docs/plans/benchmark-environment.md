@@ -246,7 +246,20 @@ for the vendor's runs and the driver's alike. It checks the TCP connect time wit
 with it (`net-delay-<delay>.txt` with the reports); the reports are prefixed `-d<delay>` and state
 the delay beside the round trip they measure. One tier at a time. `BB_ISOLATIONS="READ_COMMITTED
 REPEATABLE_READ SERIALIZABLE"` runs each of the driver's levels (run (a) at the vendor's matching
-one), the reports prefixed `-rc` and `-ser` beside REPEATABLE_READ's. With `profiling = true`, tier A's database hosts get perf, and `perf-tier-a.sh OUT RUN...`,
+one), the reports prefixed `-rc` and `-ser` beside REPEATABLE_READ's.
+
+**Benchmark plans.** `PLAN=plans/<name>.json run.sh run ...` runs a plan file in place of the
+`BB_*` variables, `REPS` and `NET_DELAYS`. A plan defines named workloads (a BenchBase benchmark
+with its weights and scale, so YCSB A, C, E and F are four workloads of one benchmark) and the
+matrix of levels, layouts and delays to run them at, with repetitions, run time, terminals, loader
+threads and the execute phase's JVM options (`bench-env/plan.py` documents the format).
+`python3 -I bench-env/plan.py PLAN show` prints what a plan will run. `run.sh` checks the plan
+before the apply and ships the local file to the client, whichever tree `SOURCE` sends. The
+report has a section per workload, and the plan and its expansion go with it (`plan.json`,
+`plan.txt`). A new experiment is a new plan file, not a script change. Locally, a 1M-row YCSB load
+took 12 s and the driver's import and backfill of it 6 s (PostgreSQL 16, 8 loader threads).
+
+With `profiling = true`, tier A's database hosts get perf, and `perf-tier-a.sh OUT RUN...`,
 run from the laptop beside a run, records 45 s of each named BenchBase run on the host (through the
 client, which alone reaches it) and fetches the backends' profiles, by function and with what each
 calls. About 4 minutes a run with loading: TPC-C and YCSB, (a) and (c), 3 repetitions, about

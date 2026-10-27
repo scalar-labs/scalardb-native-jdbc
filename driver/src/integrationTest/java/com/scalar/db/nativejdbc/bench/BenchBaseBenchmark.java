@@ -111,6 +111,17 @@ class BenchBaseBenchmark {
 
   private static final int REPS = Integer.getInteger("nativejdbc.benchbase.reps", 1);
 
+  // -Dnativejdbc.benchbase.benchmark.ycsb-a=ycsb: the BenchBase benchmark a workload runs, its
+  // name by default; with weights of its own, one benchmark runs as several workloads (a plan's
+  // YCSB A, C, E and F, bench-env/plan.py)
+  private static String benchmark(String workload) {
+    return System.getProperty("nativejdbc.benchbase.benchmark." + workload, workload);
+  }
+
+  // -Dnativejdbc.benchbase.loaderThreads=8: the load's threads, BenchBase's sample otherwise
+  private static final String LOADER_THREADS =
+      System.getProperty("nativejdbc.benchbase.loaderThreads", "");
+
   // -Dnativejdbc.benchbase.scale.tpcc=1: a workload's scale factor, BenchBase's sample otherwise
   private static String scale(String workload) {
     return System.getProperty("nativejdbc.benchbase.scale." + workload, "");
@@ -1019,7 +1030,7 @@ class BenchBaseBenchmark {
     command.add("-cp");
     command.add(classpath());
     command.add("com.oltpbenchmark.DBWorkload");
-    command.addAll(List.of("-b", workload, "-c", config.toAbsolutePath().toString()));
+    command.addAll(List.of("-b", benchmark(workload), "-c", config.toAbsolutePath().toString()));
     command.addAll(List.of(args));
     command.addAll(List.of("-d", dir.resolve(phase).toAbsolutePath().toString()));
     Path log = dir.resolve(phase + ".log");
@@ -1074,7 +1085,8 @@ class BenchBaseBenchmark {
     DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
     f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
     Document d =
-        f.newDocumentBuilder().parse(sample.resolve("sample_" + workload + "_config.xml").toFile());
+        f.newDocumentBuilder()
+            .parse(sample.resolve("sample_" + benchmark(workload) + "_config.xml").toFile());
     boolean vendor = run.equals("a") || run.equals("d");
     String url =
         e.engine() == Engine.ORACLE
@@ -1092,6 +1104,9 @@ class BenchBaseBenchmark {
     if (!scale(workload).isEmpty()) {
       set(d, "scalefactor", scale(workload));
     }
+    if (!LOADER_THREADS.isEmpty()) {
+      set(d, "loaderThreads", LOADER_THREADS);
+    }
     Element work = (Element) d.getElementsByTagName("work").item(0);
     boolean serial = text(work, "serial").equals("true");
     if (!serial) {
@@ -1099,13 +1114,13 @@ class BenchBaseBenchmark {
       setIn(work, "rate", "unlimited");
     }
     Path ddl = to.resolveSibling("ddl.sql");
-    if (writeDdl(e.engine(), workload, ddl)) {
+    if (writeDdl(e.engine(), benchmark(workload), ddl)) {
       set(d, "ddlpath", ddl.toAbsolutePath().toString());
     }
     if (!weights(workload).isEmpty()) {
       setIn(work, "weights", weights(workload));
     }
-    if (workload.equals("tpch")) {
+    if (benchmark(workload).equals("tpch")) {
       // Q15 creates and drops a view, which the driver refuses over ScalarDB tables
       List<String> w = new ArrayList<>(Arrays.asList(text(work, "weights").split(",", -1)));
       w.set(14, "0");
