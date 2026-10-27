@@ -877,3 +877,42 @@ and ends it; raising `session_cached_cursors` is the DBA's stopgap, for both sid
 benchmark, and not a change the driver makes. The remaining server CPU at SNAPSHOT decoupled,
 3.00 against 1.28 ms a commit, is mostly the nested statements' execution and the metadata rows'
 writes, which the batch item also addresses.
+
+### 2026-10-27: two more single-row write forms, INSERT ALL and the raising block (the design)
+
+At the user's request through the AWS session, on the container as the forms measurement above
+(`scratchpad/ora/forms2.jsh`; 10,000 calls a cell, two rounds, cache off and on at 128; wall,
+server CPU, DB time, parses from `V$MYSTAT`): (e) the insert as one `INSERT ALL` statement into
+the data and the metadata table, a plain `executeUpdate`; (f) the update block without OUT
+binds, the gated UPDATE then a plain UPDATE of the metadata row, `RAISE_APPLICATION_ERROR` with
+a number per zero-row outcome, sent as a plain PreparedStatement. Beside (d) the vendor's
+statement and (a) the driver's block.
+
+| per call, cached, round 0 / round 1 | wall µs | server CPU | DB time |
+|---|---|---|---|
+| update (d) plain | 226 / 254 | 8 / 11 | 32 / 39 |
+| update (a) the driver's block | 431 / 489 | 48 / 48 | 117 / 94 |
+| update (f) raising block | 466 / 463 | 44 / 42 | 93 / 110 |
+| insert (d) plain | 463 / 418 | 23 / 14 | 74 / 71 |
+| insert (a) the driver's block | 538 / 542 | 52 / 49 | 152 / 159 |
+| insert (e) INSERT ALL | 480 / 540 | 36 / 43 | 130 / 131 |
+
+Uncached: (e) parses once a call against the block's three, 41–45 of CPU against 64–113; (f)
+51–62 against 62–82. The cases of (e): a metadata row without a data row (a tombstone) fails
+`INSERT ALL` with `ORA-00001: unique constraint (SYSTEM.U2_META_PK) violated` and leaves no data
+row (checked: 0 after the failure); a duplicate data row fails with the data table's constraint
+named. (f)'s absent key raises ORA-20001 as written.
+
+Reading and decisions. (e) is taken, written into design 4.3 as "The decoupled INSERT as one
+statement": the block's own cost goes (server CPU 36–43 against 49–52, DB time 130 against
+152–159), what stays over the plain insert is the metadata row's own insert; the tombstone and
+the in-flight tombstone fall to ORA-00001 on the metadata constraint, which the driver tells
+from the data row's by the constraint name and sends to the block, a second round trip only
+then; generated keys keep the block. On AWS the insert's +95 µs should come down by the block's
+share, about 25–35, near the goal's edge. (f) is not taken: it measures within 5 µs of the block
+(the OUT binds and the callable statement are about 10 µs at the client, the block itself stays)
+and buys that with an error path per outcome; the design's answer to the question stands, that
+distinct numbers would carry what the counts carry, but there is nothing to buy with them. The
+update has no single-statement form on Oracle, no statement writing two tables, so the decoupled
+update keeps the block and its +136 µs on AWS stands at about +70 at the server and 35–50 at
+the client; the inline layout, at +8%, is the layout that meets the goal for updates.

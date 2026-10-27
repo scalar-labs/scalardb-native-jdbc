@@ -2049,6 +2049,22 @@ A multi-row INSERT and an `INSERT ... SELECT`, which Oracle's `RETURNING` cannot
 steps. A `BEFORE INSERT` row trigger still refuses the INSERT (todo 275): the key `RETURNING`
 gives would be the trigger's, exact, but the refusal is lifted only with a test.
 
+**The decoupled INSERT as one statement, `INSERT ALL` (todo 334, 2026-10-27).** Where the statement
+supplies the key, the two inserts of the block above go as one SQL statement without PL/SQL, `INSERT
+ALL INTO T (<the user's columns>) VALUES (<the user's values>) INTO T_meta (k, tx_id, tx_state,
+tx_version, tx_prepared_at, tx_committed_at) VALUES (<the key's placeholders again>, ?, 3, 1, ?, ?)
+SELECT 1 FROM dual`, a plain `executeUpdate` whose count, 2, the driver reports as the vendor's 1.
+Measured on the container (todo 334's log): the block's own cost gone, 36–43 against 49–52 µs of
+server CPU and 130 against 152–159 of DB time a call, the plain insert at 14–23 and 71–74.
+`IGNORE_ROW_ON_DUPKEY_INDEX` applies to a single-table INSERT only, so a metadata row that exists,
+the orphan or tombstone of 4.5, fails the statement with ORA-00001 naming the metadata table's
+constraint, and Oracle's statement-level atomicity leaves no data row behind (checked); the driver
+then runs the block above, which takes the row over, a second round trip only then, as the data
+row's duplicate costs already; a duplicate of the data row names the data table's constraint and is
+classified as today. A table whose key is generated keeps the block, since a key the first `INTO`
+generates is not the second's. The update keeps its block: no single statement writes two tables,
+and the block without OUT binds, raising a number per outcome instead, measured within 5 µs of it.
+
 **The locking read on Oracle (todo 334).** A user's `SELECT ... FOR UPDATE` of one ScalarDB table,
 `NOWAIT` or not, which on Oracle today runs the steps of 4.2 as five round trips, the predicate's
 in-flight check, a savepoint, the lock over the committed copy with two version lookups per row,
