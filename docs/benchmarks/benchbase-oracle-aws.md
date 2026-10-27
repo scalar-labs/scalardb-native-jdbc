@@ -281,3 +281,55 @@ transactions are longer and hold those blocks longer.
   with 78,779 parse calls, on one child, 1 load and no invalidation. These are soft parses of the
   nested cursor, not reloads: the PL/SQL cursor cache overflowing (`session_cached_cursors`, 50),
   as the design session found for the batch blocks.
+
+## Fifth run: YCSB A, C, E and F at 1M rows, the statement first at READ COMMITTED (2026-10-27)
+
+Run `20261027-1948`, the first from a plan: `bench-env/plans/ycsb-single-key.json` with a client
+flight recording added (the copy that ran is in the results as `plan.json`). Main `5cfffc3`: the
+keyed write at READ COMMITTED as one statement first, the block on a miss, and every block's nested
+statements named apart (todo 335). YCSB at 1M rows (scale 1000), 8 loader threads, 60 s a run,
+REPS 2, 4 terminals, statement cache 128 on both sides, fast network. All four cells ran, about
+1 h 50 min of instances.
+
+Throughput, (c)/(a):
+
+| workload | RC decoupled | RC inline | SNAPSHOT decoupled | SNAPSHOT inline |
+|---|---|---|---|---|
+| A, read/update | 0.82 | 0.90 | 0.76 | 0.88 |
+| C, read | 0.84 | 0.86 | 0.86 | 0.86 |
+| E, scan/insert | 0.68 | 0.76 | 0.89 | 0.86 |
+| F, read/read-modify-write | 0.78 | 0.89 | 0.79 | 0.90 |
+
+p50, µs, vendor → driver:
+
+| | RC decoupled | RC inline | SNAPSHOT decoupled | SNAPSHOT inline |
+|---|---|---|---|---|
+| read (C) | 93 → 110 (+18%) | 91 → 106 (+16%) | 167 → 194 (+16%) | 169 → 197 (+17%) |
+| update (A) | 327 → 418 (+28%) | 307 → 336 (+9%) | 301 → 418 (+39%) | 301 → 333 (+11%) |
+| read-modify-write (F) | 420 → 551 (+31%) | 421 → 470 (+12%) | 421 → 547 (+30%) | 412 → 443 (+8%) |
+| scan (E) | 2031 → 2979 (+47%) | 2113 → 2768 (+31%) | 2177 → 2451 (+13%) | 2161 → 2487 (+15%) |
+| insert (E) | 443 → 564 (+27%) | 429 → 565 (+32%) | 435 → 526 (+21%) | 425 → 539 (+27%) |
+
+The vendor's reads at SNAPSHOT (its SERIALIZABLE) take about 168 µs against about 92 at READ
+COMMITTED. At 1M rows the scan plans held: index range scans on both sides in every cell.
+
+- **The statement first at READ COMMITTED.** The inline update is +9%, against +30% in the third
+  run, and read-modify-write +12% (+23%). In RC inline's YCSB A, the update is one plain
+  `UPDATE ... SET "tx_id" = :1 ...`: 445,338 executions, 4 parse calls, 65 µs elapsed and 22 µs
+  CPU each, with no keyed block among the top statements. The decoupled update is +28% (+34–38%).
+- **Inline meets 10–20%** for reads, updates and read-modify-write at both levels, and for scans
+  at SNAPSHOT.
+- **The decoupled update stays at +28–39%**, the second table's write in a block (design 4.3, the
+  floor).
+- **The READ COMMITTED scan.** Decoupled, it is +47%. Server: 1,307 against 748 µs elapsed, 621
+  against 306 µs CPU, 119 against 104 gets a call. That is the metadata join and the in-flight arm
+  of the union (todo 334, fb12c98). Client: 1.50 against 1.10 ms of JVM CPU a transaction (flight
+  recording), +400 µs. Of the driver's CPU-time samples, the anchor path (`Anchors.*`,
+  `Writes.readKey`) is about 7%. Most of the 94% under `Proxies$AnchoredHandler.handle` is ojdbc
+  and the proxied result-set calls. At SNAPSHOT the scan is +13–15%.
+- **The client CPU of YCSB A**, per transaction (half reads, half updates), is +9 µs inline and
+  +12 µs decoupled over the vendor's 32–34 µs.
+- **YCSB E's inserts** are +21–32% in every cell. The INSERT statement accounts for +66 µs
+  (decoupled `INSERT ALL`) and +31 µs (inline), and no other statement runs once an insert. GC
+  pauses are the vendor's too: about 0.4 s a run, longest 7 ms, on both sides. The rest is open
+  (todo 334, eba2477).
