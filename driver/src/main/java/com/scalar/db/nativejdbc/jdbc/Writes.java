@@ -4701,13 +4701,13 @@ final class Writes {
         && "72000".equals(e.getSQLState());
   }
 
-  /** An Oracle constraint as its messages name it, {@code (OWNER.NAME)}. */
   /**
    * The table of each Oracle constraint an INSERT ALL has met, quoted, by {@code OWNER.NAME}: a
    * constraint's name stays its table's while the table stands (todo 334).
    */
   private static final Map<String, String> CONSTRAINT_TABLES = new ConcurrentHashMap<>();
 
+  /** An Oracle constraint as its messages name it, {@code (OWNER.NAME)}. */
   private static final Pattern ORA_CONSTRAINT =
       Pattern.compile("\\(([A-Za-z0-9_$#]+)\\.([A-Za-z0-9_$#]+)\\)");
 
