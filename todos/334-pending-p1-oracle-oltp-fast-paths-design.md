@@ -1152,3 +1152,20 @@ properties lack the key keeps the block of entries for such binds. Design 4.4 am
 c7 to build, with the confirmation test under both settings (the DUMP comparison, and the key's
 presence in `getProperties()`, so that an ojdbc change fails the test rather than the fast path
 silently). Proof: a SNAPSHOT decoupled TPC-C rerun, the order_line batch counted as bulk calls.
+
+### 2026-10-27: the double's bulk element reviewed (the design's note)
+
+c7 built it as 5d10929 on the branch oracle-bulk-double, on top of 4935bf4, not on main. Reviewed
+from `git show`: matches. `Proxies.binaryDoubles` reads the short key from ojdbc's resolved map by
+reflection once per Oracle connection, null with a DEBUG line when absent or unreadable;
+`Boolean.parseBoolean` agrees with ojdbc's own normalisation; `plsqlType` types `setDouble`,
+`setFloat`, a two-argument `setObject` of a Double or Float and a `setNull` of DOUBLE, FLOAT or
+REAL as the paragraph says, null where the connection does not say; `nullTypeOf` pads the
+`BINARY_*` slots as DOUBLE and REAL; `Bulk.types()` still refuses a placeholder whose entries
+differ. The test's property reaches ojdbc (`Engines.openDriver` merges it,
+`DriverProperties.vendorProperties` passes every non-prefixed key through). One ask: the form-4
+test asserts the stored values only under the default; the binary iteration needs its mirror
+(2.675 → 2.67 in the NUMBER(6,2), 0.1's expansion in the NUMBER), or a dropped property would pass
+both iterations as NUMBER untested. The seed row the test needs (ORA-08177 on the first INSERT
+into a segment-less table at SERIALIZABLE) is Oracle's own, a documentation point for the
+transactions guide. Landing waits on the user; the proof is 6e's SNAPSHOT decoupled TPC-C rerun.
