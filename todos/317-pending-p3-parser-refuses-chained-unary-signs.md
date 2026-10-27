@@ -53,6 +53,15 @@ P3 (2026-10-22): leave refused; report it to JSqlParser (option 2) when the user
 
 **By:** Claude Code
 
+### 2026-10-28 - Every query of the 15 files on Oracle
+
+**By:** Claude Code
+
+At e8f3436, all 122,012 queries per layout: 9,546 refused, the same in both layouts. 9,526 are
+chained signs. The other 20 are a simple `CASE` whose operand is signed, `CASE - 37 WHEN ...`,
+`CASE + cor0.col2 WHEN ...` (random/groupby, past its first 1,000 queries), which JSqlParser
+rejects at `WHEN`; 11 of them have no chained sign. Option 1 would need to cover that form too.
+
 ## Resources
 
 - docs/plans/testing.md, milestone T4.

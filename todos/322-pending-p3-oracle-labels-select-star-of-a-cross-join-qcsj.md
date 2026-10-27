@@ -40,6 +40,14 @@ Duplicate labels are read by position. **Effort:** none.
 
 **By:** Claude Code
 
+### 2026-10-28 - Every query of the 15 files
+
+**By:** Claude Code
+
+At e8f3436, all 122,012 queries per layout on Oracle Free: 190 failures per layout, every one
+this label (`SELECT *` of a `CROSS JOIN`, 156 in random/select, 29 in random/aggregates, 5 in
+index/random); no other failure, and no difference in values.
+
 ## Resources
 
 - docs/plans/testing.md, milestone T4; todo 320.

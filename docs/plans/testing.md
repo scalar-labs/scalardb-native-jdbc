@@ -233,6 +233,16 @@ SQL Server 45): such an item now keeps its text (todo 320, P2, fixed). Found and
 (todo 316, P1; the setup must run again after an upgrade), and a table named in a query and in its
 subquery was refused on the read views (todo 318). select5, joins of up to 17 tables, is skipped on
 MySQL and MariaDB, whose join-order search takes minutes a query over the read views (todo 319).
+**Oracle, every query, 2026-10-28** (e8f3436, `-Dnativejdbc.slt.queries=0`, Oracle Free, the two
+layouts in parallel on a container each, 2 h 48 min and 3 h 15 min): 122,012 queries per layout,
+99,193 passed, 9,546 refused, 190 failed, the same in both. Every failure is todo 322's label, with
+the values matching; the refusals are chained signs and, past random/groupby's first 1,000, a
+simple `CASE` with a signed operand (20, todo 317). The same night, PostgreSQL's regression tests
+(seeds 1-3, settled and in flight): layout i 4,354 passed, 634 refused, 1 failed (todo 313); layout
+d 4,334, 634 and 21, the 20 more being `int2_tbl`'s `smallint` key reported as INTEGER: the split
+read took the key and the before images from the metadata table, where ScalarDB keeps a `SMALLINT`
+as `INT` (todo 356, P2; cast as todo 303 does, on PostgreSQL and SQL Server; then 4,354, 634 and 1
+in each layout).
 - **Random statements.** Later, and only once the above runs clean: a generator over the T1 schema in
   the manner of SQLancer, its statements kept when the database accepts them. Both T1 and T2 run its
   output, from a seed.
