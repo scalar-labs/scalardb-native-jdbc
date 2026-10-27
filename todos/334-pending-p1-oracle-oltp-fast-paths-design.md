@@ -1225,3 +1225,12 @@ scratchpad):
   would recover most of a scan's client cost and nothing on a single-key operation, so they do not
   serve the 10–20% goal on key reads and writes; a fast path in the handler for `getXxx(int)`
   within the visible columns is the cheap part of the same gain. Not proposed now.
+
+### 2026-10-27: the double's bulk element on main (the design's note)
+
+With the user's approval c7 rebased the branch oracle-bulk-double onto main at 804b9e8 and
+fast-forwarded main to bdbdd21: 5d10929 → 65d83c3, 4834c21 → bdbdd21, both identical to the
+commits reviewed above (`git range-diff`). Unit tests, SpotBugs and the two Oracle classes pass on
+the rebased tree; nothing is pushed. Main now holds every Oracle item of todo 334 and the harness
+captures of 804b9e8; the proof is the SNAPSHOT decoupled TPC-C rerun, the order_line batch as
+bulk block calls.
