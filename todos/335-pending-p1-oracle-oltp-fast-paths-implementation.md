@@ -901,3 +901,52 @@ with `bk_inflight`), on a private container (gvenzl/oracle-free:23-slim-faststar
 - 9f `nestedParsesOfABulkBlock`: a 16-slot block (the gate, the FORALL UPDATE, the stamp's
   FORALL), 20 calls of 10 to 15 entries with the implicit statement cache at 128: 0 parse calls.
 Next, the two forms in `Writes`.
+
+### 2026-10-27: the bulk block built (Opus)
+
+As decided in design 4.4 "The entries merged on a clear table at SNAPSHOT" (0f83694).
+`Writes.Bulk` holds one write shape's text per set of slot types, cached, for up to 16 entries:
+- The stamp's three values and `l_n` come first, then each placeholder's value per slot into an
+  index-by table (`l_v<j>(<slot>) := ?`), typed by `Writes.plsqlType` from how the application
+  bound it: NUMBER for the integers and BigDecimal, VARCHAR2(32767) for strings, RAW(32767), DATE,
+  TIMESTAMP, TIMESTAMP WITH TIME ZONE for an OffsetDateTime, and a setNull by its type.
+- A double or a float (ojdbc may bind BINARY_DOUBLE), a stream, a calendar's value, an object of
+  another class, or entries whose types differ keep the block of entries. Slots past `l_n` are
+  bound NULL.
+- The keyed write: the gate once, `SELECT COUNT(*) INTO l_g FROM (SELECT /*+ INDEX(m ...) */ 1 ...
+  ROWNUM = 1)`. Under `l_g = 0`, the user's DML without the per-row gate runs as
+  `FORALL i IN 1 .. l_n` with `RETURNING <key> BULK COLLECT`, keeps `SQL%BULK_ROWCOUNT` per slot,
+  and stamps the keys as one FORALL with the clear-table block's own stamp (`clearTableStamp`, now
+  shared). OUT: `l_g`, the keys returned, the rows stamped, 16 counts.
+- The INSERT: FORALL INSERT, the metadata FORALL under the hint with the key values cast to the
+  column types (as INSERT ALL), the takeover as `FORALL i IN INDICES OF` the zeros. OUT: the rows
+  to take over and those stamped.
+
+Chosen in `applyOracleEntries`, before the block of entries, where the plan has one: the keyed plan
+where its single form is the clear-table one (SNAPSHOT, decoupled, by the key), and the INSERT
+where INSERT ALL is (SNAPSHOT), the table without a recorded anchor, the INSERT unless the
+generated keys are asked for. `applyOracleBulk` runs 16 entries a block and binds the lead run's
+stamp. Its outcomes:
+- the gate closed: back to the block of entries, without the coarse check, which the block of
+  entries runs;
+- fewer stamped than returned: an abort;
+- otherwise each entry's count, `anchors.wrote`, and the check passed;
+- for the INSERT, fewer stamped than to take over: an abort;
+- a failure the block undid (`undoable`): the entries one by one, as for the block of entries.
+
+Tests:
+- `WritesTest.onOracle_aBatchAtSnapshotOnAClearDecoupledTableIsOneBulkBlock`: both texts, the slot
+  types, the placeholder count (4 + 32 + 3 + 16), none at READ COMMITTED or inline.
+- `OracleOltpIntegrationTest.form4BatchesAsOneBulkBlockAtSnapshot`, at SNAPSHOT on `t`:
+  - six keyed UPDATEs with a key without a row: counts 1, 1, 0, 1, 1, 1, one round trip, every
+    metadata row a version up, 7 statements executed by the session (the block of entries runs
+    three or more an entry);
+  - a row in flight elsewhere in the table: the gate closed, the entries written by the block of
+    entries;
+  - three INSERTs into `imp` with a tombstone among them: counts 1, 1, 1, one round trip, the
+    tombstone stamped at the next version, the new keys at 1;
+  - a duplicate data row among INSERTs: `BatchUpdateException` with counts [1] and 23000, the
+    entry after it not run.
+Unit tests, SpotBugs, and the Oracle integration suite (151 tests, 74 run, 0 failing) pass on a
+fresh private container. A reused one failed 25 tests with ORA-01920, the users an earlier full
+run left.

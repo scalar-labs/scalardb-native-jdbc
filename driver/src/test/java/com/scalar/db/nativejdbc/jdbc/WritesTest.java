@@ -990,6 +990,58 @@ class WritesTest {
         .noneMatch(q -> q.startsWith("INSERT ALL"));
   }
 
+  @Test
+  void onOracle_aBatchAtSnapshotOnAClearDecoupledTableIsOneBulkBlock() throws Exception {
+    // each placeholder a slot collection typed as ojdbc binds the scalar (design 4.4)
+    assertThat(Writes.plsqlType("setInt", new Object[] {1, 5})).isEqualTo("NUMBER");
+    assertThat(Writes.plsqlType("setString", new Object[] {1, "a"})).isEqualTo("VARCHAR2(32767)");
+    assertThat(Writes.plsqlType("setObject", new Object[] {1, java.time.LocalDate.now()}))
+        .isEqualTo("DATE");
+    assertThat(Writes.plsqlType("setNull", new Object[] {1, java.sql.Types.NUMERIC}))
+        .isEqualTo("NUMBER");
+    // a double, which ojdbc may bind as BINARY_DOUBLE, a stream, a calendar's timestamp: none
+    assertThat(Writes.plsqlType("setDouble", new Object[] {1, 1.5})).isNull();
+    assertThat(Writes.plsqlType("setBinaryStream", new Object[] {1, null})).isNull();
+    assertThat(Writes.plsqlType("setTimestamp", new Object[] {1, null, null})).isNull();
+    // the keyed write: the gate once, the DML as FORALL over the slots, the stamp over its keys
+    Writes.Bulk keyed = oraclePlan(created(), "UPDATE t SET x = ? WHERE \"id\" = ?", true).bulk();
+    assertThat(keyed).isNotNull();
+    String k = keyed.sql(List.of("VARCHAR2(32767)", "NUMBER"));
+    assertThat(k)
+        .contains(
+            " TYPE t_v1 IS TABLE OF VARCHAR2(32767) INDEX BY PLS_INTEGER; l_v1 t_v1; TYPE t_v2 IS"
+                + " TABLE OF NUMBER INDEX BY PLS_INTEGER; l_v2 t_v2;")
+        .contains(" BEGIN l_i := ?; l_p := ?; l_c := ?; l_n := ?; l_v1(1) := ?; l_v2(1) := ?;")
+        .contains(
+            " l_v1(16) := ?; l_v2(16) := ?; SELECT COUNT(*) INTO l_g FROM (SELECT /*+ INDEX(m")
+        .contains(
+            " IF l_g = 0 THEN FORALL i IN 1 .. l_n UPDATE \"ns\".\"t_data\" t SET x = l_v1(i)"
+                + " WHERE (\"id\" = l_v2(i)) RETURNING \"id\" BULK COLLECT INTO l_w0;")
+        .contains(" FOR i IN 1 .. l_n LOOP l_o(i) := SQL%BULK_ROWCOUNT(i); END LOOP;")
+        .contains(" FORALL i IN 1 .. l_w0.COUNT UPDATE \"ns\".\"t_meta\" SET")
+        .endsWith(" ? := CASE WHEN l_o.EXISTS(16) THEN l_o(16) ELSE 0 END; END;");
+    // the stamp's three, l_n, 16 slots of two, l_g, the keys returned, the rows stamped, 16 counts
+    assertThat(k.chars().filter(ch -> ch == '?').count()).isEqualTo(4 + 32 + 3 + 16);
+    // the INSERT: FORALL, the metadata insert under the hint, the takeover over its zeros
+    Writes.Bulk insert =
+        oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (?, ?)", true).bulk();
+    assertThat(insert).isNotNull();
+    assertThat(insert.sql(List.of("NUMBER", "VARCHAR2(32767)")))
+        .contains(
+            " FORALL i IN 1 .. l_n INSERT INTO \"ns\".\"t_data\" (\"id\", x) VALUES (l_v1(i),"
+                + " l_v2(i)); FORALL i IN 1 .. l_n INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x"
+                + " (\"id\")) */ INTO \"ns\".\"t_meta\" x")
+        .contains(" VALUES (CAST(l_v1(i) AS number), l_i, 3, 1, l_p, l_c);")
+        .contains(" FORALL i IN INDICES OF l_o UPDATE \"ns\".\"t_meta\" SET")
+        .contains(" WHERE \"id\" = CAST(l_v1(i) AS number) AND COALESCE(\"tx_state\", 3) = 3;")
+        .endsWith(" ? := l_r; ? := l_s; END;");
+    // not at READ COMMITTED, nor on the inline layout
+    assertThat(oraclePlan(created(), "UPDATE t SET x = ? WHERE \"id\" = ?", false).bulk()).isNull();
+    assertThat(oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (?, ?)", false).bulk())
+        .isNull();
+    assertThat(oraclePlan(inline(), "UPDATE t SET x = ? WHERE \"id\" = ?", true).bulk()).isNull();
+  }
+
   /** The declared types a table of one NUMBER key and a text column has on Oracle. */
   private static final Map<String, String> ORACLE_COLUMNS =
       Map.of("id", "number", "x", "varchar2(10 char)");

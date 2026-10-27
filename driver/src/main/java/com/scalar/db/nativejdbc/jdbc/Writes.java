@@ -88,6 +88,12 @@ final class Writes {
     void bind(PreparedStatement ps, int position, int placeholder, boolean asStored)
         throws SQLException;
 
+    /**
+     * The PL/SQL type of a collection element that holds the application's value of a placeholder
+     * as ojdbc binds the scalar (design 4.4), null for a value bound any other way.
+     */
+    @Nullable String plsqlType(int placeholder);
+
     /** The statement's query timeout in seconds, 0 for none. */
     int queryTimeout() throws SQLException;
 
@@ -269,6 +275,11 @@ final class Writes {
 
     /** On Oracle, the write's block over a batch's entries (design 4.4, todo 334), or null. */
     @Nullable Entries entries() {
+      return null;
+    }
+
+    /** On Oracle at SNAPSHOT, the write's bulk block over a batch's entries (4.4), or null. */
+    @Nullable Bulk bulk() {
       return null;
     }
 
@@ -934,7 +945,10 @@ final class Writes {
         entries,
         clearRc,
         clearMergeRc,
-        predicateRc);
+        predicateRc,
+        entries != null && fast != null && span != null
+            ? Bulk.keyed(n, ast, t, span, delete, imported, from, end, inFlightCheck(n))
+            : null);
   }
 
   /**
@@ -1925,6 +1939,405 @@ final class Writes {
     int parameters() {
       return binds.size() + (stampAfter >= 0 ? 3 : 0);
     }
+  }
+
+  /**
+   * A batch's entries as one bulk block on Oracle (design 4.4 "The entries merged on a clear table
+   * at SNAPSHOT", todo 334): at SNAPSHOT on a decoupled table of which the transaction recorded no
+   * anchor, where the write's single form is the clear-table block. One text per write shape and
+   * slot types for every batch of up to {@link #SLOTS} entries, the slots past {@code l_n} bound
+   * NULL. The stamp's three values and {@code l_n} are bound first, then each placeholder's value
+   * per slot into an index-by table typed as ojdbc binds the scalar ({@link #plsqlType}). The keyed
+   * write probes the in-flight index once, and under {@code l_g = 0} runs the user's DML as {@code
+   * FORALL} returning the keys, the counts per entry from {@code SQL%BULK_ROWCOUNT}, and the
+   * clear-table stamp over the keys as one {@code FORALL}; OUT {@code l_g}, the keys returned, the
+   * rows stamped, the count per slot. The INSERT runs the user's INSERT as {@code FORALL}, the
+   * metadata insert under the hint as {@code FORALL}, and the takeover over the entries whose
+   * metadata insert counted 0 as {@code FORALL i IN INDICES OF}; OUT the rows taken over and those
+   * stamped.
+   */
+  static final class Bulk {
+    static final int SLOTS = 16;
+    private static final char HOLE = '\u0001';
+    private final Names n;
+    // the user's DML around its placeholders, which are numbered 1.. in text order
+    private final List<String> dml;
+    // the INSERT's key values around their placeholders, cast to the key columns' types; null for
+    // a keyed write
+    private final @Nullable List<List<String>> keyValues;
+    private final @Nullable List<List<Integer>> keyHoles;
+    private final boolean delete;
+    private final boolean imported;
+    // the keyed write's coarse check, which the open gate passes
+    final @Nullable String check;
+    private final Map<String, String> texts = new ConcurrentHashMap<>();
+
+    private Bulk(
+        Names n,
+        List<String> dml,
+        @Nullable List<List<String>> keyValues,
+        @Nullable List<List<Integer>> keyHoles,
+        boolean delete,
+        boolean imported,
+        @Nullable String check) {
+      this.n = n;
+      this.dml = List.copyOf(dml);
+      this.keyValues = keyValues;
+      this.keyHoles = keyHoles;
+      this.delete = delete;
+      this.imported = imported;
+      this.check = check;
+    }
+
+    boolean insert() {
+      return keyValues != null;
+    }
+
+    /** The placeholders of the statement, each a slot collection. */
+    int holes() {
+      return dml.size() - 1;
+    }
+
+    /** The OUT binds after the slots. */
+    int outs() {
+      return insert() ? 2 : 3 + SLOTS;
+    }
+
+    /** The source with each placeholder a one-character mark, so that every offset holds. */
+    private static @Nullable String marked(SqlAst ast) {
+      List<int[]> holes = ast.placeholderSpans();
+      if (holes == null) {
+        return null;
+      }
+      char[] chars = ast.source().toCharArray();
+      for (int[] h : holes) {
+        if (h[1] - h[0] != 1) {
+          return null;
+        }
+        chars[h[0]] = HOLE;
+      }
+      String marked = new String(chars);
+      return marked.chars().filter(c -> c == HOLE).count() == holes.size() ? marked : null;
+    }
+
+    private static @Nullable List<String> pieces(@Nullable String text, int holes) {
+      if (text == null) {
+        return null;
+      }
+      List<String> out = List.of(text.split(String.valueOf(HOLE), -1));
+      return out.size() == holes + 1 ? out : null;
+    }
+
+    /** The keyed write's bulk block, the DML as the clear-table block has it without the gate. */
+    static @Nullable Bulk keyed(
+        Names n,
+        SqlAst ast,
+        TableInfo t,
+        int[] span,
+        boolean delete,
+        boolean imported,
+        int from,
+        int end,
+        String check) {
+      String source = marked(ast);
+      if (source == null || t.layout() == Layout.INLINE) {
+        return null;
+      }
+      String text =
+          source.substring(0, from).stripTrailing()
+              + " WHERE ("
+              + source.substring(span[0], span[1])
+              + ")"
+              + source.substring(span[1], end);
+      List<String> dml =
+          pieces(onDataTable(n.engine, ast, t, true, text, from), ast.parameterCount());
+      return dml == null ? null : new Bulk(n, dml, null, null, delete, imported, check);
+    }
+
+    /**
+     * The INSERT's bulk block, for one row of VALUES whose key values are placeholders and literals
+     * of key columns of known types (as {@link #oracleInsertAll} takes them).
+     */
+    static @Nullable Bulk insert(
+        Names n,
+        SqlAst ast,
+        TableInfo t,
+        List<Expression> keyValues,
+        int end,
+        @Nullable Map<String, String> tableColumns) {
+      String source = marked(ast);
+      if (source == null) {
+        return null;
+      }
+      List<String> dml =
+          pieces(
+              onDataTable(n.engine, ast, t, false, source.substring(0, end), -1),
+              ast.parameterCount());
+      List<List<String>> values = new ArrayList<>();
+      List<List<Integer>> holes = new ArrayList<>();
+      for (int i = 0; i < keyValues.size(); i++) {
+        int[] span = ast.span(keyValues.get(i));
+        List<Integer> in = span == null ? null : ast.placeholdersIn(span[0], span[1]);
+        String full = type(n.engine, tableColumns, t.keyColumns().get(i)).replace(" generated", "");
+        if (span == null || in == null || full.isEmpty()) {
+          return null;
+        }
+        List<String> around =
+            pieces("CAST(" + source.substring(span[0], span[1]) + " AS " + full + ")", in.size());
+        if (around == null) {
+          return null;
+        }
+        values.add(around);
+        holes.add(in);
+      }
+      return dml == null ? null : new Bulk(n, dml, values, holes, false, false, null);
+    }
+
+    /** {@code pieces} with their holes the slots of {@code numbers} at index {@code i}. */
+    private static String fill(List<String> pieces, List<Integer> numbers) {
+      StringBuilder b = new StringBuilder(pieces.get(0));
+      for (int h = 1; h < pieces.size(); h++) {
+        b.append("l_v").append(numbers.get(h - 1)).append("(i)").append(pieces.get(h));
+      }
+      return b.toString();
+    }
+
+    /** The slot types of the entries, or null where an entry's binding has none or they differ. */
+    @Nullable List<String> types(List<Context> entries) {
+      List<String> types = new ArrayList<>();
+      for (int j = 1; j <= holes(); j++) {
+        String type = null;
+        for (Context c : entries) {
+          String t = c.plsqlType(j);
+          if (t == null || (type != null && !type.equals(t))) {
+            return null;
+          }
+          type = t;
+        }
+        types.add(Objects.requireNonNull(type));
+      }
+      return types;
+    }
+
+    String sql(List<String> types) {
+      return texts.computeIfAbsent(String.join(",", types), k -> build(types));
+    }
+
+    private String build(List<String> types) {
+      Engine engine = n.engine;
+      StringBuilder b =
+          new StringBuilder("DECLARE l_i ")
+              .append(n.meta)
+              .append(".")
+              .append(n.txId)
+              .append("%TYPE; l_p ")
+              .append(n.meta)
+              .append(".")
+              .append(n.preparedAt)
+              .append("%TYPE; l_c ")
+              .append(n.meta)
+              .append(".")
+              .append(n.committedAt)
+              .append("%TYPE;");
+      List<Integer> all = new ArrayList<>();
+      for (int j = 1; j <= types.size(); j++) {
+        b.append(" TYPE t_v")
+            .append(j)
+            .append(" IS TABLE OF ")
+            .append(types.get(j - 1))
+            .append(" INDEX BY PLS_INTEGER; l_v")
+            .append(j)
+            .append(" t_v")
+            .append(j)
+            .append(";");
+        all.add(j);
+      }
+      List<String> keys = new ArrayList<>();
+      for (String k : n.keyColumns) {
+        keys.add(engine.quote(k));
+      }
+      if (!insert()) {
+        for (int i = 0; i < keys.size(); i++) {
+          b.append(" TYPE t_w")
+              .append(i)
+              .append(" IS TABLE OF ")
+              .append(n.data)
+              .append(".")
+              .append(keys.get(i))
+              .append("%TYPE; l_w")
+              .append(i)
+              .append(" t_w")
+              .append(i)
+              .append(";");
+        }
+      }
+      b.append(" TYPE t_o IS TABLE OF NUMBER INDEX BY PLS_INTEGER; l_o t_o; l_n PLS_INTEGER; l_g")
+          .append(" NUMBER := 0; l_r NUMBER := 0; l_s NUMBER := 0;")
+          .append(" BEGIN l_i := ?; l_p := ?; l_c := ?; l_n := ?;");
+      for (int e = 1; e <= SLOTS; e++) {
+        for (int j = 1; j <= types.size(); j++) {
+          b.append(" l_v").append(j).append("(").append(e).append(") := ?;");
+        }
+      }
+      String stamp =
+          n.txId
+              + " = l_i, "
+              + n.preparedAt
+              + " = l_p, "
+              + n.committedAt
+              + " = l_c, "
+              + n.txState
+              + " = 3, "
+              + n.txVersion
+              + " = CASE WHEN "
+              + n.txId
+              + " IS NULL THEN 1 ELSE COALESCE("
+              + n.txVersion
+              + ", 0) + 1 END";
+      if (!insert()) {
+        List<String> into = new ArrayList<>();
+        for (int i = 0; i < keys.size(); i++) {
+          into.add("l_w" + i);
+        }
+        b.append(" SELECT COUNT(*) INTO l_g FROM (SELECT ")
+            .append(n.inflightHint("m"))
+            .append("1 FROM ")
+            .append(n.meta)
+            .append(" m WHERE m.")
+            .append(n.txState)
+            .append(" IN (1, 2) AND ROWNUM = 1); IF l_g = 0 THEN FORALL i IN 1 .. l_n ")
+            .append(fill(dml, all))
+            .append(" RETURNING ")
+            .append(String.join(", ", keys))
+            .append(" BULK COLLECT INTO ")
+            .append(String.join(", ", into))
+            .append("; FOR i IN 1 .. l_n LOOP l_o(i) := SQL%BULK_ROWCOUNT(i); END LOOP; l_r :=")
+            .append(" l_w0.COUNT; FORALL i IN 1 .. l_w0.COUNT ")
+            .append(clearTableStamp(n, delete, imported))
+            .append("; l_s := SQL%ROWCOUNT; END IF; ? := l_g; ? := l_r; ? := l_s;");
+        for (int e = 1; e <= SLOTS; e++) {
+          b.append(" ? := CASE WHEN l_o.EXISTS(")
+              .append(e)
+              .append(") THEN l_o(")
+              .append(e)
+              .append(") ELSE 0 END;");
+        }
+        return b.append(" END;").toString();
+      }
+      List<String> values = new ArrayList<>();
+      List<String> byKey = new ArrayList<>();
+      for (int i = 0; i < keys.size(); i++) {
+        String v =
+            fill(Objects.requireNonNull(keyValues).get(i), Objects.requireNonNull(keyHoles).get(i));
+        values.add(v);
+        byKey.add(keys.get(i) + " = " + v);
+      }
+      return b.append(" FORALL i IN 1 .. l_n ")
+          .append(fill(dml, all))
+          .append("; FORALL i IN 1 .. l_n INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (")
+          .append(n.columns(""))
+          .append(")) */ INTO ")
+          .append(n.meta)
+          .append(" x (")
+          .append(n.columns(""))
+          .append(", ")
+          .append(n.txId)
+          .append(", ")
+          .append(n.txState)
+          .append(", ")
+          .append(n.txVersion)
+          .append(", ")
+          .append(n.preparedAt)
+          .append(", ")
+          .append(n.committedAt)
+          .append(") VALUES (")
+          .append(String.join(", ", values))
+          .append(", l_i, 3, 1, l_p, l_c); FOR i IN 1 .. l_n LOOP IF SQL%BULK_ROWCOUNT(i) = 0")
+          .append(" THEN l_o(i) := i; END IF; END LOOP; l_r := l_o.COUNT; IF l_r > 0 THEN FORALL")
+          .append(" i IN INDICES OF l_o UPDATE ")
+          .append(n.meta)
+          .append(" SET ")
+          .append(stamp)
+          .append(" WHERE ")
+          .append(String.join(" AND ", byKey))
+          .append(" AND COALESCE(")
+          .append(n.txState)
+          .append(", 3) = 3; l_s := SQL%ROWCOUNT; END IF; ? := l_r; ? := l_s; END;")
+          .toString();
+    }
+  }
+
+  /**
+   * A batch's entries through the plan's bulk block, {@link Bulk#SLOTS} at a time: how many were
+   * finalized; 0 where the first block's gate was closed or its entries' bindings have no slot
+   * types, for the block of entries to run them; -1 where the block failed and was undone whole,
+   * for the entries one by one (design 4.4).
+   */
+  private static int applyOracleBulk(
+      Connection vendor, Bulk bulk, List<Context> contexts, Finalized finalized)
+      throws SQLException {
+    int done = 0;
+    while (done < contexts.size()) {
+      List<Context> chunk = contexts.subList(done, Math.min(contexts.size(), done + Bulk.SLOTS));
+      List<String> types = bulk.types(chunk);
+      if (types == null) {
+        return done;
+      }
+      Run lead = new Run(vendor, chunk.get(0));
+      lead.checkCancelled();
+      try (CallableStatement cs = lead.track(vendor.prepareCall(bulk.sql(types)))) {
+        int at = lead.stamp(cs, 1);
+        cs.setInt(at++, chunk.size());
+        for (int e = 0; e < Bulk.SLOTS; e++) {
+          for (int j = 1; j <= types.size(); j++) {
+            if (e < chunk.size()) {
+              chunk.get(e).bind(cs, at++, j, false);
+            } else {
+              cs.setNull(at++, nullTypeOf(types.get(j - 1)));
+            }
+          }
+        }
+        int out = at;
+        for (int o = 0; o < bulk.outs(); o++) {
+          cs.registerOutParameter(at++, Types.NUMERIC);
+        }
+        try {
+          cs.execute();
+        } catch (SQLException ex) {
+          if (undoable(ex)) {
+            return done == 0 ? -1 : done; // nothing of this block remains
+          }
+          throw ex;
+        }
+        if (bulk.insert()) {
+          // a metadata row taken over that was not stamped is in flight
+          if (cs.getLong(out + 1) < cs.getLong(out)) {
+            throw new Aborted("a key the statement inserts is being written by ScalarDB");
+          }
+          for (int e = 0; e < chunk.size(); e++) {
+            finalized.record(done + e, 1);
+          }
+        } else {
+          if (cs.getLong(out) != 0) {
+            return done; // the gate closed: the block of entries tells each entry
+          }
+          if (cs.getLong(out + 2) != cs.getLong(out + 1)) {
+            throw new Aborted("a row the statement writes changed after it was read");
+          }
+          if (bulk.check != null) {
+            lead.context.pass(bulk.check); // the gate was open: no row of the table is in flight
+          }
+          for (int e = 0; e < chunk.size(); e++) {
+            finalized.record(done + e, cs.getLong(out + 3 + e));
+          }
+        }
+        lead.context.anchors().wrote(lead.txId);
+      } finally {
+        lead.context.running(null);
+      }
+      done += chunk.size();
+    }
+    return done;
   }
 
   /** Where the stamp's three values sit among the keyed block's binds. */
@@ -4240,7 +4653,10 @@ final class Writes {
         oracleBlock == null
             ? null
             : oracleInsertEntries(n, ast, t, all, end, oracleKeyTypes(tableColumns, n)),
-        oracleInsertAll);
+        oracleInsertAll,
+        snapshot && oracleInsertAll != null && rows != null
+            ? Bulk.insert(n, ast, t, rows.get(0), end, tableColumns)
+            : null);
   }
 
   /**
@@ -4887,6 +5303,17 @@ final class Writes {
   static int applyOracleEntries(
       Connection vendor, Plan plan, List<Context> contexts, Finalized finalized)
       throws SQLException {
+    Bulk bulk = plan.bulk();
+    Context first = contexts.get(0);
+    // the keys an application asks for come back from the block of entries alone
+    if (bulk != null
+        && !first.anchors().recorded(plan.n.table)
+        && !(bulk.insert() && first.wantsKeys())) {
+      int got = applyOracleBulk(vendor, bulk, contexts, finalized);
+      if (got != 0) {
+        return got;
+      }
+    }
     Entries e = Objects.requireNonNull(plan.entries());
     List<Run> runs = new ArrayList<>();
     for (Context c : contexts) {
@@ -5519,6 +5946,107 @@ final class Writes {
     return anyRow(engine, "SELECT 1 FROM " + n.meta + " WHERE " + n.txState + " IN (1, 2)");
   }
 
+  /**
+   * The PL/SQL type of a collection element that holds a value bound by {@code method} with {@code
+   * args} (the position first), as ojdbc binds the scalar, so that it compares and converts as in
+   * the statement by itself (design 4.4): not the column's type, which would pad a CHAR. Null for
+   * any other binding, and for a double or float, which ojdbc binds as BINARY_DOUBLE where the
+   * connection asks for it.
+   */
+  static @Nullable String plsqlType(String method, Object[] args) {
+    Object value = args.length > 1 ? args[1] : null;
+    switch (method) {
+      case "setInt":
+      case "setLong":
+      case "setShort":
+      case "setByte":
+      case "setBigDecimal":
+        return "NUMBER";
+      case "setString":
+        return "VARCHAR2(32767)";
+      case "setBytes":
+        return "RAW(32767)";
+      case "setDate":
+        return args.length == 2 ? "DATE" : null;
+      case "setTimestamp":
+        return args.length == 2 ? "TIMESTAMP" : null;
+      case "setNull":
+        return value instanceof Integer ? plsqlTypeOfNull((Integer) value) : null;
+      case "setObject":
+        if (args.length != 2) {
+          return null;
+        }
+        if (value instanceof Integer
+            || value instanceof Long
+            || value instanceof Short
+            || value instanceof Byte
+            || value instanceof java.math.BigDecimal
+            || value instanceof java.math.BigInteger) {
+          return "NUMBER";
+        }
+        if (value instanceof String) {
+          return "VARCHAR2(32767)";
+        }
+        if (value instanceof byte[]) {
+          return "RAW(32767)";
+        }
+        if (value instanceof java.time.LocalDate || value instanceof java.sql.Date) {
+          return "DATE";
+        }
+        if (value instanceof java.time.LocalDateTime || value instanceof java.sql.Timestamp) {
+          return "TIMESTAMP";
+        }
+        if (value instanceof java.time.OffsetDateTime) {
+          return "TIMESTAMP WITH TIME ZONE";
+        }
+        return null;
+      default:
+        return null;
+    }
+  }
+
+  private static @Nullable String plsqlTypeOfNull(int type) {
+    switch (type) {
+      case Types.NUMERIC:
+      case Types.DECIMAL:
+      case Types.INTEGER:
+      case Types.BIGINT:
+      case Types.SMALLINT:
+      case Types.TINYINT:
+        return "NUMBER";
+      case Types.VARCHAR:
+      case Types.CHAR:
+        return "VARCHAR2(32767)";
+      case Types.VARBINARY:
+      case Types.BINARY:
+        return "RAW(32767)";
+      case Types.DATE:
+        return "DATE";
+      case Types.TIMESTAMP:
+        return "TIMESTAMP";
+      default:
+        return null;
+    }
+  }
+
+  /** The JDBC type a slot of {@code plsql} is bound NULL as, past a batch's entries. */
+  static int nullTypeOf(String plsql) {
+    switch (plsql) {
+      case "NUMBER":
+        return Types.NUMERIC;
+      case "VARCHAR2(32767)":
+        return Types.VARCHAR;
+      case "RAW(32767)":
+        return Types.VARBINARY;
+      case "DATE":
+        return Types.DATE;
+      case "TIMESTAMP":
+        return Types.TIMESTAMP;
+      default:
+        return Types.TIMESTAMP_WITH_TIMEZONE;
+    }
+  }
+
   /** At most this many keys are bound in one statement, under PostgreSQL's 65,535 parameters. */
   private static final int CHUNK = 1000;
 
@@ -5696,6 +6224,8 @@ final class Writes {
     final @Nullable Step clearRc;
     final @Nullable Merge clearMergeRc;
     final @Nullable Step predicateRc;
+    // at SNAPSHOT, a batch's entries as one bulk block (design 4.4, todo 334)
+    final @Nullable Bulk bulk;
 
     KeyedPlan(
         Names n,
@@ -5720,8 +6250,10 @@ final class Writes {
         @Nullable Entries entries,
         @Nullable Step clearRc,
         @Nullable Merge clearMergeRc,
-        @Nullable Step predicateRc) {
+        @Nullable Step predicateRc,
+        @Nullable Bulk bulk) {
       super(n);
+      this.bulk = bulk;
       this.clearRc = clearRc;
       this.clearMergeRc = clearMergeRc;
       this.predicateRc = predicateRc;
@@ -5776,6 +6308,11 @@ final class Writes {
       // an Oracle block is undone whole by the engine; the steps it may fall back to take their
       // own savepoint
       return block == null && predicateBlock == null && super.savepointed();
+    }
+
+    @Override
+    @Nullable Bulk bulk() {
+      return bulk;
     }
 
     @Override
@@ -6740,6 +7277,8 @@ final class Writes {
     final @Nullable Entries entries;
     // the decoupled INSERT of one row as one INSERT ALL statement, the block its fallback
     final @Nullable Step oracleInsertAll;
+    // at SNAPSHOT, a batch's entries as one bulk block (design 4.4, todo 334)
+    final @Nullable Bulk bulk;
 
     InsertPlan(
         Names n,
@@ -6756,9 +7295,11 @@ final class Writes {
         @Nullable Block oracleBlock,
         @Nullable Step oracleInline,
         @Nullable Entries entries,
-        @Nullable Step oracleInsertAll) {
+        @Nullable Step oracleInsertAll,
+        @Nullable Bulk bulk) {
       super(n);
       this.oracleInsertAll = oracleInsertAll;
+      this.bulk = bulk;
       this.oracleBlock = oracleBlock;
       this.oracleInline = oracleInline;
       this.entries = entries;
@@ -6817,6 +7358,11 @@ final class Writes {
     @Override
     @Nullable Block oracleBlock() {
       return oracleBlock;
+    }
+
+    @Override
+    @Nullable Bulk bulk() {
+      return bulk;
     }
 
     /** An entry's row: written, or a metadata row in flight, which is an abort at once. */

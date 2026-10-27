@@ -1398,6 +1398,180 @@ class OracleOltpIntegrationTest {
   }
 
   /**
+   * Form 4's batches at SNAPSHOT on a clear decoupled table as one bulk block per write shape
+   * (design 4.4 "The entries merged on a clear table at SNAPSHOT"): a batch of keyed UPDATEs, a key
+   * without a row among them counted 0, in one round trip; a row in flight in the table closes the
+   * gate, nothing written, and the block of entries writes the entries; a batch of INSERTs with a
+   * tombstone among them, taken over; a duplicate data row among the INSERTs, the application's,
+   * the entries before it counted and the rest not run. Whether the bulk block ran is read from the
+   * session's executions: the block, its gate, the bulk DML and the stamp, where the block of
+   * entries executes three statements or more an entry.
+   */
+  @Test
+  void form4BatchesAsOneBulkBlockAtSnapshot() throws Exception {
+    String meta =
+        NS
+            + "."
+            + Engine.ORACLE.quote(
+                Objects.requireNonNull(catalog.lookup(List.of(), N(NS), N("t")).metadataTable()));
+    try (Connection d = driver();
+        Connection v = ORA.open();
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      d.setAutoCommit(false);
+      Counter rt = new Counter(d);
+      List<String> before =
+          rows(
+              v,
+              "SELECT id, \"tx_version\" FROM " + meta + " WHERE id BETWEEN 65 AND 69 ORDER BY id");
+      // once unmeasured, for the block's text to be parsed: its first parse runs recursive SQL
+      try (PreparedStatement ps =
+          d.prepareStatement("UPDATE " + NS + ".t SET x = ? WHERE id = ?")) {
+        for (int id : List.of(65, 66, 900, 67, 68, 69)) {
+          ps.setString(1, "w");
+          ps.setInt(2, id);
+          ps.addBatch();
+        }
+        assertThat(ps.executeBatch()).containsExactly(1, 1, 0, 1, 1, 1);
+      }
+      d.commit();
+      long bulks = executions(d);
+      long keyed;
+      try (PreparedStatement ps =
+          d.prepareStatement("UPDATE " + NS + ".t SET x = ? WHERE id = ?")) {
+        keyed =
+            rt.measure(
+                () -> {
+                  for (int id : List.of(65, 66, 900, 67, 68, 69)) {
+                    ps.setString(1, "k");
+                    ps.setInt(2, id);
+                    ps.addBatch();
+                  }
+                  assertThat(ps.executeBatch()).containsExactly(1, 1, 0, 1, 1, 1);
+                });
+      }
+      d.commit();
+      long ran = executions(d) - bulks;
+      List<String> after =
+          rows(
+              v,
+              "SELECT id, \"tx_version\" FROM " + meta + " WHERE id BETWEEN 65 AND 69 ORDER BY id");
+      log(
+          "form 4 at SNAPSHOT: a batch of six keyed UPDATEs, one key without a row, "
+              + keyed
+              + " round trip(s), statements executed "
+              + ran
+              + ", versions "
+              + before
+              + " -> "
+              + after);
+      assertThat(keyed).isEqualTo(1);
+      assertThat(ran).isLessThan(12);
+      for (int i = 0; i < after.size(); i++) {
+        int was = Integer.parseInt(before.get(i).split("/")[1]);
+        assertThat(after.get(i)).isEqualTo(before.get(i).split("/")[0] + "/" + (was + 2));
+      }
+      assertThat(scalarDbX("t", 66)).isEqualTo("k");
+      // a row in flight in the table: the gate closed, the entries through the block of entries
+      TwoPhaseCommitTransaction held = prepared(tpc, "t", 64, "p");
+      bulks = executions(d);
+      try (PreparedStatement ps =
+          d.prepareStatement("UPDATE " + NS + ".t SET x = ? WHERE id = ?")) {
+        for (int id : List.of(65, 66)) {
+          ps.setString(1, "g");
+          ps.setInt(2, id);
+          ps.addBatch();
+        }
+        assertThat(ps.executeBatch()).containsExactly(1, 1);
+      }
+      d.commit();
+      held.rollback();
+      log(
+          "form 4 at SNAPSHOT: the gate closed by a row in flight, the entries written by the block of entries, statements executed "
+              + (executions(d) - bulks));
+      assertThat(scalarDbX("t", 65)).isEqualTo("g");
+      // INSERTs with a tombstone among them: imp's key 30 deleted keeps its metadata row
+      d.setAutoCommit(true);
+      assertThat(update(d, "INSERT INTO " + NS + ".imp VALUES (30, 1)")).isEqualTo(1);
+      assertThat(update(d, "DELETE FROM " + NS + ".imp WHERE k = 30")).isEqualTo(1);
+      d.setAutoCommit(false);
+      String impMeta =
+          NS
+              + "."
+              + Engine.ORACLE.quote(
+                  Objects.requireNonNull(
+                      catalog.lookup(List.of(), N(NS), N("imp")).metadataTable()));
+      bulks = executions(d);
+      long inserts;
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO " + NS + ".imp VALUES (?, ?)")) {
+        inserts =
+            rt.measure(
+                () -> {
+                  for (int k : List.of(31, 30, 32)) {
+                    ps.setInt(1, k);
+                    ps.setInt(2, 5);
+                    ps.addBatch();
+                  }
+                  assertThat(ps.executeBatch()).containsExactly(1, 1, 1);
+                });
+      }
+      d.commit();
+      List<String> stamped =
+          rows(
+              v,
+              "SELECT k, \"tx_state\", \"tx_version\" FROM "
+                  + impMeta
+                  + " WHERE k IN (30, 31, 32) ORDER BY k");
+      log(
+          "form 4 at SNAPSHOT: three INSERTs, a tombstone among them, "
+              + inserts
+              + " round trip(s), statements executed "
+              + (executions(d) - bulks - 0)
+              + ", metadata "
+              + stamped);
+      assertThat(inserts).isEqualTo(1);
+      assertThat(stamped).containsExactly("30/3/3", "31/3/1", "32/3/1");
+      assertThat(rows(d, "SELECT k, x FROM " + NS + ".imp WHERE k IN (30, 31, 32) ORDER BY k"))
+          .containsExactly("30/5", "31/5", "32/5");
+      d.commit();
+      // a duplicate data row among the INSERTs: the block undone whole, the entries one by one,
+      // the application's duplicate with the count before it
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO " + NS + ".imp VALUES (?, ?)")) {
+        for (int k : List.of(33, 31, 34)) {
+          ps.setInt(1, k);
+          ps.setInt(2, 6);
+          ps.addBatch();
+        }
+        assertThatThrownBy(ps::executeBatch)
+            .isInstanceOf(java.sql.BatchUpdateException.class)
+            .satisfies(
+                e -> {
+                  java.sql.BatchUpdateException b = (java.sql.BatchUpdateException) e;
+                  assertThat(b.getUpdateCounts()).containsExactly(1);
+                  assertThat(b.getSQLState()).isEqualTo("23000");
+                });
+      }
+      assertThat(rows(d, "SELECT k FROM " + NS + ".imp WHERE k IN (33, 34) ORDER BY k"))
+          .containsExactly("33");
+      d.rollback();
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(true);
+    }
+  }
+
+  /** The statements the session behind a connection has executed, recursive ones included. */
+  private static long executions(Connection c) throws SQLException {
+    try (Statement st = c.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT s.value FROM v$mystat s JOIN v$statname n ON n.statistic# = s.statistic#"
+                    + " WHERE n.name = 'execute count'")) {
+      rs.next();
+      return rs.getLong(1);
+    }
+  }
+
+  /**
    * Form 4's INSERT ALL on keys whose column changes the value given: a CHAR(5) key padded, a
    * NUMBER(10) key rounded, and a TIMESTAMP(6) key of milliseconds, all ScalarDB's metadata table
    * keeps of it (TIMESTAMP(3): a key of microseconds finds no metadata row by either form). The

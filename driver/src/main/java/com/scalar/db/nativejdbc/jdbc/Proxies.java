@@ -1276,6 +1276,12 @@ public final class Proxies {
         }
 
         @Override
+        public @Nullable String plsqlType(int placeholder) {
+          Call c = parameters == null ? null : parameters.get(placeholder);
+          return c == null ? null : Writes.plsqlType(c.method.getName(), c.args);
+        }
+
+        @Override
         public int queryTimeout() throws SQLException {
           return vendor().getQueryTimeout();
         }
