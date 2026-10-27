@@ -1174,3 +1174,54 @@ The ask met as 4834c21 (on 5d10929, the branch oracle-bulk-double): under the bi
 the test asserts 2.675 stored as 2.67 in the NUMBER(6,2) and 0.1 in the NUMBER as one row that is
 not .1; only the test and todo 335's log changed, the main code as reviewed. Both iterations run
 as the bulk block, 4 statements each. Review closed; landing on main waits on the user.
+
+### 2026-10-27: the third run read (the design's note on the scan, the update and the client)
+
+Run 20261027-1344 complete (135faaf, "Third run"): the deadlock fix and the inline whole-row lock
+proven (SNAPSHOT inline read-modify-write 522 against the vendor's 500); INSERT ALL +14/+17%; the
+bulk block takes the stock batch, the order_line batch after 4834c21. Three figures read here,
+with the container (`ora/stamp.jsh`, `proxy.jsh`, `scan*.jsh`, `realscan*.jsh`, the scratch
+worktree's `ClientCostIntegrationTest` with a 500-row scan added; all in the design session's
+scratchpad):
+
+- **The decoupled update, +34–46%** (SNAPSHOT decoupled YCSB: vendor 357 → 521 µs p50). Server:
+  the clear-table block 147 µs elapsed / 90 CPU a call against the vendor's UPDATE at 34 / 21;
+  inside it the data UPDATE with RETURNING 26 µs, the stamp as MERGE 56 elapsed / 33 CPU, the gate
+  about 5, the block's own the rest. The MERGE is not the lever: on the container the stamp as
+  `UPDATE ... IF SQL%ROWCOUNT = 0 THEN INSERT` costs the same as the MERGE (block 39–48 against
+  40–43 µs CPU; alone 14–16 against 21–22). What stands out at AWS is the MERGE's 44,232 parse
+  calls on 99,150 executions and 588 ms of `cursor: pin S wait on X`, where the container parses
+  once per 10,000: a cursor re-parsed or invalidated, not explained from here (asked of the next
+  run: V$SQL per child for that SQL_ID, loads, invalidations, bind sensitivity). The floor of a
+  decoupled single-row update on Oracle is two DMLs in one block: no form change proposed; the
+  remaining lever is the client, +50 µs a transaction of JVM CPU (6e's recording), of which the
+  callable statement's own cost is ojdbc's.
+- **The scan at decoupled READ COMMITTED, 2,306 → 4,010 µs p50.** Server CPU 1.49 against 0.42 ms a
+  call for the same 500 rows (3.5x). The committed copy joins the metadata row per row for the
+  anchors (4.2, the RC form). On the container, with the driver's real text (a UNION ALL of the
+  committed copy's `LEFT JOIN T_meta ... WHERE COALESCE(m.tx_state, 3) NOT IN (1, 2)` and the
+  before-image arm) under statistics of a 1M-row table as the harness leaves them (data table
+  gathered whole, the metadata table's rows counted at setup after the backfill, its key column
+  without statistics), the optimizer plans a HASH JOIN OUTER over two range scans: 82 logical
+  reads against the vendor's 76 (+8%), CPU within drift. Forced or chosen nested loops (a unique
+  probe of the metadata row per row) cost 592 logical reads and 2.5x the CPU: that is what the
+  setup's statistics locked on an *empty* metadata table give once the table is filled (num_rows
+  0, locked, measured: NESTED LOOPS OUTER, 592 reads), the staleness of todo 094, and what the AWS
+  figure looks like. The imported YCSB table is backfilled before its statistics are taken, so the
+  AWS plan is not explained by that; asked of the next run: V$SQL_PLAN of the top statements and
+  the two tables' `all_tab_statistics` and key-column statistics at run start. A once-gated form
+  without anchors measures the same 80 reads as the hash join, so dropping the scan's anchors buys
+  nothing once the plan is right; a lazy anchor by SCN is out, a plain user reads no SCN
+  (`DBMS_FLASHBACK`, `V$DATABASE` not granted; `TIMESTAMP_TO_SCN` approximate). The key read is
+  nested loops at 6 reads whatever the statistics. Client: the driver adds 360–840 µs of CPU to a
+  500-row scan at READ COMMITTED (the three hidden columns read and an anchor recorded per row,
+  +420 KB allocated) and 150–350 at SNAPSHOT (+200 KB); the SNAPSHOT decoupled scan's +368 µs at
+  AWS is that client cost, its server form being the once-probed CASE (80 reads).
+- **The reflection under the proxies, 12% of the driver run's samples.** A `java.lang.reflect.Proxy`
+  call over ojdbc's ResultSet costs 21 ns against 18 direct (JDK 25, `Method.invoke` as the handler
+  does it); the name switch 10 more; a bound MethodHandle 127. The samples are the volume: a
+  500-row scan makes about 6,000 proxied calls, 25–60 ns each through `AnchoredHandler.handle`,
+  the 150–350 µs above; a key read's twenty calls are under a microsecond. Plain delegating classes
+  would recover most of a scan's client cost and nothing on a single-key operation, so they do not
+  serve the 10–20% goal on key reads and writes; a fast path in the handler for `getXxx(int)`
+  within the visible columns is the cheap part of the same gain. Not proposed now.

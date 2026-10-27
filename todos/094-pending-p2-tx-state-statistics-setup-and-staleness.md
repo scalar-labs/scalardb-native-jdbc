@@ -142,3 +142,12 @@ See Findings.
   and 4.7-5.0x in others. Likely the random sample of `ANALYZE` choosing between two plans; not
   investigated. Capture both plans (`-Dnativejdbc.bench.explain='^IN subquery'`) when this todo is
   worked.
+
+## Finding (2026-10-27, the Oracle design session, todo 334's log)
+
+Measured on the container: the decoupled READ COMMITTED committed copy joins the metadata table per
+row for its anchors, and its plan depends on the metadata table's statistics. Locked at setup on an
+empty metadata table, then filled to 100k rows: NESTED LOOPS OUTER, 592 logical reads a 500-row
+scan, 2.5x the vendor's CPU. Taken on the filled table (as the backfill order gives an imported
+table): HASH JOIN, 82 reads against the vendor's 76. A table ScalarDB created and the application
+fills after setup keeps the empty table's locked statistics. The key read is unaffected (6 reads).
