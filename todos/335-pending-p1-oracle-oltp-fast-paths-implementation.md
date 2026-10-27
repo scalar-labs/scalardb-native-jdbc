@@ -994,3 +994,59 @@ Tests on a fresh private container:
   URL and the system property.
 `OracleOltpIntegrationTest` (17, one skipped: the measure) and `OracleFormsIntegrationTest` (15)
 pass, as do the unit tests and SpotBugs.
+
+### 2026-10-27: the keyed write at READ COMMITTED, the statement first (Opus)
+
+Built as design 4.3 has it (b50c8db), on both layouts, created and imported tables:
+- `Writes.oracleRcFirst` plans two texts beside the keyed block, without the anchor and with it:
+  inline, the user's DML with the stamp in an UPDATE's SET list and `COALESCE(t.tx_state, 3) = 3`
+  [`AND DECODE(t.tx_id, ?, 1, 0) = 1 AND COALESCE(t.tx_version, 0) = COALESCE(?, 0)`]; decoupled,
+  a block of the DML under `EXISTS` of the committed metadata row [and the anchor, in `l_ai`,
+  `l_av`], `RETURNING` the key it wrote, then the CAS on the metadata row by that key, OUT
+  `written, stamped`. Null where a placeholder follows the predicate.
+- `KeyedPlan.applyRcFirst` runs before the block: no version of the table recorded, the plain
+  text; the key's version found by `Anchors.version`, the anchored text; recorded and not found,
+  the block alone. Written (and stamped) 1 is count 1 and `wrote`; nothing written, the block;
+  written and not stamped, the abort.
+- The key from the statement: `keySources` reads each key column's placeholder or literal from
+  the WHERE clause `fullKey` accepted, `Context.value` the placeholder's value; an integral number
+  is taken as ojdbc returns a NUMBER (a `BigDecimal` of scale 0), so that a read's anchor is found
+  for a `setInt`. A key the statement spells otherwise than the row, a CHAR literal unpadded, finds
+  none and takes the block. (A `setString` of the unpadded value matches no row of a CHAR key, the
+  vendor's statement alone neither: it is the literal the design's hazard is about.)
+- Every nested statement of every Oracle block is named by `Writes.hinted`,
+  `/*+ scalardb_native_<shape><n>_<block> */`, the block its text's hash, so that the same
+  statement in two blocks, or per entry, is told apart; a user's hint keeps its place with the
+  name after it; a MERGE's clauses are not named.
+
+Tests changed, as the design says the hit is one execution: form 2's first keyed UPDATE 1 round
+trip (no block, no first-use check), a missing key 2; the first-use check now reached by a key not
+read after a read (`verifyOutBinds`), since a missing key decides nothing; and
+`form2RowMovedBetweenTheReadAndTheCas` became `form2RowWrittenByAnotherWhileTheStatementWaits`: a
+write without a read, which waited on another connection's write, goes through once it commits
+(the statement's WHERE evaluated on the committed row), where the block aborted; read first, the
+anchor moved, 40001. Added: `form2StatementFirstAtReadCommitted` (both layouts: without a read 1,
+a missing key 2, read then written 1, the same key again 2 through the block; the CHAR(5) key by
+literal 2, padded bind 1, the anchor moved 40001), `nestedStatementsParseOnceAcrossBlocks`, unit
+tests of the texts and of `hinted`. The Oracle integration suite on a fresh container: 156 tests,
+78 run, 0 failing.
+
+Parse calls, `V$SQL` over five rounds of the SNAPSHOT update gated and ungated and a three-entry
+block of entries, ojdbc's implicit cache at 128: 65 executions of the named statements, 0 parse
+calls; the same with the names off, 55 executions, 55 parse calls. Without ojdbc's cache every
+nested statement parses on every call whatever its text: the client closes the block's cursor.
+
+Measured on the container (`readCommittedUpdateMeasure`, `-Dnativejdbc.oracle.rcmeasure=3000`,
+cache 128, an UPDATE and its commit, or the read of the key before it), the driver less the vendor,
+`main` (cc17393) against this branch, a quiet pair of runs back to back:
+
+| per op | wall | client CPU | server CPU | executes (vendor) |
+|---|---|---|---|---|
+| inline update | +119 → +27 µs | +28 → −2 | +40 → +7 | 3 → 1 (1) |
+| inline read+update | +283 → +54 | +68 → +8 | +50 → +24 | 4 → 2 (2) |
+| decoupled update | +96 → +95 | +8 → +20 | +23 → +13 | 4 → 3 (1) |
+| decoupled read+update | +197 → +253 | +48 → +42 | +50 → +50 | 5 → 4 (2) |
+
+The inline update reaches the vendor's cost; the decoupled one saves step 1's execution, which the
+laptop's noise (±20–50 µs between runs) does not resolve: AWS's YCSB single-key plan is the
+measure there.

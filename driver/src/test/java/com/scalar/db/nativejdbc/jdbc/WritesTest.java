@@ -659,10 +659,116 @@ class WritesTest {
         .endsWith("FROM scalardb_native_inserted; RELEASE SAVEPOINT scalardb_native_write");
   }
 
+  /** The texts without the names of their blocks' nested statements ({@link Writes#hinted}). */
+  private static String untag(String sql) {
+    return sql.replaceAll(" /\\*\\+ scalardb_native_\\w+ \\*/", "")
+        .replaceAll(" scalardb_native_[a-z]+\\d+_[0-9a-f]+ \\*/", " */");
+  }
+
+  private static List<String> untag(List<String> sql) {
+    List<String> out = new java.util.ArrayList<>();
+    for (String s : sql) {
+      out.add(untag(s));
+    }
+    return out;
+  }
+
   private static List<String> oracle(TableInfo t, String sql, boolean snapshot) throws Exception {
     StatementShape shape =
         StatementShape.of(SqlAst.parse(sql, Engine.ORACLE).orElseThrow()).orElseThrow();
-    return Writes.plan(Engine.ORACLE, shape, t, "", snapshot, false, null).sql();
+    return untag(Writes.plan(Engine.ORACLE, shape, t, "", snapshot, false, null).sql());
+  }
+
+  @Test
+  void onOracle_aKeyedWriteAtReadCommittedIsTheStatementFirst() throws Exception {
+    String stamp =
+        "\"tx_id\" = ?, \"tx_prepared_at\" = ?, \"tx_committed_at\" = ?, \"tx_state\" = 3,"
+            + " \"tx_version\" = CASE WHEN \"tx_id\" IS NULL THEN 1 ELSE"
+            + " COALESCE(\"tx_version\", 0) + 1 END";
+    String anchor =
+        " AND DECODE(t.\"tx_id\", ?, 1, 0) = 1 AND COALESCE(t.\"tx_version\", 0) = COALESCE(?, 0)";
+    // the inline layout: the user's statement, the stamp in an UPDATE's SET list, its WHERE clause
+    // extended by the committed state and, where the key's version was read, the anchor; the texts
+    // before the block they fall back to
+    List<String> update = oracle(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ?", false);
+    assertThat(update.subList(update.size() - 3, update.size() - 1))
+        .containsExactly(
+            "UPDATE t SET "
+                + stamp
+                + ", x = x || ? WHERE (\"id\" = ?) AND COALESCE(t.\"tx_state\", 3) = 3",
+            "UPDATE t SET "
+                + stamp
+                + ", x = x || ? WHERE (\"id\" = ?) AND COALESCE(t.\"tx_state\", 3) = 3"
+                + anchor);
+    List<String> delete = oracle(inline(), "DELETE FROM t WHERE \"id\" = ?", false);
+    assertThat(delete.subList(delete.size() - 3, delete.size() - 1))
+        .containsExactly(
+            "DELETE FROM t WHERE (\"id\" = ?) AND COALESCE(t.\"tx_state\", 3) = 3",
+            "DELETE FROM t WHERE (\"id\" = ?) AND COALESCE(t.\"tx_state\", 3) = 3" + anchor);
+    // a decoupled table: the DML under the metadata row's committed state and anchor, the key it
+    // wrote returned, then the CAS on the metadata row; two counts back
+    List<String> created = oracle(created(), "UPDATE t SET x = ? WHERE \"id\" = ?", false);
+    assertThat(created.get(created.size() - 2))
+        .isEqualTo(
+            "DECLARE l_written NUMBER := 0; l_stamped NUMBER := 0; l_ai"
+                + " \"ns\".\"t_meta\".\"tx_id\"%TYPE; l_av \"ns\".\"t_meta\".\"tx_version\"%TYPE;"
+                + " l_k0 \"ns\".\"t_data\".\"id\"%TYPE; BEGIN l_ai := ?; l_av := ?; UPDATE"
+                + " \"ns\".\"t_data\" t SET x = ? WHERE (\"id\" = ?) AND EXISTS (SELECT 1 FROM"
+                + " \"ns\".\"t_meta\" m WHERE m.\"id\" = t.\"id\" AND COALESCE(m.\"tx_state\", 3) = 3"
+                + " AND DECODE(m.\"tx_id\", l_ai, 1, 0) = 1 AND COALESCE(m.\"tx_version\", 0) ="
+                + " COALESCE(l_av, 0)) RETURNING \"id\" INTO l_k0; l_written := SQL%ROWCOUNT; IF"
+                + " l_written = 1 THEN UPDATE \"ns\".\"t_meta\" SET "
+                + stamp
+                + " WHERE \"id\" = l_k0 AND COALESCE(\"tx_state\", 3) = 3 AND DECODE(\"tx_id\","
+                + " l_ai, 1, 0) = 1 AND COALESCE(\"tx_version\", 0) = COALESCE(l_av, 0); l_stamped :="
+                + " SQL%ROWCOUNT; END IF; ? := l_written; ? := l_stamped; END;");
+    // a created table's DELETE removes the metadata row; an imported table's stamps its tombstone
+    List<String> createdDelete = oracle(created(), "DELETE FROM t WHERE \"id\" = ?", false);
+    assertThat(createdDelete.get(createdDelete.size() - 3))
+        .contains(" IF l_written = 1 THEN DELETE FROM \"ns\".\"t_meta\" WHERE \"id\" = l_k0 AND")
+        .doesNotContain("l_ai");
+    List<String> importedDelete = oracle(table(), "DELETE FROM t WHERE \"id\" = ?", false);
+    assertThat(importedDelete.get(importedDelete.size() - 3))
+        .contains(" IF l_written = 1 THEN UPDATE \"ns\".\"t_meta\" SET " + stamp + " WHERE");
+    // SNAPSHOT keeps its forms; a write beyond the key and a locking clause have none
+    assertThat(oracle(inline(), "UPDATE t SET x = ? WHERE \"id\" = ?", true))
+        .noneMatch(q -> q.endsWith("COALESCE(t.\"tx_state\", 3) = 3"));
+    assertThat(oracle(inline(), "UPDATE t SET x = ? WHERE x = ?", false))
+        .noneMatch(q -> q.contains("COALESCE(?, 0)"));
+  }
+
+  @Test
+  void onOracle_eachNestedStatementOfABlockIsNamed() {
+    String block =
+        "DECLARE l_o t_o; BEGIN UPDATE t SET a = 'x; UPDATE' WHERE k = ?; MERGE INTO m USING"
+            + " (SELECT 1 AS k FROM dual) s ON (m.k = s.k) WHEN MATCHED THEN UPDATE SET a = 1 WHEN"
+            + " NOT MATCHED THEN INSERT (k) VALUES (1); l_o.DELETE; UPDATE /*+ INDEX(t i) */ t SET"
+            + " a = 2; IF SQL%ROWCOUNT = 1 THEN DELETE FROM t; END IF; OPEN ? FOR SELECT 1 FROM"
+            + " dual; END;";
+    String name = "scalardb_native_b%d_" + Integer.toHexString(block.hashCode());
+    String hinted = Writes.hinted(block, "b");
+    // each statement of the block named, the user's hint kept with the name after it; a MERGE's
+    // clauses, a literal's text and a collection's method are no statements
+    assertThat(hinted)
+        .isEqualTo(
+            "DECLARE l_o t_o; BEGIN UPDATE /*+ "
+                + String.format(name, 1)
+                + " */ t SET a = 'x; UPDATE' WHERE k = ?; MERGE /*+ "
+                + String.format(name, 2)
+                + " */ INTO m USING (SELECT 1 AS k FROM dual) s ON (m.k = s.k) WHEN MATCHED THEN"
+                + " UPDATE SET a = 1 WHEN NOT MATCHED THEN INSERT (k) VALUES (1); l_o.DELETE;"
+                + " UPDATE /*+ INDEX(t i) "
+                + String.format(name, 3)
+                + " */ t SET a = 2; IF SQL%ROWCOUNT = 1 THEN DELETE /*+ "
+                + String.format(name, 4)
+                + " */ FROM t; END IF; OPEN ? FOR SELECT /*+ "
+                + String.format(name, 5)
+                + " */ 1 FROM dual; END;");
+    // the placeholders as they were: the binds keep their positions
+    assertThat(hinted.chars().filter(c -> c == '?').count()).isEqualTo(2);
+    // the same statement in two blocks is named apart
+    assertThat(Writes.hinted("BEGIN DELETE FROM t; END;", "b"))
+        .isNotEqualTo(Writes.hinted("BEGIN DELETE FROM t; NULL; END;", "b").replace(" NULL;", ""));
   }
 
   @Test
@@ -900,7 +1006,7 @@ class WritesTest {
     assertThat(entries).isNotNull();
     assertThat(entries.binds).containsExactly(2, 1, 2); // the key for the read, then x and the key
     assertThat(entries.stampAfter).isEqualTo(1);
-    String two = entries.sql(2, Writes.Variant.CURSOR);
+    String two = untag(entries.sql(2, Writes.Variant.CURSOR));
     assertThat(two)
         .startsWith("DECLARE l_rows_1 NUMBER := 0; l_written_1 NUMBER := 0; l_id_1")
         .contains(" l_k0_1 \"ns\".\"t\".\"id\"%TYPE; l_done_1 NUMBER := 0; l_rows_2 NUMBER := 0;")
@@ -927,7 +1033,7 @@ class WritesTest {
     Writes.Plan created = Writes.plan(Engine.ORACLE, insert, created(), "", false, false, null);
     Writes.Entries inserts = created.entries();
     assertThat(inserts).isNotNull();
-    assertThat(inserts.sql(2, Writes.Variant.CURSOR))
+    assertThat(untag(inserts.sql(2, Writes.Variant.CURSOR)))
         .contains(
             " BEGIN IF l_stop = 0 THEN l_done_1 := 1; l_i_1 := ?; l_p_1 := ?; l_c_1 := ?;"
                 + " INSERT INTO \"ns\".\"t_data\" (id, x) VALUES (?, ?) RETURNING \"id\" INTO l_k0_1;")
@@ -953,9 +1059,10 @@ class WritesTest {
         "INSERT ALL INTO \"ns\".\"t_data\" (\"id\", x) VALUES (?, ?) INTO \"ns\".\"t_meta\" (\"id\","
             + " \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\", \"tx_committed_at\")"
             + " VALUES (CAST(? AS number), ?, 3, 1, ?, ?) SELECT 1 FROM dual";
-    assertThat(oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (?, ?)", false).sql())
+    assertThat(untag(oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (?, ?)", false).sql()))
         .contains(one);
-    assertThat(oraclePlan(created(), "INSERT INTO t (x, \"id\") VALUES ('a', 7)", false).sql())
+    assertThat(
+            untag(oraclePlan(created(), "INSERT INTO t (x, \"id\") VALUES ('a', 7)", false).sql()))
         .contains(
             "INSERT ALL INTO \"ns\".\"t_data\" (x, \"id\") VALUES ('a', 7) INTO \"ns\".\"t_meta\""
                 + " (\"id\", \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
@@ -986,7 +1093,7 @@ class WritesTest {
                 .sql())
         .noneMatch(q -> q.startsWith("INSERT ALL"));
     // not for the inline layout, whose INSERT is one statement already
-    assertThat(oraclePlan(inline(), "INSERT INTO t (id, x) VALUES (?, ?)", false).sql())
+    assertThat(untag(oraclePlan(inline(), "INSERT INTO t (id, x) VALUES (?, ?)", false).sql()))
         .noneMatch(q -> q.startsWith("INSERT ALL"));
   }
 
@@ -1029,7 +1136,7 @@ class WritesTest {
     // the keyed write: the gate once, the DML as FORALL over the slots, the stamp over its keys
     Writes.Bulk keyed = oraclePlan(created(), "UPDATE t SET x = ? WHERE \"id\" = ?", true).bulk();
     assertThat(keyed).isNotNull();
-    String k = keyed.sql(List.of("VARCHAR2(32767)", "NUMBER"));
+    String k = untag(keyed.sql(List.of("VARCHAR2(32767)", "NUMBER")));
     assertThat(k)
         .contains(
             " TYPE t_v1 IS TABLE OF VARCHAR2(32767) INDEX BY PLS_INTEGER; l_v1 t_v1; TYPE t_v2 IS"
@@ -1049,7 +1156,7 @@ class WritesTest {
     Writes.Bulk insert =
         oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (?, ?)", true).bulk();
     assertThat(insert).isNotNull();
-    assertThat(insert.sql(List.of("NUMBER", "VARCHAR2(32767)")))
+    assertThat(untag(insert.sql(List.of("NUMBER", "VARCHAR2(32767)"))))
         .contains(
             " FORALL i IN 1 .. l_n INSERT INTO \"ns\".\"t_data\" (\"id\", x) VALUES (l_v1(i),"
                 + " l_v2(i)); FORALL i IN 1 .. l_n INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x"
@@ -1111,23 +1218,24 @@ class WritesTest {
     String cursor =
         " OPEN ? FOR SELECT l_rows, 1, l_id, l_version, l_state, l_written, l_written, l_k0 FROM"
             + " dual;";
-    assertThat(block.step(Writes.Variant.OUT).sql).endsWith(" END IF;" + assigns + " END;");
-    assertThat(block.step(Writes.Variant.CHECK).sql)
+    assertThat(untag(block.step(Writes.Variant.OUT).sql)).endsWith(" END IF;" + assigns + " END;");
+    assertThat(untag(block.step(Writes.Variant.CHECK).sql))
         .endsWith(" END IF;" + assigns + cursor + " END;");
-    assertThat(block.step(Writes.Variant.CURSOR).sql).endsWith(" END IF;" + cursor + " END;");
+    assertThat(untag(block.step(Writes.Variant.CURSOR).sql))
+        .endsWith(" END IF;" + cursor + " END;");
     assertThat(block.step(Writes.Variant.OUT).outTypes).containsExactly(2, 2, 12, 2, 2, 2, 2, 2);
     assertThat(block.step(Writes.Variant.OUT).cursor).isFalse();
     assertThat(block.step(Writes.Variant.CHECK).cursor).isTrue();
     assertThat(block.step(Writes.Variant.CURSOR).outTypes).isEmpty();
     // the texts differ in nothing but the row's return
-    String body = block.step(Writes.Variant.OUT).sql;
-    assertThat(block.step(Writes.Variant.CHECK).sql)
+    String body = untag(block.step(Writes.Variant.OUT).sql);
+    assertThat(untag(block.step(Writes.Variant.CHECK).sql))
         .startsWith(body.substring(0, body.length() - " END;".length()));
     // the INSERT block likewise, meta, stamped and the key
     Writes.Plan insert = oraclePlan(created(), "INSERT INTO t (id, x) VALUES (?, ?)", false);
     Writes.Block inserted = insert.oracleBlock();
     assertThat(inserted).isNotNull();
-    assertThat(inserted.step(Writes.Variant.OUT).sql)
+    assertThat(untag(inserted.step(Writes.Variant.OUT).sql))
         .endsWith(" END IF; ? := l_meta; ? := l_stamped; ? := l_k0; END;");
     assertThat(inserted.step(Writes.Variant.OUT).outTypes).containsExactly(2, 2, 2);
     // a batch's entries: per entry n, done and the row as OUT binds; the checking variant's
@@ -1135,14 +1243,14 @@ class WritesTest {
     Writes.Entries entries = keyed.entries();
     assertThat(entries).isNotNull();
     assertThat(entries.outTypes()).containsExactly(2, 2, 2, 2, 12, 2, 2, 2, 2, 2);
-    assertThat(entries.sql(2, Writes.Variant.OUT))
+    assertThat(untag(entries.sql(2, Writes.Variant.OUT)))
         .contains(
             " ? := 1; ? := l_done_1; ? := l_rows_1; ? := 1; ? := l_id_1; ? := l_version_1;"
                 + " ? := l_state_1; ? := l_written_1; ? := l_written_1; ? := l_k0_1; ? := 2;"
                 + " ? := l_done_2;")
         .endsWith(" ? := l_k0_2; END;")
         .doesNotContain("OPEN ?");
-    assertThat(entries.sql(2, Writes.Variant.CHECK))
+    assertThat(untag(entries.sql(2, Writes.Variant.CHECK)))
         .contains(" ? := l_k0_2; OPEN ? FOR SELECT 1, l_done_1,")
         .endsWith(" FROM dual ORDER BY 1; END;");
     // without the columns' types the cursor stands: the plan's text is the first design's
@@ -1152,7 +1260,8 @@ class WritesTest {
         .endsWith(cursor + " END;");
     assertThat(oracle(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ?", false).size())
         .isEqualTo(
-            oraclePlan(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ?", false).sql().size());
+            untag(oraclePlan(inline(), "UPDATE t SET x = x || ? WHERE \"id\" = ?", false).sql())
+                .size());
   }
 
   @Test

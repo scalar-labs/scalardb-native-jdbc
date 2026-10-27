@@ -6,6 +6,8 @@ import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.SqlAst;
 import com.scalar.db.nativejdbc.sql.StatementShape;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.sql.BatchUpdateException;
@@ -93,6 +95,12 @@ final class Writes {
      * as ojdbc binds the scalar (design 4.4), null for a value bound any other way.
      */
     @Nullable String plsqlType(int placeholder);
+
+    /**
+     * The application's value of a placeholder as a one-element array, its element null for a NULL;
+     * null where it was bound any other way than as one value (a stream, a calendar's time).
+     */
+    Object @Nullable [] value(int placeholder);
 
     /** The statement's query timeout in seconds, 0 for none. */
     int queryTimeout() throws SQLException;
@@ -873,6 +881,12 @@ final class Writes {
             ? oracleKeyedBlock(
                 n, ast, t, exposed, span, inWhere, all, delete, imported, from, end, keyTypes)
             : null;
+    // at READ COMMITTED, the write by the key as one statement first, the block on a miss (design
+    // 4.3 "The keyed write at READ COMMITTED on Oracle", todo 334)
+    RcFirst rcFirst =
+        block == null || span == null || snapshot
+            ? null
+            : oracleRcFirst(n, ast, t, exposed, span, where, all, delete, imported, from, end);
     Entries entries =
         block == null || span == null
             ? null
@@ -948,7 +962,8 @@ final class Writes {
         predicateRc,
         entries != null && fast != null && span != null
             ? Bulk.keyed(n, ast, t, span, delete, imported, from, end, inFlightCheck(n))
-            : null);
+            : null,
+        rcFirst);
   }
 
   /**
@@ -1344,7 +1359,13 @@ final class Writes {
     }
     b.append(" END IF; ? := l_found; ? := l_held; ? := l_missing; ? := l_after; ? := l_written;")
         .append(" ? := l_stamped; ? := l_skipped; ? := l_abort; END;");
-    return new Step(b.toString(), binds, Set.of(), 0, Collections.nCopies(8, Types.NUMERIC), false);
+    return new Step(
+        hinted(b.toString(), "p"),
+        binds,
+        Set.of(),
+        0,
+        Collections.nCopies(8, Types.NUMERIC),
+        false);
   }
 
   /**
@@ -1399,7 +1420,8 @@ final class Writes {
         .append("; l_written := SQL%ROWCOUNT; FORALL i IN 1 .. l_w0.COUNT ");
     b.append(clearTableStamp(n, delete, imported));
     b.append("; l_stamped := SQL%ROWCOUNT; ? := l_written; ? := l_stamped; END;");
-    return new Step(b.toString(), all, Set.of(), 0, List.of(Types.NUMERIC, Types.NUMERIC), false);
+    return new Step(
+        hinted(b.toString(), "c"), all, Set.of(), 0, List.of(Types.NUMERIC, Types.NUMERIC), false);
   }
 
   /**
@@ -1502,6 +1524,111 @@ final class Writes {
     return b.toString();
   }
 
+  private static final Set<String> STATEMENTS =
+      Set.of("SELECT", "INSERT", "UPDATE", "DELETE", "MERGE");
+
+  /**
+   * An Oracle block with each of its nested statements named by a hint comment of its own, {@code
+   * scalardb_native_<shape><n>_<block>}, the n-th statement of a block of {@code shape} whose text
+   * hashes to {@code block} (design 4.3, todo 334): PL/SQL keeps one open cursor per nested text, a
+   * text two blocks share, or one block repeats per entry, parses on every call, and PL/SQL keeps a
+   * hint where it strips a plain comment. Only a statement of the block is named, not a clause of
+   * one (a MERGE's {@code THEN UPDATE}); a statement with a hint of its own, the user's, takes the
+   * name inside it, after its hints.
+   */
+  static String hinted(String block, String shape) {
+    String name = "scalardb_native_" + shape + "%d_" + Integer.toHexString(block.hashCode());
+    StringBuilder out = new StringBuilder(block.length() + 64);
+    boolean inStatement = false;
+    int depth = 0;
+    int nth = 0;
+    int i = 0;
+    int length = block.length();
+    while (i < length) {
+      char c = block.charAt(i);
+      if (c == '\'' || c == '"') {
+        int close = i + 1;
+        while (close < length) {
+          if (block.charAt(close) == c) {
+            if (close + 1 < length && block.charAt(close + 1) == c) {
+              close += 2;
+              continue;
+            }
+            break;
+          }
+          close++;
+        }
+        out.append(block, i, Math.min(close + 1, length));
+        i = close + 1;
+        continue;
+      }
+      if (c == '/' && i + 1 < length && block.charAt(i + 1) == '*') {
+        int close = block.indexOf("*/", i + 2);
+        close = close < 0 ? length : close + 2;
+        out.append(block, i, close);
+        i = close;
+        continue;
+      }
+      if (c == '-' && i + 1 < length && block.charAt(i + 1) == '-') {
+        int close = block.indexOf('\n', i);
+        close = close < 0 ? length : close;
+        out.append(block, i, close);
+        i = close;
+        continue;
+      }
+      if (inStatement) {
+        if (c == '(') {
+          depth++;
+        } else if (c == ')') {
+          depth--;
+        } else if (c == ';' && depth == 0) {
+          inStatement = false;
+        }
+        out.append(c);
+        i++;
+        continue;
+      }
+      if (Character.isLetter(c)
+          && (i == 0 || !isWordPart(block.charAt(i - 1)) && block.charAt(i - 1) != '.')) {
+        int stop = i;
+        while (stop < length && isWordPart(block.charAt(stop))) {
+          stop++;
+        }
+        String word = block.substring(i, stop);
+        out.append(word);
+        i = stop;
+        if (STATEMENTS.contains(word.toUpperCase(Locale.ROOT))) {
+          inStatement = true;
+          depth = 0;
+          String tag = String.format(Locale.ROOT, name, ++nth);
+          int next = i;
+          while (next < length && Character.isWhitespace(block.charAt(next))) {
+            next++;
+          }
+          if (block.startsWith("/*+", next)) {
+            int close = block.indexOf("*/", next + 3);
+            if (close > 0) {
+              out.append(block, i, close)
+                  .append(close > 0 && block.charAt(close - 1) == ' ' ? "" : " ");
+              out.append(tag).append(" */");
+              i = close + 2;
+              continue;
+            }
+          }
+          out.append(" /*+ ").append(tag).append(" */");
+        }
+        continue;
+      }
+      out.append(c);
+      i++;
+    }
+    return out.toString();
+  }
+
+  private static boolean isWordPart(char c) {
+    return Character.isLetterOrDigit(c) || c == '_' || c == '$' || c == '#' || c == '%';
+  }
+
   /**
    * How an Oracle block returns its row: OUT binds, both for the first-use check, or the cursor.
    */
@@ -1544,13 +1671,15 @@ final class Writes {
      * the cursor after them on the same locals (the check), or the cursor alone.
      */
     String block(Variant v) {
-      return "DECLARE "
-          + declare
-          + " BEGIN "
-          + body
-          + (v == Variant.CURSOR ? "" : assigns())
-          + (v == Variant.OUT ? "" : cursor())
-          + " END;";
+      return hinted(
+          "DECLARE "
+              + declare
+              + " BEGIN "
+              + body
+              + (v == Variant.CURSOR ? "" : assigns())
+              + (v == Variant.OUT ? "" : cursor())
+              + " END;",
+          "b");
     }
   }
 
@@ -1926,12 +2055,14 @@ final class Writes {
                   .append(String.join(", ", b.items))
                   .append(" FROM dual");
             }
-            return declare
-                + " l_stop NUMBER := 0;"
-                + run
-                + (v == Variant.CURSOR ? "" : outs)
-                + (v == Variant.OUT ? "" : rows + " ORDER BY 1;")
-                + " END;";
+            return hinted(
+                declare
+                    + " l_stop NUMBER := 0;"
+                    + run
+                    + (v == Variant.CURSOR ? "" : outs)
+                    + (v == Variant.OUT ? "" : rows + " ORDER BY 1;")
+                    + " END;",
+                "e");
           });
     }
 
@@ -2120,7 +2251,7 @@ final class Writes {
     }
 
     String sql(List<String> types) {
-      return texts.computeIfAbsent(String.join(",", types), k -> build(types));
+      return texts.computeIfAbsent(String.join(",", types), k -> hinted(build(types), "k"));
     }
 
     private String build(List<String> types) {
@@ -2338,6 +2469,311 @@ final class Writes {
       done += chunk.size();
     }
     return done;
+  }
+
+  /**
+   * The keyed write at READ COMMITTED on Oracle as one statement, tried before the block (design
+   * 4.3 "The keyed write at READ COMMITTED on Oracle", todo 334): its two texts, without the anchor
+   * and with it, and where each key column's value comes from. On an inline table the user's DML
+   * with the stamp in an UPDATE's SET list and its WHERE clause extended by the committed state and
+   * the anchor; on a decoupled one a block of the DML under the same conditions read from the
+   * metadata row, the key it wrote returned, and the CAS of step 3 under the same conditions, two
+   * counts back. Null where the text cannot be rewritten or a placeholder follows the predicate.
+   */
+  private static @Nullable RcFirst oracleRcFirst(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      @Nullable Expression where,
+      List<Integer> all,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end) {
+    List<Object> sources = keySources(n, ast, where);
+    List<Integer> after = ast.placeholdersIn(span[1], end);
+    if (sources == null || after == null || !after.isEmpty()) {
+      return null;
+    }
+    boolean inline = t.layout() == Layout.INLINE;
+    String plain = rcFirstText(n, ast, t, exposed, span, delete, imported, from, end, false);
+    String anchored = rcFirstText(n, ast, t, exposed, span, delete, imported, from, end, true);
+    if (plain == null || anchored == null) {
+      return null;
+    }
+    // the stamp: an inline UPDATE's first, a decoupled table's after the DML's binds; an inline
+    // DELETE and a created table's DELETE stamp nothing
+    boolean stamps = inline ? !delete : imported || !delete;
+    return new RcFirst(plain, anchored, all, sources, inline, stamps);
+  }
+
+  /** {@link #oracleRcFirst}'s text, with the anchor or without it. */
+  private static @Nullable String rcFirstText(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int[] span,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end,
+      boolean anchored) {
+    Engine engine = n.engine;
+    String source = ast.source();
+    String predicate = source.substring(span[0], span[1]);
+    String tail = source.substring(span[1], end);
+    String x = exposed;
+    if (t.layout() == Layout.INLINE) {
+      String conditions =
+          "COALESCE("
+              + x
+              + "."
+              + n.txState
+              + ", 3) = 3"
+              + (anchored
+                  ? " AND DECODE("
+                      + x
+                      + "."
+                      + n.txId
+                      + ", ?, 1, 0) = 1 AND COALESCE("
+                      + x
+                      + "."
+                      + n.txVersion
+                      + ", 0) = COALESCE(?, 0)"
+                  : "");
+      String text;
+      if (delete) {
+        text = source.substring(0, span[0]) + "(" + predicate + ") AND " + conditions + tail;
+      } else {
+        int set = ast.afterFirst("SET");
+        if (set < 0 || set > span[0]) {
+          return null;
+        }
+        text =
+            source.substring(0, set)
+                + " "
+                + inlineStampSets(n)
+                + ","
+                + source.substring(set, span[0])
+                + "("
+                + predicate
+                + ") AND "
+                + conditions
+                + tail;
+      }
+      return onDataTable(engine, ast, t, true, text, from);
+    }
+    String anchor =
+        anchored
+            ? " AND DECODE(m."
+                + n.txId
+                + ", l_ai, 1, 0) = 1 AND COALESCE(m."
+                + n.txVersion
+                + ", 0) = COALESCE(l_av, 0)"
+            : "";
+    String dml =
+        onDataTable(
+            engine,
+            ast,
+            t,
+            true,
+            source.substring(0, span[0])
+                + "("
+                + predicate
+                + ") AND EXISTS (SELECT 1 FROM "
+                + n.meta
+                + " m WHERE "
+                + n.keyJoin("m", x)
+                + " AND COALESCE(m."
+                + n.txState
+                + ", 3) = 3"
+                + anchor
+                + ")"
+                + tail,
+            from);
+    if (dml == null) {
+      return null;
+    }
+    StringBuilder b = new StringBuilder("DECLARE l_written NUMBER := 0; l_stamped NUMBER := 0;");
+    if (anchored) {
+      b.append(" l_ai ")
+          .append(n.meta)
+          .append(".")
+          .append(n.txId)
+          .append("%TYPE; l_av ")
+          .append(n.meta)
+          .append(".")
+          .append(n.txVersion)
+          .append("%TYPE;");
+    }
+    List<String> returned = new ArrayList<>();
+    List<String> into = new ArrayList<>();
+    List<String> byKey = new ArrayList<>();
+    for (int i = 0; i < n.keyColumns.size(); i++) {
+      String k = engine.quote(n.keyColumns.get(i));
+      b.append(" l_k").append(i).append(" ").append(n.data).append(".").append(k).append("%TYPE;");
+      returned.add(k);
+      into.add("l_k" + i);
+      byKey.add(k + " = l_k" + i);
+    }
+    String metaCas =
+        String.join(" AND ", byKey)
+            + " AND COALESCE("
+            + n.txState
+            + ", 3) = 3"
+            + (anchored
+                ? " AND DECODE("
+                    + n.txId
+                    + ", l_ai, 1, 0) = 1 AND COALESCE("
+                    + n.txVersion
+                    + ", 0) = COALESCE(l_av, 0)"
+                : "");
+    b.append(" BEGIN ")
+        .append(anchored ? "l_ai := ?; l_av := ?; " : "")
+        .append(dml)
+        .append(" RETURNING ")
+        .append(String.join(", ", returned))
+        .append(" INTO ")
+        .append(String.join(", ", into))
+        .append("; l_written := SQL%ROWCOUNT; IF l_written = 1 THEN ")
+        .append(
+            delete && !imported
+                ? "DELETE FROM " + n.meta + " WHERE " + metaCas
+                : "UPDATE " + n.meta + " SET " + inlineStampSets(n) + " WHERE " + metaCas)
+        .append("; l_stamped := SQL%ROWCOUNT; END IF; ? := l_written; ? := l_stamped; END;");
+    return hinted(b.toString(), anchored ? "ra" : "r");
+  }
+
+  /**
+   * Where each key column's value comes from in a WHERE clause that is the full key, in the key's
+   * order: a placeholder's number, or a literal's value; null where a value is neither.
+   */
+  private static @Nullable List<Object> keySources(
+      Names n, SqlAst ast, @Nullable Expression where) {
+    Engine engine = n.engine;
+    List<Expression> conjuncts = new ArrayList<>();
+    conjuncts(where, conjuncts);
+    Object[] out = new Object[n.keyColumns.size()];
+    for (Expression e : conjuncts) {
+      if (!(e instanceof EqualsTo)) {
+        return null;
+      }
+      Expression column = ((EqualsTo) e).getLeftExpression();
+      Expression value = ((EqualsTo) e).getRightExpression();
+      if (!(column instanceof Column)) {
+        Expression other = column;
+        column = value;
+        value = other;
+      }
+      if (!(column instanceof Column)) {
+        return null;
+      }
+      String name = engine.columnKey(engine.resolveIdentifier(((Column) column).getColumnName()));
+      int at = -1;
+      for (int i = 0; i < n.keyColumns.size(); i++) {
+        if (engine.columnKey(n.keyColumns.get(i)).equals(name)) {
+          at = i;
+        }
+      }
+      if (at < 0) {
+        return null;
+      }
+      if (value instanceof JdbcParameter) {
+        int[] span = ast.span(value);
+        List<Integer> in = span == null ? null : ast.placeholdersIn(span[0], span[1]);
+        if (in == null || in.size() != 1) {
+          return null;
+        }
+        out[at] = in.get(0);
+      } else if (value instanceof LongValue) {
+        out[at] = new Literal(((LongValue) value).getBigIntegerValue());
+      } else if (value instanceof StringValue) {
+        out[at] = new Literal(((StringValue) value).getValue());
+      } else {
+        return null;
+      }
+    }
+    for (Object o : out) {
+      if (o == null) {
+        return null;
+      }
+    }
+    return List.of(out);
+  }
+
+  /** A key column's value written into the statement. */
+  private static final class Literal {
+    final Object value;
+
+    Literal(Object value) {
+      this.value = value;
+    }
+  }
+
+  /** {@link #oracleRcFirst}'s texts and the key's sources. */
+  static final class RcFirst {
+    final String plain;
+    final String anchored;
+    final List<Integer> binds;
+    private final List<Object> sources;
+    final boolean inline;
+    final boolean stamps;
+
+    RcFirst(
+        String plain,
+        String anchored,
+        List<Integer> binds,
+        List<Object> sources,
+        boolean inline,
+        boolean stamps) {
+      this.plain = plain;
+      this.anchored = anchored;
+      this.binds = List.copyOf(binds);
+      this.sources = sources;
+      this.inline = inline;
+      this.stamps = stamps;
+    }
+
+    /**
+     * The statement's key as the reads record a key of an Oracle table, by {@link Anchors#key}: an
+     * integral number as ojdbc returns a NUMBER, a BigDecimal of scale 0, a fraction without
+     * trailing zeros; null where a value was bound in a way the driver does not read back.
+     */
+    Object @Nullable [] key(Context context) {
+      Object[] key = new Object[sources.size()];
+      for (int i = 0; i < key.length; i++) {
+        Object s = sources.get(i);
+        Object v;
+        if (s instanceof Literal) {
+          v = ((Literal) s).value;
+        } else {
+          Object[] one = context.value((Integer) s);
+          if (one == null) {
+            return null;
+          }
+          v = one[0];
+        }
+        key[i] = asRead(v);
+      }
+      return key;
+    }
+
+    private static @Nullable Object asRead(@Nullable Object v) {
+      if (v instanceof Integer || v instanceof Long || v instanceof Short || v instanceof Byte) {
+        return BigDecimal.valueOf(((Number) v).longValue());
+      }
+      if (v instanceof BigInteger) {
+        return new BigDecimal((BigInteger) v);
+      }
+      if (v instanceof BigDecimal) {
+        BigDecimal d = ((BigDecimal) v).stripTrailingZeros();
+        return d.scale() < 0 ? d.setScale(0) : d;
+      }
+      return v;
+    }
   }
 
   /** Where the stamp's three values sit among the keyed block's binds. */
@@ -6251,6 +6687,9 @@ final class Writes {
     final @Nullable Step predicateRc;
     // at SNAPSHOT, a batch's entries as one bulk block (design 4.4, todo 334)
     final @Nullable Bulk bulk;
+    // at READ COMMITTED on Oracle, the write by the key as one statement before the block (todo
+    // 334)
+    final @Nullable RcFirst rcFirst;
 
     KeyedPlan(
         Names n,
@@ -6276,9 +6715,11 @@ final class Writes {
         @Nullable Step clearRc,
         @Nullable Merge clearMergeRc,
         @Nullable Step predicateRc,
-        @Nullable Bulk bulk) {
+        @Nullable Bulk bulk,
+        @Nullable RcFirst rcFirst) {
       super(n);
       this.bulk = bulk;
+      this.rcFirst = rcFirst;
       this.clearRc = clearRc;
       this.clearMergeRc = clearMergeRc;
       this.predicateRc = predicateRc;
@@ -6325,6 +6766,12 @@ final class Writes {
           out.add(s.sql);
         }
       }
+      if (rcFirst != null) {
+        // before the block it falls back to, which stays last
+        int at = out.size() - (block != null ? 1 : 0) - (predicateBlock != null ? 1 : 0);
+        out.add(at, rcFirst.anchored);
+        out.add(at, rcFirst.plain);
+      }
       return out;
     }
 
@@ -6357,6 +6804,12 @@ final class Writes {
         }
         if (predicateRc != null && !run.context.anchors().recorded(n.table)) {
           return applyPredicateRc(run, predicateRc);
+        }
+      }
+      if (rcFirst != null) {
+        Long written = applyRcFirst(run, rcFirst);
+        if (written != null) {
+          return written;
         }
       }
       if (block != null || predicateBlock != null) {
@@ -6543,6 +6996,89 @@ final class Writes {
         }
         return total;
       }
+    }
+
+    /**
+     * The keyed write at READ COMMITTED on Oracle as {@link #oracleRcFirst}'s statement (design 4.3
+     * "The keyed write at READ COMMITTED on Oracle", todo 334): without the anchor for a
+     * transaction that recorded no version of the table's keys, with it where the version of the
+     * statement's key is found; where versions are recorded and this key's is not, a key the
+     * statement spells otherwise than the row (a CHAR key unpadded), null, the block, which matches
+     * the key as the row returns it. The row written and stamped is count 1; nothing written is
+     * null, the block, which decides as its table says; written and not stamped, an abort.
+     */
+    private @Nullable Long applyRcFirst(Run run, RcFirst f) throws SQLException {
+      Anchors anchors = run.context.anchors();
+      Anchors.Version anchor = null;
+      if (anchors.recorded(n.table)) {
+        Object[] key = f.key(run.context);
+        anchor = key == null ? null : anchors.version(n.table, key);
+        if (anchor == null) {
+          return null;
+        }
+      }
+      long written;
+      long stamped;
+      if (f.inline) {
+        try (PreparedStatement ps = run.prepare(anchor == null ? f.plain : f.anchored)) {
+          int at = f.stamps ? run.stamp(ps, 1) : 1;
+          for (int b : f.binds) {
+            run.context.bind(ps, at++, b, false);
+          }
+          if (anchor != null) {
+            bindAnchor(ps, at, anchor);
+          }
+          written = ps.executeUpdate();
+          stamped = written;
+        }
+      } else {
+        run.checkCancelled();
+        try (CallableStatement cs =
+            run.track(run.v.prepareCall(anchor == null ? f.plain : f.anchored))) {
+          int at = 1;
+          if (anchor != null) {
+            at = bindAnchor(cs, at, anchor);
+          }
+          for (int b : f.binds) {
+            run.context.bind(cs, at++, b, false);
+          }
+          if (f.stamps) {
+            at = run.stamp(cs, at);
+          }
+          cs.registerOutParameter(at, Types.NUMERIC);
+          cs.registerOutParameter(at + 1, Types.NUMERIC);
+          cs.execute();
+          written = cs.getLong(at);
+          stamped = cs.getLong(at + 1);
+        }
+      }
+      if (written == 0) {
+        return null; // no row, a row in flight or moved, a key without metadata: the block tells
+      }
+      if (written > 1) {
+        throw new Aborted("a key matched " + written + " rows");
+      }
+      if (stamped != 1) {
+        throw new Aborted("a row the statement writes changed after it was read");
+      }
+      anchors.wrote(run.txId);
+      return 1L;
+    }
+
+    /** The anchor's tx_id and version from {@code at}, either NULL as the version has it. */
+    private static int bindAnchor(PreparedStatement ps, int at, Anchors.Version anchor)
+        throws SQLException {
+      if (anchor.txId == null) {
+        ps.setNull(at, Types.VARCHAR);
+      } else {
+        ps.setString(at, anchor.txId);
+      }
+      if (anchor.version == null) {
+        ps.setNull(at + 1, Types.NUMERIC);
+      } else {
+        ps.setLong(at + 1, anchor.version);
+      }
+      return at + 2;
     }
 
     /**

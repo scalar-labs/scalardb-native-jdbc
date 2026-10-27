@@ -1326,6 +1326,30 @@ public final class Proxies {
         }
 
         @Override
+        public Object @Nullable [] value(int placeholder) {
+          Call c = parameters == null ? null : parameters.get(placeholder);
+          if (c == null) {
+            return null;
+          }
+          switch (c.method.getName()) {
+            case "setNull":
+              return new Object[] {null};
+            case "setObject":
+            case "setInt":
+            case "setLong":
+            case "setShort":
+            case "setByte":
+            case "setBigDecimal":
+            case "setString":
+            case "setDouble":
+            case "setFloat":
+              return c.args.length == 2 ? new Object[] {c.args[1]} : null;
+            default:
+              return null;
+          }
+        }
+
+        @Override
         public @Nullable String plsqlType(int placeholder) {
           Call c = parameters == null ? null : parameters.get(placeholder);
           return c == null

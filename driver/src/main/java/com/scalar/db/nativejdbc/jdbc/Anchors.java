@@ -85,6 +85,12 @@ final class Anchors {
     return v == null || v.is(txId, version);
   }
 
+  /** The version the transaction read of a key, as {@link #key} matches it; null where none. */
+  synchronized @Nullable Version version(String table, Object[] key) {
+    Map<List<Object>, Version> r = read.get(table);
+    return r == null ? null : r.get(key(key));
+  }
+
   /** Records the stamp of one of the transaction's writes. */
   synchronized void wrote(String txId) {
     ownStamps.add(txId);

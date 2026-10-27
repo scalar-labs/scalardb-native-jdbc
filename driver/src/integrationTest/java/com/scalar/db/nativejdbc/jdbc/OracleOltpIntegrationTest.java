@@ -313,12 +313,13 @@ class OracleOltpIntegrationTest {
         long first;
         long update;
         long delete;
+        long checked;
         long missing;
         try (PreparedStatement up =
                 d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?");
             PreparedStatement del = d.prepareStatement("DELETE FROM " + sql + " WHERE id = ?")) {
-          // the first block of the table in this process returns its key through the OUT binds
-          // and the cursor both, the check of the OUT binds' typing: one round trip more, once
+          // at READ COMMITTED the statement first (todo 334): a write that goes through runs no
+          // block, the first-use check of the OUT binds among it
           Writes.OutBindCheck.reset();
           first =
               rt.measure(
@@ -340,11 +341,25 @@ class OracleOltpIntegrationTest {
                     del.setInt(1, 20);
                     assertThat(del.executeUpdate()).isEqualTo(1);
                   });
+          d.commit();
+          // the table's first block in the process returns its key through the OUT binds and the
+          // cursor both, the check of the OUT binds' typing, one round trip more, once: a key not
+          // read after one read goes to the block
+          assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 70")).hasSize(1);
+          checked =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "b");
+                    up.setInt(2, 9);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+          d.commit();
+          // a missing key: the statement writes nothing, the block counts 0
           missing =
               rt.measure(
                   () -> {
                     up.setString(1, "z");
-                    up.setInt(2, 999);
+                    up.setInt(2, 998);
                     assertThat(up.executeUpdate()).isEqualTo(0);
                   });
         }
@@ -352,9 +367,10 @@ class OracleOltpIntegrationTest {
         log(
             "form 2 ("
                 + layout
-                + "): the table's first keyed UPDATE in the process, the check of the OUT binds, "
+                + "): the table's first keyed UPDATE in the process, the statement alone, "
                 + first
-                + " round trip(s)");
+                + " round trip(s); the block with the check of the OUT binds "
+                + checked);
         log(
             "form 2 ("
                 + layout
@@ -365,10 +381,11 @@ class OracleOltpIntegrationTest {
                 + ", a write of a missing key "
                 + missing
                 + " round trip(s), at READ COMMITTED in a transaction");
-        assertThat(first).isEqualTo(2);
+        assertThat(first).isEqualTo(1);
         assertThat(update).isEqualTo(1);
         assertThat(delete).isEqualTo(1);
-        assertThat(missing).isEqualTo(1);
+        assertThat(checked).isEqualTo(2);
+        assertThat(missing).isEqualTo(2);
         d.setAutoCommit(true);
         assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 1")).containsExactly("b");
         assertThat(rows(d, "SELECT COUNT(*) FROM " + sql))
@@ -876,9 +893,9 @@ class OracleOltpIntegrationTest {
         d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
         d.setAutoCommit(false);
         Counter rt = new Counter(d);
-        // the table verified first, by a write of its own, so that the batches measured are the
+        // the table verified first, by a block of its own, so that the batches measured are the
         // form itself and not the first-use check
-        assertThat(update(d, "UPDATE " + sql + " SET x = 'm' WHERE id = 63")).isEqualTo(1);
+        verifyOutBinds(d, sql);
         long keyed;
         try (PreparedStatement ps =
             d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
@@ -1360,16 +1377,141 @@ class OracleOltpIntegrationTest {
   }
 
   /**
-   * Form 2's row the test map had none for (todo 335's log): a row another connection's keyed write
-   * holds under the vendor's lock when the block's DML reaches it. The block read the row committed
-   * before; once the other connection commits, the DML goes through on the decoupled table ({@code
-   * written} 1) and its CAS finds the metadata row at another version ({@code stamped} 0), or on
-   * the inline table the DML's own CAS finds the version moved ({@code written} 0): abort {@code
-   * 40001}, "changed after it was read", the DML undone by the rollback and the row as the other
-   * connection left it; the write then goes through.
+   * The keyed write at READ COMMITTED on Oracle, the statement first and the block on a miss
+   * (design 4.3, todo 334), counted in round trips: a key written without a read, one, the
+   * statement alone; a missing key, the statement and the block, two, count 0; a key read then
+   * written, one, its anchor in the statement; the same key written again, whose row carries the
+   * transaction's own stamp and not the anchor, through the block; and a CHAR key bound unpadded,
+   * which the anchor recorded as the row spells it does not match, through the block, which still
+   * finds the anchor: a version moved by another connection aborts {@code 40001}.
    */
   @Test
-  void form2RowMovedBetweenTheReadAndTheCas() throws Exception {
+  void form2StatementFirstAtReadCommitted() throws Exception {
+    try (Connection d = driver();
+        Connection other = driver()) {
+      for (String table : List.of("t", "ti")) {
+        String sql = NS + "." + table;
+        String layout = table.equals("t") ? "decoupled" : "inline";
+        d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        d.setAutoCommit(false);
+        // the table's OUT binds verified first, so that the misses measured are the form itself
+        verifyOutBinds(d, sql);
+        Counter rt = new Counter(d);
+        long blind;
+        long missing;
+        long read;
+        long twice;
+        try (PreparedStatement up =
+            d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
+          blind =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "p");
+                    up.setInt(2, 22);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+          missing =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "p");
+                    up.setInt(2, 996);
+                    assertThat(up.executeUpdate()).isEqualTo(0);
+                  });
+          assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 23")).hasSize(1);
+          read =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "q");
+                    up.setInt(2, 23);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+          twice =
+              rt.measure(
+                  () -> {
+                    up.setString(1, "r");
+                    up.setInt(2, 23);
+                    assertThat(up.executeUpdate()).isEqualTo(1);
+                  });
+        }
+        d.commit();
+        log(
+            "form 2 ("
+                + layout
+                + ") at READ COMMITTED: a key written without a read "
+                + blind
+                + ", a missing key "
+                + missing
+                + ", a key read then written "
+                + read
+                + ", the same key again "
+                + twice
+                + " round trip(s)");
+        assertThat(blind).isEqualTo(1);
+        assertThat(missing).isEqualTo(2);
+        assertThat(read).isEqualTo(1);
+        assertThat(twice).isEqualTo(2);
+        assertThat(scalarDbX(table, 22)).isEqualTo("p");
+        assertThat(scalarDbX(table, 23)).isEqualTo("r");
+        d.setAutoCommit(true);
+      }
+      // the CHAR(5) key, stored padded: the read records it as the row spells it, the statement
+      // spells it unpadded, a CHAR literal compared padded, so the block runs, which matches the
+      // key as the row returns it (a VARCHAR2 bind of 'a' matches no row, the vendor's statement
+      // alone neither)
+      String ch = KeyType.K_CH.table();
+      d.setAutoCommit(false);
+      Counter rt = new Counter(d);
+      assertThat(rows(d, "SELECT x FROM " + ch + " WHERE k = 'a'")).hasSize(1);
+      long unpadded;
+      try (PreparedStatement up = d.prepareStatement("UPDATE " + ch + " SET x = x WHERE k = 'a'")) {
+        unpadded = rt.measure(() -> assertThat(up.executeUpdate()).isEqualTo(1));
+      }
+      d.commit();
+      // padded as the row spells it: the anchor found, the statement alone
+      assertThat(rows(d, "SELECT x FROM " + ch + " WHERE k = 'a'")).hasSize(1);
+      long padded;
+      try (PreparedStatement up = d.prepareStatement("UPDATE " + ch + " SET x = x WHERE k = ?")) {
+        padded =
+            rt.measure(
+                () -> {
+                  up.setString(1, "a    ");
+                  assertThat(up.executeUpdate()).isEqualTo(1);
+                });
+      }
+      d.commit();
+      log(
+          "form 2 at READ COMMITTED: a CHAR(5) key read then written, bound unpadded "
+              + unpadded
+              + ", padded "
+              + padded
+              + " round trip(s)");
+      assertThat(padded).isEqualTo(1);
+      // unpadded, the version moved by another connection: the block finds the anchor
+      assertThat(rows(d, "SELECT x FROM " + ch + " WHERE k = 'a'")).hasSize(1);
+      assertThat(update(other, "UPDATE " + ch + " SET x = x WHERE k = 'a'")).isEqualTo(1);
+      try (PreparedStatement up = d.prepareStatement("UPDATE " + ch + " SET x = x WHERE k = 'a'")) {
+        assertThatThrownBy(up::executeUpdate)
+            .as("CHAR(5): the anchor moved")
+            .isInstanceOf(SQLTransactionRollbackException.class)
+            .extracting(e -> ((SQLException) e).getSQLState())
+            .isEqualTo("40001");
+      }
+      d.rollback();
+      d.setAutoCommit(true);
+    }
+  }
+
+  /**
+   * Form 2 at READ COMMITTED, a row another connection's keyed write holds under the vendor's lock
+   * when the statement reaches it (design 4.3 "The keyed write at READ COMMITTED on Oracle", todo
+   * 334). Oracle evaluates the statement's WHERE clause on the row as it is once the lock is given,
+   * restarting the statement where the row changed: a transaction that read no version of the key
+   * writes over the other connection's committed write, as the vendor's statement does; one that
+   * read the key first finds its anchor moved, the statement writes nothing, and the block aborts
+   * {@code 40001}, the row as the other connection left it.
+   */
+  @Test
+  void form2RowWrittenByAnotherWhileTheStatementWaits() throws Exception {
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try (Connection d = driver();
         Connection other = driver()) {
@@ -1385,19 +1527,27 @@ class OracleOltpIntegrationTest {
         Thread.sleep(700);
         assertThat(write.isDone()).as(layout + ": waits on the row").isFalse();
         other.commit();
-        assertThatThrownBy(() -> write.get(20, TimeUnit.SECONDS))
-            .as(layout + ": the row moved between the block's read and its CAS")
+        assertThat(write.get(20, TimeUnit.SECONDS)).as(layout + ": written").isEqualTo(1);
+        d.commit();
+        assertThat(scalarDbX(table, 21)).isEqualTo("d");
+        // the key read first: its anchor in the statement, which the other's write moves
+        assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 21")).containsExactly("d");
+        assertThat(update(other, "UPDATE " + sql + " SET x = 'o' WHERE id = 21")).isEqualTo(1);
+        Future<Integer> anchored =
+            pool.submit(() -> update(d, "UPDATE " + sql + " SET x = 'e' WHERE id = 21"));
+        Thread.sleep(700);
+        assertThat(anchored.isDone()).as(layout + ": waits on the row").isFalse();
+        other.commit();
+        assertThatThrownBy(() -> anchored.get(20, TimeUnit.SECONDS))
+            .as(layout + ": the row moved since the transaction read it")
             .cause()
             .isInstanceOf(SQLTransactionRollbackException.class)
-            .hasMessageContaining("changed after it was read")
             .extracting(e -> ((SQLException) e).getSQLState())
             .isEqualTo("40001");
         d.rollback();
         assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 21")).containsExactly("o");
         assertThat(scalarDbX(table, 21)).isEqualTo("o");
-        assertThat(update(d, "UPDATE " + sql + " SET x = 'd' WHERE id = 21")).isEqualTo(1);
-        d.commit();
-        assertThat(scalarDbX(table, 21)).isEqualTo("d");
+        d.rollback();
         d.setAutoCommit(true);
         other.setAutoCommit(true);
       }
@@ -1749,6 +1899,110 @@ class OracleOltpIntegrationTest {
     return out;
   }
 
+  /**
+   * The nested statements of the blocks told apart (design 4.3, todo 334): at SNAPSHOT a keyed
+   * UPDATE runs the clear-table block gated and then ungated, two blocks whose stamp of the
+   * metadata rows is the same statement; at READ COMMITTED a batch's block of entries repeats each
+   * entry's statements. Named per block and per occurrence, none of them parses again once the
+   * session has run it: {@code V$SQL}'s parse calls of the named statements do not move over
+   * further transactions while their executions do.
+   */
+  @Test
+  void nestedStatementsParseOnceAcrossBlocks() throws Exception {
+    String sql = NS + ".t";
+    // ojdbc's statement cache, as the benchmarks run: a block closed after each call closes its
+    // nested statements' cursors with it, and every call parses them again whatever their text
+    Properties cached = new Properties();
+    cached.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "60000");
+    cached.setProperty("oracle.jdbc.implicitStatementCacheSize", "128");
+    try (Connection d = ORA.openDriver(cached);
+        Connection v = ORA.open()) {
+      Action round =
+          () -> {
+            d.setAutoCommit(false);
+            d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            assertThat(update(d, "UPDATE " + sql + " SET x = 'n' WHERE id = 24")).isEqualTo(1);
+            assertThat(update(d, "UPDATE " + sql + " SET x = 'n' WHERE id = 25")).isEqualTo(1);
+            d.commit();
+            d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            // a key read, so that the batch's entries go to the block of entries
+            assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 70")).hasSize(1);
+            try (PreparedStatement ps =
+                d.prepareStatement("UPDATE " + sql + " SET x = ? WHERE id = ?")) {
+              for (int id = 26; id <= 28; id++) {
+                ps.setString(1, "n");
+                ps.setInt(2, id);
+                ps.addBatch();
+              }
+              assertThat(ps.executeBatch()).containsExactly(1, 1, 1);
+            }
+            d.commit();
+            d.setAutoCommit(true);
+          };
+      for (int i = 0; i < 3; i++) {
+        round.run();
+      }
+      Map<String, long[]> before = nestedParses(v);
+      for (int i = 0; i < 5; i++) {
+        round.run();
+      }
+      Map<String, long[]> after = nestedParses(v);
+      long parses = 0;
+      long executions = 0;
+      for (Map.Entry<String, long[]> e : after.entrySet()) {
+        long[] was = before.getOrDefault(e.getKey(), new long[2]);
+        long p = e.getValue()[0] - was[0];
+        long x = e.getValue()[1] - was[1];
+        if (x > 0) {
+          log("  " + e.getKey() + ": " + x + " executions, " + p + " parse calls");
+        }
+        parses += p;
+        executions += x;
+      }
+      log(
+          "the blocks' named statements over five rounds: "
+              + executions
+              + " executions, "
+              + parses
+              + " parse calls");
+      assertThat(executions).isGreaterThan(0);
+      assertThat(parses).isZero();
+    }
+  }
+
+  /**
+   * Per named statement of the blocks, its parse calls and executions as {@code V$SQL} has them.
+   */
+  private static Map<String, long[]> nestedParses(Connection v) throws SQLException {
+    Map<String, long[]> out = new java.util.TreeMap<>();
+    try (Statement st = v.createStatement();
+        ResultSet rs =
+            st.executeQuery(
+                "SELECT SUBSTR(sql_text, 1, 60), parse_calls, executions FROM v$sql WHERE"
+                    + " REGEXP_LIKE(sql_text, 'scalardb' || '_native_[a-z]+[0-9]+_[0-9a-f]+')"
+                    + " AND command_type <> 47")) {
+      while (rs.next()) {
+        out.merge(
+            rs.getString(1),
+            new long[] {rs.getLong(2), rs.getLong(3)},
+            (x, y) -> new long[] {x[0] + y[0], x[1] + y[1]});
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Runs the table's keyed block on a row of its own, in {@code d}'s transaction at READ COMMITTED,
+   * which it commits, so that its OUT binds are verified: a key read records the table's anchors,
+   * and a key not read then goes to the block, whose row decides the check; a missing key decides
+   * nothing.
+   */
+  private static void verifyOutBinds(Connection d, String sql) throws SQLException {
+    assertThat(rows(d, "SELECT x FROM " + sql + " WHERE id = 70")).hasSize(1);
+    assertThat(update(d, "UPDATE " + sql + " SET x = x WHERE id = 63")).isEqualTo(1);
+    d.commit();
+  }
+
   /** The statements the session behind a connection has executed, recursive ones included. */
   private static long executions(Connection c) throws SQLException {
     try (Statement st = c.createStatement();
@@ -1925,6 +2179,101 @@ class OracleOltpIntegrationTest {
     }
   }
 
+  /**
+   * The keyed UPDATE at READ COMMITTED through the driver beside the vendor's on the data table,
+   * each with its commit, and the read of the key before it (todo 334's measure of the statement
+   * first): per operation the client thread's CPU, the session's CPU and DB time, its executes,
+   * parse calls and round trips, ojdbc's implicit cache at 128 on both. Run only with {@code
+   * -Dnativejdbc.oracle.rcmeasure=<operations>}; it changes the rows' x, so alone.
+   */
+  @Test
+  void readCommittedUpdateMeasure() throws Exception {
+    int n = Integer.getInteger("nativejdbc.oracle.rcmeasure", 0);
+    Assumptions.assumeTrue(n > 0, "-Dnativejdbc.oracle.rcmeasure not set");
+    Properties p = new Properties();
+    p.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "600000");
+    p.setProperty("oracle.jdbc.implicitStatementCacheSize", "128");
+    Properties raw = new Properties();
+    raw.setProperty("user", ORA.username());
+    raw.setProperty("password", ORA.password());
+    raw.setProperty("oracle.jdbc.implicitStatementCacheSize", "128");
+    java.lang.management.ThreadMXBean cpu =
+        java.lang.management.ManagementFactory.getThreadMXBean();
+    for (int round = 0; round < 2; round++) {
+      for (String table : List.of("ti", "t")) {
+        String layout = table.equals("t") ? "decoupled" : "inline";
+        String data =
+            NS + "." + Engine.ORACLE.quote(catalog.lookup(List.of(), N(NS), N(table)).dataTable());
+        try (Connection d = ORA.openDriver(p);
+            Connection v = java.sql.DriverManager.getConnection(ORA.url(), raw)) {
+          d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+          d.setAutoCommit(false);
+          v.setAutoCommit(false);
+          for (boolean rmw : List.of(false, true)) {
+            for (boolean driver : List.of(false, true)) {
+              Connection c = driver ? d : v;
+              String target = driver ? NS + "." + table : data;
+              int[] next = {0};
+              try (PreparedStatement read =
+                      c.prepareStatement("SELECT x FROM " + target + " WHERE id = ?");
+                  PreparedStatement up =
+                      c.prepareStatement("UPDATE " + target + " SET x = ? WHERE id = ?")) {
+                Action op =
+                    () -> {
+                      int id = 1 + next[0]++ % 60;
+                      if (rmw) {
+                        read.setInt(1, id);
+                        try (ResultSet rs = read.executeQuery()) {
+                          rs.next();
+                        }
+                      }
+                      up.setString(1, "m");
+                      up.setInt(2, id);
+                      assertThat(up.executeUpdate()).isEqualTo(1);
+                      c.commit();
+                    };
+                for (int i = 0; i < 300; i++) {
+                  op.run();
+                }
+                Map<String, Long> a = sessionStats(c);
+                long cpu0 = cpu.getCurrentThreadCpuTime();
+                long t0 = System.nanoTime();
+                for (int i = 0; i < n; i++) {
+                  op.run();
+                }
+                long wall = System.nanoTime() - t0;
+                long client = cpu.getCurrentThreadCpuTime() - cpu0;
+                Map<String, Long> b = sessionStats(c);
+                double per = n;
+                System.out.printf(
+                    "[334] round %d, %s, %s %s at READ COMMITTED, %d ops: wall %.0f µs, client CPU"
+                        + " %.0f µs, server CPU %.0f µs, DB time %.0f µs, executes %.2f, parses"
+                        + " %.2f, round trips %.2f an op%n",
+                    round,
+                    layout,
+                    driver ? "driver" : "vendor",
+                    rmw ? "read+update" : "update",
+                    n,
+                    wall / 1000.0 / per,
+                    client / 1000.0 / per,
+                    (b.get("CPU used by this session") - a.get("CPU used by this session"))
+                        * 10000.0
+                        / per,
+                    (b.get("DB time") - a.get("DB time")) * 10000.0 / per,
+                    (b.get("execute count") - a.get("execute count")) / per,
+                    (b.get("parse count (total)") - a.get("parse count (total)")) / per,
+                    (b.get("SQL*Net roundtrips to/from client")
+                            - a.get("SQL*Net roundtrips to/from client"))
+                        / per);
+              }
+            }
+          }
+          d.setAutoCommit(true);
+        }
+      }
+    }
+  }
+
   private static Map<String, Long> sessionStats(Connection c) throws SQLException {
     Map<String, Long> out = new java.util.HashMap<>();
     try (Statement st = c.createStatement();
@@ -1932,7 +2281,8 @@ class OracleOltpIntegrationTest {
             st.executeQuery(
                 "SELECT n.name, s.value FROM v$mystat s JOIN v$statname n ON n.statistic# ="
                     + " s.statistic# WHERE n.name IN ('parse count (total)', 'CPU used by this"
-                    + " session', 'DB time', 'SQL*Net roundtrips to/from client')")) {
+                    + " session', 'DB time', 'SQL*Net roundtrips to/from client', 'execute"
+                    + " count')")) {
       while (rs.next()) {
         out.put(rs.getString(1), rs.getLong(2));
       }
