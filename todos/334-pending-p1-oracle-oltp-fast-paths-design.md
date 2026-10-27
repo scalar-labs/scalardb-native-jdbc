@@ -1023,3 +1023,7 @@ and one plain; the row the vendor's; a second connection's NOWAIT ORA-00054) and
 (`InlineIntegrationTest`'s three star forms at SNAPSHOT). One ask before the proof run: the
 Oracle `InlineIntegrationTest`, which failed on the container's leftover users and not on the
 change, on a fresh container.
+
+The ask on 1070d98 is met (the AWS session, 2026-10-27): the Oracle `InlineIntegrationTest`
+passed on a fresh container, 3 of 3, the star forms at SNAPSHOT among them. The review of 1070d98
+is closed; its proof is the SNAPSHOT inline YCSB cell of the next AWS run.
