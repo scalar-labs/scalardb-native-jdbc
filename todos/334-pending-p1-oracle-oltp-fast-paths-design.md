@@ -1995,20 +1995,20 @@ runs' READ COMMITTED decoupled YCSB E cells (`jdk.CPUTimeSample`, 1 ms a sample,
 Everything got slower between the runs: the vendor's own scan +10% on the client, the driver's +13%;
 the driver's scan statement on the server 621 → 700 µs of CPU a call with the same plan and the same
 119 gets (the vendor's 306 → 304); the p50s 1,983/1,916 → 2,055/2,075 (vendor) and 2,865/2,855 →
-3,134/3,182 (driver). Repetitions of one cell differ by up to 6%. The driver's excess over the vendor
-grew by about 70 µs a scan, under twice the repetition noise. Rows a scan (499), fetches and network
-waits a scan are identical in both runs; the client ran at 12% of its 16 vCPUs in both; garbage
-collection, deoptimizations and the parks are alike. The sixth run was a fresh stack after six hours
-of TPC-C cells; the fifth's followed its own load.
+3,134/3,182 (driver). Repetitions of one cell differ by up to 6%. The driver's excess over the
+vendor grew by about 70 µs a scan, under twice the repetition noise. Rows a scan (499), fetches and
+network waits a scan are identical in both runs; the client ran at 12% of its 16 vCPUs in both;
+garbage collection, deoptimizations and the parks are alike. The sixth run was a fresh stack after
+six hours of TPC-C cells; the fifth's followed its own load.
 
 By category, the driver's own code fell as designed: the proxy's dispatch, the anchors, `readKey`
 and the handler's own getters 248 → 205 µs a scan (reflection gone, the key reader once, the map
 unbuilt). What grew is the vendor driver's work under the proxy: the application's 5,000 `getString`
 calls a scan 450 → 563 µs where the vendor's own stayed 412 → 413, and `next` 380 → 498 against the
-vendor's 257 → 326 (the same +27%, the rows being 3 columns wider). In the sixth run's samples 11% of
-the driver's `getString` time sits at the vendor driver's lock release (`ReentrantLock.unlock`,
-`AbstractQueuedSynchronizer.signalNext`) and the getter's own frame, 2% in the fifth's and none in the
-vendor's; no other thread contends for a connection's lock (every other thread is an idle pool
+vendor's 257 → 326 (the same +27%, the rows being 3 columns wider). In the sixth run's samples 11%
+of the driver's `getString` time sits at the vendor driver's lock release (`ReentrantLock.unlock`,
+`AbstractQueuedSynchronizer.signalNext`) and the getter's own frame, 2% in the fifth's and none in
+the vendor's; no other thread contends for a connection's lock (every other thread is an idle pool
 thread), so that is where the samples land, not a wait.
 
 The container (JDK 25, the same vendor driver, `ClientCostIntegrationTest` in the scratch worktree,
@@ -2025,10 +2025,10 @@ driver's client CPU a scan less the vendor's in the same run:
 
 Main is cheaper in every configuration, by 70–370 µs a scan. Nothing on the container reproduces the
 AWS growth, so the reading is that the sixth run's environment, not the three items, moved the
-driver's scan, and more than the vendor's because the driver's scan does more of everything (a
-wider row, the hash join on the server). The benchmark session's candidates are ruled out by the
-code: the 4,096-entry fold never triggers in a 500-row transaction, the flat lists are cleared at
-each commit, and the fast path boxes nothing the reflection did not.
+driver's scan, and more than the vendor's because the driver's scan does more of everything (a wider
+row, the hash join on the server). The benchmark session's candidates are ruled out by the code: the
+4,096-entry fold never triggers in a 500-row transaction, the flat lists are cleared at each commit,
+and the fast path boxes nothing the reflection did not.
 
 The proof, the user's call: the two builds on one stack back to back, YCSB E at READ COMMITTED
 decoupled, fast network, 60 s × 2 repetitions each, about 10 minutes of runtime; the fifth run's
