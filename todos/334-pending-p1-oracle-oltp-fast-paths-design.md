@@ -1746,3 +1746,82 @@ mergeable as it is, the user deciding the landing.
   (after 25c52e4); unit tests 402 of 402; spotbugsIntegrationTest down to the two findings of
   other work (6e's report).
 - The design's sentence (section 1's architecture bullet) added with this note.
+
+### 2026-10-28: the lazy anchor map, the hoisted key reader and the version by getLong, designed (the design's decision; item 3 of the user's order, for c7 after item 2 lands)
+
+**What costs** (the fifth run's JFR, per 500-row scan at READ COMMITTED decoupled, the note of
+f767e74): the anchors are 124 µs of the client's +381: the two version getters 50 (`getString` of
+`tx_id` 30, `getObject` of `tx_version` 20, a BigDecimal on Oracle); `readKey` 42 (the key's
+`getObject` 21, a BigDecimal; `getMetaData`, `getColumnTypeName` and `getColumnType` per key
+column per row and the loop's compares 21); `Anchors.read` 32 (`key()`'s `ArrayList`, the hash of
+it, `putIfAbsent`, the map's resizes through 500 rows). After item 2 the same per-row code runs
+from `rowReached`.
+
+**The design.** Three changes on the same per-row path, engine-neutral, the texts untouched:
+
+1. *The key reader's metadata hoisted.* `Writes.readKey(rs, from, width)` asks the metadata per
+   row for each key column (`getColumnTypeName`, `getColumnType`, and `onSqlServer` for a `time`)
+   to choose among `getObject`, `getObject(c, OffsetDateTime.class)`, `OffsetTime`, `LocalDateTime`,
+   `LocalTime` and `getString` (todos 148 and 254). A `Writes.KeyReader` (per column one of those
+   six kinds) is computed once per result set from the metadata, at the first row, and `readKey(rs,
+   from, KeyReader)` reads the columns with no metadata call; `AnchoredHandler` keeps one per
+   table of `anchored.tables`. The old `readKey(rs, from, width)` stays for the write paths'
+   read-backs (one row or a few) as `readKey(rs, from, KeyReader.of(rs, from, width))`.
+
+2. *The version by `getLong`.* The row hook reads `tx_version` with `rs.getLong(c)` and
+   `rs.wasNull()` (both direct on the vendor's rows) instead of `getObject`, so no BigDecimal on
+   Oracle; `Anchors.Version` gains the constructor `(String txId, long version, boolean isNull)`
+   or keeps its `Object` one fed a `Long`: the stored `Long version` and `is()` unchanged. The
+   key's getter stays `getObject`: `Anchors.key` matches what the read returned with what the
+   write binds, normalized per engine (`RcFirst.key`: an integral bind to a BigDecimal of scale 0
+   on Oracle, as ojdbc's `getObject` of a NUMBER), and moving the read to `Long` would move the
+   write's normalization with it for about 20 µs a scan; declined.
+
+3. *The map built when first asked.* `Anchors` keeps per table a flat list of what was read, in
+   order — an entry of the key array as `readKey` returned it (the driver's own array, never the
+   application's) and its `Version` — appended by `read(at, table, key, v)` under the same epoch
+   check: no `key()` wrapping, no hash, no map insert per row. The key-to-version map of a table is
+   built from its list at the first call that needs it, `version(table, key)` or `unchanged(...)`,
+   by `putIfAbsent` in list order, so the first read of a key still wins; a build folds in only the
+   entries added since the last one (a scan after a write to the same table). `recorded(table)`
+   answers from the list (non-empty), no build. `transactionEnded` clears the lists, the maps and
+   the stamps. A scan never followed by a write to its table, YCSB E's and most read-only scans,
+   never builds; a write after a scan pays the build once, what the scan paid per row before. The
+   single-row `anchor(...)` of the write paths' read-backs (`Proxies`, `records`) goes through the
+   same `read`.
+
+Per row after the three: the three getters (`getString`, `getObject` of the key, `getLong` and
+`wasNull`), an `Object[]`, an entry and a list add; about 0.35 µs against 0.6 today on Oracle.
+Expected: about −50 µs of a 500-row scan's client CPU on Oracle (−20 the metadata, −15 the
+BigDecimal of the version, −15 the map), −35 on PostgreSQL, whose `getObject` of an `int8` is a
+`Long` already; the allocation per scan down by about a third (the `ArrayList` key, the map node
+and its resizes gone per row). With item 2, the scan's client cost at READ COMMITTED from +381 to
+about +260 µs; the rest is the three hidden columns in ojdbc's `next()` and the proxy's stub.
+
+**Tests** (every engine, both layouts where the suite has them; item 2's full-suite run is the
+baseline):
+- kept: every anchored read-then-write test, the anchor the first read's — `DecoupledReadCommitted-
+  IntegrationTest` test1–test5 (test2 the row without metadata, its version NULL, through
+  `getLong` and `wasNull`), form2 and form3, `WriteIntegrationTest.anchorReviewFindings`,
+  `OracleOltpIntegrationTest`'s READ COMMITTED tests, `ReadIntegrationTest.fastGetters_...`'s
+  scrollable `absolute` case; todo 141's read across a transaction's end recording nothing (the
+  epoch); todo 142's own stamp unchanged; the temporal-key tests of todos 148 and 254
+  (`timestamptz` and `timetz` keys on PostgreSQL, `time` keys on SQL Server), which exercise the
+  reader's kinds; a `byte[]` key read and then written (content equality after the build), where
+  the suite has one.
+- to add: `AnchorsTest` (unit, `driver/src/test`): a key read twice with different versions gives
+  the first; `recorded` true after reads and `version` null for a key not read, without and with a
+  build; a read after `transactionEnded` (the epoch moved) records nothing; a build then more reads
+  then another lookup finds both the old and the new entries; `byte[]` keys match by content;
+  `unchanged` true for a version carrying an own stamp with no build. Integration, on every engine:
+  a scan of a few hundred rows of a ScalarDB table then an UPDATE of one of its rows after another
+  connection moved that row's version (`40001`), and of a row the scan did not reach (no anchor:
+  the write goes through) — the build at the write finds the right entry; the same with two scans
+  and a write between them (the fold of the entries added after the first build).
+- the measure: the next AWS run's JFR, `Anchors.*` and `readKey` from 6.7% of the driver's samples
+  toward 3%, `getMetaData` and `getColumnTypeName` gone from the scan's stacks; locally
+  `ora/jfrcat.py` on a container YCSB E run.
+
+**The design's own text.** At the merge, design 4.2's anchors paragraph gains one sentence: the
+versions a read records are kept per table as read and indexed by key at the first write to the
+table (todo 334); nothing else changes.
