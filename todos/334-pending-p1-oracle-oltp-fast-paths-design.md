@@ -1923,6 +1923,24 @@ and cell 5 (the same cell at +250 µs) confirms the cause from the live dictiona
 of `STOCK_tx_metadata` with only `TX_STATE`, the sampling texts' `SUM(CASE WHEN (key = :B1) ...)`
 through `STOCK_INFLIGHT`.
 
+**Confirmed from the live dictionary** (cell 5, the benchmark session's capture during its driver
+runs): `DBA_OPTSTAT_OPERATIONS` shows the setup's block in order before the harness's schema gather,
+once per driver repetition (each re-creates the tables): the gather, the `set_column_stats` of
+tx_state, the lock, then `gather_schema_stats`, all completed. Every `*_tx_metadata` table has
+statistics on exactly one column, tx_state with its FREQUENCY histogram (three rows in
+`DBA_TAB_HISTOGRAMS`), where every data table has all its columns; the key columns `S_I_ID` and
+`S_W_ID` have none. The sampling text is as predicted: `SUM(CASE WHEN ("S_I_ID" = :B1) AND
+("S_W_ID" = :B2) AND (COALESCE("tx_state", 3) = 3) THEN 1 ELSE 0 END)` through
+`INDEX("STOCK_tx_metadata" "STOCK_INFLIGHT")`, the key and the committed-or-absent condition the
+keyed block's CAS on the metadata row carries; 361 `DS_SVC` cursors, 3,280 executions and 100.5 s
+of them 30 s into one driver run, 392 directives on `STOCK_tx_metadata`. The block's and the
+in-flight cursors are distinct texts parsed once each (one child, no re-parse reasons): the parses
+are the texts, not cursors re-created. (A query of the column statistics without an owner filter
+returned no rows during the first repetition; the per-owner query during the second shows the
+column and the operation history nothing deleting statistics, so that result is discounted. The
+setup's quoting is fine: the block on a quoted lower-case table and column on the container leaves
+the same one column, as `SetupIntegrationTest` checks.)
+
 **What it does not explain**: the block of entries at 33–55 ms and 990–1,380 gets a call. The
 sampling is per hard parse, one or two a text, under 2 ms a call averaged over its 500 calls; the
 rest is the block's own run, over 100 gets an entry, 10x what its statements should cost by the
