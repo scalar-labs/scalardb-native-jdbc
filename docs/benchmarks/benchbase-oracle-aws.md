@@ -399,8 +399,23 @@ estimated (ac5eeec). The merged form's item remains for the 9–13 gets an entry
 - **Item 2:** the samples under `Method.invoke` fell from 82.3% to 2.5%.
 - **Item 3:** `Anchors.*` plus `Writes.readKey` fell from 6.7% to 4.4%. `getMetaData` and
   `getColumnTypeName` are about 0.
-- **But the scan did not get cheaper.** JVM CPU a transaction is 1.71 ms for the driver against
-  1.10 ms for the vendor, +610 µs, where the fifth run had +395 µs. The RC decoupled scan p50 is +52%
-  (+47%). Where the client's time moved is open (todo 334).
+- **The scan's excess did not shrink here, and that is the run, not the code** (todo 334, 80b4de6).
+  JVM CPU a transaction is 1.71 ms for the driver against 1.10 ms for the vendor, +610 µs, where the
+  fifth run had +395 µs; the RC decoupled scan p50 is +52% (+47%). But between the runs everything got
+  slower:
+  - Client CPU a scan: the vendor's +10% (697/670 → 767/745 µs over the two repetitions), the
+    driver's +13% (1,078/1,092 → 1,266/1,189).
+  - Server CPU a call: the driver's scan statement 621 → 700 µs, with the same plan and the same 119
+    gets; the vendor's 306 → 304.
+  - Rows, fetches, network waits, the client's load (12% of 16 vCPUs), GC and deoptimizations are
+    alike in both runs.
+  - Repetitions of one cell differ by up to 6%. The driver's excess grew by about 70 µs a scan, under
+    twice that.
+  By category, the driver's own code fell 248 → 205 µs a scan, as designed. What grew is ojdbc's work
+  under the proxy: the application's 5,000 getString calls a scan went 450 → 563 µs, where the
+  vendor's own stayed at 412. On the design session's container, main is cheaper than the fifth run's
+  code in every configuration: BenchBase's result-set shape, 1 thread, +611 → +244 µs a scan over the
+  vendor; 4 threads +359 → +278 and +420 → +352. The proof would be the two builds back to back on
+  one stack (YCSB E, RC decoupled, about 10 minutes).
 
 At +250 µs every YCSB cell is 0.82–0.98.
