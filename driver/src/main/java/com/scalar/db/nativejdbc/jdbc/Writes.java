@@ -5949,13 +5949,18 @@ final class Writes {
   /**
    * The PL/SQL type of a collection element that holds a value bound by {@code method} with {@code
    * args} (the position first), as ojdbc binds the scalar, so that it compares and converts as in
-   * the statement by itself (design 4.4): not the column's type, which would pad a CHAR. Null for
-   * any other binding, and for a double or float, which ojdbc binds as BINARY_DOUBLE where the
-   * connection asks for it.
+   * the statement by itself (design 4.4): not the column's type, which would pad a CHAR. A double
+   * or float as {@code binary}, the connection's {@code SetFloatAndDoubleUseBinary}, has ojdbc bind
+   * it: NUMBER, or BINARY_DOUBLE and BINARY_FLOAT where it is true; null where the connection does
+   * not say. Null for any other binding.
    */
-  static @Nullable String plsqlType(String method, Object[] args) {
+  static @Nullable String plsqlType(String method, Object[] args, @Nullable Boolean binary) {
     Object value = args.length > 1 ? args[1] : null;
     switch (method) {
+      case "setDouble":
+        return binaryOr(binary, "BINARY_DOUBLE");
+      case "setFloat":
+        return binaryOr(binary, "BINARY_FLOAT");
       case "setInt":
       case "setLong":
       case "setShort":
@@ -5971,7 +5976,7 @@ final class Writes {
       case "setTimestamp":
         return args.length == 2 ? "TIMESTAMP" : null;
       case "setNull":
-        return value instanceof Integer ? plsqlTypeOfNull((Integer) value) : null;
+        return value instanceof Integer ? plsqlTypeOfNull((Integer) value, binary) : null;
       case "setObject":
         if (args.length != 2) {
           return null;
@@ -5983,6 +5988,12 @@ final class Writes {
             || value instanceof java.math.BigDecimal
             || value instanceof java.math.BigInteger) {
           return "NUMBER";
+        }
+        if (value instanceof Double) {
+          return binaryOr(binary, "BINARY_DOUBLE");
+        }
+        if (value instanceof Float) {
+          return binaryOr(binary, "BINARY_FLOAT");
         }
         if (value instanceof String) {
           return "VARCHAR2(32767)";
@@ -6005,8 +6016,18 @@ final class Writes {
     }
   }
 
-  private static @Nullable String plsqlTypeOfNull(int type) {
+  /** {@code type} where the connection binds a double or float as binary, NUMBER where not. */
+  private static @Nullable String binaryOr(@Nullable Boolean binary, String type) {
+    return binary == null ? null : binary ? type : "NUMBER";
+  }
+
+  private static @Nullable String plsqlTypeOfNull(int type, @Nullable Boolean binary) {
     switch (type) {
+      case Types.DOUBLE:
+      case Types.FLOAT:
+        return binaryOr(binary, "BINARY_DOUBLE");
+      case Types.REAL:
+        return binaryOr(binary, "BINARY_FLOAT");
       case Types.NUMERIC:
       case Types.DECIMAL:
       case Types.INTEGER:
@@ -6042,6 +6063,10 @@ final class Writes {
         return Types.DATE;
       case "TIMESTAMP":
         return Types.TIMESTAMP;
+      case "BINARY_DOUBLE":
+        return Types.DOUBLE;
+      case "BINARY_FLOAT":
+        return Types.REAL;
       default:
         return Types.TIMESTAMP_WITH_TIMEZONE;
     }

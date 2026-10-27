@@ -968,3 +968,28 @@ before:
 The block's own cost goes, as the design's harness measured (1,190–1,210 → 455–515 there): server
 CPU 760–890 → 260–350, DB time about halved, and the nested statements' parses 50 → 0, in the same
 round trips.
+
+### 2026-10-27: a double's bulk element as ojdbc binds it (Opus)
+
+AWS run 20261027-1344 showed BenchBase's order_line batch still on the block of entries:
+`setDouble` on `OL_AMOUNT` had no element type. As design 4.4 now has it (4935bf4):
+- `Proxies.binaryDoubles` reads `SetFloatAndDoubleUseBinary` once at connect from
+  `OracleConnection.getProperties()` by reflection, the key without its `oracle.jdbc.` prefix,
+  null where it is absent or unreadable (DEBUG line);
+- `Writes.plsqlType` takes it: `setDouble` and `setObject` of a `Double` as `NUMBER` or
+  `BINARY_DOUBLE`, `setFloat` and `setObject` of a `Float` as `NUMBER` or `BINARY_FLOAT`, a
+  `setNull` of `DOUBLE`/`FLOAT` and `REAL` the same; null where the connection does not say;
+  `nullTypeOf` binds the padding slots of a `BINARY_*` element as `DOUBLE` and `REAL`.
+
+Tests on a fresh private container:
+- `form4BatchesDoublesAsOneBulkBlockAsOjdbcBindsThem`: with the setting unset and true, a batch of
+  eleven INSERTs into `dbl` (the design's ten doubles into `NUMBER(6,2)`, `NUMBER`,
+  `BINARY_DOUBLE` through `setObject`, and `BINARY_FLOAT`, then a row of `setNull`s) runs as the
+  bulk block, 4 statements executed, and stores by DUMP exactly the rows of the statement alone;
+  unset, 2.675 is 2.68 and 0.1 is .1. A double against the `NUMBER(10)` and the `BINARY_DOUBLE`
+  key finds the rows the statement finds, counts [1, 0] both ways. The table needs a row before the
+  tests: at SERIALIZABLE the first INSERT into a table without a segment is ORA-08177.
+- `ojdbcReportsSetFloatAndDoubleUseBinary`: false by default, true from a connect property, the
+  URL and the system property.
+`OracleOltpIntegrationTest` (17, one skipped: the measure) and `OracleFormsIntegrationTest` (15)
+pass, as do the unit tests and SpotBugs.

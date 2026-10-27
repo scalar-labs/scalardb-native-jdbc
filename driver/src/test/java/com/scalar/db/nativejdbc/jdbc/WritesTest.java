@@ -993,16 +993,39 @@ class WritesTest {
   @Test
   void onOracle_aBatchAtSnapshotOnAClearDecoupledTableIsOneBulkBlock() throws Exception {
     // each placeholder a slot collection typed as ojdbc binds the scalar (design 4.4)
-    assertThat(Writes.plsqlType("setInt", new Object[] {1, 5})).isEqualTo("NUMBER");
-    assertThat(Writes.plsqlType("setString", new Object[] {1, "a"})).isEqualTo("VARCHAR2(32767)");
-    assertThat(Writes.plsqlType("setObject", new Object[] {1, java.time.LocalDate.now()}))
+    assertThat(Writes.plsqlType("setInt", new Object[] {1, 5}, null)).isEqualTo("NUMBER");
+    assertThat(Writes.plsqlType("setString", new Object[] {1, "a"}, null))
+        .isEqualTo("VARCHAR2(32767)");
+    assertThat(Writes.plsqlType("setObject", new Object[] {1, java.time.LocalDate.now()}, null))
         .isEqualTo("DATE");
-    assertThat(Writes.plsqlType("setNull", new Object[] {1, java.sql.Types.NUMERIC}))
+    assertThat(Writes.plsqlType("setNull", new Object[] {1, java.sql.Types.NUMERIC}, null))
         .isEqualTo("NUMBER");
-    // a double, which ojdbc may bind as BINARY_DOUBLE, a stream, a calendar's timestamp: none
-    assertThat(Writes.plsqlType("setDouble", new Object[] {1, 1.5})).isNull();
-    assertThat(Writes.plsqlType("setBinaryStream", new Object[] {1, null})).isNull();
-    assertThat(Writes.plsqlType("setTimestamp", new Object[] {1, null, null})).isNull();
+    // a double or float as the connection's SetFloatAndDoubleUseBinary has ojdbc bind it
+    assertThat(Writes.plsqlType("setDouble", new Object[] {1, 1.5}, false)).isEqualTo("NUMBER");
+    assertThat(Writes.plsqlType("setDouble", new Object[] {1, 1.5}, true))
+        .isEqualTo("BINARY_DOUBLE");
+    assertThat(Writes.plsqlType("setFloat", new Object[] {1, 1.5f}, true))
+        .isEqualTo("BINARY_FLOAT");
+    assertThat(Writes.plsqlType("setObject", new Object[] {1, 1.5}, true))
+        .isEqualTo("BINARY_DOUBLE");
+    assertThat(Writes.plsqlType("setObject", new Object[] {1, 1.5f}, false)).isEqualTo("NUMBER");
+    assertThat(Writes.plsqlType("setNull", new Object[] {1, java.sql.Types.DOUBLE}, true))
+        .isEqualTo("BINARY_DOUBLE");
+    assertThat(Writes.plsqlType("setNull", new Object[] {1, java.sql.Types.REAL}, true))
+        .isEqualTo("BINARY_FLOAT");
+    assertThat(Writes.plsqlType("setNull", new Object[] {1, java.sql.Types.FLOAT}, false))
+        .isEqualTo("NUMBER");
+    // where the connection does not say, a double keeps the block of entries
+    assertThat(Writes.plsqlType("setDouble", new Object[] {1, 1.5}, null)).isNull();
+    assertThat(Writes.plsqlType("setObject", new Object[] {1, 1.5}, null)).isNull();
+    assertThat(Writes.plsqlType("setNull", new Object[] {1, java.sql.Types.DOUBLE}, null)).isNull();
+    // a three-argument setObject, a stream, a calendar's timestamp: none
+    assertThat(Writes.plsqlType("setObject", new Object[] {1, 1.5, java.sql.Types.DOUBLE}, true))
+        .isNull();
+    assertThat(Writes.plsqlType("setBinaryStream", new Object[] {1, null}, true)).isNull();
+    assertThat(Writes.plsqlType("setTimestamp", new Object[] {1, null, null}, true)).isNull();
+    assertThat(Writes.nullTypeOf("BINARY_DOUBLE")).isEqualTo(java.sql.Types.DOUBLE);
+    assertThat(Writes.nullTypeOf("BINARY_FLOAT")).isEqualTo(java.sql.Types.REAL);
     // the keyed write: the gate once, the DML as FORALL over the slots, the stamp over its keys
     Writes.Bulk keyed = oraclePlan(created(), "UPDATE t SET x = ? WHERE \"id\" = ?", true).bulk();
     assertThat(keyed).isNotNull();

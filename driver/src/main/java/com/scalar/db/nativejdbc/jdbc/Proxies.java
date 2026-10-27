@@ -35,6 +35,8 @@ import java.util.function.Consumer;
 import java.util.function.IntFunction;
 import java.util.function.UnaryOperator;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The proxies over the vendor driver's objects. Each forwards every method it does not intercept;
@@ -86,6 +88,32 @@ public final class Proxies {
             Proxies.class.getClassLoader(),
             new Class<?>[] {Connection.class, ScalarDbTables.class},
             new ConnectionHandler(vendor, router, session, inflightWait));
+  }
+
+  private static final Logger LOG = LoggerFactory.getLogger(Proxies.class);
+
+  /**
+   * The connection's {@code SetFloatAndDoubleUseBinary} as ojdbc resolved it from every source it
+   * takes it, its properties, the URL, the system property and {@code ojdbc.properties}: the key
+   * without its {@code oracle.jdbc.} prefix in {@code OracleConnection.getProperties()}.
+   */
+  static @Nullable Boolean binaryDoubles(Connection vendor) {
+    try {
+      Class<?> oracle =
+          Class.forName("oracle.jdbc.OracleConnection", false, vendor.getClass().getClassLoader());
+      Object props = oracle.getMethod("getProperties").invoke(vendor.unwrap(oracle));
+      String v =
+          props instanceof Properties
+              ? ((Properties) props).getProperty("SetFloatAndDoubleUseBinary")
+              : null;
+      if (v != null) {
+        return Boolean.parseBoolean(v);
+      }
+      LOG.debug("ojdbc does not report SetFloatAndDoubleUseBinary: a double keeps its entry");
+    } catch (ReflectiveOperationException | SQLException | LinkageError e) {
+      LOG.debug("ojdbc's SetFloatAndDoubleUseBinary not read: a double keeps its entry", e);
+    }
+    return null;
   }
 
   private static Object proxy(Class<?> type, InvocationHandler h) {
@@ -175,6 +203,9 @@ public final class Proxies {
     // pgjdbc's getAutosave, or null where there is none
     private @Nullable Method autosave;
     private boolean autosaveRead;
+    // ojdbc's SetFloatAndDoubleUseBinary, how it binds a double or float; null where it does not
+    // say, or on another engine (design 4.4)
+    final @Nullable Boolean binaryDoubles;
 
     ConnectionHandler(Connection vendor, Router router, Session session, Duration inflightWait) {
       super(vendor);
@@ -182,6 +213,7 @@ public final class Proxies {
       this.router = router;
       this.session = session;
       this.inflightWait = inflightWait;
+      this.binaryDoubles = router.engine() == Engine.ORACLE ? binaryDoubles(vendor) : null;
     }
 
     Router.Route route(String sql) throws SQLException {
@@ -1278,7 +1310,9 @@ public final class Proxies {
         @Override
         public @Nullable String plsqlType(int placeholder) {
           Call c = parameters == null ? null : parameters.get(placeholder);
-          return c == null ? null : Writes.plsqlType(c.method.getName(), c.args);
+          return c == null
+              ? null
+              : Writes.plsqlType(c.method.getName(), c.args, owner.binaryDoubles);
         }
 
         @Override
