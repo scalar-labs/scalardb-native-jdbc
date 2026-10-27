@@ -379,3 +379,12 @@ tens of milliseconds to seconds. The order costs nothing: the partial index is i
 the limit reads at most 301 entries. 4.2's rule, "every probe of the whole in-flight index on
 PostgreSQL is spelled so", covers it without a change of text. For the builder, with a plan test
 on the unanalyzed copy as for the four texts.
+
+### 2026-10-27: the open case withdrawn, the plan-choosing count is not PostgreSQL's (Opus)
+
+The count I raised above, `Router.inflightCount`, is called only from the MySQL/MariaDB and SQL
+Server branches of the plan choice (`engine == MYSQL || MARIADB`, `engine == SQLSERVER`), as its
+javadoc says. PostgreSQL never sends it, so 4.2's rule for PostgreSQL's probes does not reach it
+and nothing was built. MySQL's in-flight index is `(tx_state, key)`, read with a histogram from
+the setup, and SQL Server's is filtered with `OPTION (RECOMPILE)` on the locked form. My mistake
+in raising it, sent back to the design.
