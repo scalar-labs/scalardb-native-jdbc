@@ -1077,3 +1077,20 @@ getString broken to return a constant fails it. PostgreSQL's refcursor: no test 
 full suite on PostgreSQL, MySQL, MySQL lower case, MariaDB and Oracle passed; SQL Server's one
 failure, `InlineIntegrationTest`'s `FOR UPDATE` loop from 1070d98, fails on the base too and is
 fixed in the commit after. The measure is the next AWS run's JFR.
+
+2026-10-28: the anchors' per-row cost (todo 334's design at 32011ea, item 3 of the user's order).
+`Writes.KeyReader` holds each key column's kind (getObject, OffsetDateTime, OffsetTime,
+LocalDateTime, LocalTime, getString for SQL Server's time), chosen from the metadata once;
+`AnchoredHandler` keeps one per table, made at the first row, and `readKey(rs, from, width)` stays
+for the write paths' read-backs as `readKey(rs, from, KeyReader.of(...))`. The row hook reads
+`tx_version` by `getLong` and `wasNull`. `Anchors` keeps per table the keys and versions as read,
+indexes them by key at the first `version` or `unchanged`, folding in only what was read since,
+first read winning; `recorded` answers without indexing. One addition to the design: past
+`UNINDEXED` (4096) entries not yet indexed, `read` indexes them, so a transaction that scans the
+same rows again and again with no write holds an entry per key, not per read, as before. Tests:
+`AnchorsTest` (unit, eight cases), and `ReadIntegrationTest.scannedRows_areAnchored_atTheFirstWrite`
+on every engine and layout (a scan of 250 rows, then writes: a row outside the scan goes through,
+a scanned row nobody moved goes through, a scanned row moved since is 40001; two scans with a
+write between, a moved row of the second 40001). A fold broken to drop reads after the first
+lookup fails it. The full suite on PostgreSQL, MySQL, MySQL lower case, MariaDB, SQL Server and
+Oracle passed. The measure is the next AWS run's JFR.

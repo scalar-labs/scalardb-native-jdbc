@@ -20,6 +20,10 @@ import org.jspecify.annotations.Nullable;
 // rows holds as many, until its end (a read-only connection records nothing)
 final class Anchors {
 
+  // what the entries not yet indexed may number before they are, so that a key read again and
+  // again by scans no write follows does not hold an entry per read
+  static final int UNINDEXED = 4096;
+
   /** A row's version: {@code (tx_id, tx_version)}, either NULL for a row without metadata. */
   static final class Version {
     final @Nullable String txId;
@@ -45,7 +49,39 @@ final class Anchors {
     }
   }
 
-  private final Map<String, Map<List<Object>, Version>> read = new HashMap<>();
+  /**
+   * A table's versions: as read, in order, and indexed by key when a write first asks (todo 334),
+   * so that a scan no write follows costs no hashing per row.
+   */
+  private static final class Read {
+    final List<Object[]> keys = new ArrayList<>();
+    final List<Version> versions = new ArrayList<>();
+    final Map<List<Object>, Version> byKey = new HashMap<>();
+
+    void add(Object[] key, Version v) {
+      keys.add(key);
+      versions.add(v);
+      if (keys.size() > UNINDEXED) {
+        index();
+      }
+    }
+
+    /** The key-to-version map, the entries read since the last call folded in: the first wins. */
+    Map<List<Object>, Version> index() {
+      for (int i = 0; i < keys.size(); i++) {
+        byKey.putIfAbsent(key(keys.get(i)), versions.get(i));
+      }
+      keys.clear();
+      versions.clear();
+      return byKey;
+    }
+
+    boolean isEmpty() {
+      return keys.isEmpty() && byKey.isEmpty();
+    }
+  }
+
+  private final Map<String, Read> read = new HashMap<>();
   private final Set<String> ownStamps = new HashSet<>();
   // moves at every transaction's end, so that a result set read across it records nothing
   private long epoch;
@@ -66,11 +102,12 @@ final class Anchors {
 
   /**
    * Records a key's version as read by a statement executed in transaction {@code at}, unless the
-   * transaction has ended since (todo 141) or read the key before.
+   * transaction has ended since (todo 141); a key read before keeps its first version. The key's
+   * array is kept as it is: the driver's own, read from the rows.
    */
   synchronized void read(long at, String table, Object[] key, Version v) {
     if (at == epoch) {
-      read.computeIfAbsent(table, t -> new HashMap<>()).putIfAbsent(key(key), v);
+      read.computeIfAbsent(table, t -> new Read()).add(key, v);
     }
   }
 
@@ -80,15 +117,15 @@ final class Anchors {
     if (txId != null && ownStamps.contains(txId)) {
       return true; // the transaction's own write (todo 142)
     }
-    Map<List<Object>, Version> r = read.get(table);
-    Version v = r == null ? null : r.get(key(key));
+    Read r = read.get(table);
+    Version v = r == null ? null : r.index().get(key(key));
     return v == null || v.is(txId, version);
   }
 
   /** The version the transaction read of a key, as {@link #key} matches it; null where none. */
   synchronized @Nullable Version version(String table, Object[] key) {
-    Map<List<Object>, Version> r = read.get(table);
-    return r == null ? null : r.get(key(key));
+    Read r = read.get(table);
+    return r == null ? null : r.index().get(key(key));
   }
 
   /** Records the stamp of one of the transaction's writes. */
@@ -98,7 +135,7 @@ final class Anchors {
 
   /** Whether the transaction recorded a version of any key of {@code table}. */
   synchronized boolean recorded(String table) {
-    Map<List<Object>, Version> r = read.get(table);
+    Read r = read.get(table);
     return r != null && !r.isEmpty();
   }
 

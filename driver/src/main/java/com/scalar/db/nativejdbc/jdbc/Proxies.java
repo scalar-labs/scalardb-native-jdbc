@@ -1939,6 +1939,8 @@ public final class Proxies {
     boolean closesStatement;
     // per table, whether its state column said so already
     final boolean[] passed;
+    // per table, how its key columns are read, from the metadata at the first row
+    Writes.KeyReader @Nullable [] readers;
 
     AnchoredHandler(
         Object vendor,
@@ -2123,13 +2125,22 @@ public final class Proxies {
         }
         for (int t = 0, at = visible() + 1; anchors != null && t < anchored.tables.size(); t++) {
           int keys = anchored.keys.get(t);
-          Object[] key = Writes.readKey(rs, at, keys); // null on a LEFT JOIN's NULL-extended side
+          if (readers == null) {
+            readers = new Writes.KeyReader[anchored.tables.size()];
+          }
+          if (readers[t] == null) {
+            readers[t] = Writes.KeyReader.of(rs, at, keys); // the metadata once (todo 334)
+          }
+          // null on a LEFT JOIN's NULL-extended side
+          Object[] key = Writes.readKey(rs, at, readers[t]);
           if (key != null) {
+            String txId = rs.getString(at + keys);
+            long version = rs.getLong(at + keys + 1); // no BigDecimal on Oracle (todo 334)
             anchors.read(
                 epoch,
                 anchored.tables.get(t),
                 key,
-                new Anchors.Version(rs.getString(at + keys), rs.getObject(at + keys + 1)));
+                new Anchors.Version(txId, rs.wasNull() ? null : version));
           }
           at += keys + width;
         }

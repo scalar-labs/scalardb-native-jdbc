@@ -6595,36 +6595,84 @@ final class Writes {
     }
   }
 
-  /** Reads a key value so that it binds back unchanged: a local time is not shifted by the zone. */
+  /**
+   * How {@link #readKey} reads each key column, chosen from the metadata once per result set rather
+   * than per row (todo 334): a local time is not shifted by the zone.
+   */
+  static final class KeyReader {
+    private static final int OBJECT = 0;
+    private static final int OFFSET_DATE_TIME = 1;
+    private static final int OFFSET_TIME = 2;
+    private static final int LOCAL_DATE_TIME = 3;
+    private static final int LOCAL_TIME = 4;
+    private static final int STRING = 5;
+
+    private final int[] kinds;
+
+    private KeyReader(int[] kinds) {
+      this.kinds = kinds;
+    }
+
+    static KeyReader of(ResultSet rs, int from, int width) throws SQLException {
+      int[] kinds = new int[width];
+      ResultSetMetaData md = rs.getMetaData();
+      for (int i = 0; i < width; i++) {
+        int c = from + i;
+        // PostgreSQL's driver reports timestamptz as TIMESTAMP and timetz as TIME (todo 148)
+        String name = md.getColumnTypeName(c);
+        if ("timestamptz".equalsIgnoreCase(name)) {
+          kinds[i] = OFFSET_DATE_TIME;
+        } else if ("timetz".equalsIgnoreCase(name)) {
+          kinds[i] = OFFSET_TIME;
+        } else if ("time".equals(name) && onSqlServer(rs)) {
+          // mssql-jdbc binds a LocalTime as datetime, which a time cannot be compared with (254)
+          kinds[i] = STRING;
+        } else {
+          switch (md.getColumnType(c)) {
+            case Types.TIMESTAMP:
+              kinds[i] = LOCAL_DATE_TIME;
+              break;
+            case Types.TIME:
+              kinds[i] = LOCAL_TIME;
+              break;
+            case Types.TIMESTAMP_WITH_TIMEZONE:
+              kinds[i] = OFFSET_DATE_TIME;
+              break;
+            default:
+              kinds[i] = OBJECT;
+          }
+        }
+      }
+      return new KeyReader(kinds);
+    }
+  }
+
+  /** Reads a key value so that it binds back unchanged, the reader's kinds from the metadata. */
   static Object @Nullable [] readKey(ResultSet rs, int from, int width) throws SQLException {
-    Object[] key = new Object[width];
-    ResultSetMetaData md = rs.getMetaData();
-    for (int i = 0; i < width; i++) {
+    return readKey(rs, from, KeyReader.of(rs, from, width));
+  }
+
+  /** Reads a key value so that it binds back unchanged, as {@code reader} says per column. */
+  static Object @Nullable [] readKey(ResultSet rs, int from, KeyReader reader) throws SQLException {
+    int[] kinds = reader.kinds;
+    Object[] key = new Object[kinds.length];
+    for (int i = 0; i < kinds.length; i++) {
       int c = from + i;
-      // PostgreSQL's driver reports timestamptz as TIMESTAMP and timetz as TIME (todo 148)
-      String name = md.getColumnTypeName(c);
-      if ("timestamptz".equalsIgnoreCase(name)) {
-        key[i] = rs.getObject(c, OffsetDateTime.class);
-        continue;
-      }
-      if ("timetz".equalsIgnoreCase(name)) {
-        key[i] = rs.getObject(c, OffsetTime.class);
-        continue;
-      }
-      if ("time".equals(name) && onSqlServer(rs)) {
-        // mssql-jdbc binds a LocalTime as datetime, which a time cannot be compared with (254)
-        key[i] = rs.getString(c);
-        continue;
-      }
-      switch (md.getColumnType(c)) {
-        case Types.TIMESTAMP:
+      switch (kinds[i]) {
+        case KeyReader.OFFSET_DATE_TIME:
+          key[i] = rs.getObject(c, OffsetDateTime.class);
+          break;
+        case KeyReader.OFFSET_TIME:
+          key[i] = rs.getObject(c, OffsetTime.class);
+          break;
+        case KeyReader.LOCAL_DATE_TIME:
           key[i] = rs.getObject(c, LocalDateTime.class);
           break;
-        case Types.TIME:
+        case KeyReader.LOCAL_TIME:
           key[i] = rs.getObject(c, LocalTime.class);
           break;
-        case Types.TIMESTAMP_WITH_TIMEZONE:
-          key[i] = rs.getObject(c, OffsetDateTime.class);
+        case KeyReader.STRING:
+          key[i] = rs.getString(c);
           break;
         default:
           key[i] = rs.getObject(c);

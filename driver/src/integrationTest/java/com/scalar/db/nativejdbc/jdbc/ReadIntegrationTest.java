@@ -715,6 +715,117 @@ class ReadIntegrationTest {
     }
   }
 
+  /**
+   * The versions a scan records, kept as read and indexed at the first write (todo 334): after a
+   * scan of 250 rows at READ COMMITTED, a write of a row the scan did not reach goes through, and
+   * of one it reached after another connection moved its version is a conflict; a second scan after
+   * a write, its rows folded in, the same.
+   */
+  @ParameterizedTest
+  @MethodSource("layouts")
+  @SuppressFBWarnings(
+      value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
+      justification = "fixture DDL and queries written in the test sources")
+  void scannedRows_areAnchored_atTheFirstWrite(Engines e, boolean inline) throws Exception {
+    Engine engine = e.engine();
+    String ns = inline ? "sci" : "scd";
+    String sdb = e.storedSchema(ns);
+    boolean oracle = engine == Engine.ORACLE;
+    java.util.function.UnaryOperator<String> q = n -> oracle ? "\"" + n + "\"" : n;
+    TransactionFactory scalarDb = e.scalarDb();
+    try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace(sdb, true);
+      admin.createTable(
+          sdb,
+          "sc",
+          TableMetadata.newBuilder()
+              .addColumn("id", DataType.INT)
+              .addColumn("x", DataType.INT)
+              .addPartitionKey("id")
+              .build(),
+          true,
+          inline ? Map.of() : DECOUPLED);
+    }
+    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    try (Connection c = e.open()) {
+      assertThat(
+              Setup.run(
+                  catalog, c, t -> t.namespace().equals(sdb), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    String sc = ns + "." + q.apply("sc");
+    String id = q.apply("id");
+    String x = q.apply("x");
+    String update = "UPDATE " + sc + " SET " + x + " = ? WHERE " + id + " = ?";
+    try (Connection d = e.openDriver();
+        Connection other = e.openDriver()) {
+      try (PreparedStatement ins =
+          d.prepareStatement("INSERT INTO " + sc + " (" + id + ", " + x + ") VALUES (?, 0)")) {
+        d.setAutoCommit(false);
+        for (int i = 1; i <= 300; i++) {
+          ins.setInt(1, i);
+          ins.executeUpdate();
+        }
+        d.commit();
+      }
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      // one scan, then writes
+      assertThat(scan(d, sc, id, 1, 250)).isEqualTo(250);
+      assertThat(write(other, update, 100)).isEqualTo(1);
+      assertThat(write(other, update, 280)).isEqualTo(1);
+      assertThat(write(d, update, 280)).as("a row the scan did not reach").isEqualTo(1);
+      assertThat(write(d, update, 120)).as("a scanned row nobody moved").isEqualTo(1);
+      assertThatThrownBy(() -> write(d, update, 100))
+          .as("a scanned row moved since")
+          .isInstanceOf(SQLException.class)
+          .extracting("SQLState")
+          .isEqualTo("40001");
+      d.rollback();
+      // two scans, a write between: the second's rows folded in after the first lookup
+      assertThat(scan(d, sc, id, 1, 100)).isEqualTo(100);
+      assertThat(write(d, update, 50)).isEqualTo(1);
+      assertThat(scan(d, sc, id, 101, 200)).isEqualTo(100);
+      assertThat(write(other, update, 150)).isEqualTo(1);
+      assertThat(write(d, update, 160)).isEqualTo(1);
+      assertThatThrownBy(() -> write(d, update, 150))
+          .as("a row of the second scan moved since")
+          .isInstanceOf(SQLException.class)
+          .extracting("SQLState")
+          .isEqualTo("40001");
+      d.rollback();
+    }
+  }
+
+  @SuppressFBWarnings(
+      value = {"SQL_INJECTION_JDBC", "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"},
+      justification = "the table's name, from the test")
+  private static int scan(Connection c, String table, String id, int from, int to)
+      throws SQLException {
+    int n = 0;
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT * FROM " + table + " WHERE " + id + " BETWEEN ? AND ? ORDER BY " + id)) {
+      ps.setInt(1, from);
+      ps.setInt(2, to);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          n++;
+        }
+      }
+    }
+    return n;
+  }
+
+  @SuppressFBWarnings(value = "SQL_INJECTION_JDBC", justification = "the statement, from the test")
+  private static int write(Connection c, String update, int id) throws SQLException {
+    try (PreparedStatement ps = c.prepareStatement(update)) {
+      ps.setInt(1, id * 10);
+      ps.setInt(2, id);
+      return ps.executeUpdate();
+    }
+  }
+
   /** Each getter's value by index and by label, and wasNull after it, keyed by the call. */
   private static Map<String, Object> values(ResultSet rs, String[] cols, String[][] getters)
       throws Exception {
