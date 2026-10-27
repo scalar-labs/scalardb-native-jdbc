@@ -93,8 +93,11 @@ class WritesTest {
             + " \"tx_version\" = CASE WHEN \"tx_id\" IS NULL THEN 1 ELSE"
             + " COALESCE(\"tx_version\", 0) + 1 END";
     // an inline table: the stamp in the SET list, ahead of the user's items, the gate one probe of
-    // the in-flight index; nothing more for a table the transaction found clear
-    String gate = " AND NOT EXISTS (SELECT 1 FROM \"ns\".\"t\" WHERE \"tx_state\" IN (1, 2))";
+    // the in-flight index, its first row in the index's order (todo 337); nothing more for a
+    // table the transaction found clear
+    String gate =
+        " AND (SELECT 1 FROM \"ns\".\"t\" WHERE \"tx_state\" IN (1, 2) ORDER BY \"id\" LIMIT 1)"
+            + " IS NULL";
     assertThat(fast(inline(), "UPDATE t SET x = x || ? WHERE id = ? -- note"))
         .containsExactly(
             "UPDATE t SET " + stamp + ", x = x || ? WHERE (id = ?)" + gate + " -- note",
@@ -121,8 +124,9 @@ class WritesTest {
                 + counts);
     assertThat(fast(created(), "DELETE FROM t WHERE id = ?").get(0))
         .isEqualTo(
-            "WITH scalardb_native_w AS (DELETE FROM \"ns\".\"t_data\" AS t WHERE (id = ?) AND NOT"
-                + " EXISTS (SELECT 1 FROM \"ns\".\"t_meta\" WHERE \"tx_state\" IN (1, 2))"
+            "WITH scalardb_native_w AS (DELETE FROM \"ns\".\"t_data\" AS t WHERE (id = ?) AND"
+                + " (SELECT 1 FROM \"ns\".\"t_meta\" WHERE \"tx_state\" IN (1, 2) ORDER BY \"id\""
+                + " LIMIT 1) IS NULL"
                 + " RETURNING \"id\" AS scalardb_native_w0), scalardb_native_s AS (DELETE FROM"
                 + " \"ns\".\"t_meta\" m USING scalardb_native_w w WHERE m.\"id\" ="
                 + " w.scalardb_native_w0 AND COALESCE(m.\"tx_state\", 3) = 3"

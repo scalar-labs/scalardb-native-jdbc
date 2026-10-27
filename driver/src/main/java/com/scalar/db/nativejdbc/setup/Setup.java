@@ -365,11 +365,13 @@ public final class Setup {
       if (gatherHistogram(t)) {
         done(
             actions,
-            engine != Engine.ORACLE
-                ? "gathered a histogram on " + meta + ".tx_state"
-                : t.layout() == Layout.INLINE
-                    ? "set fixed statistics on " + meta + ".tx_state"
-                    : "set and locked fixed statistics on " + meta + ".tx_state");
+            engine == Engine.POSTGRESQL
+                ? "analyzed " + meta
+                : engine != Engine.ORACLE
+                    ? "gathered a histogram on " + meta + ".tx_state"
+                    : t.layout() == Layout.INLINE
+                        ? "set fixed statistics on " + meta + ".tx_state"
+                        : "set and locked fixed statistics on " + meta + ".tx_state");
       }
       for (String g : grantees) {
         execute("GRANT SELECT ON " + name(ns, view) + " TO " + grantee(g));
@@ -463,11 +465,17 @@ public final class Setup {
    * #ORACLE_ASSUMED_INFLIGHT} rows in flight, locked: a gathered one records whatever is in flight
    * at that moment, usually nothing. Not locked on an inline table, whose lock would freeze the
    * application's own statistics; the nightly job may replace it there. MySQL never regathers one
-   * by itself, and its plans did not depend on the moment (todo 094).
+   * by itself, and its plans did not depend on the moment (todo 094). On PostgreSQL an {@code
+   * ANALYZE} of the metadata table the backfill has just filled: until autoanalyze reaches it the
+   * planner estimates {@code tx_state IN (1, 2)} by defaults (todo 337).
    *
    * @return whether one was set or gathered
    */
   private boolean gatherHistogram(TableInfo t) throws SQLException {
+    if (engine == Engine.POSTGRESQL) {
+      execute("ANALYZE " + name(t.namespace(), metadataTable(t)));
+      return true;
+    }
     if (planned != null && (engine == Engine.ORACLE || engine == Engine.MYSQL)) {
       planned.add(
           engine == Engine.ORACLE

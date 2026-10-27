@@ -385,12 +385,11 @@ final class SplitRead {
         if (engine == Engine.POSTGRESQL && t.layout() != Layout.INLINE) {
           // one probe of the in-flight index for the whole statement first: while the table has
           // no row in flight the planner never builds the set the per-row probe reads, and past
-          // work_mem it keeps the EXISTS as that probe (design 4.2, todo 337)
-          sql.append("NOT EXISTS (SELECT 1 FROM ")
-              .append(meta(engine, t))
-              .append(" WHERE ")
-              .append(txState)
-              .append(" IN (1, 2)) OR ");
+          // work_mem it keeps the EXISTS as that probe (design 4.2, todo 337); the first row in
+          // the index's order, which the planner takes from the index under any statistics
+          sql.append("(")
+              .append(Writes.firstInFlight(new Writes.Names(engine, t)))
+              .append(") IS NULL OR ");
         }
         sql.append("NOT EXISTS (SELECT 1 FROM ")
             .append(meta(engine, t))

@@ -1135,15 +1135,19 @@ final class Router {
         }
         String held = m + "." + engine.quote("tx_state") + " IN (1, 2)";
         out.add(
-            "CASE WHEN NOT EXISTS (SELECT "
-                + n.inflightHint(m)
-                + "1 FROM "
-                + n.meta
-                + " "
-                + m
-                + " WHERE "
-                + held
-                + ") THEN 0 WHEN ("
+            "CASE WHEN "
+                + (engine == Engine.POSTGRESQL
+                    ? "(" + Writes.firstInFlight(n) + ") IS NULL" // todo 337
+                    : "NOT EXISTS (SELECT "
+                        + n.inflightHint(m)
+                        + "1 FROM "
+                        + n.meta
+                        + " "
+                        + m
+                        + " WHERE "
+                        + held
+                        + ")")
+                + " THEN 0 WHEN ("
                 + String.join(", ", keys)
                 + ") IN (SELECT "
                 + n.inflightHint(m)
@@ -2448,7 +2452,8 @@ final class Router {
         columns.add(
             oracle
                 ? "CASE WHEN EXISTS (" + check + ") THEN 1 ELSE 0 END"
-                : "EXISTS (" + check + ")");
+                // not EXISTS, which drops the check's order and limit and is planned anew
+                : "(" + check + ") IS NOT NULL");
       }
       try (PreparedStatement st =
           vendor.prepareStatement(

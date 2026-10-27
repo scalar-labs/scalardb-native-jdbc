@@ -736,9 +736,10 @@ class DecoupledReadCommittedIntegrationTest {
       System.out.println("[337] the routed read: " + routed);
       assertThat(routed)
           .contains(
-              "NOT EXISTS (SELECT 1 FROM "
+              "(SELECT 1 FROM "
                   + metaTable
-                  + " WHERE \"tx_state\" IN (1, 2)) OR NOT EXISTS");
+                  + " WHERE \"tx_state\" IN (1, 2) ORDER BY \"id\" LIMIT 1) IS NULL OR NOT"
+                  + " EXISTS");
       assertThat(rows(v, read)).containsExactly("3901");
       // nothing in flight: the set the per-row probe reads is never built
       String clear = String.join("\n", rows(v, "EXPLAIN (ANALYZE, COSTS OFF) " + routed));
@@ -756,13 +757,100 @@ class DecoupledReadCommittedIntegrationTest {
         System.out.println("[337] 3000 in flight, work_mem 64kB:\n" + held);
         // the gate kept; whether the set is hashed or probed per row is the planner's by size (a
         // 50,000-row table with 30,000 in flight probes per row, todo 337's log)
-        assertThat(held).contains("(NOT $0) OR (NOT ");
+        assertThat(held).contains("($0 IS NULL) OR (NOT ");
         assertThat(rows(v, routed)).containsExactly("1000");
       } finally {
         v.rollback();
         v.setAutoCommit(true);
         PG.execute(v, "ANALYZE " + metaTable);
       }
+    }
+  }
+
+  /**
+   * Todo 337's follow-up (bc2077f): every probe of the whole in-flight index on PostgreSQL is its
+   * first row in the index's order, which the planner takes from the partial index under any
+   * statistics: each text the driver sends, run against a copy of the metadata table that was never
+   * analyzed (200,000 rows, nothing in flight), plans no scan of it, where the probe spelled {@code
+   * LIMIT 1} without the order scans it. And the setup analyzes the metadata table.
+   */
+  @Test
+  void todo337_everyProbeOfTheIndexTakesItUnanalyzed() throws Exception {
+    try (Connection v = PG.open()) {
+      TableInfo t = big();
+      String metaTable = "\"" + NS + "\".\"" + t.metadataTable() + "\"";
+      String copy = "\"" + NS + "\".\"unanalyzed\"";
+      PG.execute(
+          v,
+          "DROP TABLE IF EXISTS " + copy,
+          "CREATE TABLE "
+              + copy
+              + " (LIKE "
+              + metaTable
+              + " INCLUDING ALL) WITH (autovacuum_enabled = off)",
+          "INSERT INTO "
+              + copy
+              + " (id, tx_id, tx_state, tx_version) SELECT g, 't', 3, 1 FROM generate_series(1,"
+              + " 200000) g");
+      Router router = new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+      List<String> texts = new java.util.ArrayList<>();
+      texts.add(router.inFlightCheck(t)); // the coarse check
+      texts.add(router.route(v, "SELECT x FROM " + NS + ".big WHERE id BETWEEN 1 AND 10").sql);
+      router.setIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      texts.add(router.route(v, "SELECT x FROM " + NS + ".big WHERE x = 'a'").sql);
+      Writes.Plan write =
+          Objects.requireNonNull(
+              router.route(v, "UPDATE " + NS + ".big SET x = ? WHERE id = ?").write);
+      texts.addAll(write.sql());
+      String first = "\"tx_state\" IN (1, 2) ORDER BY \"id\" LIMIT 1";
+      int probes = 0;
+      for (String text : texts) {
+        if (!text.contains(first)) {
+          continue;
+        }
+        probes++;
+        String plan = generic(v, text.replace(metaTable, copy));
+        System.out.println("[337] unanalyzed: " + text + "\n" + plan);
+        assertThat(plan).as(text).doesNotContain("Seq Scan on unanalyzed");
+      }
+      // the coarse check, the read's gate, the state at SNAPSHOT and the write's gate
+      assertThat(probes).as("the texts with the probe").isGreaterThanOrEqualTo(4);
+      String unordered =
+          generic(v, "SELECT 1 FROM " + copy + " WHERE \"tx_state\" IN (1, 2) LIMIT 1");
+      System.out.println("[337] unanalyzed, without the order:\n" + unordered);
+      assertThat(unordered).contains("Seq Scan on unanalyzed");
+      PG.execute(v, "DROP TABLE " + copy);
+      List<String> planned =
+          Setup.plan(catalog, v, x -> x.table().equals("big"), List.of()).get(0).actions();
+      assertThat(planned).contains("ANALYZE " + metaTable);
+    }
+  }
+
+  /**
+   * The generic plan of a text with the driver's {@code ?} placeholders, costs off: prepared on the
+   * server, as pgjdbc would bind the {@code $n} of an EXPLAIN (GENERIC_PLAN) itself.
+   */
+  private static String generic(Connection v, String text) throws SQLException {
+    StringBuilder numbered = new StringBuilder();
+    List<String> nulls = new java.util.ArrayList<>();
+    for (char c : text.toCharArray()) {
+      if (c == '?') {
+        nulls.add("NULL");
+        numbered.append('$').append(nulls.size());
+      } else {
+        numbered.append(c);
+      }
+    }
+    PG.execute(v, "SET plan_cache_mode = force_generic_plan", "PREPARE p337 AS " + numbered);
+    try {
+      return String.join(
+          "\n",
+          rows(
+              v,
+              "EXPLAIN (COSTS OFF) EXECUTE p337"
+                  + (nulls.isEmpty() ? "" : "(" + String.join(", ", nulls) + ")")));
+    } finally {
+      PG.execute(v, "DEALLOCATE p337", "RESET plan_cache_mode");
     }
   }
 

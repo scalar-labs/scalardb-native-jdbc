@@ -324,3 +324,33 @@ left at READ COMMITTED on the decoupled layout: its cell should land near SNAPSH
 ms a transaction above it at the fast round trip. What remains to the vendor from there is the
 layout's own cost, shared with SNAPSHOT (0.79 fast; execution 630 against 365 µs a commit, server
 CPU 1.35 against 0.87 ms), a question for todo 329, not this one.
+
+### 2026-10-27: the follow-up built, every whole-table probe ordered and the setup's ANALYZE (Opus)
+
+As decided above (bc2077f), with `Writes.firstInFlight(n)`, `SELECT 1 FROM T_meta WHERE tx_state IN
+(1, 2) ORDER BY <key> LIMIT 1`, on PostgreSQL:
+- the coarse check: `Writes.inFlightCheck`, the probe itself;
+- the write gate: `Writes.clearGate`, `(...) IS NULL`;
+- the committed copy's gate: `SplitRead.committed`, `(...) IS NULL OR NOT EXISTS (<per-row>)`;
+- the state's CASE at SNAPSHOT: `Router.versions`, `CASE WHEN (...) IS NULL THEN 0 WHEN ...`.
+One place more than the list: `Router`'s batched coarse checks, which wrapped each check in
+`EXISTS (...)`. PostgreSQL drops a subquery's ORDER BY and LIMIT under EXISTS and plans it anew,
+so they are now `(<check>) IS NOT NULL`. Oracle's and the other engines' spellings are untouched.
+`Setup.gatherHistogram` on PostgreSQL runs `ANALYZE <metadata table>` (`execute`, so the dry run
+lists it), reported as "analyzed <table>".
+
+Tests: `DecoupledReadCommittedIntegrationTest.todo337_everyProbeOfTheIndexTakesItUnanalyzed`
+copies big's metadata table into a never-analyzed table (200,000 rows, nothing in flight,
+autovacuum off). It plans each text the driver sends against the copy as a generic plan: the
+coarse check, the READ COMMITTED read's gate, the SNAPSHOT read's state and the SNAPSHOT write's
+gate. Each takes `Index Only Scan using unanalyzed_id_idx`, with no Seq Scan of the copy. The same
+probe without the order is a `Seq Scan on unanalyzed`, so the check is not vacuous. The setup's
+plan lists the ANALYZE. In `todo337_thePerRowProbeBehindOneProbeOfTheIndex` the gate's filter is
+now `($0 IS NULL) OR (NOT (SubPlan 2))`, with the InitPlan a Limit over the in-flight index, and
+the per-row probe still "never executed" with nothing in flight. Two unit tests' gate texts were
+updated. Unit tests 397, the PostgreSQL suite 142 (89 run), all passing; SpotBugs clean.
+
+Open, for the design: one whole-table probe of the in-flight index is not in the list, Router's
+plan-choosing count `SELECT COUNT(*) FROM (SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) LIMIT
+301) x`. It is cached per table with a TTL rather than run per statement, but under default
+statistics it could scan the table too. Left as it is.

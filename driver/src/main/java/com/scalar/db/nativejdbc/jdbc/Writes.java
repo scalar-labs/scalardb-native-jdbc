@@ -2304,7 +2304,27 @@ final class Writes {
           + n.txState
           + " IN (1, 2))";
     }
+    if (n.engine == Engine.POSTGRESQL) {
+      return "(" + firstInFlight(n) + ") IS NULL";
+    }
     return "NOT EXISTS (SELECT 1 FROM " + n.meta + " WHERE " + n.txState + " IN (1, 2))";
+  }
+
+  /**
+   * On PostgreSQL, the probe of the whole in-flight index as its first row in the index's order:
+   * spelled {@code EXISTS} or {@code LIMIT 1} without the order, it is planned by the estimated
+   * share of rows in flight, and under default statistics (before the table's first {@code
+   * ANALYZE}) or stale ones that makes a scan of the metadata table the cheaper first row; the
+   * ordered first row is the partial index's under any statistics (design 4.2, todo 337).
+   */
+  static String firstInFlight(Names n) {
+    return "SELECT 1 FROM "
+        + n.meta
+        + " WHERE "
+        + n.txState
+        + " IN (1, 2) ORDER BY "
+        + n.columns("")
+        + " LIMIT 1";
   }
 
   /**
@@ -5372,6 +5392,9 @@ final class Writes {
               + " m WHERE m."
               + n.txState
               + " IN (1, 2)");
+    }
+    if (engine == Engine.POSTGRESQL) {
+      return firstInFlight(n);
     }
     return anyRow(engine, "SELECT 1 FROM " + n.meta + " WHERE " + n.txState + " IN (1, 2)");
   }
