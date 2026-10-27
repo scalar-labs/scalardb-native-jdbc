@@ -1059,5 +1059,5 @@ wire.
 The ask on 438d627 already held: the key's values reach the statement through
 `StatementShape.insertKeyValues`, which gives them only when each is a placeholder or a literal
 (signed or cast), and on Oracle an INSERT whose key is any other expression is refused before any
-form is chosen. The builder added the assertion (`VALUES (ABS(?), 'a')` refused) as 9b0f6ad on
+form is chosen. The builder added the assertion (`VALUES (ABS(?), 'a')` refused) as c94dd1a on
 the branch. The review of INSERT ALL is closed; it waits on the user's decision to land it.
