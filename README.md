@@ -46,13 +46,13 @@ After the release, the driver comes from Maven Central and the two zips from the
 Read [Getting started](docs/getting-started.md) first, then the guide for the task at hand; the
 reference pages are for looking things up.
 
-| Guides | |
+| Guides | What it covers |
 | --- | --- |
 | [Getting started](docs/getting-started.md) | from an empty database to a program through the driver, in either of ScalarDB's layouts |
 | [Development builds](docs/development-builds.md) | building the driver, `snsql` and the tools yourself before a release, and using them |
 | [Setting up tables](docs/setting-up-tables.md) | `scalardb-native-tools`: setting ScalarDB tables up for the driver, checking them, adding a table while applications run |
 
-| Reference | |
+| Reference | What it covers |
 | --- | --- |
 | [Concepts](docs/concepts.md) | the terms the other pages use: ScalarDB table, layout, in flight, catalog, the setup, read view, passthrough, SNAPSHOT |
 | [Configuration](docs/configuration.md) | the driver's URLs and properties, passthrough, the database settings and users the driver needs |
@@ -61,7 +61,7 @@ reference pages are for looking things up.
 | [Errors](docs/errors.md) | the SQLStates the driver returns, and what to do about each |
 | [snsql](docs/snsql.md) | the interactive shell: options, commands, transactions |
 
-| Design | |
+| Design | What it covers |
 | --- | --- |
 | [Design](docs/design.md) | the rules the driver implements and the reasoning behind them |
 

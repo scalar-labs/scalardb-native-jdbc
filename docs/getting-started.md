@@ -25,7 +25,7 @@ flowchart TB
   orderService["Order service<br/>(ScalarDB transactions)"]
   warehouseApp["Warehouse application<br/>(SQL through ScalarDB Native JDBC)"]
   subgraph ordersDb["Orders database"]
-    orders["orders"]
+    orders["orders<br/>(ScalarDB table)"]
   end
   subgraph warehouseDb["Warehouse database"]
     stock["stock<br/>(ScalarDB table)"]
@@ -76,7 +76,7 @@ causes.
   file the guide uses, so you don't copy any from this page.
 - From the [ScalarDB releases](https://github.com/scalar-labs/scalardb/releases), the Schema Loader
   of the ScalarDB line the driver is certified against, `scalardb-schema-loader-<SCALARDB_VERSION>.jar`
-  ([Compatibility](../README.md#compatibility)), about 170 MB. Take `scalardb-schema-loader`, not
+  ([Compatibility](../README.md#compatibility)), about 170 MB. Download `scalardb-schema-loader`, not
   `scalardb-cluster-schema-loader`, which is for ScalarDB Cluster. Put it in
   `samples/getting-started`.
 - From the ScalarDB Native JDBC GitHub release, `scalardb-native-shell-<VERSION>.zip` (`snsql`) and
@@ -107,7 +107,7 @@ Wait until PostgreSQL accepts connections, a few seconds after the container sta
 until docker exec native-pg pg_isready -U postgres -h localhost; do sleep 1; done
 ```
 
-```
+```text
 localhost:5432 - accepting connections
 ```
 
@@ -128,11 +128,13 @@ return the metadata columns. Choose decoupled when other tools or applications r
 directly and should not see ScalarDB's columns, or when you don't want columns added to an existing
 table. Otherwise inline is the simpler choice.
 
-In the scenario `stock` already exists, so B or C is the usual path. A is for a table that is new.
+The layout and how you get the table are two choices: A and B give an inline table, C a decoupled
+one. In the scenario `stock` already exists, so B or C is the usual path: they create `stock` with
+plain DDL to stand for the existing table, then import it. A is for a table that is new.
 
 Follow **one** of A, B or C below. To try another, start over from step 1
-([Start over and clean up](#start-over-and-clean-up)). All three run the Schema Loader with `scalardb.properties`, which
-names the warehouse database:
+([Start over and clean up](#start-over-and-clean-up)). All three run the Schema Loader with
+`scalardb.properties`, which names the warehouse database:
 
 ```properties
 scalar.db.storage=jdbc
@@ -154,8 +156,8 @@ application that writes these tables, the order service's included:
 
 For SERIALIZABLE the settings differ ([Isolation levels](transactions.md#isolation-levels)). The
 order service's own ScalarDB configuration names both databases, with the same settings for the
-warehouse database ([multi-storage
-transactions](https://scalardb.scalar-labs.com/docs/latest/multi-storage-transactions/)).
+warehouse database
+([multi-storage transactions](https://scalardb.scalar-labs.com/docs/latest/multi-storage-transactions/)).
 
 ### A. Inline, created with the Schema Loader
 
@@ -267,34 +269,36 @@ for DDL and for ordinary tables.
 ## 3. Set `stock` up for the driver
 
 Before the driver serves a ScalarDB table, run [the setup](concepts.md#the-setup) once, as a user
-that can run DDL. It creates the table's [in-flight index](concepts.md#in-flight-index) and [read
-view](concepts.md#read-view), which the driver needs to read the table safely, and on an imported
-table writes the transaction metadata the import did not. It is safe to run again, and you run it again whenever a table is added
-to ScalarDB. The tools read the password from `SCALARDB_NATIVE_PASSWORD`, and `snsql`, in step 4,
-from `SNSQL_PASSWORD`, since the setup is often run as a different user from the application's.
+that can run DDL. It creates the table's [in-flight index](concepts.md#in-flight-index) and
+[read view](concepts.md#read-view), which the driver needs to read the table safely, and on an
+imported table writes the transaction metadata the import did not. It is safe to run again, and you
+run it again whenever a table is added to ScalarDB. The tools read the password from
+`SCALARDB_NATIVE_PASSWORD`, and `snsql`, in step 4, from `SNSQL_PASSWORD`, since the setup is often
+run as a different user from the application's.
 
 ```sh
 export SCALARDB_NATIVE_PASSWORD=postgres
 scalardb-native-tools setup jdbc:scalardb-native:postgresql://localhost:5432/postgres -U postgres --no-wait
 ```
 
-```
+```text
 warehouse.stock: created in-flight index stock_inflight, backfilled 0 rows, created read view rc_stock, analyzed stock
 
 New ScalarDB table: warehouse.stock.
-ScalarDB transactions may write warehouse.stock from 2026-10-27 13:47:08 GMT+09:00, or after every application using the driver on this database has restarted.
+ScalarDB transactions may write warehouse.stock from <date> <time>, or after every application using the driver on this database has restarted.
 ```
 
 In the decoupled layout (C), the line ends `analyzed stock_tx_metadata`, the table where ScalarDB
 keeps the metadata.
 
-Without `--no-wait`, the setup waits until that time, 60 seconds, before it returns. The wait is for
+`<date> <time>` is 60 seconds after the run. Without `--no-wait`, the setup waits until then before
+it returns. The wait is for
 ScalarDB transactions, not for the driver. The driver keeps a list of ScalarDB tables, its
 [catalog](concepts.md#catalog), and reads it again every 60 seconds. An application that was
 already running before the setup has the list from before, and may treat `stock` as an ordinary
-table for up to 60 seconds. So once applications using the driver run, start ScalarDB transactions on a new table, here
-the order service's, only after that time ([Adding a table to ScalarDB while applications
-run](setting-up-tables.md#adding-a-table-to-scalardb-while-applications-run)).
+table for up to 60 seconds. So once applications using the driver run, start ScalarDB transactions
+on a new table, here the order service's, only after that time
+([Adding a table to ScalarDB while applications run](setting-up-tables.md#adding-a-table-to-scalardb-while-applications-run)).
 
 In this guide nothing is running yet, and `snsql` and the program load the list when they start, so
 they know `stock` at once: `--no-wait` is safe, and you can go on straight away.
@@ -305,7 +309,7 @@ Check the result:
 scalardb-native-tools check jdbc:scalardb-native:postgresql://localhost:5432/postgres -U postgres
 ```
 
-```
+```text
 warehouse.stock: set up, no rows stuck
 ```
 
@@ -322,7 +326,7 @@ snsql -U postgres jdbc:scalardb-native:postgresql://localhost:5432/postgres
 
 List the tables. The `ScalarDB` column marks `warehouse.stock`:
 
-```
+```text
 postgres=> \dt warehouse.*
           List of relations
   Schema   | Name  | Type  | ScalarDB
@@ -338,7 +342,7 @@ Run the session at SNAPSHOT, the level of the order service's ScalarDB transacti
 driver connection starts at READ COMMITTED, so set it first. Then add two items and correct both
 counts in one transaction, as after a stocktake:
 
-```
+```text
 postgres=> SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;
 SET
 postgres=> INSERT INTO warehouse.stock (item_id, name, quantity) VALUES (1, 'bolt', 100), (2, 'nut', 50);
@@ -361,7 +365,8 @@ postgres=> SELECT * FROM warehouse.stock ORDER BY item_id;
 postgres=> \q
 ```
 
-`SELECT *` returns `item_id`, `name` and `quantity` only, in every layout. `BEGIN`, `COMMIT` and
+Inside a transaction the prompt is `postgres=*>`, as in psql. `SELECT *` returns `item_id`, `name`
+and `quantity` only, in every layout. `BEGIN`, `COMMIT` and
 `ROLLBACK` work as in psql, and `\?` lists the other commands. The session level holds until
 `snsql` exits; each new `snsql` session starts at READ COMMITTED again.
 
@@ -413,7 +418,9 @@ With Maven, the same dependencies are:
 `src/main/java/example/ReceiveShipment.java` receives a delivery of 30 bolts and 20 nuts in one
 transaction: both are added to `stock`, or neither is. It is plain JDBC. The changes from a program
 written for PostgreSQL alone are the URL, `jdbc:scalardb-native:postgresql:...` in place of
-`jdbc:postgresql:...`, and the isolation level, set to SNAPSHOT as in step 4. This first version leaves `receipt` out; step 6 adds it.
+`jdbc:postgresql:...`, and the isolation level, set to SNAPSHOT as in step 4. This first version
+leaves `receipt` out; step 6 adds it. The excerpt below leaves out the imports and the printing; the
+full program is in that file.
 
 ```java
 public final class ReceiveShipment {
@@ -474,10 +481,12 @@ Run it:
 ./gradlew run
 ```
 
-```
+```text
 1 bolt 128
 2 nut 69
 ```
+
+The delivery took the counts from step 4, 98 and 49, to 128 and 69.
 
 The order service's ScalarDB transactions can take stock from these rows at the same time, through
 `warehouse.stock` (`warehouse.stock_scalardb` in the decoupled layout). Each side sees only the
@@ -531,14 +540,17 @@ Run it:
 ./gradlew run -PmainClass=example.ReceiveShipmentWithReceipt
 ```
 
-```
+```text
 1 bolt 158
 2 nut 89
 ```
 
+The program receives the same delivery again, 30 bolts and 20 nuts, so the counts rise from 128 and
+69 to 158 and 89, and this time it records a receipt for each item.
+
 Look at the receipts in `snsql`:
 
-```
+```text
 postgres=> SELECT item_id, quantity FROM warehouse.receipt ORDER BY receipt_id;
  item_id | quantity
 ---------+----------

@@ -178,8 +178,8 @@ jdbc:sqlserver://host:1433;databaseName=db;lockTimeout=1000
 
 A read-write transaction that scans a table ScalarDB keeps writing hardly progresses at this level:
 its range locks and ScalarDB's prepares wait on and deadlock with each other. The data stays
-correct. Declare a transaction that only reads read-only; otherwise read and write by key, or run
-such transactions at SNAPSHOT.
+correct. Declare a transaction that only reads as read-only. For one that writes, read and write by
+key, or run it at SNAPSHOT.
 
 ### A level set in SQL on SQL Server
 

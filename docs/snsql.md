@@ -1,5 +1,8 @@
 # snsql, the interactive shell
 
+This page describes `snsql`, the driver's interactive shell: installing it, connecting, its
+commands, and transactions and passthrough in it.
+
 `snsql` is a psql-like shell that goes through the driver, on all five engines. Use it, not the
 database's own shell, for ScalarDB tables: `psql`, `mysql`, `sqlcmd` or `sqlplus` would bypass the
 driver, read data ScalarDB transactions have not committed, and write rows without the metadata
@@ -7,13 +10,14 @@ ScalarDB transactions check. The database's own shell stays right for DDL and fo
 
 ## Installing
 
-Take `scalardb-native-shell-<version>.zip` from the GitHub release, unzip it, and put its `bin`
+Download `scalardb-native-shell-<version>.zip` from the GitHub release, unzip it, and put its `bin`
 directory on your `PATH`. It needs Java 11 or later. The zip bundles the JDBC drivers of PostgreSQL,
 MariaDB (also used for MySQL), SQL Server and Oracle. To use another one, MySQL Connector/J for
 example, put its jar in the zip's `lib` directory.
 
 Before the release there is no zip to download: build `snsql` yourself
-([Development builds](development-builds.md)).
+([Development builds](development-builds.md)). The zip you build is the same, and installs the same
+way.
 
 ## Connecting
 
@@ -24,11 +28,16 @@ snsql -U alice jdbc:scalardb-native:postgresql://localhost:5432/shop
 snsql -U alice -h localhost -d shop --engine postgresql -c "select count(*) from orders"
 ```
 
-`snsql` prompts for the password, unseen. To give it without a prompt, set `SNSQL_PASSWORD`, or pass
-`--property password=...`; `-w` never prompts. `--property` also sets the vendor driver's connect
-properties and the driver's own `scalar.db.native_jdbc.*` ones ([Configuration](configuration.md)).
+`snsql` takes the password from the first of these that is set:
 
-| Option | |
+1. the `SNSQL_PASSWORD` environment variable;
+2. `--property password=...`;
+3. a prompt, where the password is not shown, when a user name is given with `-U` and `-w` is not.
+
+`--property` also sets the vendor driver's other connect properties and the driver's own
+`scalar.db.native_jdbc.*` ones ([Configuration](configuration.md)).
+
+| Option | What it does |
 | --- | --- |
 | `URL` | `jdbc:scalardb-native:...`, or give `-h`, `-p` and `-d` with `--engine` |
 | `-h`, `--host` | database server host (default: localhost) |
@@ -44,9 +53,12 @@ properties and the driver's own `scalar.db.native_jdbc.*` ones ([Configuration](
 | `-?`, `--help` | show the help, then exit |
 | `-V`, `--version` | show the version, then exit |
 
-`snsql` exits with 0 when it ends normally, at `\q` too, in a script as at the prompt; 1 on a fatal
-error, such as a malformed URL; 2 when it cannot connect, or for an option it does not know; 3 when
-a script stops at an error with `ON_ERROR_STOP`.
+| Exit status | When |
+| --- | --- |
+| 0 | `snsql` ended normally, at `\q` too, in a script as at the prompt |
+| 1 | a fatal error, such as a malformed URL |
+| 2 | it cannot connect, or an option it does not know |
+| 3 | a script stopped at an error with `ON_ERROR_STOP` |
 
 ## Using it
 
@@ -55,7 +67,7 @@ line, and `db=*>` inside a transaction. Results print as aligned tables, followe
 the update count. Ctrl-C cancels the running statement, and at the prompt clears the line. History
 is kept in `~/.snsql_history`.
 
-| Command | |
+| Command | What it does |
 | --- | --- |
 | `\q` | quit |
 | `\conninfo` | show the current connection |

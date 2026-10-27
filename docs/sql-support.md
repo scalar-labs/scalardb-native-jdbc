@@ -139,10 +139,10 @@ such a transaction.
 
 ### INSERT on MySQL
 
-- It has no `RETURNING`.
-- It gives each key column a literal or a placeholder of the column's type, or leaves out an
+- MySQL has no `RETURNING`.
+- An `INSERT` gives each key column a literal or a placeholder of the column's type, or leaves out an
   `AUTO_INCREMENT` key; not NULL or 0 for it.
-- It needs a strict `sql_mode`, and no `BEFORE INSERT` trigger on the table.
+- The session needs a strict `sql_mode`, and the table no `BEFORE INSERT` trigger.
 
 ### Types on MySQL and MariaDB
 
@@ -161,7 +161,7 @@ such a transaction.
 
 ### INSERT on SQL Server
 
-- It has no `RETURNING`. The driver reads its keys back with `OUTPUT`, which a table with a trigger
+- SQL Server has no `RETURNING`. The driver reads its keys back with `OUTPUT`, which a table with a trigger
   refuses.
 
 ### Locking reads on SQL Server
@@ -191,11 +191,11 @@ a ScalarDB table.
 
 ### INSERT on Oracle
 
-- It has no `RETURNING`; `RETURNING ... INTO` does not parse.
+- An `INSERT` takes no `RETURNING`: Oracle's `RETURNING ... INTO` does not parse.
 - The keys are read back by the values the statement gives them, as on MySQL, or come from an
   `IDENTITY` key the INSERT leaves out. A multi-row `VALUES` cannot return such a key (Oracle's
   ORA-63809).
-- No `BEFORE INSERT` or `COMPOUND` trigger on the table.
+- The table must have no `BEFORE INSERT` or `COMPOUND` trigger.
 
 ### Locking reads on Oracle
 
