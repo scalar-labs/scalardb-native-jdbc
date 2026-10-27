@@ -729,3 +729,58 @@ written. On one table any `OF` column locks the same rows as the key column, so 
 could replace it, which would also spare the case of a user's `OF` column the derived table does
 not select (ORA-00904 on the decoupled form, as before this fix). The proof stays the YCSB
 decoupled READ COMMITTED cell on AWS.
+
+### 2026-10-27: the single-row write as a block, a procedure, a minimal block, and the vendor's statement (the design)
+
+At the user's request through the AWS session, on the container (`scratchpad/ora/forms.jsh`;
+YCSB's shape, a key and ten 100-character fields, 1,000 rows loaded with metadata, the in-flight
+index `(tx_state, K)`; 10,000 calls a cell after 300 warm, a commit every 100; server CPU and DB
+time from `V$MYSTAT` deltas, parses likewise, wall at the client; ojdbc's implicit cache off and
+on at 128). The forms: (d) the vendor's statement; (a) the driver's clear-table block as emitted
+(the gated UPDATE `RETURNING ... BULK COLLECT`, `FORALL` over the keys stamping `T_meta`, two OUT
+binds); (c) the minimal block, the same two statements without the collection, the stamp's values
+bound in the second statement; (pa) and (pc) the same two bodies as stored procedures called as
+`BEGIN p(...); END;`; the insert likewise; the key read plain and with the states column (`CASE
+WHEN NOT EXISTS (in-flight probe) THEN 0 WHEN (K) IN (...) THEN 1 END`).
+
+| per call, µs | parsed per call: wall, CPU, DB time | cached: wall, CPU, DB time |
+|---|---|---|
+| update (d) plain | 242, 14, 39 | 199, 9, 23 |
+| update (a) the driver's block | 396, 43, 110 | 279, 36, 94 |
+| update (c) minimal block | 469, 37, 105 | 316, 29, 95 |
+| update (pa) procedure, (a)'s body | 360, 51, 97 | 302, 37, 93 |
+| update (pc) procedure, (c)'s body | 378, 35, 92 | 362, 33, 91 |
+| insert (d) plain | 253, 18, 60 | 260, 10, 52 |
+| insert (a) the driver's block | 511, 43, 127 | 377, 32, 99 |
+| insert (c) minimal block | 423, 43, 109 | 376, 35, 122 |
+| insert (pa) procedure, (a)'s body | 415, 42, 119 | 378, 44, 115 |
+| read (d) plain | 241, 10, 25 | 197, 3, 22 |
+| read (s) with the states column | 279, 13, 44 | 208, 5, 36 |
+
+Parses per call: 3 for a block (its two nested statements with it), 1 for a procedure call or a
+plain statement, 0 cached. `V$SQL` per execution, cached: the block 30 µs of CPU and 82 elapsed,
+its nested gated `UPDATE U` 8–10 and 20–31, its `UPDATE U_meta` 11–12 and 28–30; the plain UPDATE
+7 and 21. (The insert cells ran in sequence on a growing table, so their DB time drifts upward
+with the arm; read them as CPU.)
+
+Reading. (1) A stored procedure gains nothing over the anonymous block once the text is cached
+(37 against 36 µs of CPU, 93 against 94 of DB time); uncached it spares two parse calls, 97
+against 110 of DB time, which the cache spares anyway. Not worth an object created at import.
+(2) The minimal block spares about 7 µs of CPU and nothing of DB time: the collection plumbing
+and the `%TYPE` locals cost next to nothing at run time. (3) The cache's gain is mostly the
+client's: 117 µs of wall a block call (396 → 279), 7 of server CPU, 16 of DB time; the decision
+above stands. (4) What a block costs beyond its two statements, cached: about 16 µs of CPU and
+30 of DB time, PL/SQL's call, two context switches and the OUT binds; the second write itself 11
+of CPU and 28–30 elapsed, the layout's own; the gate 1–2 of CPU. Against the vendor's plain
+UPDATE at 9 and 23, the decoupled write stands at 36 and 94: about +70 µs of server time a call,
+of which a third is the block and a third the metadata row's write. (5) The read's states column
+costs 2 µs of CPU, 14 of DB time and 11 of wall over the plain read.
+
+What it means for the user's 10–20% on key reads and writes (YCSB fast: the vendor's update 380
+µs, the driver +237; insert 417, +200): the server's share of the +237 is about 70; the rest is
+the client's, of which the cache takes about 100 (the AWS cache cell will say); what remains at
+the client is the driver's own work per call, to be measured against raw ojdbc. The server's +70
+has no PL/SQL form cheaper than the block; a form without a block, one SQL statement, does not
+exist on Oracle for two tables (a trigger stamping the metadata row from a session context would
+fire for ScalarDB's own writers too and is not proposed). The key read is within the goal already
+(+11 µs of wall on 197).
