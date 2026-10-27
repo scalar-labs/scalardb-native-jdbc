@@ -47,6 +47,50 @@ READ COMMITTED inline +15%, +30%, +15%; SNAPSHOT inline +16%, +7%, +12%. Decoupl
 ratio is held back by its scans (1.7 times the vendor's p50). The next PostgreSQL run should include
 YCSB for decoupled READ COMMITTED.
 
+## Per operation, from the runs' own files
+
+BenchBase writes a latency series per transaction type (`execute/*.results.<Type>.csv` in each
+run's `*-benchbase-runs.tgz`), so the stored runs give a per-operation breakdown without a new run.
+Below: the throughput-weighted median latency over the run's windows, the median of the
+repetitions, vendor (a) then driver (c), µs, fast round trip. "Share" is the operation's weight in
+the mix times its added latency, so the shares add up to the "added" figure of the run's write-up.
+
+YCSB (weights: read 50, scan 15, read-modify-write 20, update 10, insert 5):
+
+| PostgreSQL | read | update | insert | read-modify-write | scan |
+|---|---|---|---|---|---|
+| decoupled RC, tenth run (816f506) | 179 → 201 | 253 → 323 | 248 → 311 | 352 → 470 | **1325 → 2434** |
+| decoupled SNAPSHOT, ninth run | 193 → 216 | 261 → 323 | 253 → 316 | 358 → 440 | 1231 → 1505 |
+| inline RC, ninth run | 192 → 194 | 260 → 303 | 253 → 294 | 360 → 411 | 1236 → 1550 |
+| inline SNAPSHOT, ninth run | 193 → 206 | 263 → 280 | 256 → 300 | 365 → 410 | 1243 → 1447 |
+
+- Decoupled RC: the scan's share is about 166 of the 214 µs added per operation; the single-key
+  operations add 21–117 µs each, near SNAPSHOT's 23–82. The scan is the item, at 1.84 times the
+  vendor's, and todos 336 and 337 did not touch it.
+- Inline RC: reads add 2 µs (SNAPSHOT 13); updates 43 against 17; the scan 314 against 204.
+
+TPC-C, per transaction:
+
+| PostgreSQL, added µs (times the vendor's) | NewOrder | Payment | Delivery | StockLevel | OrderStatus |
+|---|---|---|---|---|---|
+| decoupled RC, eleventh run (faae2ed) | +1030 (1.33) | +347 (1.41) | +4198 (1.58) | +1265 (2.02) | +151 (1.38) |
+| decoupled SNAPSHOT, eleventh run | +669 (1.22) | +268 (1.32) | +2928 (1.41) | +165 (1.12) | +143 (1.37) |
+| inline RC, ninth run | +649 (1.20) | +287 (1.33) | **+4344 (1.58)** | +747 (1.56) | +111 (1.27) |
+| inline SNAPSHOT, ninth run | +463 (1.14) | +155 (1.17) | +808 (1.11) | +295 (1.22) | +155 (1.37) |
+
+- Decoupled RC over SNAPSHOT, about 290 µs a transaction by share: NewOrder 163, Delivery 51,
+  StockLevel 44, Payment 34 (before `cb16d83`, which takes StockLevel's probes and part of its
+  planning).
+- Inline RC over SNAPSHOT, about 300 µs: Delivery 142 (its write beyond the key, +3.5 ms a call
+  over SNAPSHOT's), NewOrder 84, Payment 56, StockLevel 18.
+
+Oracle, third run, YCSB: the scan is behind the vendor only at decoupled RC (2307 → 4020); the
+update adds 136–164 µs on decoupled at both levels and 115 inline RC, against 26 inline SNAPSHOT.
+
+The mixed runs keep contention and cache effects in these figures. A run with one operation at a
+time (YCSB with one weight at 100) would isolate each; the per-type series above already point at
+the items: the decoupled RC scan, the inline RC write beyond the key, the update on Oracle.
+
 ## Where each row stands
 
 1. **PostgreSQL, decoupled.** Todo 337's design reading expects `cb16d83` to bring READ COMMITTED to
