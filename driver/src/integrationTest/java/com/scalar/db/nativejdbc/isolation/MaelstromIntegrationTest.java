@@ -286,11 +286,12 @@ class MaelstromIntegrationTest {
             false,
             Level.SERIALIZABLE.mixed,
             // 60 seconds showed no read skew on SQL Server, which commits about a third as many,
-            // nor
-            // on MySQL and MariaDB on GitHub's runners now and then; 240 did
+            // nor 240 on MariaDB, locally too; two keys, which readers then read both of, and four
+            // times the rate, the runs' cap, showed it there
             4 * ANOMALY_SECONDS,
             0,
-            Level.READ_COMMITTED.jdbc);
+            Level.READ_COMMITTED.jdbc,
+            List.of("--key-count", "2", "--rate", "200"));
     assertThat(output).contains(INVALID);
   }
 
@@ -402,6 +403,38 @@ class MaelstromIntegrationTest {
       double faults,
       int readOnlyLevel)
       throws Exception {
+    return run(
+        e,
+        w,
+        name,
+        level,
+        scalarDb,
+        drivers,
+        inline,
+        vendor,
+        model,
+        minimumSeconds,
+        faults,
+        readOnlyLevel,
+        List.of());
+  }
+
+  /** One Maelstrom run, with {@code options} added to Maelstrom's command line. */
+  private static String run(
+      Engines e,
+      Workload w,
+      String name,
+      Level level,
+      Properties scalarDb,
+      String drivers,
+      boolean inline,
+      boolean vendor,
+      String model,
+      int minimumSeconds,
+      double faults,
+      int readOnlyLevel,
+      List<String> options)
+      throws Exception {
     Path maelstrom = maelstrom();
     String table =
         (w == Workload.LIST_APPEND ? "la_" : "rw_")
@@ -483,26 +516,28 @@ class MaelstromIntegrationTest {
                 minimumSeconds,
                 Integer.parseInt(System.getProperty("nativejdbc.isolation.seconds", "30"))));
     List<String> test =
-        List.of(
-            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-            "-Djava.awt.headless=true",
-            "-jar",
-            maelstrom.toAbsolutePath().toString(),
-            "test",
-            "-w",
-            w.maelstrom,
-            "--bin",
-            script.toAbsolutePath().toString(),
-            "--node-count",
-            "2",
-            "--concurrency",
-            "4n",
-            "--time-limit",
-            seconds,
-            "--rate",
-            System.getProperty("nativejdbc.isolation.rate", "50"),
-            "--consistency-models",
-            model);
+        new ArrayList<>(
+            List.of(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-Djava.awt.headless=true",
+                "-jar",
+                maelstrom.toAbsolutePath().toString(),
+                "test",
+                "-w",
+                w.maelstrom,
+                "--bin",
+                script.toAbsolutePath().toString(),
+                "--node-count",
+                "2",
+                "--concurrency",
+                "4n",
+                "--time-limit",
+                seconds,
+                "--rate",
+                System.getProperty("nativejdbc.isolation.rate", "50"),
+                "--consistency-models",
+                model));
+    test.addAll(options);
     Path log = run.resolve("maelstrom.log");
     Process p =
         new ProcessBuilder(test)
