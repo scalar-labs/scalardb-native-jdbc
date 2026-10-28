@@ -4424,20 +4424,6 @@ public final class SqlAst {
     return checked(text, sources);
   }
 
-  /**
-   * Returns whether the statement aggregates without grouping, so that it returns one row whatever
-   * it reads (todo 334).
-   *
-   * @return whether it does
-   */
-  public boolean aggregatesToOneRow() {
-    if (!(statement instanceof PlainSelect)) {
-      return false;
-    }
-    PlainSelect s = (PlainSelect) statement;
-    return s.getGroupBy() == null && s.getHaving() == null && isGrouped(s);
-  }
-
   /** The label of a copy's appended select item {@code i}. */
   private static final String EXTRA = "scalardb_native_x";
 

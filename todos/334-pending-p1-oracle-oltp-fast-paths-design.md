@@ -3024,6 +3024,12 @@ and from 5 to 1 in autocommit. Measured on the container, Delivery's SUM a call 
 decoupled 7.1, 33, 11 against 10.2, 90, 42. Mergeable once the close is in; the proof Delivery's SUM
 and StockLevel at READ COMMITTED, StockLevel from +53-62% toward +25%.
 
+After the review of f4c9055: the gated read's own statement is registered before it runs, so that
+`cancel()` reaches it beside a write's (it was set only once its rows were handed out), and is closed
+at the statement's close as at its next execute (that block runs for both; its comment now says so);
+`SqlAst.aggregatesToOneRow`, unused, removed. Unit tests, `spotbugsMain`, and on Oracle the form tests,
+`PredicateCheckIntegrationTest`, `ReadIntegrationTest` and `WriteIntegrationTest` pass.
+
 ### 2026-10-28: D2 reviewed mergeable: baf2a07 on oracle-gated-reads (the design's note)
 
 Reviewed from `git diff f4c9055 baf2a07`. The leak the review asked about was the reviewer's

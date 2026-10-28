@@ -728,8 +728,9 @@ public final class Proxies {
     // target (todo 329); its settings and parameters are replayed as it becomes the target
     volatile @Nullable Statement alternate;
     volatile boolean plainNow;
-    // the vendor statement of the last execute's gated read, whose rows it returned (todo 334)
-    @Nullable Statement gatedOpen;
+    // the vendor statement of the last execute's gated read, from before it runs, which cancel()
+    // reaches, to the statement's next execute or close (todo 334)
+    volatile @Nullable Statement gatedOpen;
 
     @Override
     void handedOut() {
@@ -782,7 +783,8 @@ public final class Proxies {
             rows.close();
           }
         }
-        // the gated read's own statement, as executing again closes a statement's rows
+        // the gated read's own statement, at the statement's close and at its next execute, as
+        // executing again closes a statement's rows
         Statement gatedRan = gatedOpen;
         gatedOpen = null;
         if (gatedRan != null) {
@@ -799,6 +801,10 @@ public final class Proxies {
       }
       if (name.equals("cancel")) {
         cancelled = true;
+        Statement gatedRunning = gatedOpen;
+        if (gatedRunning != null && !gatedRunning.isClosed()) {
+          gatedRunning.cancel(); // a gated read's own statement, the one running (todo 334)
+        }
         Statement running = runningWrite;
         if (running != null) {
           try {
@@ -1891,6 +1897,7 @@ public final class Proxies {
       }
       Statement st =
           takesSql ? owner.vendor.createStatement() : owner.vendor.prepareStatement(g.sql);
+      gatedOpen = st;
       ResultSet rs = null;
       try {
         for (Call c : settings.values()) {
@@ -1899,7 +1906,7 @@ public final class Proxies {
         if (!takesSql) {
           for (int source : g.parameterSources) {
             if (!parameters.containsKey(source)) {
-              st.close();
+              closeGated(st);
               return null; // the vendor reports a missing value for the statement itself
             }
           }
@@ -1924,14 +1931,14 @@ public final class Proxies {
             Object gate = rs.getObject(i);
             if (gate == null || ((Number) gate).intValue() != 0) {
               rs.close();
-              st.close();
+              closeGated(st);
               return null;
             }
           }
         } else {
           if (!snapshot) {
             rs.close();
-            st.close();
+            closeGated(st);
             return null;
           }
           for (String check : g.checks) {
@@ -1942,7 +1949,7 @@ public final class Proxies {
                 ResultSet found = c.executeQuery(check)) {
               if (found.next()) {
                 rs.close();
-                st.close();
+                closeGated(st);
                 return null;
               }
             }
@@ -1954,14 +1961,13 @@ public final class Proxies {
           }
         }
         owner.ran(one);
-        gatedOpen = st;
         return proxy(
             ResultSet.class, new GatedRows(rs, connection, (Statement) proxy, g.gates, st, row));
       } catch (SQLException e) {
         if (rs != null) {
           rs.close();
         }
-        st.close();
+        closeGated(st);
         SQLException retryable = Writes.asRetryable(e);
         if (!(retryable instanceof java.sql.SQLTransactionRollbackException)
             && !Writes.endsTransaction(owner.vendor, e)
@@ -1980,6 +1986,12 @@ public final class Proxies {
         }
         throw Writes.asRetryable(e);
       }
+    }
+
+    /** Closes a gated read's statement that returned no rows to the application. */
+    private void closeGated(Statement st) throws SQLException {
+      gatedOpen = null;
+      st.close();
     }
 
     /** Binds the parameters set so far onto the target: as written, or as the split read takes. */
