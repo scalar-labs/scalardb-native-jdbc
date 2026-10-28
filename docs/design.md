@@ -910,12 +910,13 @@ union as a derived table.
   carries them from a left join to its metadata row, `LEFT JOIN T_meta m ON m.k = t.k` with
   `COALESCE(m.tx_state, 3) = 3` in place of the `NOT EXISTS` per row, one access to the metadata row
   where the lookups made two and the exclusion a third; an in-flight copy carries its before
-  image's; the committed copy of an inline table carries `/*+ NO_INDEX_SS(t) */`, its state
-  condition being a filter on the row and never a key, since the optimizer took an index skip scan of
-  the in-flight index, (tx_state, key), over the primary key's range scan in the sixth run, 133 gets
-  a 500-row scan against the vendor's 100, which a forced skip scan reproduces on the container (272
-  against 184; todo 334's log, 2026-10-28). The argument is the engine's statement-level read
-  consistency, which Oracle gives at
+  image's; the committed copy of an inline table carries `/*+ NO_INDEX_SS(t T_inflight) */`, the
+  in-flight index named so that a skip scan of the primary key or of another index stays open to a
+  predicate on trailing key columns, its state condition being a filter on the row and never a key,
+  since the optimizer took an index skip scan of the in-flight index, (tx_state, key), over the
+  primary key's range scan in the sixth run, 133 gets a 500-row scan against the vendor's 100, which
+  a forced skip scan reproduces on the container (272 against 184; todo 334's log, 2026-10-28). The
+  argument is the engine's statement-level read consistency, which Oracle gives at
   READ COMMITTED (section 1): the lookups and the columns read the same metadata row in the same
   statement's snapshot, so they agree, and the join adds no row, the metadata row being at most
   one per key. A `*` or `t.*` over such a copy is spelled out as the table's columns, which Oracle
