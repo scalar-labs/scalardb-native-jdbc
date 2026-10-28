@@ -2954,3 +2954,14 @@ and from 5 to 1 in autocommit. Measured on the container, Delivery's SUM a call 
 7.1 gets, 51 µs, 15 µs of CPU against the split read's 10.3, 126, 54 and the vendor's 5.1, 29, 10;
 decoupled 7.1, 33, 11 against 10.2, 90, 42. Mergeable once the close is in; the proof Delivery's SUM
 and StockLevel at READ COMMITTED, StockLevel from +53-62% toward +25%.
+
+### 2026-10-28: D2 reviewed mergeable: baf2a07 on oracle-gated-reads (the design's note)
+
+Reviewed from `git diff f4c9055 baf2a07`. The leak the review asked about was the reviewer's
+misreading: the block that closes the last write's rows runs for the Statement's `close` as well as
+for its next execute, so `gatedOpen` was closed with the Statement already, and the comment now says
+both. The follow-up stands on its own: `gatedOpen` is volatile and set as soon as the gated vendor
+statement is created, so `cancel()` reaches it while it runs, beside `runningWrite`; every fallback
+clears it through `closeGated`; `SqlAst.aggregatesToOneRow` is gone. Unit tests, spotbugsMain and
+the Oracle form, PredicateCheck, Read and Write integration tests pass. Mergeable; landing as
+before; the last of D1 to D3, after which the full run starts.
