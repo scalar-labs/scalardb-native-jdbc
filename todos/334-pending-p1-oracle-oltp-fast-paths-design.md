@@ -2835,6 +2835,57 @@ set up, the row in flight, 300 reads each in its own transaction under 15 gets, 
 gates, the column's three values, the decoupled text unchanged. Mergeable; landing as before; the
 proof the SNAPSHOT inline OrderStatus line, from +75% toward +30%.
 
+### 2026-10-28: D3 built (c7): the write beyond the key as the statement first, both layouts
+
+As designed, with the two corrections on main (d9c2e14, 9b3bb3e). `KeyedPlan` gains `predicateFirst`,
+tried before the predicate block when the transaction recorded no anchor of the table: at READ
+COMMITTED on an inline table (`oraclePredicateFirstInline`, its SNAPSHOT form the gated statement as
+before) and at both levels on a decoupled one (`oraclePredicateFirstDecoupled`, at SNAPSHOT after the
+gated clear-table block and the coarse check, as the predicate block was). One block, under
+`SAVEPOINT scalardb_native_f`: the predicate's rows locked by `SELECT 1 BULK COLLECT INTO l_x FROM
+<data> x WHERE <pred> FOR UPDATE NOWAIT`, ORA-00054 or ORA-30006 holding; then the user's DML as
+written, inline with the stamp in its SET list and `tx_version = CASE WHEN COALESCE(tx_state, 3) NOT
+IN (1, 2) THEN <next> ELSE -1 END` returning the versions (a DELETE its states), decoupled returning
+its keys with step 3's CAS over them by `FORALL` (a created table's DELETE removing the metadata rows);
+then the in-flight copy over the predicate, step 1's arm. A row held, marked, found, or a CAS short,
+rolls back to the savepoint and `applyPredicateFirst` returns null for the predicate block, which
+tells the case: the wait or the abort, or a key without a metadata row the steps stamp. Two OUT
+counts, `written, held`; the binds the stamp, the predicate's in the lock, the DML's, the predicate's
+in the look.
+
+Tests (`OracleOltpIntegrationTest`): `form3InlineWriteBeyondTheKeyAsTheStatementFirst` and
+`form3DecoupledWriteBeyondTheKeyAsTheStatementFirst`, each an order table of 3,000 rows ten to an
+order with full-sized stamps (a stamp that grows the row migrates it: with `'seed'` and 1 the inline
+DML read 69 gets), the setup's index and statistics, a catalog of its own (the driver shares one per
+TTL in the process: a table created after another test's catalog was read is not routed by it, and
+the earlier runs of these tests passed through unrouted). Delivery's UPDATE shape one round trip and
+10 rows; a row of another order in flight changes nothing; a row of the order in flight aborts without
+a wait set, and with one waits and writes the order once it settles; a row in flight whose before
+image alone matches aborts (the look after the DML); a DELETE beyond the key one round trip, the
+decoupled one removing the metadata rows; at SNAPSHOT on a decoupled table not yet clear three round
+trips, the gated block, the coarse check, the statement first (today's sequence ends in the predicate
+block, the same count); an imported table's row without a metadata row stamped through the steps.
+`WritesTest` asserts both texts. `form3WriteBeyondTheKeyAsOneBlock` keeps its outcomes. One
+expectation changed: `WriteIntegrationTest.reviewFindings` 134 (a prepare and rollback around the write) on
+Oracle now writes the row the rollback restored at the version the statement read, as on PostgreSQL
+(todo 328), where the block of steps aborted: the lock meets the prepared image, restarts, and the DML
+runs after the rollback. `InlineIntegrationTest.aPredicateDelete_racingAnUpdate...` (todo 292) holds
+through the lock.
+
+Measured on the container, 50 calls after 10, Delivery's shape (`w = 1 AND o = ?`, 10 rows), the
+vendor's UPDATE 3.2 to 3.8 gets, 33 to 42 µs elapsed, 11 to 17 µs CPU:
+
+| | gets | elapsed µs | CPU µs |
+|---|---|---|---|
+| inline, today's block | 43.0 | 306 | 178 |
+| inline, statement first (lock 12.2, DML 13.2, look 4.0) | 29.4 | 204 | 107 |
+| decoupled, today's block | 72.7 | 734 | 562 |
+| decoupled, statement first (lock 12.2, DML 3.2, CAS 36.0, look 4.0) | 55.4 | 299 | 166 |
+
+The lock's 12 gets are its current-mode get per row, the price of todo 292's rule; the decoupled CAS
+is today's 36. Suites: unit and Oracle integration pass; `spotbugsIntegrationTest` main's three
+findings only.
+
 ### 2026-10-28: D3 reviewed mergeable: 53fc25f on oracle-write-beyond-first (the design's note)
 
 Reviewed from `git show 53fc25f` (on 5c39f67). The two blocks are the design's with its two

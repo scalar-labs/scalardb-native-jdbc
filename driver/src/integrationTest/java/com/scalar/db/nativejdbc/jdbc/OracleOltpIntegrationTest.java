@@ -591,6 +591,520 @@ class OracleOltpIntegrationTest {
   }
 
   /**
+   * The write beyond the key at READ COMMITTED on an inline table as the statement first (design
+   * 4.3 "The write beyond the key as the statement first", todo 334): Delivery's order_line UPDATE
+   * shape, by an order's key prefix, as one nested statement with the count 10, one round trip,
+   * with a row of another order in flight; a row of the order in flight undoes it and the block
+   * takes the write, an abort without a wait set and the wait and the write with one; a row in
+   * flight whose before image the predicate matches and whose after image does not, which the DML
+   * leaves alone, found by the look after it; a DELETE beyond the key likewise; the DML's gets a
+   * call against the vendor's statement's.
+   */
+  @Test
+  void form3InlineWriteBeyondTheKeyAsTheStatementFirst() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      admin.createTable(
+          N(NS),
+          N("tol"),
+          TableMetadata.newBuilder()
+              .addColumn(N("w"), intType())
+              .addColumn(N("o"), intType())
+              .addColumn(N("n"), intType())
+              .addColumn(N("x"), DataType.TEXT)
+              .addPartitionKey(N("w"))
+              .addClusteringKey(N("o"))
+              .addClusteringKey(N("n"))
+              .build(),
+          true);
+    }
+    try (Connection v = ORA.open()) {
+      // 3,000 committed rows, ten to an order, as ScalarDB leaves them, their stamps full-sized:
+      // a stamp that grows the row migrates it
+      ORA.execute(
+          v,
+          "INSERT INTO "
+              + NS
+              + ".tol (w, o, n, x, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+              + " \"tx_committed_at\") SELECT 1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10), 'a',"
+              + " RPAD('seed', 36, '-'), 3, 1, 1761600000000, 1761600000000 FROM dual CONNECT BY"
+              + " LEVEL <= 3000",
+          "COMMIT");
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().equals(N("tol")),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .hasSize(1)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    // a catalog of its own, read after the table was created, then kept: the driver shares one per
+    // TTL in the process, and one read per statement is a round trip
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59001");
+    Properties waits = new Properties();
+    waits.putAll(ttl);
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "10000");
+    String delivery = "UPDATE " + NS + ".tol SET x = ? WHERE w = 1 AND o = ?";
+    String count = "SELECT COUNT(*) FROM " + NS + ".tol WHERE o = %d AND x = '%s'";
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection d = ORA.openDriver(ttl);
+        Connection waiting = ORA.openDriver(waits);
+        Connection v = ORA.open();
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(false);
+      Counter rt = new Counter(d);
+      // a row of another order in flight: the statement goes through
+      TwoPhaseCommitTransaction elsewhere = preparedLine(tpc, "tol", 8, 0, "p");
+      long one;
+      try (PreparedStatement ps = d.prepareStatement(delivery)) {
+        ps.setString(1, "b");
+        ps.setInt(2, 6);
+        assertThat(ps.executeUpdate()).isEqualTo(10); // the text's first parse, unmeasured
+        one =
+            rt.measure(
+                () -> {
+                  ps.setString(1, "b");
+                  ps.setInt(2, 7);
+                  assertThat(ps.executeUpdate()).isEqualTo(10);
+                });
+      }
+      d.commit();
+      elsewhere.rollback();
+      log("form 3 (inline): Delivery's UPDATE at READ COMMITTED, " + one + " round trip(s)");
+
+      assertThat(one).isEqualTo(1);
+      assertThat(rows(d, String.format(count, 7, "b"))).containsExactly("10");
+      d.commit();
+      // stamped: ScalarDB reads the order's rows committed at the driver's version
+      assertThat(scalarDbLine("tol", 7, 3)).isEqualTo("b");
+      // a row of the order in flight: an abort without a wait set, nothing of the order written
+      TwoPhaseCommitTransaction held = preparedLine(tpc, "tol", 9, 3, "p");
+      assertAborts(
+          d, "UPDATE " + NS + ".tol SET x = 'c' WHERE w = 1 AND o = 9", "a row of the order");
+      d.rollback();
+      // with one: the wait, then the write of the whole order once the row settles
+      waiting.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      waiting.setAutoCommit(false);
+      Future<Integer> write =
+          pool.submit(
+              () -> update(waiting, "UPDATE " + NS + ".tol SET x = 'd' WHERE w = 1 AND o = 9"));
+      Thread.sleep(700);
+      assertThat(write.isDone()).as("waits on the row in flight").isFalse();
+      held.rollback();
+      assertThat(write.get(20, TimeUnit.SECONDS)).isEqualTo(10);
+      waiting.commit();
+      assertThat(rows(d, String.format(count, 9, "d"))).containsExactly("10");
+      d.commit();
+      // a row in flight whose before image matches and whose after image does not: the DML
+      // skips it, the look after it finds it
+      TwoPhaseCommitTransaction before = preparedLine(tpc, "tol", 10, 3, "p");
+      assertAborts(
+          d,
+          "UPDATE " + NS + ".tol SET x = 'e' WHERE w = 1 AND o = 10 AND x = 'a'",
+          "a row in flight by its before image");
+      d.rollback();
+      before.rollback();
+      assertThat(rows(d, String.format(count, 10, "a"))).containsExactly("10");
+      d.commit();
+      // a DELETE beyond the key, one round trip once its text is parsed
+      long deleted;
+      try (PreparedStatement ps =
+          d.prepareStatement("DELETE FROM " + NS + ".tol WHERE w = 1 AND o = ?")) {
+        ps.setInt(1, 12);
+        assertThat(ps.executeUpdate()).isEqualTo(10); // the text's first parse, unmeasured
+        deleted =
+            rt.measure(
+                () -> {
+                  ps.setInt(1, 11);
+                  assertThat(ps.executeUpdate()).isEqualTo(10);
+                });
+      }
+      d.commit();
+      log("form 3 (inline): a DELETE beyond the key " + deleted + " round trip(s)");
+      assertThat(deleted).isEqualTo(1);
+      assertThat(rows(d, "SELECT COUNT(*) FROM " + NS + ".tol WHERE o = 11")).containsExactly("0");
+      d.commit();
+      // the gets a call: the block, its lock, DML and look for rows in flight, against the
+      // vendor's, counted over 50 calls after 10, which the parses' gets are not among
+      String[] patterns = {
+        "DECLARE l_i \"OO\".\"TOL\"%",
+        "SELECT /*+ scalardb_native_f1_%TOL%",
+        "UPDATE /*+ scalardb_native_f2_%TOL%",
+        "SELECT /*+ scalardb_native_f3_%TOL%",
+        "%vtol%"
+      };
+      long[][] at = new long[5][];
+      try (PreparedStatement ps = d.prepareStatement(delivery)) {
+        for (int o = 100; o < 160; o++) {
+          if (o == 110) {
+            for (int i = 0; i < 4; i++) {
+              at[i] = gets(v, patterns[i]);
+            }
+          }
+          ps.setString(1, "f");
+          ps.setInt(2, o);
+          assertThat(ps.executeUpdate()).isEqualTo(10);
+        }
+      }
+      d.commit();
+      v.setAutoCommit(false);
+      try (PreparedStatement ps =
+          v.prepareStatement("UPDATE /* vtol */ " + NS + ".tol SET x = ? WHERE w = 1 AND o = ?")) {
+        for (int o = 160; o < 220; o++) {
+          if (o == 170) {
+            at[4] = gets(v, patterns[4]);
+          }
+          ps.setString(1, "g");
+          ps.setInt(2, o);
+          assertThat(ps.executeUpdate()).isEqualTo(10);
+        }
+      }
+      v.rollback();
+      v.setAutoCommit(true);
+      double[] perCall = new double[5];
+      long[][] now = new long[5][];
+      for (int i = 0; i < 5; i++) {
+        now[i] = gets(v, patterns[i]);
+        assertThat(now[i][1] - at[i][1]).as(patterns[i]).isEqualTo(50);
+        perCall[i] = (now[i][0] - at[i][0]) / 50.0;
+      }
+      log("form 3 (inline): " + times(at[0], now[0], at[4], now[4]));
+      log(
+          String.format(
+              "form 3 (inline): gets a call, the block %.1f, its lock %.1f, DML %.1f and look for"
+                  + " rows in flight %.1f, the vendor's UPDATE %.1f",
+              perCall[0], perCall[1], perCall[2], perCall[3], perCall[4]));
+      // the block of the keys read and the DML by key costs 43 here
+      assertThat(perCall[0]).isLessThan(36);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * The write beyond the key on a decoupled table as the statement first (design 4.3 "The write
+   * beyond the key as the statement first", todo 334), at both levels: Delivery's order_line UPDATE
+   * shape as one block of the DML and the CAS over the keys it returned, the count 10 and every
+   * metadata row stamped, one round trip at READ COMMITTED; a row of the order in flight, which the
+   * CAS falls short on, undoes it for the block of steps, an abort without a wait set and the wait
+   * and the write with one; a row in flight by its before image alone found by the look after the
+   * DML; a created table's DELETE removing the metadata rows; at SNAPSHOT on a table with a row in
+   * flight elsewhere, the gated block closed, then the statement first; an imported table's row
+   * without a metadata row, a CAS short, stamped by the steps; the block's gets a call against the
+   * vendor's statement's.
+   */
+  @Test
+  void form3DecoupledWriteBeyondTheKeyAsTheStatementFirst() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      admin.createTable(
+          N(NS),
+          N("tod"),
+          TableMetadata.newBuilder()
+              .addColumn(N("w"), intType())
+              .addColumn(N("o"), intType())
+              .addColumn(N("n"), intType())
+              .addColumn(N("x"), DataType.TEXT)
+              .addPartitionKey(N("w"))
+              .addClusteringKey(N("o"))
+              .addClusteringKey(N("n"))
+              .build(),
+          Map.of("transaction-metadata-decoupling", "true"));
+    }
+    catalog.invalidate();
+    TableInfo info = tableInfo("tod");
+    String data = NS + ".\"" + info.dataTable() + "\"";
+    String meta = NS + ".\"" + Objects.requireNonNull(info.metadataTable()) + "\"";
+    try (Connection v = ORA.open()) {
+      // 3,000 committed rows, ten to an order, as ScalarDB leaves them, their stamps full-sized
+      ORA.execute(
+          v,
+          "INSERT INTO "
+              + data
+              + " (w, o, n, x) SELECT 1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10), 'a' FROM"
+              + " dual CONNECT BY LEVEL <= 3000",
+          "INSERT INTO "
+              + meta
+              + " (w, o, n, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+              + " \"tx_committed_at\") SELECT 1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10),"
+              + " RPAD('seed', 36, '-'), 3, 1, 1761600000000, 1761600000000 FROM dual CONNECT BY"
+              + " LEVEL <= 3000",
+          "COMMIT",
+          // an imported table whose rows the predicate reaches beyond the key, one of them added
+          // after the setup without a metadata row
+          "CREATE TABLE " + NS + ".impw (k NUMBER(10) PRIMARY KEY, g NUMBER(10), x NUMBER(10))",
+          "INSERT INTO " + NS + ".impw VALUES (1, 1, 0)",
+          "INSERT INTO " + NS + ".impw VALUES (2, 1, 0)");
+    }
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      admin.importTable(N(NS), N("impw"), DECOUPLED, Map.of());
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t ->
+                      t.namespace().equals(N(NS))
+                          && (t.table().equals(N("tod")) || t.table().equals(N("impw"))),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .hasSize(2)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+      ORA.execute(v, "INSERT INTO " + NS + ".impw VALUES (3, 1, 0)");
+    }
+    // a catalog of its own, read after the tables were created (the driver shares one per TTL)
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59002");
+    Properties waits = new Properties();
+    waits.putAll(ttl);
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "10000");
+    String delivery = "UPDATE " + NS + ".tod SET x = ? WHERE w = 1 AND o = ?";
+    String count = "SELECT COUNT(*) FROM " + NS + ".tod WHERE o = %d AND x = '%s'";
+    String stamped = "SELECT COUNT(*) FROM " + meta + " WHERE o = %d AND \"tx_version\" = 2";
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection d = ORA.openDriver(ttl);
+        Connection waiting = ORA.openDriver(waits);
+        Connection v = ORA.open();
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(false);
+      Counter rt = new Counter(d);
+      // a row of another order in flight: the statement goes through
+      TwoPhaseCommitTransaction elsewhere = preparedLine(tpc, "tod", 8, 0, "p");
+      long one;
+      try (PreparedStatement ps = d.prepareStatement(delivery)) {
+        ps.setString(1, "b");
+        ps.setInt(2, 6);
+        assertThat(ps.executeUpdate()).isEqualTo(10); // the text's first parse, unmeasured
+        one =
+            rt.measure(
+                () -> {
+                  ps.setString(1, "b");
+                  ps.setInt(2, 7);
+                  assertThat(ps.executeUpdate()).isEqualTo(10);
+                });
+      }
+      d.commit();
+      log("form 3 (decoupled): Delivery's UPDATE at READ COMMITTED, " + one + " round trip(s)");
+      assertThat(one).isEqualTo(1);
+      assertThat(rows(d, String.format(count, 7, "b"))).containsExactly("10");
+      d.commit();
+      assertThat(rows(v, String.format(stamped, 7))).containsExactly("10");
+      assertThat(scalarDbLine("tod", 7, 3)).isEqualTo("b");
+      // a row of the order in flight: the CAS short, the block of steps, an abort without a wait
+      TwoPhaseCommitTransaction held = preparedLine(tpc, "tod", 9, 3, "p");
+      assertAborts(
+          d, "UPDATE " + NS + ".tod SET x = 'c' WHERE w = 1 AND o = 9", "a row of the order");
+      d.rollback();
+      // with one: the wait, then the write of the whole order once the row settles
+      waiting.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      waiting.setAutoCommit(false);
+      Future<Integer> write =
+          pool.submit(
+              () -> update(waiting, "UPDATE " + NS + ".tod SET x = 'd' WHERE w = 1 AND o = 9"));
+      Thread.sleep(700);
+      assertThat(write.isDone()).as("waits on the row in flight").isFalse();
+      held.rollback();
+      assertThat(write.get(20, TimeUnit.SECONDS)).isEqualTo(10);
+      waiting.commit();
+      assertThat(rows(d, String.format(count, 9, "d"))).containsExactly("10");
+      d.commit();
+      // a row in flight by its before image alone: the look after the DML finds it
+      TwoPhaseCommitTransaction before = preparedLine(tpc, "tod", 10, 3, "p");
+      assertAborts(
+          d,
+          "UPDATE " + NS + ".tod SET x = 'e' WHERE w = 1 AND o = 10 AND x = 'a'",
+          "a row in flight by its before image");
+      d.rollback();
+      before.rollback();
+      assertThat(rows(d, String.format(count, 10, "a"))).containsExactly("10");
+      d.commit();
+      // a created table's DELETE beyond the key: the data rows and their metadata rows
+      long deleted;
+      try (PreparedStatement ps =
+          d.prepareStatement("DELETE FROM " + NS + ".tod WHERE w = 1 AND o = ?")) {
+        ps.setInt(1, 12);
+        assertThat(ps.executeUpdate()).isEqualTo(10); // the text's first parse, unmeasured
+        deleted =
+            rt.measure(
+                () -> {
+                  ps.setInt(1, 11);
+                  assertThat(ps.executeUpdate()).isEqualTo(10);
+                });
+      }
+      d.commit();
+      log("form 3 (decoupled): a DELETE beyond the key " + deleted + " round trip(s)");
+      assertThat(deleted).isEqualTo(1);
+      assertThat(rows(v, "SELECT COUNT(*) FROM " + meta + " WHERE o = 11")).containsExactly("0");
+      // at SNAPSHOT, a row of another order in flight: the gated block, which writes nothing, the
+      // coarse check finding the gate closed, then the statement first
+      d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      long snapshot;
+      try (PreparedStatement ps = d.prepareStatement(delivery)) {
+        ps.setString(1, "h");
+        ps.setInt(2, 13);
+        assertThat(ps.executeUpdate()).isEqualTo(10); // the texts' first parses, unmeasured
+        d.commit();
+        snapshot =
+            rt.measure(
+                () -> {
+                  ps.setString(1, "h");
+                  ps.setInt(2, 14);
+                  assertThat(ps.executeUpdate()).isEqualTo(10);
+                });
+      }
+      d.commit();
+      elsewhere.rollback();
+      log("form 3 (decoupled): Delivery's UPDATE at SNAPSHOT, " + snapshot + " round trip(s)");
+      assertThat(snapshot).isEqualTo(3);
+      assertThat(rows(v, String.format(stamped, 14))).containsExactly("10");
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      // an imported table's row without a metadata row: the CAS short, the steps stamp it
+      assertThat(update(d, "UPDATE " + NS + ".impw SET x = 1 WHERE g = 1")).isEqualTo(3);
+      d.commit();
+      assertThat(
+              rows(
+                  v,
+                  "SELECT COUNT(*) FROM "
+                      + NS
+                      + ".\""
+                      + Objects.requireNonNull(tableInfo("impw").metadataTable())
+                      + "\" WHERE \"tx_state\" = 3"))
+          .containsExactly("3");
+      // the gets a call: the block, its nested statements, against the vendor's, counted over 50
+      // calls after 10, which the parses' gets are not among
+      String[] patterns = {
+        "DECLARE%scalardb_native_g1_%TOD%",
+        "SELECT /*+ scalardb_native_g1_%",
+        "UPDATE /*+ scalardb_native_g2_%",
+        "UPDATE /*+ scalardb_native_g3_%",
+        "SELECT /*+ scalardb_native_g4_%",
+        "%vtod%"
+      };
+      long[][] at = new long[6][];
+      try (PreparedStatement ps = d.prepareStatement(delivery)) {
+        for (int o = 100; o < 160; o++) {
+          if (o == 110) {
+            for (int i = 0; i < 5; i++) {
+              at[i] = gets(v, patterns[i]);
+            }
+          }
+          ps.setString(1, "f");
+          ps.setInt(2, o);
+          assertThat(ps.executeUpdate()).isEqualTo(10);
+        }
+      }
+      d.commit();
+      v.setAutoCommit(false);
+      try (PreparedStatement ps =
+          v.prepareStatement("UPDATE /* vtod */ " + data + " SET x = ? WHERE w = 1 AND o = ?")) {
+        for (int o = 160; o < 220; o++) {
+          if (o == 170) {
+            at[5] = gets(v, patterns[5]);
+          }
+          ps.setString(1, "g");
+          ps.setInt(2, o);
+          assertThat(ps.executeUpdate()).isEqualTo(10);
+        }
+      }
+      v.rollback();
+      v.setAutoCommit(true);
+      double[] perCall = new double[6];
+      long[][] now = new long[6][];
+      for (int i = 0; i < 6; i++) {
+        now[i] = gets(v, patterns[i]);
+        assertThat(now[i][1] - at[i][1]).as(patterns[i]).isEqualTo(50);
+        perCall[i] = (now[i][0] - at[i][0]) / 50.0;
+      }
+      log("form 3 (decoupled): " + times(at[0], now[0], at[5], now[5]));
+      log(
+          String.format(
+              "form 3 (decoupled): gets a call, the block %.1f, its lock %.1f, DML %.1f, CAS %.1f"
+                  + " and look for rows in flight %.1f, the vendor's UPDATE %.1f",
+              perCall[0], perCall[1], perCall[2], perCall[3], perCall[4], perCall[5]));
+      // the block of the keys read, the DML by key and the CAS costs 73 here, the CAS 36
+      assertThat(perCall[0]).isLessThan(65);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /** A line of an order table prepared by a ScalarDB transaction with its x, left in flight. */
+  private static TwoPhaseCommitTransaction preparedLine(
+      TwoPhaseCommitTransactionManager tpc, String table, int o, int line, String x)
+      throws Exception {
+    TwoPhaseCommitTransaction tx = tpc.begin();
+    tx.update(
+        Update.newBuilder()
+            .namespace(N(NS))
+            .table(N(table))
+            .partitionKey(ScalarDbNames.key("w", 1))
+            .clusteringKey(
+                com.scalar.db.io.Key.newBuilder()
+                    .addBigInt(N("o"), o)
+                    .addBigInt(N("n"), line)
+                    .build())
+            .textValue(N("x"), x)
+            .build());
+    tx.prepare();
+    return tx;
+  }
+
+  private static @Nullable String scalarDbLine(String table, int o, int line) throws Exception {
+    try (DistributedTransactionManager tm = factory.getTransactionManager()) {
+      DistributedTransaction tx = tm.begin();
+      String x =
+          tx.get(
+                  com.scalar.db.api.Get.newBuilder()
+                      .namespace(N(NS))
+                      .table(N(table))
+                      .partitionKey(ScalarDbNames.key("w", 1))
+                      .clusteringKey(
+                          com.scalar.db.io.Key.newBuilder()
+                              .addBigInt(N("o"), o)
+                              .addBigInt(N("n"), line)
+                              .build())
+                      .build())
+              .map(r -> r.getText(N("x")))
+              .orElse(null);
+      tx.commit();
+      return x;
+    }
+  }
+
+  /**
+   * Buffer gets, executions, elapsed and CPU time (µs) of the statements whose text is LIKE {@code
+   * pattern}.
+   */
+  private static long[] gets(Connection v, String pattern) throws SQLException {
+    try (PreparedStatement ps =
+        v.prepareStatement(
+            "SELECT NVL(SUM(buffer_gets), 0), NVL(SUM(executions), 0), NVL(SUM(elapsed_time), 0),"
+                + " NVL(SUM(cpu_time), 0) FROM v$sql WHERE sql_text LIKE ? AND sql_text NOT LIKE"
+                + " '%v$sql%'")) {
+      ps.setString(1, pattern);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return new long[] {rs.getLong(1), rs.getLong(2), rs.getLong(3), rs.getLong(4)};
+      }
+    }
+  }
+
+  /** The block's and the vendor's elapsed and CPU time a call over the window, in µs. */
+  private static String times(long[] blockAt, long[] blockNow, long[] vendorAt, long[] vendorNow) {
+    return String.format(
+        "the block %.0f µs elapsed, %.0f µs CPU a call, the vendor's UPDATE %.0f and %.0f",
+        (blockNow[2] - blockAt[2]) / 50.0,
+        (blockNow[3] - blockAt[3]) / 50.0,
+        (vendorNow[2] - vendorAt[2]) / 50.0,
+        (vendorNow[3] - vendorAt[3]) / 50.0);
+  }
+
+  /**
    * Form 3 (design 4.3, "The write beyond the key on Oracle"): a write whose predicate is not the
    * key runs as one block over the predicate's keys, two round trips, on both layouts, when the
    * transaction recorded no anchor of the table; a key another connection moves under the block's

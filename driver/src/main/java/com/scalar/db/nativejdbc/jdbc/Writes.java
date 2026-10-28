@@ -897,6 +897,20 @@ final class Writes {
             ? oraclePredicateBlock(
                 n, ast, t, exposed, span, inWhere, all, delete, imported, snapshot, from, end)
             : null;
+    // the write beyond the key as the statement first, the block on a row in flight or a CAS
+    // short: at READ COMMITTED on an inline table, whose SNAPSHOT form is the gated statement, and
+    // at both levels on a decoupled one (design 4.3 "The write beyond the key as the statement
+    // first")
+    Step predicateFirst =
+        predicateBlock == null
+            ? null
+            : t.layout() == Layout.INLINE
+                ? snapshot
+                    ? null
+                    : oraclePredicateFirstInline(
+                        n, ast, t, exposed, span, inWhere, all, delete, from, end)
+                : oraclePredicateFirstDecoupled(
+                    n, ast, t, exposed, span, inWhere, all, delete, imported, from, end);
     Step fast = plain ? fastKeyed(n, ast, t, span, all, delete, imported, from, end, true) : null;
     Step fastClear =
         fast == null ? null : fastKeyed(n, ast, t, span, all, delete, imported, from, end, false);
@@ -956,6 +970,7 @@ final class Writes {
         fastMergeClear,
         block,
         predicateBlock,
+        predicateFirst,
         entries,
         clearRc,
         clearMergeRc,
@@ -1367,6 +1382,255 @@ final class Writes {
         Set.of(),
         0,
         Collections.nCopies(8, Types.NUMERIC),
+        false);
+  }
+
+  /**
+   * The statement-first forms' lock of the rows the predicate matches, without waiting (design 4.3
+   * "The write beyond the key as the statement first", todo 334): once the block holds them, the
+   * DML cannot meet a row another transaction changes and commits while it waits, which Oracle
+   * would write at its new version; a row locked by another transaction sets {@code l_held}, for
+   * the block of steps, which waits and holds to the versions it reads. Run after the savepoint,
+   * whose rollback releases what it locked.
+   */
+  private static String lockFirst(Names n, String exposed, String where) {
+    return " BEGIN SELECT 1 BULK COLLECT INTO l_x FROM "
+        + n.data
+        + " "
+        + exposed
+        + where
+        + " FOR UPDATE NOWAIT; EXCEPTION WHEN OTHERS THEN IF SQLCODE IN (-54, -30006) THEN"
+        + " l_held := 1; ELSE RAISE; END IF; END;";
+  }
+
+  /**
+   * The write beyond the key at READ COMMITTED on an inline table on Oracle as the statement first
+   * (design 4.3 "The write beyond the key as the statement first", todo 334): under a savepoint the
+   * rows the predicate matches locked without waiting ({@link #lockFirst}), then the user's DML as
+   * written, an UPDATE with the stamp in its SET list and the row's own state folded into the
+   * version, -1 for a row in flight whose after image the predicate matches, the versions returned,
+   * a DELETE returning the states; then the rows in flight whose before image the predicate
+   * matches, through the in-flight index, which the DML evaluated on their after images, looked for
+   * after it so that a row gone in flight between the two is found too. Any row in flight, marked
+   * or found, rolls back to the savepoint, and the block above takes the write. Two counts back,
+   * {@code written, held}. The binds: the stamp; the predicate's placeholders in the lock; the
+   * DML's; the predicate's in the look for rows in flight. Null when the text cannot be rewritten.
+   */
+  private static @Nullable Step oraclePredicateFirstInline(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int @Nullable [] span,
+      List<Integer> inWhere,
+      List<Integer> all,
+      boolean delete,
+      int from,
+      int end) {
+    Engine engine = n.engine;
+    String source = ast.source();
+    String x = exposed;
+    String where = span == null ? "" : " WHERE " + source.substring(span[0], span[1]);
+    String text;
+    String returned;
+    if (delete) {
+      text = source.substring(0, end);
+      returned = n.txState;
+    } else {
+      int set = ast.afterFirst("SET");
+      if (set < 0 || (span != null && set > span[0]) || set > from) {
+        return null;
+      }
+      String stamp =
+          n.txId
+              + " = l_i, "
+              + n.preparedAt
+              + " = l_p, "
+              + n.committedAt
+              + " = l_c, "
+              + n.txState
+              + " = 3, "
+              + n.txVersion
+              + " = CASE WHEN COALESCE("
+              + x
+              + "."
+              + n.txState
+              + ", 3) NOT IN (1, 2) THEN CASE WHEN "
+              + x
+              + "."
+              + n.txId
+              + " IS NULL THEN 1 ELSE COALESCE("
+              + x
+              + "."
+              + n.txVersion
+              + ", 0) + 1 END ELSE -1 END";
+      text = source.substring(0, set) + " " + stamp + "," + source.substring(set, end);
+      returned = n.txVersion;
+    }
+    String dml = onDataTable(engine, ast, t, true, text, from);
+    if (dml == null) {
+      return null;
+    }
+    String metaTable = n.data;
+    String held = delete ? " IF l_v(i) IN (1, 2) THEN" : " IF l_v(i) = -1 THEN";
+    String b =
+        "DECLARE l_i "
+            + metaTable
+            + "."
+            + n.txId
+            + "%TYPE; l_p "
+            + metaTable
+            + "."
+            + n.preparedAt
+            + "%TYPE; l_c "
+            + metaTable
+            + "."
+            + n.committedAt
+            + "%TYPE; TYPE t_n IS TABLE OF NUMBER; l_v t_n; l_x t_n; l_written NUMBER := 0;"
+            + " l_held NUMBER := 0; BEGIN l_i := ?; l_p := ?; l_c := ?;"
+            + " SAVEPOINT scalardb_native_f;"
+            + lockFirst(n, x, where)
+            + " IF l_held = 0 THEN "
+            + dml
+            + " RETURNING "
+            + x
+            + "."
+            + returned
+            + " BULK COLLECT INTO l_v; l_written := SQL%ROWCOUNT; FOR i IN 1 .. l_v.COUNT LOOP"
+            + held
+            + " l_held := l_held + 1; END IF; END LOOP;"
+            + " SELECT l_held + COUNT(*) INTO l_held FROM dual WHERE EXISTS (SELECT 1 FROM "
+            + SplitRead.inFlight(engine, t, t.dataColumns(), true)
+            + " "
+            + x
+            + where
+            + "); END IF; IF l_held > 0 THEN ROLLBACK TO scalardb_native_f; l_written := 0;"
+            + " END IF; ? := l_written; ? := l_held; END;";
+    List<Integer> binds = new ArrayList<>(inWhere);
+    binds.addAll(all);
+    binds.addAll(inWhere);
+    return new Step(
+        hinted(b, "f"), binds, Set.of(), 0, List.of(Types.NUMERIC, Types.NUMERIC), false);
+  }
+
+  /**
+   * The write beyond the key on a decoupled table on Oracle as the statement first (design 4.3 "The
+   * write beyond the key as the statement first", todo 334): under a savepoint the rows the
+   * predicate matches locked without waiting ({@link #lockFirst}), then the user's DML as written,
+   * the keys it wrote returned, and the CAS of step 3 over them by {@code FORALL}, under the
+   * committed state, a created table's DELETE removing the metadata rows, the stamp's UPDATE
+   * otherwise; then, as on an inline table, the rows in flight whose before image the predicate
+   * matches, which the DML evaluated on their after images. A CAS short of the DML's count, a row
+   * in flight or one without a metadata row, or a row found in flight, rolls back to the savepoint,
+   * and the block above takes the write, as does a row locked by another transaction. Two counts
+   * back, {@code written, held}. The binds: the stamp; the predicate's placeholders in the lock;
+   * the DML's; the predicate's in the look for rows in flight. Null when the text cannot be
+   * rewritten.
+   */
+  private static @Nullable Step oraclePredicateFirstDecoupled(
+      Names n,
+      SqlAst ast,
+      TableInfo t,
+      String exposed,
+      int @Nullable [] span,
+      List<Integer> inWhere,
+      List<Integer> all,
+      boolean delete,
+      boolean imported,
+      int from,
+      int end) {
+    Engine engine = n.engine;
+    String source = ast.source();
+    String where = span == null ? "" : " WHERE " + source.substring(span[0], span[1]);
+    String dml = onDataTable(engine, ast, t, true, source.substring(0, end), from);
+    if (dml == null) {
+      return null;
+    }
+    StringBuilder b =
+        new StringBuilder("DECLARE l_i ")
+            .append(n.meta)
+            .append(".")
+            .append(n.txId)
+            .append("%TYPE; l_p ")
+            .append(n.meta)
+            .append(".")
+            .append(n.preparedAt)
+            .append("%TYPE; l_c ")
+            .append(n.meta)
+            .append(".")
+            .append(n.committedAt)
+            .append("%TYPE;");
+    List<String> returned = new ArrayList<>();
+    List<String> into = new ArrayList<>();
+    List<String> byKey = new ArrayList<>();
+    for (int i = 0; i < n.keyColumns.size(); i++) {
+      String k = engine.quote(n.keyColumns.get(i));
+      b.append(" TYPE t_w")
+          .append(i)
+          .append(" IS TABLE OF ")
+          .append(n.data)
+          .append(".")
+          .append(k)
+          .append("%TYPE; l_w")
+          .append(i)
+          .append(" t_w")
+          .append(i)
+          .append(";");
+      returned.add(exposed + "." + k);
+      into.add("l_w" + i);
+      byKey.add(k + " = l_w" + i + "(i)");
+    }
+    String metaCas = String.join(" AND ", byKey) + " AND COALESCE(" + n.txState + ", 3) = 3";
+    b.append(" TYPE t_n IS TABLE OF NUMBER; l_x t_n; l_written NUMBER := 0; l_stamped NUMBER := 0;")
+        .append(" l_held NUMBER := 0; BEGIN l_i := ?; l_p := ?; l_c := ?;")
+        .append(" SAVEPOINT scalardb_native_f;")
+        .append(lockFirst(n, exposed, where))
+        .append(" IF l_held = 0 THEN ")
+        .append(dml)
+        .append(" RETURNING ")
+        .append(String.join(", ", returned))
+        .append(" BULK COLLECT INTO ")
+        .append(String.join(", ", into))
+        .append("; l_written := SQL%ROWCOUNT; IF l_written > 0 THEN FORALL i IN 1 .. l_written ")
+        .append(
+            delete && !imported
+                ? "DELETE FROM " + n.meta + " WHERE " + metaCas
+                : "UPDATE "
+                    + n.meta
+                    + " SET "
+                    + n.txId
+                    + " = l_i, "
+                    + n.preparedAt
+                    + " = l_p, "
+                    + n.committedAt
+                    + " = l_c, "
+                    + n.txState
+                    + " = 3, "
+                    + n.txVersion
+                    + " = CASE WHEN "
+                    + n.txId
+                    + " IS NULL THEN 1 ELSE COALESCE("
+                    + n.txVersion
+                    + ", 0) + 1 END WHERE "
+                    + metaCas)
+        .append("; l_stamped := SQL%ROWCOUNT; END IF;")
+        .append(" SELECT COUNT(*) INTO l_held FROM dual WHERE EXISTS (SELECT 1 FROM ")
+        .append(SplitRead.inFlight(engine, t, t.dataColumns(), true))
+        .append(" ")
+        .append(exposed)
+        .append(where)
+        .append("); END IF; IF l_held > 0 OR l_stamped < l_written THEN ROLLBACK TO")
+        .append(" scalardb_native_f; l_held := 1; l_written := 0; END IF; ? := l_written;")
+        .append(" ? := l_held; END;");
+    List<Integer> binds = new ArrayList<>(inWhere);
+    binds.addAll(all);
+    binds.addAll(inWhere);
+    return new Step(
+        hinted(b.toString(), "g"),
+        binds,
+        Set.of(),
+        0,
+        List.of(Types.NUMERIC, Types.NUMERIC),
         false);
   }
 
@@ -7034,6 +7298,9 @@ final class Writes {
     // from, and the write beyond the key as the same block over the predicate's keys (todo 334)
     final @Nullable Block block;
     final @Nullable Step predicateBlock;
+    // the write beyond the key as the statement first, the predicate block on a row in flight or
+    // a CAS short (todo 334)
+    final @Nullable Step predicateFirst;
     // the keyed block over a batch's entries (design 4.4, todo 334)
     final @Nullable Entries entries;
     // at READ COMMITTED on PostgreSQL on a decoupled table, without a wait: the clear-table
@@ -7072,6 +7339,7 @@ final class Writes {
         @Nullable Merge fastMergeClear,
         @Nullable Block block,
         @Nullable Step predicateBlock,
+        @Nullable Step predicateFirst,
         @Nullable Entries entries,
         @Nullable Step clearRc,
         @Nullable Merge clearMergeRc,
@@ -7094,6 +7362,7 @@ final class Writes {
       this.predicateRc = predicateRc;
       this.block = block;
       this.predicateBlock = predicateBlock;
+      this.predicateFirst = predicateFirst;
       this.entries = entries;
       this.delete = delete;
       this.imported = imported;
@@ -7130,6 +7399,7 @@ final class Writes {
               block == null
                   ? null
                   : block.step(block.keyTypes == null ? Variant.CURSOR : Variant.OUT),
+              predicateFirst,
               predicateBlock)) {
         if (s != null) {
           out.add(s.sql);
@@ -7177,6 +7447,12 @@ final class Writes {
       }
       if (rcFirst != null) {
         Long written = applyRcFirst(run, rcFirst);
+        if (written != null) {
+          return written;
+        }
+      }
+      if (predicateFirst != null && !run.context.anchors().recorded(n.table)) {
+        Long written = applyPredicateFirst(run, predicateFirst);
         if (written != null) {
           return written;
         }
@@ -7806,6 +8082,29 @@ final class Writes {
         }
         return written;
       }
+    }
+
+    /**
+     * {@link #oraclePredicateFirstInline}'s or {@link #oraclePredicateFirstDecoupled}'s block: the
+     * rows written, recorded; null where a row in flight matched or a CAS fell short, the block's
+     * savepoint undoing the DML, for the predicate block to tell the row's outcome: the wait or the
+     * abort, or a key without a metadata row, which the steps stamp.
+     */
+    private @Nullable Long applyPredicateFirst(Run run, Step step) throws SQLException {
+      long written;
+      long held;
+      try (CallableStatement cs = run.call(step)) {
+        cs.execute();
+        written = cs.getLong(step.outAt());
+        held = cs.getLong(step.outAt() + 1);
+      }
+      if (held > 0) {
+        return null;
+      }
+      if (written > 0) {
+        run.context.anchors().wrote(run.txId);
+      }
+      return written;
     }
 
     /**

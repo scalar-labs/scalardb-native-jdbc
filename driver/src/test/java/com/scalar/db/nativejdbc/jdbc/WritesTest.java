@@ -901,7 +901,7 @@ class WritesTest {
             " SELECT COUNT(*) INTO l_after FROM dual WHERE EXISTS (SELECT 1 FROM (SELECT /*+"
                 + " INDEX(m ");
     String index = Engine.ORACLE.quote(Engine.ORACLE.inflightIndexName("t"));
-    assertThat(snapshot.get(snapshot.size() - 3))
+    assertThat(snapshot.get(snapshot.size() - 4))
         .isEqualTo(
             "DECLARE l_i \"ns\".\"t_meta\".\"tx_id\"%TYPE; l_p \"ns\".\"t_meta\".\"tx_prepared_at\"%TYPE;"
                 + " l_c \"ns\".\"t_meta\".\"tx_committed_at\"%TYPE; TYPE t_w0 IS TABLE OF"
@@ -919,12 +919,12 @@ class WritesTest {
     // a created table's DELETE removes the metadata rows; an imported table's stamp is a MERGE
     // per key, which writes the row a key had none of yet
     List<String> createdDelete = oracle(created(), "DELETE FROM t WHERE x = ?", true);
-    assertThat(createdDelete.get(createdDelete.size() - 3))
+    assertThat(createdDelete.get(createdDelete.size() - 4))
         .contains(
             "FORALL i IN 1 .. l_w0.COUNT DELETE FROM \"ns\".\"t_meta\" WHERE \"id\" = l_w0(i)"
                 + " AND COALESCE(\"tx_state\", 3) = 3;");
     List<String> importedDelete = oracle(table(), "DELETE FROM t WHERE x = ?", true);
-    assertThat(importedDelete.get(importedDelete.size() - 3))
+    assertThat(importedDelete.get(importedDelete.size() - 4))
         .contains(
             "FORALL i IN 1 .. l_w0.COUNT MERGE INTO \"ns\".\"t_meta\" m USING (SELECT l_w0(i)"
                 + " AS \"id\" FROM dual) s ON (m.\"id\" = s.\"id\") WHEN MATCHED THEN UPDATE SET m.\"tx_id\""
@@ -933,11 +933,49 @@ class WritesTest {
                 + " 0) + 1 END WHERE COALESCE(m.\"tx_state\", 3) = 3 WHEN NOT MATCHED THEN INSERT (\"id\","
                 + " \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\", \"tx_committed_at\") VALUES"
                 + " (s.\"id\", l_i, 3, 1, l_p, l_c); l_stamped := SQL%ROWCOUNT;");
+    // ahead of the block, the statement first (design 4.3 "The write beyond the key as the
+    // statement first"): under a savepoint the predicate's rows locked without waiting, the DML as
+    // written returning its keys, the CAS over them, the look for rows in flight by their before
+    // image; at both levels on a decoupled table
+    for (List<String> plan : List.of(update, snapshot)) {
+      assertThat(plan.get(plan.size() - 2))
+          .contains(
+              " BEGIN l_i := ?; l_p := ?; l_c := ?; SAVEPOINT scalardb_native_f; BEGIN SELECT 1"
+                  + " BULK COLLECT INTO l_x FROM \"ns\".\"t_data\" t WHERE x = ? FOR UPDATE NOWAIT;"
+                  + " EXCEPTION WHEN OTHERS THEN IF SQLCODE IN (-54, -30006) THEN l_held := 1; ELSE"
+                  + " RAISE; END IF; END; IF l_held = 0 THEN UPDATE \"ns\".\"t_data\" t SET x = ?"
+                  + " WHERE x = ?")
+          .contains(
+              " RETURNING t.\"id\" BULK COLLECT INTO l_w0; l_written := SQL%ROWCOUNT; IF l_written"
+                  + " > 0 THEN FORALL i IN 1 .. l_written UPDATE \"ns\".\"t_meta\" SET \"tx_id\" ="
+                  + " l_i,")
+          .contains(
+              "WHERE \"id\" = l_w0(i) AND COALESCE(\"tx_state\", 3) = 3; l_stamped :="
+                  + " SQL%ROWCOUNT; END IF; SELECT COUNT(*) INTO l_held FROM dual WHERE EXISTS"
+                  + " (SELECT 1 FROM (SELECT /*+ INDEX(m ")
+          .endsWith(
+              " END IF; IF l_held > 0 OR l_stamped < l_written THEN ROLLBACK TO"
+                  + " scalardb_native_f; l_held := 1; l_written := 0; END IF; ? := l_written; ? :="
+                  + " l_held; END;");
+    }
+    assertThat(createdDelete.get(createdDelete.size() - 2))
+        .contains(
+            "FORALL i IN 1 .. l_written DELETE FROM \"ns\".\"t_meta\" WHERE \"id\" = l_w0(i)"
+                + " AND COALESCE(\"tx_state\", 3) = 3;");
     // the inline layout: the committed rows and the before images in flight as the keys read, the
     // UPDATE with the CAS folded into the version it writes (-1 where the row moved), returning
     // the versions; the DELETE with its CAS in its WHERE clause and the predicate re-read on a
     // skipped row
     List<String> inlineUpdate = oracle(inline(), "UPDATE t SET x = ? WHERE x = ?", false);
+    // at READ COMMITTED ahead of it, the statement first: the lock, the DML with the stamp and the
+    // row's own state folded into the version, -1 for a row in flight, the look after it
+    assertThat(inlineUpdate.get(inlineUpdate.size() - 2))
+        .contains(" SAVEPOINT scalardb_native_f; BEGIN SELECT 1 BULK COLLECT INTO l_x FROM")
+        .contains(
+            " \"tx_version\" = CASE WHEN COALESCE(t.\"tx_state\", 3) NOT IN (1, 2) THEN CASE WHEN"
+                + " t.\"tx_id\" IS NULL THEN 1 ELSE COALESCE(t.\"tx_version\", 0) + 1 END ELSE -1 END,"
+                + " x = ? WHERE x = ? RETURNING t.\"tx_version\" BULK COLLECT INTO l_v;")
+        .contains(" IF l_v(i) = -1 THEN l_held := l_held + 1; END IF; END LOOP;");
     assertThat(inlineUpdate.get(inlineUpdate.size() - 1))
         .contains("UNION ALL SELECT t.\"id\", NULL, NULL, 1 FROM (SELECT /*+ INDEX(m ")
         .contains(
