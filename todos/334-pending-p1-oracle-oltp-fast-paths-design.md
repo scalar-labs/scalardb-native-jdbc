@@ -2834,3 +2834,35 @@ near the container's 8 and 30. The test covers the list: a composite-key inline 
 set up, the row in flight, 300 reads each in its own transaction under 15 gets, the plan's two
 gates, the column's three values, the decoupled text unchanged. Mergeable; landing as before; the
 proof the SNAPSHOT inline OrderStatus line, from +75% toward +30%.
+
+### 2026-10-28: D3 reviewed mergeable: 53fc25f on oracle-write-beyond-first (the design's note)
+
+Reviewed from `git show 53fc25f` (on 5c39f67). The two blocks are the design's with its two
+corrections: the savepoint, the lock `SELECT 1 BULK COLLECT INTO l_x FROM <data> x WHERE <pred> FOR
+UPDATE NOWAIT` with ORA-00054 and ORA-30006 caught into `l_held`, the DML as written, inline with
+the stamp spliced after its SET and the own state folded into the version (`-1` for a row in flight,
+the versions returned; a DELETE as written returning the states, 1 or 2 held), decoupled returning
+the keys and step 3's FORALL CAS over them under the committed state (a created table's DELETE
+removing the metadata rows, an imported table's stamped), then the look for rows in flight by their
+before image through the hinted in-flight copy over the predicate, after the DML; `l_held` or a CAS
+short rolls back to the savepoint, which releases the locks, and returns `written, held`.
+`applyPredicateFirst` takes the block only when the transaction recorded no anchor of the table,
+returns the count, 0 included, when nothing was held, and hands a held write to the predicate block,
+whose steps tell a row locked by another transaction (the wait on its lock and the version rule), a
+row in flight (the wait or the abort) and a key without a metadata row (the MERGE) apart, as the
+design says. The binds follow the text, the stamp first, the predicate's in the lock, the DML's, the
+predicate's in the look. The plan holds the step only at READ COMMITTED on an inline table, whose
+SNAPSHOT form is the gated statement, and at both levels on a decoupled one, after the gated
+clear-table block and the coarse check at SNAPSHOT, so a table not yet clear keeps today's three
+round trips and a clear one takes one. The one changed expectation is right and now in 4.3: at READ
+COMMITTED a prepare rolled back while the write waits leaves the row at the version the statement
+then reads and the write writes it, as PostgreSQL's one statement does (todo 328), where the block
+of steps had read the prepared version first and aborted; todo 292's race keeps its abort through
+the lock. The tests cover the list on both layouts, Delivery's shape in one round trip, a row of
+another order in flight, one of the order aborting or waiting, the before-image match found by the
+look, the DELETE, the SNAPSHOT decoupled sequence, the imported row without metadata through the
+steps, and the gets against the vendor's. Measured on the container, a call: inline 204 µs and 107
+µs of CPU against the block's 306 and 178 (29.4 gets against 43.0, the lock's current-mode get per
+row the price of todo 292); decoupled 299 and 166 against 734 and 562 (55.4 against 72.7, the CAS's
+36 unchanged). Mergeable; landing as before; the proof Delivery at READ COMMITTED, about 3.5 ms a
+transaction inline and 2.6 decoupled.
