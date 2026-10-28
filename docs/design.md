@@ -642,32 +642,35 @@ index skip scans, 112 gets for a ten-row read on Oracle (todo 334's log, 2026-10
 metadata table's primary key order differs from the data table's, the setup also builds an index on
 the metadata table over the key columns in the data order, `T_key`, named and folded as the others,
 maintained on inserts and deletes only since a stamp changes no key column; teardown drops it, and
-an in-flight index found in another column order counts as not set up and is rebuilt; on an imported
-table the backfill, which stamps `tx_id = 'scalardb-native-backfill'`; then the view, with `CREATE
-OR REPLACE` (`CREATE OR ALTER` on SQL Server); then, on Oracle and MySQL, a histogram on the
-metadata table's `tx_state`, without which both estimate `tx_state IN (1, 2)` as most of the table
-and scan it (Oracle 22x, MySQL 12-69x on the split read); on PostgreSQL an `ANALYZE` of the metadata
-table the backfill has just filled, since until autoanalyze reaches it, about a minute, the planner
-estimates `tx_state IN (1, 2)` by defaults, under which a probe of the whole in-flight index spelled
-without its order is a sequential scan of the table (4.2, todo 337: 13 ms a probe on 200,000 rows
-against 0.05 through the index). On MySQL it is gathered (`ANALYZE TABLE ... UPDATE HISTOGRAM ON
-tx_state`), and MySQL never regathers it by itself. On Oracle it is set, not gathered: a frequency
-histogram assuming 10,000 rows in flight (at most half the table), with the table's statistics then
-locked so that the nightly job does not replace it; one gathered while nothing is in flight cost up
-to 1654x when a burst followed (todo 094). The same gather takes every column's basic statistics
-first (`FOR ALL COLUMNS SIZE REPEAT`, which keeps an inline table's own histograms): a key column
-without them makes every hard parse of a keyed statement sample the table through the in-flight
-index, 0.3 s a text at 3.2M rows (todo 334). An inline table's statistics are the application's, so
-they are set there but not locked. Teardown unlocks the others and deletes the histogram on both. On
-SQL Server the metadata table's statistics are left to the automatic updates: refreshed while
-ScalarDB writes, they estimate a few rows in flight, and a plan compiled then would scan the
-in-flight index once per row of a read, through the ghost records its churn leaves; the plans a read
-compiles while rows are in flight seek the index by a hint instead (the split read below). Keeping
-the statistics as the setup took them (`NORECOMPUTE`) did no better beside that hint, and twice in
-four runs left the in-flight check a plan 30-40x slower (`docs/benchmarks/inflight-check.md`). Last
-a grant of `SELECT` on the view to each application user given. The backfill waits only for rows
-ScalarDB has in flight over a deemed-committed row, which carry `before_tx_id` NULL and
-`before_tx_version` 0, never for an in-flight insert.
+an in-flight index found in another column order counts as not set up for the setup and its check,
+which rebuild it, while the catalog, which routes a table by its index's existence, keeps it set up,
+since the old order serves every read, only slower, and a table set up before this rule would
+otherwise refuse reads until its setup ran again; on an imported table the backfill, which stamps
+`tx_id = 'scalardb-native-backfill'`; then the view, with `CREATE OR REPLACE` (`CREATE OR ALTER` on
+SQL Server); then, on Oracle and MySQL, a histogram on the metadata table's `tx_state`, without
+which both estimate `tx_state IN (1, 2)` as most of the table and scan it (Oracle 22x, MySQL 12-69x
+on the split read); on PostgreSQL an `ANALYZE` of the metadata table the backfill has just filled,
+since until autoanalyze reaches it, about a minute, the planner estimates `tx_state IN (1, 2)` by
+defaults, under which a probe of the whole in-flight index spelled without its order is a sequential
+scan of the table (4.2, todo 337: 13 ms a probe on 200,000 rows against 0.05 through the index). On
+MySQL it is gathered (`ANALYZE TABLE ... UPDATE HISTOGRAM ON tx_state`), and MySQL never regathers
+it by itself. On Oracle it is set, not gathered: a frequency histogram assuming 10,000 rows in
+flight (at most half the table), with the table's statistics then locked so that the nightly job
+does not replace it; one gathered while nothing is in flight cost up to 1654x when a burst followed
+(todo 094). The same gather takes every column's basic statistics first (`FOR ALL COLUMNS SIZE
+REPEAT`, which keeps an inline table's own histograms): a key column without them makes every hard
+parse of a keyed statement sample the table through the in-flight index, 0.3 s a text at 3.2M rows
+(todo 334). An inline table's statistics are the application's, so they are set there but not
+locked. Teardown unlocks the others and deletes the histogram on both. On SQL Server the metadata
+table's statistics are left to the automatic updates: refreshed while ScalarDB writes, they estimate
+a few rows in flight, and a plan compiled then would scan the in-flight index once per row of a
+read, through the ghost records its churn leaves; the plans a read compiles while rows are in flight
+seek the index by a hint instead (the split read below). Keeping the statistics as the setup took
+them (`NORECOMPUTE`) did no better beside that hint, and twice in four runs left the in-flight check
+a plan 30-40x slower (`docs/benchmarks/inflight-check.md`). Last a grant of `SELECT` on the view to
+each application user given. The backfill waits only for rows ScalarDB has in flight over a
+deemed-committed row, which carry `before_tx_id` NULL and `before_tx_version` 0, never for an
+in-flight insert.
 
 A table is set up when its index exists and is usable (an invalid index a failed concurrent build left
 does not count) and its view exists with exactly the table's columns, in order. Because the view comes
