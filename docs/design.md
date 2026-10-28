@@ -848,8 +848,11 @@ union as a derived table.
   columns of its own instead of lookups (todo 329): a committed copy of an inline table its row's
   `tx_id` and `tx_version`, the copy kept to the rows whose own state is committed rather than
   probing the in-flight index per row; a decoupled table's by a left join to its metadata row,
-  whose ON clause repeats, for the metadata side, the predicate's conjuncts that compare a key
-  column with a constant or a placeholder, bound again: PostgreSQL forms no equivalence class across
+  whose ON clause repeats, for the metadata side, the conjuncts of the predicate's top-level AND
+  that compare a key column with a placeholder, an integer or a string by =, <, <=, >, >= or
+  BETWEEN, the statement's own tokens with the column read as the metadata table's and each
+  placeholder bound again where it stands, none inside an OR: PostgreSQL forms no equivalence class
+  across
   an outer join's ON clause, so without them the metadata side has no key range and a range read
   probes its metadata row per row, YCSB's scan at twice Oracle's excess, which derives them (todo
   334's log, 2026-10-28); an in-flight copy its before image's. A key read of a decoupled table in a

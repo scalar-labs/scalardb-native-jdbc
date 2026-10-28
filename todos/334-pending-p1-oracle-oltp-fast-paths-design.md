@@ -2549,3 +2549,38 @@ on Oracle the prefix read of the metadata rows an INDEX RANGE SCAN under `INDEX(
 second setup with no index action; an in-flight index put back in the old order, `check` not set up,
 setup "rebuilt", `check` set up; teardown dropping both. Mergeable; landing as A2's; the proof the
 Oracle TPC-C READ COMMITTED decoupled cell's Delivery and StockLevel, with A2 toward 0.65.
+
+### 2026-10-28: (B) item 1 reviewed mergeable: ae811f9 on pg-on-key-range (the design's note)
+
+Reviewed from `git show ae811f9` (on 98f8d47). The mechanism is the one the design's note gave and
+nothing more: `copyEdits` emits the committed copy's derived table as a `Splice` where the copy
+answers `keyRange`, the text to the ON clause's end, then `AND` and a `Run` per key conjunct, then
+the rest; each run is the conjunct's own tokens under `Edits` of its own that read the column,
+however qualified, as `m."k"` raw, so the metadata index applies, and the emitter records each
+placeholder again where it stands, which is the bind order, as `SplitTest` asserts (`1, 2, 4` for
+the ON clause, then the WHERE's `1, 2, 3, 4`, per copy). The semantics are unchanged: the repeated
+conditions sit on the inner side of a left join whose ON clause already has `m.k = t.k`, and the
+WHERE keeps the same range on `t`, so no row joins or drops differently. `keyConjuncts` takes the
+top-level AND's comparisons of a key column of the reference with a placeholder, an integer or a
+string by =, <, <=, >, >= or BETWEEN (not NOT BETWEEN; a BETWEEN's run from its column to its upper
+bound, having no node of its own), the qualifier as `selectsKey` reads it, an unqualified column
+only where the reference is alone in the FROM clause, none for a reference in a subquery, inside an
+OR or in parentheses; `SplitRead` answers `keyRange` on PostgreSQL alone, for the committed piece
+whose check is the `LEFT_JOIN` carrying the copy's own versions on a decoupled table, the check's
+choice shared with `fragment` through `committedCheck`; the per-row `LEFT_JOIN` copy under a limit
+is left to its nested loop, rightly. `canPrepareAgain`'s relaxation is only the repeat: a split read
+prepared again takes any split route, and `replay` binds every stored value through the new route's
+sources at every position that takes it (`bind`), streams refused there as before, `checkIndex`
+bounding by the application's count; the earlier branches still refuse a route that writes or a text
+changed other than by its counts or level, a pending batch, an unwrapped or closed statement. One
+accepted nit: `ParameterMetaData` describes a parameter by the first position that takes it, now the
+ON clause's, so on a PostgreSQL table whose SMALLINT key the metadata keeps as INT (todo 356) the
+described type is the wider one; metadata only. Design 4.2's sentence now spells the conjuncts
+taken. The tests cover the list: the unit test's ON text and sources; the million-row decoupled
+table's range read in a transaction with the routed ON clause `m."id" = t."id" AND m."id" > ? AND
+m."id" < ?`, the generic plan's index scan of the metadata primary key under `(id > $1) AND (id <
+$2)` hash-joined to the data side's range, no sequential scan, 500 rows, failing without the range.
+The Oracle suite's one failure was ScalarDB's `importTable` raising ORA-08177 in the class's setup
+before the driver ran, the class passing alone; the change touches no Oracle text. Mergeable;
+landing as A2's; the proof the PostgreSQL YCSB E scan at READ COMMITTED decoupled, 1.68 ms of
+execution toward 1.0, the cell from 1.81 toward about 1.3.
