@@ -2793,3 +2793,23 @@ at both levels the DML and CAS counts, a row in flight through the slow block's 
 table's DELETE, an imported row without a metadata row stamped by the slow path; `V$SQL` gets a call
 against the vendor's. If D3's decoupled part does not fit before tonight's run, land the inline part
 and send the decoupled one after.
+
+### 2026-10-28: D1 reviewed mergeable: 2c3b91b on oracle-inline-state (the design's note)
+
+Reviewed from `git show 2c3b91b` (on d9c2e14). `Router` puts each inline reference of a SNAPSHOT
+read on Oracle (states without versions) in the own-columns set, so its copies carry the row's
+versions and state through `SplitRead`'s `Versions`, the state as `scalardb_native_v2`, and the
+state column's second branch reads it, `WHEN <x>."scalardb_native_v2" IN (1, 2) THEN 1`, the key-set
+subquery kept where `own` is false, so for decoupled tables and for a `*` the copies cannot spell
+out. The copies stay raw at SNAPSHOT (`emit`'s `raw` is `states`), taken whole with the rows in
+flight and their after images, so the column's meaning is unchanged: 1 for a row in flight by either
+image, NULL for a committed row under a closed gate, 0 on a clear table, which the test reads back
+through the vendor's connection; the versions extras are per reference now (`own.contains(r)`), and
+`emit`'s state flag follows `states`, which changes nothing at READ COMMITTED. The design's spelling
+`WHEN t.tx_state IN (1, 2)` was unreachable from the outer CASE (ORA-00904), and 4.2's sentence now
+says the built one. Measured: 11.1 gets a 10-row read with a row of another order in flight against
+28.2 for main's text, the in-flight index twice in the plan (each copy's gate) against four times,
+near the container's 8 and 30. The test covers the list: a composite-key inline table of 30,000 rows
+set up, the row in flight, 300 reads each in its own transaction under 15 gets, the plan's two
+gates, the column's three values, the decoupled text unchanged. Mergeable; landing as before; the
+proof the SNAPSHOT inline OrderStatus line, from +75% toward +30%.
