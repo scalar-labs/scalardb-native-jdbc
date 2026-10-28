@@ -2535,6 +2535,9 @@ public final class SqlAst {
     final String after;
     final String alias;
     final List<String> keyColumns;
+    // the columns of the statement's other tables, lowercased, which an unqualified column of a
+    // join is not one of to be the reference's; null where they are not all known
+    final @Nullable Set<String> elsewhere;
 
     /**
      * Creates the split.
@@ -2545,10 +2548,31 @@ public final class SqlAst {
      * @param keyColumns the reference's key columns, as the table stores them
      */
     public KeyRange(String before, String after, String alias, List<String> keyColumns) {
+      this(before, after, alias, keyColumns, null);
+    }
+
+    /**
+     * Creates the split, or a gate column's texts around the conjuncts it repeats (todo 334).
+     *
+     * @param before the text up to the conjuncts
+     * @param after the rest of its text
+     * @param alias the alias the conjuncts' column is read as
+     * @param keyColumns the reference's key columns, as the table stores them
+     * @param elsewhere the columns of the statement's other tables, lowercased, or {@code null}
+     *     where they are not all known: an unqualified column of a join is the reference's only
+     *     where no other table has one of its name
+     */
+    public KeyRange(
+        String before,
+        String after,
+        String alias,
+        List<String> keyColumns,
+        @Nullable Set<String> elsewhere) {
       this.before = before;
       this.after = after;
       this.alias = alias;
       this.keyColumns = List.copyOf(keyColumns);
+      this.elsewhere = elsewhere == null ? null : Set.copyOf(elsewhere);
     }
   }
 
@@ -3107,14 +3131,14 @@ public final class SqlAst {
    * another table's. The qualifier as written, as {@link #selectsKey} reads it.
    */
   private static @Nullable String keyColumnOf(Column c, TableRef r, boolean alone, KeyRange k) {
+    String name = lowerUnquoted(c.getColumnName());
     boolean ofTable =
         (c.getTable() == null || c.getTable().getName() == null)
-            ? alone
+            ? alone || (k.elsewhere != null && !k.elsewhere.contains(name))
             : c.getTable().getName().equals(r.hasAlias() ? r.alias() : r.name());
     if (!ofTable) {
       return null;
     }
-    String name = lowerUnquoted(c.getColumnName());
     for (String key : k.keyColumns) {
       if (key.toLowerCase(Locale.ROOT).equals(name)) {
         return key;
@@ -4301,6 +4325,117 @@ public final class SqlAst {
       out.add(name + ".*");
     }
     return String.join(", ", out);
+  }
+
+  /** The label of a gate column {@code i} (todo 334). */
+  private static final String GATE = "scalardb_native_g";
+
+  /**
+   * Returns the statement as written, the references {@code naming} names replaced, with a gate
+   * column for each of {@code gates} appended to its select list (design 4.2 "Anchor-less reads as
+   * written behind a gate column", todo 334): the gate's text before its conjuncts, then, with
+   * {@code ranged}, each conjunct of the statement's WHERE clause on the reference's key columns,
+   * read as the gate's alias's, its placeholders bound again where they stand, then the text after;
+   * wrapped in {@code MAX()} where the statement groups or aggregates. Without such a conjunct for
+   * a reference, a ranged gate is not made.
+   *
+   * @param naming what to replace
+   * @param gates each gate's reference and texts, in the select list's order
+   * @param ranged whether each gate repeats its reference's key conjuncts
+   * @return the statement and the sources of its placeholders, or {@code null} where it is not one
+   *     plain select, its select list has a bare {@code *}, a ranged gate has no conjunct, or the
+   *     text cannot be rewritten
+   */
+  public @Nullable SplitText gated(
+      @Nullable Naming naming, Map<TableRef, KeyRange> gates, boolean ranged) {
+    Token start = root.jjtGetFirstToken();
+    if (start == null
+        || gates.isEmpty()
+        || !(statement instanceof PlainSelect)
+        || hasMisreadHashComment()) {
+      return null;
+    }
+    Map<Token, Integer> placeholders = new IdentityHashMap<>();
+    Token last = null;
+    for (Token t = start; t != null && t.kind != 0 && !t.image.isEmpty(); t = t.next) {
+      if (t.image.equals("?")) {
+        placeholders.put(t, placeholders.size() + 1);
+      }
+      last = t;
+    }
+    if (placeholders.size() != parameterCount || last == null || last.image.equals(";")) {
+      return null;
+    }
+    Map<Token, String> from = new IdentityHashMap<>();
+    Map<Token, Token> to = new IdentityHashMap<>();
+    if (naming != null) {
+      Rewrite plan = planRewrite(naming, false);
+      if (plan.unrepresentable
+          || lockTargetIsRenamed(plan)
+          || !collectReplacements(plan, from, to)) {
+        return null;
+      }
+    }
+    PlainSelect s = (PlainSelect) statement;
+    for (SelectItem<?> item : s.getSelectItems()) {
+      if (item.getExpression() instanceof AllColumns
+          && !(item.getExpression() instanceof AllTableColumns)) {
+        // Oracle takes no bare * beside another item, and a table renamed without an alias of
+        // its name leaves no name to spell it out by
+        return null;
+      }
+    }
+    keepLabels(from, to, Map.of());
+    List<SelectItem<?>> items = s.getSelectItems();
+    Node lastItemNode = items.get(items.size() - 1).getASTNode();
+    Token lastItem = lastItemNode == null ? null : lastItemNode.jjtGetLastToken();
+    if (lastItem == null) {
+      return null;
+    }
+    boolean grouped = isGrouped(s);
+    List<Integer> sources = new ArrayList<>();
+    Emitter e = new Emitter(from, to, placeholders, sources);
+    e.tokens(start, lastItem);
+    int i = 0;
+    for (Map.Entry<TableRef, KeyRange> g : gates.entrySet()) {
+      List<Run> runs = ranged ? keyConjuncts(g.getKey(), g.getValue()) : List.of();
+      if (ranged && runs.isEmpty()) {
+        return null;
+      }
+      e.text(",");
+      if (grouped) {
+        e.text("MAX(");
+      }
+      e.text(g.getValue().before);
+      for (Run r : runs) {
+        e.text("AND");
+        e.run(r);
+      }
+      e.text(g.getValue().after);
+      if (grouped) {
+        e.text(")");
+      }
+      e.text("AS");
+      e.text(engine.quote(GATE + i++));
+    }
+    e.tokens(lastItem.next, null);
+    String text = e.text();
+    assert parses(text) : text;
+    return checked(text, sources);
+  }
+
+  /**
+   * Returns whether the statement aggregates without grouping, so that it returns one row whatever
+   * it reads (todo 334).
+   *
+   * @return whether it does
+   */
+  public boolean aggregatesToOneRow() {
+    if (!(statement instanceof PlainSelect)) {
+      return false;
+    }
+    PlainSelect s = (PlainSelect) statement;
+    return s.getGroupBy() == null && s.getHaving() == null && isGrouped(s);
   }
 
   /** The label of a copy's appended select item {@code i}. */

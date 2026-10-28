@@ -149,6 +149,12 @@ final class Router {
     /** The coarse checks of the ScalarDB tables {@link #plainSql} reads, each to have passed. */
     final List<String> clearedBy;
 
+    /**
+     * On Oracle, an anchor-less read as written behind gate columns, run before {@link #sql}, which
+     * runs only where a gate is closed (design 4.2, todo 334); null otherwise.
+     */
+    final @Nullable Gated gated;
+
     private Route(
         String source,
         String sql,
@@ -174,7 +180,9 @@ final class Router {
         Writes.@Nullable Step fallback,
         @Nullable Booleans booleans,
         @Nullable String plainSql,
-        List<String> clearedBy) {
+        List<String> clearedBy,
+        @Nullable Gated gated) {
+      this.gated = gated;
       this.plainSql = plainSql;
       this.clearedBy = List.copyOf(clearedBy);
       this.booleans = booleans;
@@ -273,6 +281,37 @@ final class Router {
           b);
     }
 
+    /** This route, with the anchor-less read as written behind its gates (todo 334). */
+    Route gated(@Nullable Gated g) {
+      return new Route(
+          source,
+          sql,
+          changesSession,
+          changesNames,
+          passthrough,
+          kind,
+          isolation,
+          sessionGeneration,
+          catalogGeneration,
+          trustedUntil,
+          parameterSources,
+          parameters,
+          recheckAt,
+          countsOnly,
+          perRow,
+          parallel,
+          plansParallel,
+          write,
+          anchored,
+          anchoring,
+          checks,
+          fallback,
+          booleans,
+          plainSql,
+          clearedBy,
+          g);
+    }
+
     /** This route, with the statement a transaction runs once it found the tables clear. */
     Route plain(@Nullable String plainSql, List<String> clearedBy) {
       return new Route(
@@ -300,7 +339,8 @@ final class Router {
           fallback,
           booleans,
           plainSql,
-          clearedBy);
+          clearedBy,
+          gated);
     }
 
     private Route copy(
@@ -339,7 +379,8 @@ final class Router {
           fallback,
           booleans,
           plainSql,
-          clearedBy);
+          clearedBy,
+          gated);
     }
   }
 
@@ -356,6 +397,34 @@ final class Router {
     Booleans(List<Integer> columns, String probe) {
       this.columns = List.copyOf(columns);
       this.probe = probe;
+    }
+  }
+
+  /**
+   * An anchor-less read on Oracle as written over the data tables, a gate column per ScalarDB table
+   * appended to its select list, 1 where the table has a row in flight in the predicate's key range
+   * (READ COMMITTED) or at all (SNAPSHOT), 0 otherwise (design 4.2 "Anchor-less reads as written
+   * behind a gate column", todo 334). The writes' count rule decides from the first row: every gate
+   * 0, the rows are the read's; any 1, or NULL (an aggregate over no row), the split read runs
+   * instead; no row, the coarse checks decide, an empty result where each finds nothing.
+   */
+  static final class Gated {
+    final String sql;
+    final List<Integer> parameterSources;
+    // the gate columns, the last of each row
+    final int gates;
+    // per gate, the coarse check it stands for
+    final List<String> checks;
+    // whether a gate of 0 marks its table clear for the transaction: the whole table's, at
+    // SNAPSHOT
+    final boolean marks;
+
+    Gated(String sql, List<Integer> parameterSources, List<String> checks, boolean marks) {
+      this.sql = sql;
+      this.parameterSources = List.copyOf(parameterSources);
+      this.gates = checks.size();
+      this.checks = List.copyOf(checks);
+      this.marks = marks;
     }
   }
 
@@ -1006,7 +1075,8 @@ final class Router {
         null,
         null,
         null,
-        List.of());
+        List.of(),
+        null);
   }
 
   /**
@@ -1640,7 +1710,8 @@ final class Router {
         null,
         null,
         null,
-        List.of());
+        List.of(),
+        null);
   }
 
   /** Whether every one of {@code columns} is a key column of {@code t}. */
@@ -1925,6 +1996,9 @@ final class Router {
         // with states, run only for a scrollable result, whose moves pass over rows unchecked
         r = r.checked(checks(scalarDb), fallback(ast, scalarDb));
       }
+      if (anchored.isEmpty()) {
+        r = gated(r, ast, scalarDb);
+      }
       r =
           engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
               ? r.with(r.sql, r.parameterSources, r.perRow, false, true)
@@ -1948,9 +2022,81 @@ final class Router {
             0,
             List.of(),
             true);
+    r = gated(r, ast, scalarDb);
     return snapshot
         ? withPlain(r.checked(checks(scalarDb), fallback(ast, scalarDb)), ast, scalarDb)
         : r;
+  }
+
+  /**
+   * On Oracle, an anchor-less read with its form as written over the data tables behind a gate
+   * column per ScalarDB table (design 4.2 "Anchor-less reads as written behind a gate column", todo
+   * 334): at READ COMMITTED each gate over the predicate's conjuncts on its table's key columns,
+   * those B1 repeats on PostgreSQL, a table without one keeping the split read alone; at SNAPSHOT
+   * over the whole table, its 0 marking the table clear. Unchanged elsewhere, for a locking read,
+   * and for a {@code *} over an inline table, whose data table holds the metadata.
+   */
+  private Route gated(Route r, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+    if (engine != Engine.ORACLE || ast.hasLockingOrIntoClause() || scalarDb.isEmpty()) {
+      return r;
+    }
+    boolean snapshot = snapshot();
+    // an unqualified column of a join is a table's where no other table of the statement has one
+    // of its name, which only every table's columns known can tell
+    boolean known = ast.tableRefs().stream().allMatch(scalarDb::containsKey);
+    Map<SqlAst.TableRef, SqlAst.KeyRange> gates = new LinkedHashMap<>();
+    List<String> checks = new ArrayList<>();
+    String m = engine.quote(META_ALIAS);
+    for (Map.Entry<SqlAst.TableRef, TableInfo> e : scalarDb.entrySet()) {
+      TableInfo t = e.getValue();
+      if (t.layout() == Layout.INLINE && ast.columnsReadFrom(e.getKey()) == null) {
+        return r;
+      }
+      Set<String> elsewhere = null;
+      if (known) {
+        elsewhere = new HashSet<>();
+        for (Map.Entry<SqlAst.TableRef, TableInfo> other : scalarDb.entrySet()) {
+          if (other.getKey() != e.getKey()) {
+            for (String c : other.getValue().dataColumns()) {
+              elsewhere.add(c.toLowerCase(Locale.ROOT));
+            }
+          }
+        }
+      }
+      Writes.Names n = new Writes.Names(engine, t);
+      gates.put(
+          e.getKey(),
+          new SqlAst.KeyRange(
+              "(SELECT COUNT(*) FROM dual WHERE EXISTS (SELECT "
+                  + n.inflightHint(m)
+                  + "1 FROM "
+                  + n.meta
+                  + " "
+                  + m
+                  + " WHERE "
+                  + m
+                  + "."
+                  + engine.quote("tx_state")
+                  + " IN (1, 2)",
+              "))",
+              m,
+              t.keyColumns(),
+              elsewhere));
+      checks.add(inFlightCheck(t));
+    }
+    SqlAst.SplitText text =
+        ast.gated(
+            ref -> {
+              TableInfo t = scalarDb.get(ref);
+              return t == null
+                  ? null
+                  : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
+            },
+            gates,
+            !snapshot);
+    return text == null
+        ? r
+        : r.gated(new Gated(text.sql(), text.parameterSources(), checks, snapshot));
   }
 
   /**
@@ -2652,7 +2798,8 @@ final class Router {
         null,
         null,
         null,
-        List.of());
+        List.of(),
+        null);
   }
 
   /**

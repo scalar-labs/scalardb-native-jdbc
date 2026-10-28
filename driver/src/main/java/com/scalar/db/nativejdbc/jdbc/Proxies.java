@@ -728,6 +728,8 @@ public final class Proxies {
     // target (todo 329); its settings and parameters are replayed as it becomes the target
     volatile @Nullable Statement alternate;
     volatile boolean plainNow;
+    // the vendor statement of the last execute's gated read, whose rows it returned (todo 334)
+    @Nullable Statement gatedOpen;
 
     @Override
     void handedOut() {
@@ -779,6 +781,12 @@ public final class Proxies {
           if (rows != null) {
             rows.close();
           }
+        }
+        // the gated read's own statement, as executing again closes a statement's rows
+        Statement gatedRan = gatedOpen;
+        gatedOpen = null;
+        if (gatedRan != null) {
+          gatedRan.close();
         }
       }
       if (name.equals("getGeneratedKeys") && writeKeys != null) {
@@ -884,12 +892,12 @@ public final class Proxies {
               ParameterMetaData.class,
               new ParameterHandler(created(vendor(), method, args), split));
         }
-      } else if (preparedWith != null
+      } else if ((preparedWith != null || (split != null && split.gated != null))
           && name.startsWith("set")
           && args != null
           && args.length >= 2
           && args[0] instanceof Integer) {
-        // kept to bind again when the statement is prepared again
+        // kept to bind again when the statement is prepared again, or into its gated form
         Object r = forward(vendor(), method, args);
         parameters.put((Integer) args[0], new Call(method, args));
         return r;
@@ -1068,6 +1076,11 @@ public final class Proxies {
       boolean marks = inTransaction;
       boolean ranBefore = owner.ranInTransaction;
       long at = epoch;
+      // on Oracle an anchor-less read as written behind its gates first (todo 334)
+      Object gatedRows = ran.size() == 1 ? gated(proxy, ran.get(0), name, takesSql, marks) : null;
+      if (gatedRows != null) {
+        return gatedRows;
+      }
       // in autocommit the checks and the read share one snapshot in a transaction of their own,
       // its rows fetched whole, since its end closes a cursor
       boolean own = checked != null && owner.vendor.getAutoCommit();
@@ -1847,6 +1860,128 @@ public final class Proxies {
       replay(route, plain);
     }
 
+    /**
+     * An anchor-less read on Oracle as written behind its gates (design 4.2 "Anchor-less reads as
+     * written behind a gate column", todo 334), on a vendor statement of its own, closed with its
+     * rows: the rows, their first already read, when each gate of the first row is 0, a whole
+     * table's then marked clear in a transaction at SNAPSHOT; when there is no row, in such a
+     * transaction, whose one snapshot the coarse checks read too, the empty rows where each finds
+     * nothing. Null, nothing returned, for the split read to run instead: a gate of 1, or NULL (an
+     * aggregate over no row), or no row elsewhere; and where the gated form does not apply, an
+     * {@code execute} other than {@code executeQuery}, a scrollable or unwrapped result, a bound
+     * stream, or a transaction that found the tables clear, which runs the plain statement.
+     */
+    @SuppressFBWarnings(
+        value = "SQL_INJECTION_JDBC",
+        justification =
+            "the application's own statement with the driver's gates, and the driver's coarse"
+                + " checks, their names quoted from the catalog")
+    private @Nullable Object gated(
+        Object proxy, Router.Route one, String name, boolean takesSql, boolean marks)
+        throws Throwable {
+      Router.Gated g = one.gated;
+      if (g == null
+          || one.write != null
+          || !name.equals("executeQuery")
+          || unwrapped
+          || vendor().getResultSetType() != ResultSet.TYPE_FORWARD_ONLY
+          || (!takesSql && streamBound())
+          || (one.plainSql != null && marks && owner.router.allPassed(one.clearedBy))) {
+        return null;
+      }
+      Statement st =
+          takesSql ? owner.vendor.createStatement() : owner.vendor.prepareStatement(g.sql);
+      ResultSet rs = null;
+      try {
+        for (Call c : settings.values()) {
+          forward(st, c.method, c.args);
+        }
+        if (!takesSql) {
+          for (int source : g.parameterSources) {
+            if (!parameters.containsKey(source)) {
+              st.close();
+              return null; // the vendor reports a missing value for the statement itself
+            }
+          }
+          for (Call c : parameters.values()) {
+            int index = (Integer) c.args[0];
+            for (int i = 0; i < g.parameterSources.size(); i++) {
+              if (g.parameterSources.get(i) == index) {
+                Object[] at = c.args.clone();
+                at[0] = i + 1;
+                forward(st, c.method, at);
+              }
+            }
+          }
+        }
+        owner.router.beforeRun(owner.vendor, List.of());
+        rs = takesSql ? st.executeQuery(g.sql) : ((PreparedStatement) st).executeQuery();
+        boolean row = rs.next();
+        boolean snapshot = g.marks && marks;
+        if (row) {
+          int columns = rs.getMetaData().getColumnCount();
+          for (int i = columns - g.gates + 1; i <= columns; i++) {
+            Object gate = rs.getObject(i);
+            if (gate == null || ((Number) gate).intValue() != 0) {
+              rs.close();
+              st.close();
+              return null;
+            }
+          }
+        } else {
+          if (!snapshot) {
+            rs.close();
+            st.close();
+            return null;
+          }
+          for (String check : g.checks) {
+            if (owner.router.passed(check)) {
+              continue;
+            }
+            try (Statement c = owner.vendor.createStatement();
+                ResultSet found = c.executeQuery(check)) {
+              if (found.next()) {
+                rs.close();
+                st.close();
+                return null;
+              }
+            }
+          }
+        }
+        if (snapshot) {
+          for (String check : g.checks) {
+            owner.router.pass(check);
+          }
+        }
+        owner.ran(one);
+        gatedOpen = st;
+        return proxy(
+            ResultSet.class, new GatedRows(rs, connection, (Statement) proxy, g.gates, st, row));
+      } catch (SQLException e) {
+        if (rs != null) {
+          rs.close();
+        }
+        st.close();
+        SQLException retryable = Writes.asRetryable(e);
+        if (!(retryable instanceof java.sql.SQLTransactionRollbackException)
+            && !Writes.endsTransaction(owner.vendor, e)
+            && e.getErrorCode() != 1013) {
+          // what the statement as written cannot run, a CLOB compared, say: the split read,
+          // which may abort first, as before (a cancel, ORA-01013, is the application's)
+          return null;
+        }
+        if (marks && Writes.endsTransaction(owner.vendor, e)) {
+          if (owner.ranInTransaction) {
+            owner.rollbackOnly = true;
+          } else {
+            owner.anchors.transactionEnded();
+            owner.ranInTransaction = false;
+          }
+        }
+        throw Writes.asRetryable(e);
+      }
+    }
+
     /** Binds the parameters set so far onto the target: as written, or as the split read takes. */
     private void replay(Router.Route route, boolean plain) throws Throwable {
       for (Call c : parameters.values()) {
@@ -2303,6 +2438,92 @@ public final class Proxies {
         throw new SQLException("the column index " + args[0] + " is out of range", "22023");
       }
       return forward(target, method, args);
+    }
+  }
+
+  /**
+   * The rows of an anchor-less read as written behind its gates (design 4.2, todo 334): the first
+   * row, read already for its gates, handed out again at the first {@code next}; the gate columns,
+   * the last of each row, hidden; the vendor statement they came from closed with them.
+   */
+  private static final class GatedRows extends ChildHandler {
+    final int hidden;
+    final Statement ran;
+    boolean peeked;
+    int visible = -1;
+
+    GatedRows(
+        ResultSet rows,
+        Connection connection,
+        Statement statement,
+        int hidden,
+        Statement ran,
+        boolean peeked) {
+      super(rows, connection, statement, Writes::asRetryable);
+      this.hidden = hidden;
+      this.ran = ran;
+      this.peeked = peeked;
+    }
+
+    private int visible() throws SQLException {
+      if (visible < 0) {
+        visible = ((ResultSet) target).getMetaData().getColumnCount() - hidden;
+      }
+      return visible;
+    }
+
+    @Override
+    @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+      String name = method.getName();
+      if (args == null) {
+        switch (name) {
+          case "next":
+            if (peeked) {
+              peeked = false;
+              return true;
+            }
+            break;
+          case "isBeforeFirst":
+            if (peeked) {
+              return true;
+            }
+            break;
+          case "isFirst":
+            if (peeked) {
+              return false;
+            }
+            break;
+          case "getRow":
+            if (peeked) {
+              return 0;
+            }
+            break;
+          case "close":
+            try {
+              return forward(target, method, args);
+            } finally {
+              ran.close();
+            }
+          case "getMetaData":
+            return proxy(
+                java.sql.ResultSetMetaData.class,
+                new HiddenColumns(created(target, method, args), hidden));
+          default:
+            break;
+        }
+      } else if (name.equals("findColumn")) {
+        int i = (Integer) Objects.requireNonNull(forward(target, method, args));
+        if (i > visible()) {
+          throw new SQLException("no column " + args[0] + " in the result", "42703");
+        }
+        return i;
+      } else if ((name.startsWith("get") || name.startsWith("update"))
+          && args.length >= 1
+          && args[0] instanceof Integer
+          && (Integer) args[0] > visible()) {
+        throw new SQLException("no column " + args[0] + " in the result", "22023");
+      }
+      return super.handle(proxy, method, args);
     }
   }
 

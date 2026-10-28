@@ -2918,6 +2918,75 @@ row the price of todo 292); decoupled 299 and 166 against 734 and 562 (55.4 agai
 36 unchanged). Mergeable; landing as before; the proof Delivery at READ COMMITTED, about 3.5 ms a
 transaction inline and 2.6 decoupled.
 
+### 2026-10-28: D2 built (c7): anchor-less reads on Oracle as written behind a gate column
+
+As designed, with three choices of the builder's for the design to confirm. `Router.gated` gives
+an anchor-less read on Oracle (the split read's anchored list empty: a grouped, aggregate or
+DISTINCT read, any read in autocommit or on a read-only connection; and the views path) a `Gated`
+form beside its route: `SqlAst.gated`, the statement as written over the data tables (the plain
+statement's naming), a gate column per ScalarDB table appended to its select list,
+`(SELECT COUNT(*) FROM dual WHERE EXISTS (SELECT /*+ INDEX(m T_inflight) */ 1 FROM T_meta m WHERE
+m.tx_state IN (1, 2) AND <the key conjuncts over m>))` labelled `scalardb_native_g<i>`, wrapped in
+`MAX()` where the statement groups or aggregates (Oracle takes an aggregate over a scalar subquery,
+checked on the container); at READ COMMITTED the conjuncts are B1's `keyConjuncts` and a table
+without one leaves the read to the split alone; at SNAPSHOT none, the whole table. B1's extraction
+gains one case for StockLevel: an unqualified column of a join is a table's key column where no
+other table of the statement has a column of its name, which `KeyRange.elsewhere` carries when
+every table of the statement is a ScalarDB one (B1's own ranges pass none, unchanged). A `*` over
+an inline table, whose data table holds the metadata, is not gated, as `withPlain` does; nor a bare
+`*` at all: Oracle takes none beside another item, and the table renamed to its data table keeps no
+alias of its name to spell it out by (`SELECT * FROM an.made` was ORA-00904 in the suite).
+
+`Proxies.StatementHandler.gated` runs it for an `executeQuery`, before the SNAPSHOT checks and the
+autocommit read's own transaction, on a vendor statement of its own (the statement's settings
+replayed, its parameters bound through the gated text's sources), closed with its rows or at the
+statement's next execute or close (its parameters now recorded for a gated route, as for a split
+one, a value not bound leaving the read to the route as before): the first row read; every gate 0, the rows are the read's
+(`GatedRows`: the first row handed out again, the gate columns hidden from the metadata and the
+getters), and at SNAPSHOT in a transaction each table is marked clear, so that the next read is
+the plain statement; a gate of 1, or NULL (an aggregate over no row), the gated statement is closed
+and the split read runs as before. The three choices: (1) no row at READ COMMITTED takes the split
+read, not the coarse check: there each statement reads its own snapshot, so a check after the read
+could miss a row in flight at the read's that committed between the two; at SNAPSHOT in a
+transaction the coarse checks share the read's snapshot and decide as designed; (2) only
+`executeQuery` is gated, not `execute` (whose `getResultSet` would need the gated rows kept beside
+the statement's own), and only a forward-only result not unwrapped; (3) a transaction that found the
+tables clear runs the plain statement, as before, not the gated one. And an error of the gated
+statement that is not a serialization failure, the transaction's end or a cancel falls back to the
+route as before: `PredicateCheckIntegrationTest`'s SNAPSHOT read over a CLOB, which the statement as
+written cannot compare (ORA-22848), still aborts on its row in flight through the checks.
+
+Tests (`OracleOltpIntegrationTest.form7AnchorlessReadsAsWrittenBehindGates`, both layouts, an order
+line table of 3,000 rows and a stock table of 100 items, full-sized stamps, a catalog of its own):
+Delivery's SUM at READ COMMITTED one round trip with a row of another order in flight, the right
+sum, the gated text in `V$SQL`; two with one of the order in flight, the split read's sum, the
+before image's amount; a GROUP BY of ten groups and a DISTINCT, two columns and one; a DISTINCT
+over no row; StockLevel's `COUNT(DISTINCT s_i)` over the join, its key columns unqualified, the
+vendor's count, both gates in the text; a predicate without key conjuncts, no gate; at SNAPSHOT an
+aggregate on a table not yet found clear one round trip, the next the plain statement, one.
+`form1ReadsWithoutAnchorsAndTheClearTableMemory`'s aggregate now 1 round trip where the coarse
+check went first (2), and in autocommit 1 where it was 5.
+
+Measured (the same test, 50 calls after 10, two runs), Delivery's SUM over an order, gets / elapsed µs / CPU
+µs a call:
+
+| | gated | split read | vendor |
+|---|---|---|---|
+| inline, first run | 7.1 / 117 / 84 | 10.3 / 379 / 309 | 5.1 / 94 / 68 |
+| inline, on D3 | 7.1 / 51 / 15 | 10.3 / 126 / 54 | 5.1 / 29 / 10 |
+| decoupled, first run | 7.1 / 59 / 32 | 10.2 / 144 / 71 | 16.0 / 89 / 36 |
+| decoupled, on D3 | 7.1 / 33 / 11 | 10.2 / 90 / 42 | 16.0 / 82 / 33 |
+
+The gets repeat; the container's times vary from run to run, the ratios less.
+
+(the decoupled vendor's 16 gets are its data table's own plan in this test, not the driver's.)
+
+Suites (before the rebase onto D3): unit, Oracle and PostgreSQL integration pass, `ReadIntegrationTest`
+once failing on Oracle at its own table's import (DB-CORE-30017) and passing alone on a fresh
+container; `spotbugsMain` clean with one suppression (`SQL_INJECTION_JDBC` on `gated`, the
+application's statement with the driver's gates and checks); `spotbugsIntegrationTest` main's three
+findings only. On D3: the form tests pass (the duplicate `gets` helper both added, kept once).
+
 ### 2026-10-28: D2 reviewed: f4c9055 on oracle-gated-reads, mergeable with one change (the design's note)
 
 Reviewed from `git show f4c9055` (on 4a41577). `SqlAst.gated` emits the statement as written over

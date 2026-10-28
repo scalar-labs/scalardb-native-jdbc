@@ -291,8 +291,9 @@ class OracleOltpIntegrationTest {
   /**
    * Form 1 (design 4.2, "On Oracle both hold"): at SNAPSHOT in a transaction no read records an
    * anchor, the state column's two probes and the coarse check read the in-flight index under the
-   * INDEX hint, and a table found clear is remembered: its later reads run as the vendor's, without
-   * the check, one round trip fewer for a shape that is checked table by table.
+   * INDEX hint, and a table found clear is remembered: its later reads run as the vendor's. An
+   * aggregate, which records no anchor, runs as written behind the table's gate, which marks it
+   * clear (todo 334, D2), one round trip where the coarse check went first before.
    */
   @Test
   void form1ReadsWithoutAnchorsAndTheClearTableMemory() throws Exception {
@@ -320,12 +321,13 @@ class OracleOltpIntegrationTest {
       long first = rt.measure(() -> counted[0] = rows(d, count).get(0));
       long second = rt.measure(() -> assertThat(rows(d, count)).containsExactly(counted[0]));
       log(
-          "form 1: an aggregate read, checked table by table: "
+          "form 1: an aggregate read, as written behind the table's gate: "
               + first
               + " round trip(s), then "
               + second
-              + " once the table is found clear (decoupled)");
-      assertThat(first).isEqualTo(2);
+              + " once the gate found the table clear (decoupled)");
+      // the gate stands for the table's coarse check, sent before the read until todo 334's D2
+      assertThat(first).isEqualTo(1);
       assertThat(second).isEqualTo(1);
       d.rollback();
       // a key read's state column marks the table clear by itself: the aggregate after it is one
@@ -342,7 +344,7 @@ class OracleOltpIntegrationTest {
       long secondInline =
           rt.measure(() -> assertThat(rows(d, countInline)).containsExactly(counted[0]));
       log("form 1: the same on the inline table: " + firstInline + " then " + secondInline);
-      assertThat(firstInline).isEqualTo(2);
+      assertThat(firstInline).isEqualTo(1);
       assertThat(secondInline).isEqualTo(1);
       d.rollback();
       // in autocommit nothing is remembered (section 5: READ COMMITTED, and the checked read's
@@ -2719,6 +2721,412 @@ class OracleOltpIntegrationTest {
       assertThat(rs.next()).isFalse();
       return value;
     }
+  }
+
+  /**
+   * Anchor-less reads on Oracle as written behind a gate column per table (design 4.2 "Anchor-less
+   * reads as written behind a gate column", todo 334), on both layouts: Delivery's SUM over an
+   * order at READ COMMITTED one round trip, the statement as written, the right sum with a row of
+   * another order in flight, and the split read's sum, the before image's amount, with one of the
+   * order; a GROUP BY and a DISTINCT, their gate columns hidden; StockLevel's count over a join,
+   * its unqualified key columns each table's; a predicate without key conjuncts keeping the split
+   * read; at SNAPSHOT the whole table's gate, a table found clear by it, the next read the plain
+   * statement; the gets a call of the gated SUM against the vendor's and the split read's.
+   */
+  @Test
+  void form7AnchorlessReadsAsWrittenBehindGates() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      for (String layout : List.of("i", "d")) {
+        Map<String, String> options =
+            layout.equals("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of();
+        admin.createTable(
+            N(NS),
+            N("gol" + layout),
+            TableMetadata.newBuilder()
+                .addColumn(N("ol_w"), intType())
+                .addColumn(N("ol_o"), intType())
+                .addColumn(N("ol_n"), intType())
+                .addColumn(N("ol_i"), intType())
+                .addColumn(N("ol_amt"), intType())
+                .addPartitionKey(N("ol_w"))
+                .addClusteringKey(N("ol_o"))
+                .addClusteringKey(N("ol_n"))
+                .build(),
+            options);
+        admin.createTable(
+            N(NS),
+            N("gst" + layout),
+            TableMetadata.newBuilder()
+                .addColumn(N("s_w"), intType())
+                .addColumn(N("s_i"), intType())
+                .addColumn(N("s_q"), intType())
+                .addPartitionKey(N("s_w"))
+                .addClusteringKey(N("s_i"))
+                .build(),
+            options);
+      }
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      for (String layout : List.of("i", "d")) {
+        // 3,000 order lines, ten to an order, and 100 items of stock, their stamps full-sized
+        seed(
+            v,
+            "gol" + layout,
+            "ol_w, ol_o, ol_n, ol_i, ol_amt",
+            "1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10), MOD(LEVEL * 7, 100),"
+                + " MOD(LEVEL, 10) + 1",
+            "ol_w, ol_o, ol_n",
+            "1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10)",
+            3000);
+        seed(
+            v,
+            "gst" + layout,
+            "s_w, s_i, s_q",
+            "1, LEVEL - 1, MOD(LEVEL, 20)",
+            "s_w, s_i",
+            "1, LEVEL - 1",
+            100);
+      }
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)g(ol|st)[id]"),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .hasSize(4)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    // a catalog of its own, read after the tables were created (the driver shares one per TTL)
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59003");
+    try (Connection d = ORA.openDriver(ttl);
+        Connection v = ORA.open();
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      for (String layout : List.of("i", "d")) {
+        String name = layout.equals("i") ? "inline" : "decoupled";
+        String ol = NS + ".gol" + layout;
+        String st = NS + ".gst" + layout;
+        String olData = NS + ".\"" + tableInfo("gol" + layout).dataTable() + "\"";
+        String tag = "/* g" + layout + System.nanoTime() + " */";
+        String sum = "SELECT " + tag + " SUM(ol_amt) FROM " + ol + " WHERE ol_w = 1 AND ol_o = ?";
+        d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        d.setAutoCommit(false);
+        Counter rt = new Counter(d);
+        String sum7 = rows(v, "SELECT SUM(ol_amt) FROM " + olData + " WHERE ol_o = 7").get(0);
+        String sum9 = rows(v, "SELECT SUM(ol_amt) FROM " + olData + " WHERE ol_o = 9").get(0);
+        // a row of another order in flight: the gate open, the statement as written
+        TwoPhaseCommitTransaction elsewhere = preparedAmount(tpc, "gol" + layout, 8, 0, 100);
+        long open;
+        long closed;
+        try (PreparedStatement ps = d.prepareStatement(sum)) {
+          ps.setInt(1, 6);
+          assertThat(rowsOf(ps)).hasSize(1); // the texts' first parses, unmeasured
+          open =
+              rt.measure(
+                  () -> {
+                    ps.setInt(1, 7);
+                    assertThat(rowsOf(ps)).containsExactly(sum7);
+                  });
+          // a row of the order in flight: the gate closed, the split read, the before image's
+          // amount in the sum
+          TwoPhaseCommitTransaction held = preparedAmount(tpc, "gol" + layout, 9, 3, 100);
+          closed =
+              rt.measure(
+                  () -> {
+                    ps.setInt(1, 9);
+                    assertThat(rowsOf(ps)).containsExactly(sum9);
+                  });
+          held.rollback();
+        }
+        d.commit();
+        elsewhere.rollback();
+        log(
+            "form 7 ("
+                + name
+                + "): Delivery's SUM at READ COMMITTED, the gate open "
+                + open
+                + ", closed "
+                + closed
+                + " round trip(s)");
+        assertThat(open).isEqualTo(1);
+        assertThat(closed).isEqualTo(2);
+        assertThat(executedTexts(v, tag))
+            .as(name + ": the gated text ran")
+            .anyMatch(t -> t.contains("\"scalardb_native_g0\""));
+        // a GROUP BY and a DISTINCT, the gate columns hidden
+        try (PreparedStatement ps =
+            d.prepareStatement(
+                "SELECT ol_n, COUNT(*) FROM "
+                    + ol
+                    + " WHERE ol_w = 1 AND ol_o = ? GROUP BY ol_n ORDER BY ol_n")) {
+          ps.setInt(1, 11);
+          try (ResultSet rs = ps.executeQuery()) {
+            assertThat(rs.getMetaData().getColumnCount()).isEqualTo(2);
+            int groups = 0;
+            while (rs.next()) {
+              assertThat(rs.getInt(1)).isEqualTo(groups++);
+              assertThat(rs.getInt(2)).isEqualTo(1);
+            }
+            assertThat(groups).isEqualTo(10);
+          }
+        }
+        try (PreparedStatement ps =
+            d.prepareStatement(
+                "SELECT DISTINCT ol_o FROM " + ol + " WHERE ol_w = 1 AND ol_o BETWEEN ? AND ?")) {
+          ps.setInt(1, 20);
+          ps.setInt(2, 22);
+          try (ResultSet rs = ps.executeQuery()) {
+            assertThat(rs.getMetaData().getColumnCount()).isEqualTo(1);
+            List<Integer> orders = new ArrayList<>();
+            while (rs.next()) {
+              orders.add(rs.getInt(1));
+            }
+            assertThat(orders).containsExactlyInAnyOrder(20, 21, 22);
+          }
+          // no row: at READ COMMITTED the split read says so
+          ps.setInt(1, 5000);
+          ps.setInt(2, 5001);
+          try (ResultSet rs = ps.executeQuery()) {
+            assertThat(rs.next()).isFalse();
+          }
+        }
+        // StockLevel's count over a join, its key columns unqualified
+        String stockTag = "/* s" + layout + System.nanoTime() + " */";
+        String stockLevel =
+            "SELECT "
+                + stockTag
+                + " COUNT(DISTINCT s_i) FROM "
+                + ol
+                + ", "
+                + st
+                + " WHERE ol_w = ? AND ol_o < ? AND ol_o >= ? AND s_w = ? AND s_i = ol_i AND s_q"
+                + " < ?";
+        String expected =
+            rows(
+                    v,
+                    "SELECT COUNT(DISTINCT s_i) FROM "
+                        + olData
+                        + ", "
+                        + NS
+                        + ".\""
+                        + tableInfo("gst" + layout).dataTable()
+                        + "\" WHERE ol_w = 1 AND ol_o < 50 AND ol_o >= 30 AND s_w = 1 AND s_i ="
+                        + " ol_i AND s_q < 10")
+                .get(0);
+        try (PreparedStatement ps = d.prepareStatement(stockLevel)) {
+          ps.setInt(1, 1);
+          ps.setInt(2, 50);
+          ps.setInt(3, 30);
+          ps.setInt(4, 1);
+          ps.setInt(5, 10);
+          assertThat(rowsOf(ps)).containsExactly(expected);
+        }
+        assertThat(executedTexts(v, stockTag))
+            .as(name + ": StockLevel's gated text, a gate per table")
+            .anyMatch(t -> t.contains("\"scalardb_native_g1\""));
+        // a predicate without key conjuncts: the split read alone
+        String noKeyTag = "/* n" + layout + System.nanoTime() + " */";
+        assertThat(rows(d, "SELECT " + noKeyTag + " COUNT(*) FROM " + st + " WHERE s_q < 0"))
+            .containsExactly("0");
+        assertThat(executedTexts(v, noKeyTag))
+            .as(name + ": no gate without a key conjunct")
+            .isNotEmpty()
+            .noneMatch(t -> t.contains("scalardb_native_g0"));
+        d.commit();
+        // at SNAPSHOT the whole table's gate: one round trip, the table found clear, the next read
+        // the plain statement
+        d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+        String snapTag = "/* p" + layout + System.nanoTime() + " */";
+        String count = "SELECT " + snapTag + " COUNT(*) FROM " + st + " WHERE s_q >= 0";
+        long first = rt.measure(() -> assertThat(rows(d, count)).containsExactly("100"));
+        long second = rt.measure(() -> assertThat(rows(d, count)).containsExactly("100"));
+        d.commit();
+        log(
+            "form 7 ("
+                + name
+                + "): at SNAPSHOT an aggregate on a table not yet found clear "
+                + first
+                + ", then "
+                + second
+                + " round trip(s)");
+        assertThat(first).isEqualTo(1);
+        assertThat(second).isEqualTo(1);
+        assertThat(executedTexts(v, snapTag))
+            .anyMatch(t -> t.contains("\"scalardb_native_g0\""))
+            .anyMatch(t -> !t.contains("scalardb_native"));
+        d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        // gets and times a call over 50 calls after 10: the gated SUM, the split read's text run
+        // by the vendor, and the vendor's SUM over the data table
+        String measured = "/* m" + layout + System.nanoTime() + " */";
+        String gatedSum =
+            "SELECT " + measured + " SUM(ol_amt) FROM " + ol + " WHERE ol_w = 1 AND ol_o = ?";
+        String split = d.nativeSQL(gatedSum).replace(measured, "/* split */ " + measured);
+        String[] texts = {
+          gatedSum,
+          split,
+          "SELECT /* vendor */ " + measured + " SUM(ol_amt) FROM " + olData + " WHERE ol_o = ?"
+        };
+        String[] patterns = {
+          "SELECT " + measured + "%scalardb_native_g0%",
+          "SELECT /* split */ " + measured + "%",
+          "SELECT /* vendor */ " + measured + "%"
+        };
+        long[][] per = new long[3][];
+        for (int f = 0; f < 3; f++) {
+          Connection c = f == 0 ? d : v;
+          long[] at = null;
+          try (PreparedStatement ps = c.prepareStatement(texts[f])) {
+            int marks = ps.getParameterMetaData().getParameterCount();
+            for (int o = 100; o < 160; o++) {
+              if (o == 110) {
+                at = gets(v, patterns[f]);
+              }
+              for (int i = 1; i <= marks; i++) {
+                ps.setInt(i, o);
+              }
+              assertThat(rowsOf(ps)).hasSize(1);
+            }
+          }
+          long[] now = gets(v, patterns[f]);
+          long[] from = Objects.requireNonNull(at);
+          assertThat(now[1] - from[1]).as(patterns[f]).isEqualTo(50);
+          per[f] = new long[] {now[0] - from[0], now[2] - from[2], now[3] - from[3]};
+        }
+        d.commit();
+        log(
+            String.format(
+                "form 7 (%s): Delivery's SUM a call, gets / elapsed µs / CPU µs: as written behind"
+                    + " the gate %.1f / %.0f / %.0f, the split read %.1f / %.0f / %.0f, the"
+                    + " vendor's %.1f / %.0f / %.0f",
+                name,
+                per[0][0] / 50.0,
+                per[0][1] / 50.0,
+                per[0][2] / 50.0,
+                per[1][0] / 50.0,
+                per[1][1] / 50.0,
+                per[1][2] / 50.0,
+                per[2][0] / 50.0,
+                per[2][1] / 50.0,
+                per[2][2] / 50.0));
+        assertThat(per[0][0]).isLessThan(per[1][0]);
+      }
+    }
+  }
+
+  /** Seeds a ScalarDB table of either layout with committed rows, their stamps full-sized. */
+  private static void seed(
+      Connection v,
+      String table,
+      String columns,
+      String values,
+      String keys,
+      String keyValues,
+      int rows)
+      throws SQLException {
+    TableInfo t = tableInfo(table);
+    String stamps =
+        "\"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\", \"tx_committed_at\"";
+    String stamped = "RPAD('seed', 36, '-'), 3, 1, 1761600000000, 1761600000000";
+    String data = NS + ".\"" + t.dataTable() + "\"";
+    if (t.layout() == com.scalar.db.nativejdbc.catalog.Layout.INLINE) {
+      ORA.execute(
+          v,
+          "INSERT INTO "
+              + data
+              + " ("
+              + columns
+              + ", "
+              + stamps
+              + ") SELECT "
+              + values
+              + ", "
+              + stamped
+              + " FROM dual CONNECT BY LEVEL <= "
+              + rows,
+          "COMMIT");
+    } else {
+      ORA.execute(
+          v,
+          "INSERT INTO "
+              + data
+              + " ("
+              + columns
+              + ") SELECT "
+              + values
+              + " FROM dual CONNECT BY LEVEL <= "
+              + rows,
+          "INSERT INTO "
+              + NS
+              + ".\""
+              + Objects.requireNonNull(t.metadataTable())
+              + "\" ("
+              + keys
+              + ", "
+              + stamps
+              + ") SELECT "
+              + keyValues
+              + ", "
+              + stamped
+              + " FROM dual CONNECT BY LEVEL <= "
+              + rows,
+          "COMMIT");
+    }
+  }
+
+  /** An order line's amount prepared by a ScalarDB transaction, left in flight. */
+  private static TwoPhaseCommitTransaction preparedAmount(
+      TwoPhaseCommitTransactionManager tpc, String table, int o, int line, int amount)
+      throws Exception {
+    TwoPhaseCommitTransaction tx = tpc.begin();
+    tx.update(
+        Update.newBuilder()
+            .namespace(N(NS))
+            .table(N(table))
+            .partitionKey(ScalarDbNames.key("ol_w", 1))
+            .clusteringKey(
+                com.scalar.db.io.Key.newBuilder()
+                    .addBigInt(N("ol_o"), o)
+                    .addBigInt(N("ol_n"), line)
+                    .build())
+            .bigIntValue(N("ol_amt"), amount)
+            .build());
+    tx.prepare();
+    return tx;
+  }
+
+  /** The texts V$SQL holds that carry {@code tag} and ran at least once. */
+  private static List<String> executedTexts(Connection v, String tag) throws SQLException {
+    List<String> out = new ArrayList<>();
+    try (PreparedStatement ps =
+        v.prepareStatement(
+            "SELECT sql_fulltext FROM v$sql WHERE sql_text LIKE ? AND executions > 0 AND sql_text"
+                + " NOT LIKE '%v$sql%'")) {
+      ps.setString(1, "%" + tag + "%");
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          out.add(rs.getString(1));
+        }
+      }
+    }
+    return out;
+  }
+
+  /** A prepared read's rows, each its columns joined by '/'. */
+  private static List<String> rowsOf(PreparedStatement ps) throws SQLException {
+    List<String> out = new ArrayList<>();
+    try (ResultSet rs = ps.executeQuery()) {
+      int n = rs.getMetaData().getColumnCount();
+      while (rs.next()) {
+        List<String> row = new ArrayList<>();
+        for (int i = 1; i <= n; i++) {
+          row.add(rs.getString(i));
+        }
+        out.add(String.join("/", row));
+      }
+    }
+    return out;
   }
 
   /**
