@@ -962,7 +962,9 @@ final class Writes {
         predicateRc,
         entries != null && fast != null && span != null
             ? Bulk.keyed(n, ast, t, span, delete, imported, from, end, inFlightCheck(n))
-            : null,
+            : entries != null && rcFirst != null && !rcFirst.inline && span != null
+                ? Bulk.keyedRc(n, ast, t, exposed, span, delete, imported, from, end)
+                : null,
         rcFirst);
   }
 
@@ -2101,6 +2103,10 @@ final class Writes {
     private final boolean imported;
     // the keyed write's coarse check, which the open gate passes
     final @Nullable String check;
+    // at READ COMMITTED, the keyed write's DML under the committed metadata row with each slot's
+    // anchor, beside {@link #dml} under it without (design 4.4 "The READ COMMITTED decoupled
+    // entries"); null at SNAPSHOT and for the INSERT
+    private final @Nullable List<String> anchoredDml;
     private final Map<String, String> texts = new ConcurrentHashMap<>();
 
     private Bulk(
@@ -2110,7 +2116,8 @@ final class Writes {
         @Nullable List<List<Integer>> keyHoles,
         boolean delete,
         boolean imported,
-        @Nullable String check) {
+        @Nullable String check,
+        @Nullable List<String> anchoredDml) {
       this.n = n;
       this.dml = List.copyOf(dml);
       this.keyValues = keyValues;
@@ -2118,6 +2125,12 @@ final class Writes {
       this.delete = delete;
       this.imported = imported;
       this.check = check;
+      this.anchoredDml = anchoredDml == null ? null : List.copyOf(anchoredDml);
+    }
+
+    /** Whether this is the keyed write's block at READ COMMITTED. */
+    boolean readCommitted() {
+      return anchoredDml != null;
     }
 
     boolean insert() {
@@ -2131,7 +2144,7 @@ final class Writes {
 
     /** The OUT binds after the slots. */
     int outs() {
-      return insert() ? 2 : 3 + SLOTS;
+      return insert() ? 2 : readCommitted() ? 2 + SLOTS : 3 + SLOTS;
     }
 
     /** The source with each placeholder a one-character mark, so that every offset holds. */
@@ -2182,7 +2195,71 @@ final class Writes {
               + source.substring(span[1], end);
       List<String> dml =
           pieces(onDataTable(n.engine, ast, t, true, text, from), ast.parameterCount());
-      return dml == null ? null : new Bulk(n, dml, null, null, delete, imported, check);
+      return dml == null ? null : new Bulk(n, dml, null, null, delete, imported, check, null);
+    }
+
+    /**
+     * The keyed write's bulk block at READ COMMITTED on a decoupled table, built on the statement
+     * first of 4.3: the DML under the committed metadata row, with the slot's anchor or without.
+     */
+    static @Nullable Bulk keyedRc(
+        Names n,
+        SqlAst ast,
+        TableInfo t,
+        String exposed,
+        int[] span,
+        boolean delete,
+        boolean imported,
+        int from,
+        int end) {
+      String source = marked(ast);
+      if (source == null || t.layout() == Layout.INLINE) {
+        return null;
+      }
+      List<String> plain =
+          pieces(rcDml(n, ast, t, source, exposed, span, from, end, false), ast.parameterCount());
+      List<String> anchored =
+          pieces(rcDml(n, ast, t, source, exposed, span, from, end, true), ast.parameterCount());
+      return plain == null || anchored == null
+          ? null
+          : new Bulk(n, plain, null, null, delete, imported, null, anchored);
+    }
+
+    private static @Nullable String rcDml(
+        Names n,
+        SqlAst ast,
+        TableInfo t,
+        String source,
+        String exposed,
+        int[] span,
+        int from,
+        int end,
+        boolean anchored) {
+      return onDataTable(
+          n.engine,
+          ast,
+          t,
+          true,
+          source.substring(0, span[0])
+              + "("
+              + source.substring(span[0], span[1])
+              + ") AND EXISTS (SELECT 1 FROM "
+              + n.meta
+              + " m WHERE "
+              + n.keyJoin("m", exposed)
+              + " AND COALESCE(m."
+              + n.txState
+              + ", 3) = 3"
+              + (anchored
+                  ? " AND DECODE(m."
+                      + n.txId
+                      + ", l_ai(i), 1, 0) = 1 AND COALESCE(m."
+                      + n.txVersion
+                      + ", 0) = COALESCE(l_av(i), 0)"
+                  : "")
+              + ")"
+              + source.substring(span[1], end),
+          from);
     }
 
     /**
@@ -2221,7 +2298,7 @@ final class Writes {
         values.add(around);
         holes.add(in);
       }
-      return dml == null ? null : new Bulk(n, dml, values, holes, false, false, null);
+      return dml == null ? null : new Bulk(n, dml, values, holes, false, false, null, null);
     }
 
     /** {@code pieces} with their holes the slots of {@code numbers} at index {@code i}. */
@@ -2252,6 +2329,146 @@ final class Writes {
 
     String sql(List<String> types) {
       return texts.computeIfAbsent(String.join(",", types), k -> hinted(build(types), "k"));
+    }
+
+    /** The READ COMMITTED block for these slot types, with each slot's anchor or without. */
+    String sql(List<String> types, boolean anchored) {
+      return texts.computeIfAbsent(
+          (anchored ? "a:" : "p:") + String.join(",", types),
+          k -> hinted(buildRc(types, anchored), anchored ? "qa" : "q"));
+    }
+
+    /**
+     * The READ COMMITTED block: the DML as {@code FORALL} returning the keys it wrote, the count
+     * per slot from {@code SQL%BULK_ROWCOUNT} and, for each slot written, its anchor beside its key
+     * in the order {@code FORALL} returns them; then step 3's CAS over those keys as one {@code
+     * FORALL}, under the committed state and the anchor; OUT the keys returned, the rows stamped
+     * and the count per slot.
+     */
+    private String buildRc(List<String> types, boolean anchored) {
+      Engine engine = n.engine;
+      StringBuilder b =
+          new StringBuilder("DECLARE l_i ")
+              .append(n.meta)
+              .append(".")
+              .append(n.txId)
+              .append("%TYPE; l_p ")
+              .append(n.meta)
+              .append(".")
+              .append(n.preparedAt)
+              .append("%TYPE; l_c ")
+              .append(n.meta)
+              .append(".")
+              .append(n.committedAt)
+              .append("%TYPE;");
+      List<Integer> all = new ArrayList<>();
+      for (int j = 1; j <= types.size(); j++) {
+        b.append(" TYPE t_v")
+            .append(j)
+            .append(" IS TABLE OF ")
+            .append(types.get(j - 1))
+            .append(" INDEX BY PLS_INTEGER; l_v")
+            .append(j)
+            .append(" t_v")
+            .append(j)
+            .append(";");
+        all.add(j);
+      }
+      List<String> keys = new ArrayList<>();
+      List<String> into = new ArrayList<>();
+      List<String> byKey = new ArrayList<>();
+      for (int i = 0; i < n.keyColumns.size(); i++) {
+        String k = engine.quote(n.keyColumns.get(i));
+        keys.add(k);
+        into.add("l_w" + i);
+        byKey.add(k + " = l_w" + i + "(j)");
+        b.append(" TYPE t_w")
+            .append(i)
+            .append(" IS TABLE OF ")
+            .append(n.data)
+            .append(".")
+            .append(k)
+            .append("%TYPE; l_w")
+            .append(i)
+            .append(" t_w")
+            .append(i)
+            .append(";");
+      }
+      if (anchored) {
+        b.append(" TYPE t_ai IS TABLE OF ")
+            .append(n.meta)
+            .append(".")
+            .append(n.txId)
+            .append("%TYPE INDEX BY PLS_INTEGER; TYPE t_av IS TABLE OF ")
+            .append(n.meta)
+            .append(".")
+            .append(n.txVersion)
+            .append("%TYPE INDEX BY PLS_INTEGER; l_ai t_ai; l_av t_av; l_aw t_ai; l_vw t_av;");
+      }
+      b.append(" TYPE t_o IS TABLE OF NUMBER INDEX BY PLS_INTEGER; l_o t_o; l_n PLS_INTEGER;")
+          .append(" l_j PLS_INTEGER := 0; l_r NUMBER := 0; l_s NUMBER := 0;")
+          .append(" BEGIN l_i := ?; l_p := ?; l_c := ?; l_n := ?;");
+      for (int e = 1; e <= SLOTS; e++) {
+        for (int j = 1; j <= types.size(); j++) {
+          b.append(" l_v").append(j).append("(").append(e).append(") := ?;");
+        }
+        if (anchored) {
+          b.append(" l_ai(").append(e).append(") := ?; l_av(").append(e).append(") := ?;");
+        }
+      }
+      String cas =
+          String.join(" AND ", byKey)
+              + " AND COALESCE("
+              + n.txState
+              + ", 3) = 3"
+              + (anchored
+                  ? " AND DECODE("
+                      + n.txId
+                      + ", l_aw(j), 1, 0) = 1 AND COALESCE("
+                      + n.txVersion
+                      + ", 0) = COALESCE(l_vw(j), 0)"
+                  : "");
+      String stamp =
+          n.txId
+              + " = l_i, "
+              + n.preparedAt
+              + " = l_p, "
+              + n.committedAt
+              + " = l_c, "
+              + n.txState
+              + " = 3, "
+              + n.txVersion
+              + " = CASE WHEN "
+              + n.txId
+              + " IS NULL THEN 1 ELSE COALESCE("
+              + n.txVersion
+              + ", 0) + 1 END";
+      b.append(" FORALL i IN 1 .. l_n ")
+          .append(fill(Objects.requireNonNull(anchored ? anchoredDml : dml), all))
+          .append(" RETURNING ")
+          .append(String.join(", ", keys))
+          .append(" BULK COLLECT INTO ")
+          .append(String.join(", ", into))
+          .append("; FOR i IN 1 .. l_n LOOP l_o(i) := SQL%BULK_ROWCOUNT(i);")
+          .append(
+              anchored
+                  ? " FOR r IN 1 .. l_o(i) LOOP l_j := l_j + 1; l_aw(l_j) := l_ai(i);"
+                      + " l_vw(l_j) := l_av(i); END LOOP;"
+                  : "")
+          .append(" END LOOP; l_r := l_w0.COUNT; IF l_r > 0 THEN FORALL j IN 1 .. l_r ")
+          .append(
+              delete && !imported
+                  ? "DELETE FROM " + n.meta + " WHERE " + cas
+                  : "UPDATE " + n.meta + " SET " + stamp + " WHERE " + cas)
+          .append("; l_s := SQL%ROWCOUNT; END IF; ? := l_r; ? := l_s;");
+      for (int e = 1; e <= SLOTS; e++) {
+        b.append(" ? := CASE WHEN l_o.EXISTS(")
+            .append(e)
+            .append(") THEN l_o(")
+            .append(e)
+            .append(") ELSE 0 END;");
+      }
+      return b.append(" END;").toString();
     }
 
     private String build(List<String> types) {
@@ -2465,6 +2682,88 @@ final class Writes {
         lead.context.anchors().wrote(lead.txId);
       } finally {
         lead.context.running(null);
+      }
+      done += chunk.size();
+    }
+    return done;
+  }
+
+  /**
+   * A batch's entries of the keyed write at READ COMMITTED on a decoupled table through the plan's
+   * READ COMMITTED bulk block (design 4.4 "The READ COMMITTED decoupled entries"), {@link
+   * Bulk#SLOTS} at a time, with the returns of {@link #applyOracleBulk}: 0 where a block's entries
+   * resolve differently or not at all ({@link KeyedPlan#rcVersions}) or have no slot types, for the
+   * block of entries; -1 where the block failed and was undone whole. A count of 1 is the entry
+   * written and stamped; fewer rows stamped than written, an abort; a count of 0 is the entry's
+   * single form after the block, in order, through the keyed block.
+   */
+  private static int applyOracleBulkRc(
+      Connection vendor, KeyedPlan plan, Bulk bulk, List<Context> contexts, Finalized finalized)
+      throws SQLException {
+    int done = 0;
+    while (done < contexts.size()) {
+      List<Context> chunk = contexts.subList(done, Math.min(contexts.size(), done + Bulk.SLOTS));
+      List<String> types = bulk.types(chunk);
+      List<Anchors.Version> versions = types == null ? null : plan.rcVersions(chunk);
+      if (types == null || versions == null) {
+        return done;
+      }
+      boolean anchored = !versions.isEmpty();
+      Run lead = new Run(vendor, chunk.get(0));
+      long[] counts = new long[chunk.size()];
+      lead.checkCancelled();
+      try (CallableStatement cs = lead.track(vendor.prepareCall(bulk.sql(types, anchored)))) {
+        int at = lead.stamp(cs, 1);
+        cs.setInt(at++, chunk.size());
+        for (int e = 0; e < Bulk.SLOTS; e++) {
+          for (int j = 1; j <= types.size(); j++) {
+            if (e < chunk.size()) {
+              chunk.get(e).bind(cs, at++, j, false);
+            } else {
+              cs.setNull(at++, nullTypeOf(types.get(j - 1)));
+            }
+          }
+          if (anchored) {
+            if (e < chunk.size()) {
+              at = KeyedPlan.bindAnchor(cs, at, versions.get(e));
+            } else {
+              cs.setNull(at++, Types.VARCHAR);
+              cs.setNull(at++, Types.NUMERIC);
+            }
+          }
+        }
+        int out = at;
+        for (int o = 0; o < bulk.outs(); o++) {
+          cs.registerOutParameter(at++, Types.NUMERIC);
+        }
+        try {
+          cs.execute();
+        } catch (SQLException ex) {
+          if (undoable(ex)) {
+            return done == 0 ? -1 : done; // nothing of this block remains
+          }
+          throw ex;
+        }
+        if (cs.getLong(out + 1) != cs.getLong(out)) {
+          throw new Aborted("a row the statement writes changed after it was read");
+        }
+        if (cs.getLong(out) > 0) {
+          lead.context.anchors().wrote(lead.txId);
+        }
+        for (int e = 0; e < chunk.size(); e++) {
+          counts[e] = cs.getLong(out + 2 + e);
+        }
+      } finally {
+        lead.context.running(null);
+      }
+      for (int e = 0; e < chunk.size(); e++) {
+        long c = counts[e];
+        if (c > 1) {
+          throw new Aborted("a key matched " + c + " rows");
+        }
+        // no row, a row in flight or moved, a key without metadata: the single form's block tells
+        finalized.record(
+            done + e, c == 1 ? 1 : plan.applyOracleBlocks(new Run(vendor, chunk.get(e))));
       }
       done += chunk.size();
     }
@@ -5090,7 +5389,7 @@ final class Writes {
             ? null
             : oracleInsertEntries(n, ast, t, all, end, oracleKeyTypes(tableColumns, n)),
         oracleInsertAll,
-        snapshot && oracleInsertAll != null && rows != null
+        oracleInsertAll != null && rows != null
             ? Bulk.insert(n, ast, t, rows.get(0), end, tableColumns)
             : null);
   }
@@ -5742,10 +6041,15 @@ final class Writes {
     Bulk bulk = plan.bulk();
     Context first = contexts.get(0);
     // the keys an application asks for come back from the block of entries alone
+    // the INSERT's at both levels, which reads no version; the keyed write's at SNAPSHOT on a table
+    // the transaction recorded no version of, at READ COMMITTED as the entries' versions resolve
     if (bulk != null
-        && !first.anchors().recorded(plan.n.table)
+        && (bulk.insert() || bulk.readCommitted() || !first.anchors().recorded(plan.n.table))
         && !(bulk.insert() && first.wantsKeys())) {
-      int got = applyOracleBulk(vendor, bulk, contexts, finalized);
+      int got =
+          bulk.readCommitted()
+              ? applyOracleBulkRc(vendor, (KeyedPlan) plan, bulk, contexts, finalized)
+              : applyOracleBulk(vendor, bulk, contexts, finalized);
       if (got != 0) {
         return got;
       }
@@ -7248,8 +7552,38 @@ final class Writes {
       return 1L;
     }
 
+    /**
+     * The versions the entries' keys were read at, for the READ COMMITTED bulk block: empty where
+     * the transaction recorded none of the table, the block's plain text; one per entry where every
+     * entry's key has one, its anchored text; null where some have none, or two entries share a key
+     * or one's key is not read back from its binds, for the block of entries.
+     */
+    @Nullable List<Anchors.Version> rcVersions(List<Context> contexts) {
+      RcFirst f = Objects.requireNonNull(rcFirst);
+      Anchors anchors = contexts.get(0).anchors();
+      boolean recorded = anchors.recorded(n.table);
+      List<Anchors.Version> out = new ArrayList<>();
+      Set<List<Object>> seen = new HashSet<>();
+      for (Context c : contexts) {
+        Object[] key = f.key(c);
+        // two entries on one key: the second's DML would see the first's row but not its stamp,
+        // which the block's CAS writes after every DML
+        if (key == null || !seen.add(Anchors.key(key))) {
+          return null;
+        }
+        if (recorded) {
+          Anchors.Version v = anchors.version(n.table, key);
+          if (v == null) {
+            return null;
+          }
+          out.add(v);
+        }
+      }
+      return out;
+    }
+
     /** The anchor's tx_id and version from {@code at}, either NULL as the version has it. */
-    private static int bindAnchor(PreparedStatement ps, int at, Anchors.Version anchor)
+    static int bindAnchor(PreparedStatement ps, int at, Anchors.Version anchor)
         throws SQLException {
       if (anchor.txId == null) {
         ps.setNull(at, Types.VARCHAR);

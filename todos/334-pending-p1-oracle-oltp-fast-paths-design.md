@@ -2350,6 +2350,58 @@ by a row in flight elsewhere. Mergeable; landing is the user's call; the proof t
 inline cells at scale 32, expected toward 0.72 at SNAPSHOT from 0.62 and the same amount at READ
 COMMITTED from 0.54.
 
+### 2026-10-28: (A) items (2) and (3) built: the READ COMMITTED decoupled batches as bulk blocks (the builder's note)
+
+As designed in 4.4 ("The READ COMMITTED decoupled entries") and the "For c7 to build" list's items
+(2) and (3), approved by the user through 6e.
+
+(2) The INSERT's bulk block at both levels: `Bulk.insert` is built without `snapshot &&` in the
+InsertPlan, and `applyOracleEntries` takes an INSERT's bulk whether or not the transaction recorded
+versions of the table (that condition stays the SNAPSHOT keyed bulk's).
+
+(3) The keyed write at READ COMMITTED on a decoupled table: `Bulk.keyedRc` beside `Bulk.keyed`, held
+in the plan's bulk slot at that level (the plan is built per level, and at SNAPSHOT the slot keeps
+`Bulk.keyed`). Its DML is `rcFirst`'s, the user's predicate `AND EXISTS (SELECT 1 FROM T_meta m WHERE
+m.k = t.k AND COALESCE(m.tx_state, 3) = 3 [AND DECODE(m.tx_id, l_ai(i), 1, 0) = 1 AND
+COALESCE(m.tx_version, 0) = COALESCE(l_av(i), 0)])`, in two piece lists, plain and anchored; one text
+per slot types and per form (`sql(types, anchored)`, nested statements hinted `q`/`qa`). The block:
+the stamp and `l_n`, then per slot its values and, anchored, `l_ai(e), l_av(e)`; `FORALL i IN 1 ..
+l_n` the DML `RETURNING` the keys `BULK COLLECT INTO l_w*`; per slot `l_o(i) := SQL%BULK_ROWCOUNT(i)`
+and, anchored, the slot's anchor appended once per row it wrote (`l_aw`, `l_vw`, in the order FORALL
+returns the keys); `l_r := l_w0.COUNT`; `FORALL j IN 1 .. l_r` step 3's CAS by `l_w*(j)` under
+`COALESCE(tx_state, 3) = 3` and the anchor (`DELETE` for a created table's DELETE, the stamp's UPDATE
+otherwise); OUT `l_r`, `l_s` and the 16 counts. `applyOracleBulkRc` resolves each chunk of 16 by
+`KeyedPlan.rcVersions`: plain where the transaction recorded no version of the table, anchored where
+every entry's key has one, and the block of entries otherwise, and also where two entries share a key
+or a key is not read back from its binds. A repeated key is a case the design table names ("the
+merged form hands such entries to the block of entries before writing"): anchored, both DMLs pass
+under the first version and the second CAS misses it, an abort the entries one by one would not give;
+the test's mutation without the check aborts exactly so. After the block: `l_s` short of `l_r`, the
+abort "changed after it was read"; a count above 1, "a key matched N rows"; `anchors.wrote` once
+where anything was written; each 1 recorded, each 0 through `applyOracleBlocks` in entry order, as the
+inline vendor batch's 0s; an undoable failure, nothing of the block remains, the entries one by one
+(`applyOracleBulk`'s -1). An imported table's key without a metadata row fails the `EXISTS`, a 0, and
+the block stamps it, as the single form's.
+
+Tests, `OracleOltpIntegrationTest.form4ReadCommittedDecoupledBatchesAsBulkBlocks`, with ojdbc's
+statement cache on as the benchmarks run it and texts tagged per run (a table recreated by the class's
+setup leaves the old cursors in V$SQL): four keyed batches of 5, 9, 15 and 7, every count 1, the
+block one cursor with 1 parse and 4 executions and its two nested statements the same; a key without a
+row in the middle, `1, 1, 0, 1`; two entries on one key, not read and read first (425 read too, so
+that the anchored block, not a missing version, is what the batch would take), `1, 1, 1` and the
+metadata version 2 on, as the same two writes one by one; a row in flight in the middle with the wait,
+the wait and `1, 1, 1`, without it `40001` with `1`; a version moved by another connection after the
+read, `40001` with `1, 1`; three INSERTs over a tombstone through the INSERT's bulk block (its one
+execution in V$SQL, one round trip, the tombstone's version 3 on 2, the new keys at 1), then a
+duplicate as the third entry, `23000` with `1, 1`. It fails against each of: no READ COMMITTED bulk
+(the cursors), the 0s recorded as 0 (no wait on the row in flight), no repeated-key check (the abort
+above), the INSERT's bulk at SNAPSHOT alone (no bulk execution). `form4BatchesAsOneBlock`'s decoupled
+first-use batch at READ COMMITTED is now 1 round trip, no block of entries and so no OUT-bind check
+(was 2); `WritesTest`'s bulk test asserts the READ COMMITTED texts in place of their absence. On the
+container: the whole Oracle suite on a fresh database, 170 tests, none failing; the PostgreSQL suite,
+170; unit tests, 414; `spotbugsIntegrationTest` fails on main's three findings alone. Proof: the Oracle
+TPC-C READ COMMITTED decoupled cells at scale 32.
+
 ### 2026-10-28: (A) items (2) and (3) reviewed mergeable: f324372 on rc-decoupled-batches (the design's note)
 
 Reviewed from `git show f324372` (on 1e9f967). (2) The INSERT's bulk block at both levels: the

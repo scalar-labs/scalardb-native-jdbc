@@ -952,14 +952,14 @@ class OracleOltpIntegrationTest {
   }
 
   /**
-   * Form 4, the batches (design 4.4, "Batches on Oracle"): a prepared statement's entries go as one
-   * block of entries where the write is a block (the decoupled keyed write and INSERT), two round
-   * trips for ten, and through ojdbc's own batching where it is one statement (the inline INSERT
-   * and keyed write), one; an entry in flight stops the block, or is a 0 of the vendor's batch run
-   * after it through the keyed block, whose wait settles it, every count 1; at SNAPSHOT such an
-   * entry fails the batch with {@code 40001} and the counts before it, the gate closed for the
-   * vendor's batch handing it to the block of entries; a duplicate in the middle of an INSERT batch
-   * fails it with the counts before it, the vendor's own or the replay's.
+   * Form 4, the batches (design 4.4, "Batches on Oracle"): at READ COMMITTED a prepared statement's
+   * entries go as one bulk block where the write is a block (the decoupled keyed write and INSERT),
+   * and through ojdbc's own batching where it is one statement (the inline INSERT and keyed write),
+   * one round trip for ten either way; an entry in flight is a 0 of the bulk block or the vendor's
+   * batch, run after it through the keyed block, whose wait settles it, every count 1; at SNAPSHOT
+   * such an entry fails the batch with {@code 40001} and the counts before it, the gate closed for
+   * the vendor's batch handing it to the block of entries; a duplicate in the middle of an INSERT
+   * batch fails it with the counts before it, the vendor's own or the replay's.
    */
   @Test
   void form4BatchesAsOneBlock() throws Exception {
@@ -1025,9 +1025,8 @@ class OracleOltpIntegrationTest {
         assertThat(scalarDbX(table, 30)).isEqualTo("u");
         assertThat(scalarDbX(table, 39)).isEqualTo("u");
         assertThat(scalarDbX(table, 119)).isEqualTo("i");
-        // the table's first block of entries in the process, the check of the OUT binds: each
-        // reached entry's key through the binds and the cursor both, one round trip more, once; the
-        // inline table's batch is no block, and has none
+        // the table's first batch in the process: no check of the OUT binds, which only the block
+        // of entries makes, and neither layout's batch is one at READ COMMITTED
         Writes.OutBindCheck.reset();
         long checked;
         try (PreparedStatement ps =
@@ -1047,10 +1046,10 @@ class OracleOltpIntegrationTest {
         log(
             "form 4 ("
                 + layout
-                + "): the table's first batch in the process, the check of the OUT binds, "
+                + "): the table's first batch in the process "
                 + checked
                 + " round trip(s)");
-        assertThat(checked).isEqualTo(table.equals("t") ? 2 : 1);
+        assertThat(checked).isEqualTo(1);
         assertThat(scalarDbX(table, 30)).isEqualTo("v");
         assertThat(scalarDbX(table, 39)).isEqualTo("v");
         // an entry in flight at READ COMMITTED with the wait set: the block stops at it, the
@@ -1367,6 +1366,329 @@ class OracleOltpIntegrationTest {
       d.setAutoCommit(true);
     } finally {
       pool.shutdownNow();
+    }
+  }
+
+  /**
+   * Form 4 at READ COMMITTED on a decoupled table (design 4.4 "The READ COMMITTED decoupled
+   * entries", todo 334): the keyed batch as one bulk block over the DML and the CAS, one cursor for
+   * the block and one for each of its two statements over sizes 5 to 15, no parse after the first;
+   * a key without a row a 0 through the keyed block; two entries on one key, read first or not,
+   * through the block of entries, the version two on as one by one; a row in flight in the middle
+   * waits then is written, or aborts {@code 40001} with the counts before it without the wait; a
+   * version moved by another connection after the read aborts {@code 40001}; the INSERT batch
+   * through the INSERT's bulk block, a tombstone taken over, a duplicate in the middle failing the
+   * batch with the counts before it.
+   */
+  @Test
+  void form4ReadCommittedDecoupledBatchesAsBulkBlocks() throws Exception {
+    Properties cached = new Properties();
+    cached.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "60000");
+    cached.setProperty("oracle.jdbc.implicitStatementCacheSize", "32");
+    Properties waits = new Properties();
+    waits.putAll(cached);
+    waits.setProperty("scalar.db.native_jdbc.inflight_wait_millis", "10000");
+    String meta =
+        NS
+            + "."
+            + Engine.ORACLE.quote(
+                Objects.requireNonNull(catalog.lookup(List.of(), N(NS), N("t")).metadataTable()));
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection d = ORA.openDriver(cached);
+        Connection waiting = ORA.openDriver(waits);
+        Connection other = driver();
+        Connection v = ORA.open();
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      try (PreparedStatement ps =
+          d.prepareStatement("INSERT INTO " + NS + ".t (id, x, v) VALUES (?, 'a', 0)")) {
+        for (int id = 400; id < 440; id++) {
+          ps.setInt(1, id);
+          ps.addBatch();
+        }
+        assertThat(ps.executeBatch()).hasSize(40).containsOnly(1);
+      }
+      // texts of this run's own, whose cursors are new
+      String rcb = "/* rcb" + System.nanoTime() + " */";
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(false);
+      try (PreparedStatement ps =
+          d.prepareStatement("UPDATE " + rcb + " " + NS + ".t SET x = ? WHERE id = ?")) {
+        for (int size : List.of(5, 9, 15, 7)) {
+          for (int k = 0; k < size; k++) {
+            ps.setString(1, "b" + size);
+            ps.setInt(2, 400 + k);
+            ps.addBatch();
+          }
+          assertThat(ps.executeBatch()).hasSize(size).containsOnly(1);
+          d.commit();
+        }
+      }
+      assertThat(scalarDbX("t", 400)).isEqualTo("b7");
+      assertThat(scalarDbX("t", 410)).isEqualTo("b15");
+      long[][] cursors = rcBlocks(v, rcb);
+      log(
+          "form 4 at READ COMMITTED (decoupled): four keyed batches of 5 to 15, the bulk block and"
+              + " its two statements, cursors, parse calls, executions "
+              + java.util.Arrays.deepToString(cursors));
+      assertThat(cursors)
+          .as("one cursor each, one parse, an execution a batch")
+          .isDeepEqualTo(new long[][] {{1, 1, 4}, {2, 2, 8}});
+      // a key without a row: a 0 through the keyed block
+      try (PreparedStatement ps =
+          d.prepareStatement("UPDATE " + NS + ".t SET x = ? WHERE id = ?")) {
+        for (int id : new int[] {401, 402, 999, 403}) {
+          ps.setString(1, "m");
+          ps.setInt(2, id);
+          ps.addBatch();
+        }
+        assertThat(ps.executeBatch()).containsExactly(1, 1, 0, 1);
+      }
+      d.commit();
+      assertThat(scalarDbX("t", 403)).isEqualTo("m");
+      // two entries on one key, without and with its version read first, as the entries one by one
+      for (boolean read : List.of(false, true)) {
+        int batched = read ? 422 : 420;
+        int single = batched + 1;
+        long[] was = {metaVersion(v, meta, batched), metaVersion(v, meta, single)};
+        if (read) {
+          assertThat(
+                  rows(
+                      d,
+                      "SELECT x FROM "
+                          + NS
+                          + ".t WHERE id IN ("
+                          + batched
+                          + ", "
+                          + single
+                          + ", 425)"))
+              .hasSize(3);
+        }
+        try (PreparedStatement ps =
+            d.prepareStatement("UPDATE " + NS + ".t SET x = ? WHERE id = ?")) {
+          for (int id : new int[] {batched, 425, batched}) {
+            ps.setString(1, id == batched ? "k" : "o");
+            ps.setInt(2, id);
+            ps.addBatch();
+          }
+          assertThat(ps.executeBatch()).containsExactly(1, 1, 1);
+          for (int k = 0; k < 2; k++) {
+            ps.setString(1, "k");
+            ps.setInt(2, single);
+            assertThat(ps.executeUpdate()).isEqualTo(1);
+          }
+        }
+        d.commit();
+        long batchedMoved = metaVersion(v, meta, batched) - was[0];
+        long singleMoved = metaVersion(v, meta, single) - was[1];
+        log(
+            "form 4 at READ COMMITTED (decoupled): two entries on one key"
+                + (read ? ", read first" : "")
+                + ", the version "
+                + batchedMoved
+                + " on, one by one "
+                + singleMoved);
+        assertThat(batchedMoved).isEqualTo(2).isEqualTo(singleMoved);
+      }
+      // a row in flight in the middle: the wait, then the write
+      TwoPhaseCommitTransaction held = prepared(tpc, "t", 430, "p");
+      waiting.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      waiting.setAutoCommit(false);
+      Future<int[]> batch =
+          pool.submit(
+              () -> {
+                try (PreparedStatement ps =
+                    waiting.prepareStatement("UPDATE " + NS + ".t SET x = ? WHERE id = ?")) {
+                  for (int id = 429; id < 432; id++) {
+                    ps.setString(1, "w");
+                    ps.setInt(2, id);
+                    ps.addBatch();
+                  }
+                  return ps.executeBatch();
+                }
+              });
+      Thread.sleep(700);
+      assertThat(batch.isDone()).as("waits on the entry in flight").isFalse();
+      held.rollback();
+      assertThat(batch.get(20, TimeUnit.SECONDS)).containsExactly(1, 1, 1);
+      waiting.commit();
+      assertThat(scalarDbX("t", 430)).isEqualTo("w");
+      // without the wait, the abort and the counts before it
+      held = prepared(tpc, "t", 430, "p");
+      try (PreparedStatement ps =
+          d.prepareStatement("UPDATE " + NS + ".t SET x = ? WHERE id = ?")) {
+        for (int id = 429; id < 432; id++) {
+          ps.setString(1, "n");
+          ps.setInt(2, id);
+          ps.addBatch();
+        }
+        assertThatThrownBy(ps::executeBatch)
+            .as("an entry in flight without the wait")
+            .isInstanceOf(BatchUpdateException.class)
+            .satisfies(
+                e -> {
+                  assertThat(((BatchUpdateException) e).getUpdateCounts()).containsExactly(1);
+                  assertThat(((SQLException) e).getSQLState()).isEqualTo("40001");
+                });
+      }
+      d.rollback();
+      held.rollback();
+      // a version moved by another connection between the read and the batch
+      assertThat(rows(d, "SELECT x FROM " + NS + ".t WHERE id BETWEEN 433 AND 436")).hasSize(4);
+      assertThat(update(other, "UPDATE " + NS + ".t SET x = 'z' WHERE id = 435")).isEqualTo(1);
+      try (PreparedStatement ps =
+          d.prepareStatement("UPDATE " + NS + ".t SET x = ? WHERE id = ?")) {
+        for (int id = 433; id < 437; id++) {
+          ps.setString(1, "r");
+          ps.setInt(2, id);
+          ps.addBatch();
+        }
+        assertThatThrownBy(ps::executeBatch)
+            .as("a version moved since the read")
+            .isInstanceOf(BatchUpdateException.class)
+            .satisfies(
+                e -> {
+                  assertThat(((BatchUpdateException) e).getUpdateCounts()).containsExactly(1, 1);
+                  assertThat(((SQLException) e).getSQLState()).isEqualTo("40001");
+                });
+      }
+      d.rollback();
+      assertThat(scalarDbX("t", 435)).isEqualTo("z");
+      // the INSERT batch through the INSERT's bulk block: a tombstone taken over, then a duplicate
+      d.setAutoCommit(true);
+      assertThat(update(d, "INSERT INTO " + NS + ".imp VALUES (40, 1)")).isEqualTo(1);
+      assertThat(update(d, "DELETE FROM " + NS + ".imp WHERE k = 40")).isEqualTo(1);
+      d.setAutoCommit(false);
+      String impMeta =
+          NS
+              + "."
+              + Engine.ORACLE.quote(
+                  Objects.requireNonNull(
+                      catalog.lookup(List.of(), N(NS), N("imp")).metadataTable()));
+      String tombstone = rows(v, "SELECT \"tx_version\" FROM " + impMeta + " WHERE k = 40").get(0);
+      // a text of this run's own, whose block's cursor is new
+      String tag = "/* ib" + System.nanoTime() + " */";
+      Counter rt = new Counter(d);
+      long inserts;
+      try (PreparedStatement ps =
+          d.prepareStatement("INSERT " + tag + " INTO " + NS + ".imp VALUES (?, ?)")) {
+        inserts =
+            rt.measure(
+                () -> {
+                  for (int k : List.of(41, 40, 42)) {
+                    ps.setInt(1, k);
+                    ps.setInt(2, 2);
+                    ps.addBatch();
+                  }
+                  assertThat(ps.executeBatch()).containsExactly(1, 1, 1);
+                });
+      }
+      d.commit();
+      List<String> stamped =
+          rows(
+              v,
+              "SELECT k, \"tx_state\", \"tx_version\" FROM "
+                  + impMeta
+                  + " WHERE k IN (40, 41, 42) ORDER BY k");
+      log(
+          "form 4 at READ COMMITTED: three INSERTs over a tombstone at version "
+              + tombstone
+              + ", "
+              + inserts
+              + " round trip(s), metadata "
+              + stamped);
+      assertThat(insertBulks(v, tag)).as("the INSERT's bulk block").isEqualTo(1);
+      assertThat(inserts).as("one bulk block").isEqualTo(1);
+      assertThat(stamped)
+          .containsExactly("40/3/" + (Integer.parseInt(tombstone) + 1), "41/3/1", "42/3/1");
+      assertThat(rows(d, "SELECT k, x FROM " + NS + ".imp WHERE k BETWEEN 40 AND 42 ORDER BY k"))
+          .containsExactly("40/2", "41/2", "42/2");
+      try (PreparedStatement ps = d.prepareStatement("INSERT INTO " + NS + ".imp VALUES (?, ?)")) {
+        for (int k : List.of(43, 44, 41, 45)) {
+          ps.setInt(1, k);
+          ps.setInt(2, 3);
+          ps.addBatch();
+        }
+        assertThatThrownBy(ps::executeBatch)
+            .as("a duplicate as the third entry")
+            .isInstanceOf(BatchUpdateException.class)
+            .satisfies(
+                e -> {
+                  assertThat(((BatchUpdateException) e).getUpdateCounts()).containsExactly(1, 1);
+                  assertThat(((SQLException) e).getSQLState()).isEqualTo("23000");
+                });
+      }
+      d.rollback();
+      assertThat(rows(d, "SELECT COUNT(*) FROM " + NS + ".imp WHERE k IN (43, 44)"))
+          .containsExactly("0");
+      d.setAutoCommit(true);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * The READ COMMITTED bulk block whose text holds {@code tag}, and its nested statements, as
+   * {@code V$SQL} has them: their cursors, parse calls and executions.
+   */
+  private static long[][] rcBlocks(Connection v, String tag) throws SQLException {
+    long[] block = new long[3];
+    String hash = null;
+    try (PreparedStatement ps =
+        v.prepareStatement(
+            "SELECT parse_calls, executions, REGEXP_SUBSTR(sql_fulltext,"
+                + " 'scalardb_native_qa?1_([0-9a-f]+)', 1, 1, NULL, 1) FROM v$sql WHERE"
+                + " command_type = 47 AND DBMS_LOB.INSTR(sql_fulltext, ?) > 0")) {
+      ps.setString(1, tag);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          block[0]++;
+          block[1] += rs.getLong(1);
+          block[2] += rs.getLong(2);
+          hash = rs.getString(3);
+        }
+      }
+    }
+    long[] nested = new long[3];
+    try (PreparedStatement ps =
+        v.prepareStatement(
+            "SELECT parse_calls, executions FROM v$sql WHERE command_type <> 47 AND sql_text LIKE"
+                + " '%scalardb_native_q%' || ? || ' */%'")) {
+      ps.setString(1, String.valueOf(hash));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          nested[0]++;
+          nested[1] += rs.getLong(1);
+          nested[2] += rs.getLong(2);
+        }
+      }
+    }
+    return new long[][] {block, nested};
+  }
+
+  /** The executions {@code V$SQL} has of the INSERT's bulk blocks whose text holds {@code tag}. */
+  private static long insertBulks(Connection v, String tag) throws SQLException {
+    try (PreparedStatement ps =
+        v.prepareStatement(
+            "SELECT NVL(SUM(executions), 0) FROM v$sql WHERE command_type = 47 AND"
+                + " DBMS_LOB.INSTR(sql_fulltext, 'FORALL i IN 1 .. l_n INSERT') > 0 AND"
+                + " DBMS_LOB.INSTR(sql_fulltext, ?) > 0")) {
+      ps.setString(1, tag);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getLong(1);
+      }
+    }
+  }
+
+  /** The metadata row's version of the decoupled table's key {@code id}. */
+  private static long metaVersion(Connection v, String meta, int id) throws SQLException {
+    try (PreparedStatement ps =
+        v.prepareStatement("SELECT \"tx_version\" FROM " + meta + " WHERE id = ?")) {
+      ps.setInt(1, id);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getLong(1);
+      }
     }
   }
 

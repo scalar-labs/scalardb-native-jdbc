@@ -1165,11 +1165,40 @@ class WritesTest {
         .contains(" FORALL i IN INDICES OF l_o UPDATE \"ns\".\"t_meta\" SET")
         .contains(" WHERE \"id\" = CAST(l_v1(i) AS number) AND COALESCE(\"tx_state\", 3) = 3;")
         .endsWith(" ? := l_r; ? := l_s; END;");
-    // not at READ COMMITTED, nor on the inline layout
-    assertThat(oraclePlan(created(), "UPDATE t SET x = ? WHERE \"id\" = ?", false).bulk()).isNull();
+    // at READ COMMITTED the INSERT's the same, and the keyed write's built on the statement first:
+    // the DML under the committed metadata row, with each slot's anchor or without, then the CAS
+    // over the keys it returned (design 4.4 "The READ COMMITTED decoupled entries")
     assertThat(oraclePlan(created(), "INSERT INTO t (\"id\", x) VALUES (?, ?)", false).bulk())
-        .isNull();
+        .isNotNull()
+        .extracting(Writes.Bulk::insert)
+        .isEqualTo(true);
+    Writes.Bulk rc = oraclePlan(created(), "UPDATE t SET x = ? WHERE \"id\" = ?", false).bulk();
+    assertThat(rc).isNotNull();
+    assertThat(rc.readCommitted()).isTrue();
+    assertThat(rc.outs()).isEqualTo(2 + Writes.Bulk.SLOTS);
+    String plain = untag(List.of(rc.sql(List.of("VARCHAR2(32767)", "NUMBER"), false))).get(0);
+    String anchored = untag(List.of(rc.sql(List.of("VARCHAR2(32767)", "NUMBER"), true))).get(0);
+    assertThat(plain)
+        .contains(
+            " FORALL i IN 1 .. l_n UPDATE \"ns\".\"t_data\" t SET x = l_v1(i) WHERE (\"id\" ="
+                + " l_v2(i)) AND EXISTS (SELECT 1 FROM \"ns\".\"t_meta\" m WHERE m.\"id\" ="
+                + " t.\"id\" AND COALESCE(m.\"tx_state\", 3) = 3) RETURNING \"id\" BULK COLLECT"
+                + " INTO l_w0;")
+        .contains(" WHERE \"id\" = l_w0(j) AND COALESCE(\"tx_state\", 3) = 3;")
+        .doesNotContain("l_ai")
+        .endsWith(" ? := CASE WHEN l_o.EXISTS(16) THEN l_o(16) ELSE 0 END; END;");
+    assertThat(anchored)
+        .contains(" l_v1(1) := ?; l_v2(1) := ?; l_ai(1) := ?; l_av(1) := ?;")
+        .contains(
+            " AND DECODE(m.\"tx_id\", l_ai(i), 1, 0) = 1 AND COALESCE(m.\"tx_version\", 0) ="
+                + " COALESCE(l_av(i), 0))")
+        .contains(" FOR r IN 1 .. l_o(i) LOOP l_j := l_j + 1; l_aw(l_j) := l_ai(i);")
+        .contains(
+            " AND DECODE(\"tx_id\", l_aw(j), 1, 0) = 1 AND COALESCE(\"tx_version\", 0) ="
+                + " COALESCE(l_vw(j), 0);");
+    // not on the inline layout, whose entries go through the vendor's batching
     assertThat(oraclePlan(inline(), "UPDATE t SET x = ? WHERE \"id\" = ?", true).bulk()).isNull();
+    assertThat(oraclePlan(inline(), "UPDATE t SET x = ? WHERE \"id\" = ?", false).bulk()).isNull();
   }
 
   /** The declared types a table of one NUMBER key and a text column has on Oracle. */
