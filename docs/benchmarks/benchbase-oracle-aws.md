@@ -447,3 +447,59 @@ decoupled, the fast network, 60 s × 2, statement cache 128. About 25 minutes of
   is 3 times the vendor's.
 - This run's harness predates `d0fd2c2`, so its per-commit CPU still includes BenchBase's startup
   statistics gathering (9 `GATHER_TABLE_STATS` calls).
+
+## Eighth run: the targeted round for five fixes (2026-10-28)
+
+Run `20261028-1706-ora` from `bench-env/plans/targeted-oracle.json` on main `99e9c86`. The
+round's fixes (todo 334, 966e3f3):
+- **A1** `9cac28d`: an inline keyed batch through ojdbc's batching, at both levels.
+- **A2** `d10c269`: RC decoupled batches. The INSERT's bulk block at both levels, and the merged
+  statement-first block for the keyed write.
+- **B3** `3ebf06b`: `NO_INDEX_SS` on an inline table's RC committed copy.
+- **C** `98f8d47`: the in-flight index in the data table's key order, plus a key-ordered index on
+  the metadata table where the import ordered the key by name.
+
+TPC-C scale 32 and YCSB E at 1M rows. READ COMMITTED and SNAPSHOT, both layouts, the fast network,
+60 s × 2, statement cache 128, a client flight recording of every run. The harness now reads the
+server's counters as BenchBase starts its terminals (`d0fd2c2`), so "CPU a commit" no longer
+includes BenchBase's startup statistics gathering. All four cells passed, 21–28 min each.
+
+| (c)/(a) | TPC-C before | TPC-C now | YCSB E before | YCSB E now |
+|---|---|---|---|---|
+| RC decoupled | 0.45 (seventh) | **0.58** | 0.66 | **0.72** |
+| RC inline | 0.54 | **0.70** | 0.77 | **0.82** |
+| SNAPSHOT decoupled | 0.63 | **0.66** | 0.88 | **0.92** |
+| SNAPSHOT inline | 0.62 | **0.84** | 0.84 | 0.84 |
+
+p50 overhead against the vendor:
+
+| | Delivery | NewOrder | OrderStatus | Payment | StockLevel | scan | insert |
+|---|---|---|---|---|---|---|---|
+| RC decoupled | +142% | +55% | +71% | +57% | +53% | +38% | +28% |
+| RC inline | +92% | +20% | +41% | +20% | +62% | +22% | +11% |
+| SNAPSHOT decoupled | +71% | +41% | +71% | +48% | +25% | +8% | +14% |
+| SNAPSHOT inline | +30% | **+12%** | +75% | **+17%** | +30% | +19% | +28% |
+
+Server CPU a commit, TPC-C, driver against vendor (startup gathering excluded):
+
+| RC decoupled | RC inline | SNAPSHOT decoupled | SNAPSHOT inline |
+|---|---|---|---|
+| 3.04 / 1.43 ms | 2.22 / 1.40 | 2.32 / 1.32 | 1.64 / 1.20 |
+
+- **A1, the largest gain.** Inline TPC-C 0.54 → 0.70 at RC, 0.62 → 0.84 at SNAPSHOT. The inline
+  cells have no `DECLARE l_rows_1` text left. The stock update is ojdbc's batched `UPDATE stock
+  ...`: 102 µs a batch at RC inline, parsed 4 times in all. SNAPSHOT inline's NewOrder and Payment
+  are within 12–17% of the vendor's.
+- **A2 and C, RC decoupled 0.45 → 0.58** (expected about 0.65).
+  - The plans show no SKIP SCAN. Delivery's order_line keys read range-scans `ORDER_LINE_KEY`: 15
+    gets a call, against 112.
+  - The blocks are 0.4–0.7 ms a call, against about 2. NewOrder is 7.5 → 5.3 ms.
+  - Delivery is still 2.4 times the vendor's: its ORDER_LINE_tx_metadata block is about 0.7 ms
+    and 100 gets a call.
+- **B3, the RC inline scan +29% → +22%** (expected about +19%). 110 gets a call against the
+  vendor's 104 (133 before).
+- **Still open:**
+  - OrderStatus is +41% to +75% in every cell.
+  - StockLevel's count at RC inline is 0.8 ms and 665 gets a call.
+  - The RC decoupled scan is +38%: the join of every scanned row with its metadata row, the
+    layout's cost at RC.
