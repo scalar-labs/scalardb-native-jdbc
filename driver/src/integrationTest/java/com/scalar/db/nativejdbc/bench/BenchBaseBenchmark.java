@@ -312,7 +312,7 @@ class BenchBaseBenchmark {
     if (e.engine() == Engine.ORACLE) {
       oracleRunner(e, ns);
     }
-    benchBase(e, workload, "a", dir, "load", "--create=true", "--load=true");
+    benchBase(e, workload, "a", dir, "load", null, "--create=true", "--load=true");
     List<String> imported = new ArrayList<>();
     List<String> plain = new ArrayList<>();
     if (run.equals("c") || run.equals("d")) {
@@ -368,6 +368,39 @@ class BenchBaseBenchmark {
         stats(e) && oracle ? OracleStats.start(e, ns) : null;
     Sampler sampler = stats(e) && !oracle ? new Sampler(e) : null;
     Path histograms = dir.resolve("histograms.json");
+    // the counters read again as BenchBase starts its terminals: its startup reads the tables'
+    // index information, which on Oracle gathers their statistics (getIndexInfo), and that is not
+    // the workload's (the sixth Oracle run, about 1 ms a commit of the driver's); the readings
+    // above stand where the line never comes
+    Server.Snapshot[] pgAtStart = {start};
+    OracleStats.Counters[] oracleAtStart = {oracleStart};
+    Runnable atStart =
+        () -> {
+          try {
+            if (pgAtStart[0] != null) {
+              pgAtStart[0] = Server.snapshot(e);
+            }
+            if (oracleAtStart[0] != null) {
+              OracleStats.Counters r = OracleStats.read(e);
+              OracleStats.Counters s0 = oracleAtStart[0];
+              oracleAtStart[0] =
+                  new OracleStats.Counters(
+                      r.commits(),
+                      r.dbTimeUs(),
+                      r.redo(),
+                      r.dbCpuUs(),
+                      r.busyCs(),
+                      r.roundTrips(),
+                      r.sql(),
+                      r.sqlText(),
+                      r.waits(),
+                      r.blocks(),
+                      s0.tables());
+            }
+          } catch (SQLException ex) {
+            System.out.println("[bench] counters at the terminals' start not read: " + ex);
+          }
+        };
     try {
       benchBase(
           e,
@@ -375,6 +408,7 @@ class BenchBaseBenchmark {
           run,
           dir,
           "execute",
+          stats(e) ? atStart : null,
           "--execute=true",
           "-jh",
           histograms.toAbsolutePath().toString());
@@ -386,11 +420,11 @@ class BenchBaseBenchmark {
     Server server =
         roundTrip == null
             ? null
-            : oracleStart != null
-                ? OracleStats.since(e, oracleStart, roundTrip, dir.resolve("server.txt"))
-                : start == null
+            : oracleAtStart[0] != null
+                ? OracleStats.since(e, oracleAtStart[0], roundTrip, dir.resolve("server.txt"))
+                : pgAtStart[0] == null
                     ? null
-                    : Server.since(e, start, sampler, roundTrip, dir.resolve("server.txt"));
+                    : Server.since(e, pgAtStart[0], sampler, roundTrip, dir.resolve("server.txt"));
     return Result.read(run, dir, histograms, imported, plain, server);
   }
 
@@ -498,6 +532,65 @@ class BenchBaseBenchmark {
     }
 
     /**
+     * The generic plans of the ten statements of most execution time (EXPLAIN (GENERIC_PLAN),
+     * PostgreSQL 16), with the benchmark's schema on the search path; lines indented, so that a
+     * reader of the statements (a count in the first column) skips them. The driver's calls are
+     * planned with their values, so a custom plan may differ (todo 334: the RC decoupled scan's
+     * plan on PostgreSQL).
+     */
+    @SuppressFBWarnings(
+        value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
+        justification = "the benchmark's own statements, read back from pg_stat_statements")
+    private static String plans(Engines e) {
+      StringBuilder out = new StringBuilder("\nplans (generic)\n");
+      try (Connection c = e.open();
+          Statement st = c.createStatement()) {
+        List<String> top = new ArrayList<>();
+        try (ResultSet rs =
+            st.executeQuery(
+                "SELECT query FROM pg_stat_statements"
+                    + " WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())"
+                    + " ORDER BY total_exec_time DESC LIMIT 10")) {
+          while (rs.next()) {
+            top.add(rs.getString(1));
+          }
+        }
+        st.execute("SET search_path TO " + e.engine().quote(e.storedSchema(SCHEMA)) + ", public");
+        // through PL/pgSQL's EXECUTE: the extended protocol's parse would want the $n bound
+        st.execute(
+            "CREATE OR REPLACE FUNCTION pg_temp.scalardb_native_plan(q text) RETURNS SETOF text"
+                + " LANGUAGE plpgsql AS $f$ DECLARE r text; BEGIN FOR r IN EXECUTE"
+                + " 'EXPLAIN (GENERIC_PLAN) ' || q LOOP RETURN NEXT r; END LOOP; END $f$");
+        for (String q : top) {
+          String head = q.stripLeading().toUpperCase(Locale.ROOT);
+          if (!(head.startsWith("SELECT")
+              || head.startsWith("WITH")
+              || head.startsWith("INSERT")
+              || head.startsWith("UPDATE")
+              || head.startsWith("DELETE"))) {
+            continue;
+          }
+          out.append("  -- ").append(q.replaceAll("\\s+", " "), 0, Math.min(q.length(), 200));
+          out.append('\n');
+          try (PreparedStatement ps =
+              c.prepareStatement("SELECT * FROM pg_temp.scalardb_native_plan(?)")) {
+            ps.setString(1, q);
+            try (ResultSet rs = ps.executeQuery()) {
+              while (rs.next()) {
+                out.append("  ").append(rs.getString(1)).append('\n');
+              }
+            }
+          } catch (SQLException ex) {
+            out.append("  (no plan: ").append(ex.getMessage()).append(")\n");
+          }
+        }
+      } catch (SQLException ex) {
+        out.append("  (plans unavailable: ").append(ex.getMessage()).append(")\n");
+      }
+      return out.toString();
+    }
+
+    /**
      * The counters since {@code start}, with pg_stat_statements' top statements written to {@code
      * to}.
      */
@@ -525,6 +618,7 @@ class BenchBaseBenchmark {
       } catch (SQLException ex) {
         out.append("pg_stat_statements unavailable: ").append(ex.getMessage()).append('\n');
       }
+      out.append(plans(e));
       double backends = -1;
       double others = -1;
       if (sampler != null) {
@@ -863,7 +957,7 @@ class BenchBaseBenchmark {
       List<String> names = new ArrayList<>(end.blocks().keySet());
       names.sort(null);
       for (String name : names) {
-        double[] v = end.blocks().get(name);
+        double[] v = Objects.requireNonNull(end.blocks().get(name));
         double[] b = start.blocks().getOrDefault(name, new double[2]);
         if (v[0] - b[0] > 0) {
           out.append(
@@ -1044,7 +1138,13 @@ class BenchBaseBenchmark {
 
   /** Runs BenchBase in its own JVM, with the driver's classes and this JVM's vendor driver. */
   private static void benchBase(
-      Engines e, String workload, String run, Path dir, String phase, String... args)
+      Engines e,
+      String workload,
+      String run,
+      Path dir,
+      String phase,
+      @Nullable Runnable atStart,
+      String... args)
       throws Exception {
     Path config = dir.resolve(phase + ".xml");
     writeConfig(e, workload, run, config);
@@ -1073,7 +1173,18 @@ class BenchBaseBenchmark {
             .redirectErrorStream(true)
             .redirectOutput(log.toFile())
             .start();
-    if (!p.waitFor(3, TimeUnit.HOURS)) {
+    // BenchBase's "Creating N virtual terminals...": its startup done, the workload next
+    long deadline = System.nanoTime() + TimeUnit.HOURS.toNanos(3);
+    boolean started = atStart == null;
+    while (atStart != null && !started && p.isAlive() && System.nanoTime() < deadline) {
+      if (Files.readString(log, StandardCharsets.UTF_8).contains(" virtual terminals")) {
+        atStart.run();
+        started = true;
+      } else {
+        Thread.sleep(200);
+      }
+    }
+    if (!p.waitFor(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)) {
       p.destroyForcibly();
       throw new IllegalStateException("BenchBase did not finish: " + log);
     }
