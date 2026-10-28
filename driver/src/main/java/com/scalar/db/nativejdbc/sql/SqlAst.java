@@ -2507,6 +2507,49 @@ public final class SqlAst {
     default boolean exposesColumns() {
       return false;
     }
+
+    /**
+     * Returns, for a split reference whose derived table in this copy joins another table on the
+     * reference's key, where that join's ON clause ends and the alias the other table is read by;
+     * null where it has none. The statement's top-level conjuncts that compare a key column of the
+     * reference with a constant or a placeholder are repeated there, over the other table's column.
+     *
+     * @param ref a reference of {@link Split#places()}
+     * @return the derived table split at the ON clause's end, or null
+     */
+    default @Nullable KeyRange keyRange(TableRef ref) {
+      return null;
+    }
+  }
+
+  /**
+   * A derived table of a split copy as two texts around the end of an ON clause that joins another
+   * table, read by {@code alias}, on the reference's key (design 4.2, todo 334): PostgreSQL forms
+   * no equivalence class across an outer join's ON clause, so the key range of the statement's
+   * predicate reaches the other side only where the ON clause repeats it. Each conjunct repeated is
+   * the statement's own tokens, its column read as the other table's and its placeholders bound
+   * again where they stand.
+   */
+  public static final class KeyRange {
+    final String before;
+    final String after;
+    final String alias;
+    final List<String> keyColumns;
+
+    /**
+     * Creates the split.
+     *
+     * @param before the derived table's text up to the ON clause's end
+     * @param after the rest of its text
+     * @param alias the alias the joined table is read by
+     * @param keyColumns the reference's key columns, as the table stores them
+     */
+    public KeyRange(String before, String after, String alias, List<String> keyColumns) {
+      this.before = before;
+      this.after = after;
+      this.alias = alias;
+      this.keyColumns = List.copyOf(keyColumns);
+    }
   }
 
   /** The ScalarDB table references a split read takes pieces of, and where each stands. */
@@ -2984,6 +3027,97 @@ public final class SqlAst {
         t = t.next) {
       if (t.image.equalsIgnoreCase("WHERE")) {
         return t.next;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The conjuncts of the statement's top-level WHERE clause that compare a key column of {@code r}
+   * with a constant or a placeholder, by =, <, <=, >, >= or BETWEEN, each as a run of its own
+   * tokens with the column read as {@code k}'s alias's; none for a reference in a subquery, nor
+   * inside an OR, nor on another column.
+   */
+  private List<Run> keyConjuncts(TableRef r, KeyRange k) {
+    if (!(statement instanceof PlainSelect) || (r.scope != null && r.scope != statement)) {
+      return List.of();
+    }
+    PlainSelect s = (PlainSelect) statement;
+    boolean alone = s.getJoins() == null || s.getJoins().isEmpty();
+    List<Expression> conjuncts = new ArrayList<>();
+    for (Expression e = s.getWhere(); e != null; ) {
+      if (e instanceof AndExpression) {
+        conjuncts.add(((AndExpression) e).getRightExpression());
+        e = ((AndExpression) e).getLeftExpression();
+      } else {
+        conjuncts.add(e);
+        e = null;
+      }
+    }
+    java.util.Collections.reverse(conjuncts);
+    List<Run> out = new ArrayList<>();
+    for (Expression e : conjuncts) {
+      Expression column;
+      List<Expression> values;
+      if (e instanceof Between && !((Between) e).isNot()) {
+        Between b = (Between) e;
+        column = b.getLeftExpression();
+        values = List.of(b.getBetweenExpressionStart(), b.getBetweenExpressionEnd());
+      } else if (e instanceof EqualsTo
+          || e instanceof GreaterThan
+          || e instanceof GreaterThanEquals
+          || e instanceof MinorThan
+          || e instanceof MinorThanEquals) {
+        ComparisonOperator c = (ComparisonOperator) e;
+        boolean left = c.getLeftExpression() instanceof Column;
+        column = left ? c.getLeftExpression() : c.getRightExpression();
+        values = List.of(left ? c.getRightExpression() : c.getLeftExpression());
+      } else {
+        continue;
+      }
+      String key = column instanceof Column ? keyColumnOf((Column) column, r, alone, k) : null;
+      boolean constant = true;
+      for (Expression v : values) {
+        constant &=
+            v instanceof JdbcParameter || v instanceof LongValue || v instanceof StringValue;
+      }
+      // a BETWEEN has no node of its own: from its column to its upper bound
+      Token first = e.getASTNode() != null ? firstToken(e) : firstToken(column);
+      Token last = e.getASTNode() != null ? lastToken(e) : lastToken(values.get(values.size() - 1));
+      Token columnFirst = key == null ? null : firstToken(column);
+      Token columnLast = key == null ? null : lastToken(column);
+      if (key == null
+          || !constant
+          || first == null
+          || last == null
+          || columnFirst == null
+          || columnLast == null) {
+        continue;
+      }
+      Edits other = new Edits(new IdentityHashMap<>(), new IdentityHashMap<>());
+      other.from.put(columnFirst, k.alias + "." + engine.quote(key));
+      other.to.put(columnFirst, columnLast);
+      out.add(new Run(first, last, other));
+    }
+    return out;
+  }
+
+  /**
+   * The key column of {@code r}, as stored, that {@code c} names; null where it names none or
+   * another table's. The qualifier as written, as {@link #selectsKey} reads it.
+   */
+  private static @Nullable String keyColumnOf(Column c, TableRef r, boolean alone, KeyRange k) {
+    boolean ofTable =
+        (c.getTable() == null || c.getTable().getName() == null)
+            ? alone
+            : c.getTable().getName().equals(r.hasAlias() ? r.alias() : r.name());
+    if (!ofTable) {
+      return null;
+    }
+    String name = lowerUnquoted(c.getColumnName());
+    for (String key : k.keyColumns) {
+      if (key.toLowerCase(Locale.ROOT).equals(name)) {
+        return key;
       }
     }
     return null;
@@ -4198,6 +4332,30 @@ public final class SqlAst {
       return null;
     }
     Map<Token, Splice> splices = new IdentityHashMap<>();
+    for (TableRef r : split.places.keySet()) {
+      KeyRange k = copy.keyRange(r);
+      Node n = k == null ? null : r.node.getASTNode();
+      Token first = n == null ? null : n.jjtGetFirstToken();
+      String text = first == null ? null : base.from.get(first);
+      Token last = first == null ? null : base.to.get(first);
+      List<Run> conjuncts = k == null ? List.of() : keyConjuncts(r, k);
+      if (k == null
+          || first == null
+          || text == null
+          || last == null
+          || conjuncts.isEmpty()
+          || !text.startsWith(k.before + k.after)) {
+        continue;
+      }
+      List<Object> parts = new ArrayList<>();
+      parts.add(k.before);
+      for (Run c : conjuncts) {
+        parts.add("AND");
+        parts.add(c);
+      }
+      parts.add(text.substring(k.before.length()).strip());
+      splices.put(first, new Splice(last, parts.toArray()));
+    }
     List<Object> unmatched = new ArrayList<>();
     for (Map.Entry<TableRef, Place> e : split.places.entrySet()) {
       TableRef r = e.getKey();

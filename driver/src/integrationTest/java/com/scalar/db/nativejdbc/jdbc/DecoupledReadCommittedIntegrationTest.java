@@ -74,7 +74,7 @@ class DecoupledReadCommittedIntegrationTest {
     factory = PG.scalarDb();
     try (DistributedTransactionAdmin admin = factory.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
-      for (String table : List.of("imp", "made", "big")) {
+      for (String table : List.of("imp", "made", "big", "mil")) {
         if (admin.namespaceExists(NS) && admin.tableExists(NS, table)) {
           admin.dropTable(NS, table);
         }
@@ -823,6 +823,72 @@ class DecoupledReadCommittedIntegrationTest {
       List<String> planned =
           Setup.plan(catalog, v, x -> x.table().equals("big"), List.of()).get(0).actions();
       assertThat(planned).contains("ANALYZE " + metaTable);
+    }
+  }
+
+  /**
+   * A range read of a decoupled table in a transaction (design 4.2, todo 334): PostgreSQL forms no
+   * equivalence class across an outer join's ON clause, so the committed copy's left join to the
+   * metadata table repeats the predicate's key range there, and at a million rows the metadata side
+   * is an index range scan, not a probe per row or a scan of the table; the rows read are the
+   * vendor's.
+   */
+  @Test
+  void aRangeReadInATransaction_reachesTheMetadataRowsByTheKeyRange() throws Exception {
+    try (Connection v = PG.open()) {
+      PG.execute(
+          v,
+          "CREATE TABLE " + NS + ".mil (id INT PRIMARY KEY, x TEXT)",
+          "INSERT INTO " + NS + ".mil SELECT g, 'a' FROM generate_series(1, 1000000) g");
+    }
+    try (DistributedTransactionAdmin admin = factory.getTransactionAdmin()) {
+      admin.importTable(NS, "mil", DECOUPLED, Map.of());
+    }
+    catalog.invalidate(); // the table ScalarDB has just imported
+    TableInfo mil = catalog.lookup(List.of(), NS, "mil");
+    String meta = "\"" + NS + "\".\"" + mil.metadataTable() + "\"";
+    try (Connection v = PG.open()) {
+      // the metadata rows as a backfill leaves them, written here in one statement
+      PG.execute(
+          v,
+          "INSERT INTO "
+              + meta
+              + " (id, tx_id, tx_state, tx_version) SELECT g, 'seed', 3, 1 FROM"
+              + " generate_series(1, 1000000) g");
+      assertThat(
+              Setup.run(catalog, v, x -> x.table().equals("mil"), Duration.ofMinutes(1), List.of()))
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    String sql = "SELECT x FROM " + NS + ".mil WHERE id > ? AND id < ?";
+    try (Connection d = PG.openDriver();
+        Connection v = PG.open()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(false);
+      String routed = d.nativeSQL(sql);
+      System.out.println("[334] the range read in a transaction: " + routed);
+      assertThat(routed)
+          .contains(" m ON m.\"id\" = t.\"id\" AND m.\"id\" > ? AND m.\"id\" < ? WHERE");
+      String plan = generic(v, routed);
+      System.out.println("[334] its generic plan:\n" + plan);
+      assertThat(plan)
+          .as("both sides by the key range")
+          .containsPattern(
+              "Index Scan using \\S+ on "
+                  + mil.metadataTable()
+                  + " m\\s+Index Cond: \\(\\(id > \\$1\\) AND \\(id < \\$2\\)\\)")
+          .doesNotContain("Seq Scan on " + mil.metadataTable());
+      try (PreparedStatement ps = d.prepareStatement(sql)) {
+        ps.setInt(1, 1000);
+        ps.setInt(2, 1501);
+        try (ResultSet rs = ps.executeQuery()) {
+          int n = 0;
+          while (rs.next()) {
+            n++;
+          }
+          assertThat(n).isEqualTo(500);
+        }
+      }
+      d.commit();
     }
   }
 

@@ -2550,6 +2550,51 @@ second setup with no index action; an in-flight index put back in the old order,
 setup "rebuilt", `check` set up; teardown dropping both. Mergeable; landing as A2's; the proof the
 Oracle TPC-C READ COMMITTED decoupled cell's Delivery and StockLevel, with A2 toward 0.65.
 
+### 2026-10-28: (B) item 1 built: PostgreSQL's decoupled committed copy takes the key range on the metadata side (the builder's note)
+
+As design 4.2's READ COMMITTED bullet has it, approved by the user through 6e, by the route the
+design's note gave: no marker in the text, the statement's own tokens repeated as runs. `SqlAst.Copy`
+gains `keyRange(ref)`, a public `SqlAst.KeyRange` of the copy's derived table split at the end of the
+ON clause that joins another table on the reference's key, the alias that table is read by, and the
+key columns. `copyEdits` then emits that derived table as a `Splice` in place of its replacement: the
+text before, `AND` and a `Run` per key conjunct, the rest; each run is the conjunct's own tokens
+under `Edits` of its own that read the column, however written (`k`, `t.k`), as `m."k"`, raw, so the
+emitter binds each placeholder again where it stands. `keyConjuncts` takes the conjuncts of the
+top-level WHERE's AND that compare a key column of the reference with a placeholder, an integer or a
+string, by =, <, <=, >, >= or BETWEEN (not NOT BETWEEN), the qualifier as written matched as
+`selectsKey` matches it, an unqualified column only where the reference is alone in the FROM clause;
+none inside an OR, on another column, or for a reference in a subquery. A BETWEEN has no node of its
+own, so its run is from its column to its upper bound. `SplitRead`'s copy answers `keyRange` only on
+PostgreSQL, for the committed piece whose check is the `LEFT_JOIN` with the copy's own versions on a
+decoupled table, `committed` recording where the ON clause ends (the check's choice pulled out of
+`fragment` into `committedCheck`, shared by both, so they cannot differ).
+
+One change outside the split, for review: `Proxies.canPrepareAgain`. It allowed preparing a split read
+again only for a route with the same parameter sources (785e126, "a route that differs only in its
+committed check"). A statement prepared in autocommit and run in a transaction is prepared again with
+the anchored text, which now repeats the key range's placeholders, so the sources differ and
+`WriteIntegrationTest.anchorsFromJoins` was refused ("prepared outside a transaction"). The values are
+bound again through the new route's own sources (`replay`, then `bind` for every later set), so equal
+sources were caution, not need; the rule now takes any split route for a split read. What still holds:
+the earlier branches refuse a route that now writes, or whose text changed other than by its counts or
+its level; both routes must be split reads; no batch pending, the statement neither unwrapped nor
+closed; and a stream bound to a split read is refused at the rebinding, as before.
+
+Tests: `SplitTest.aCopyJoiningTheMetadataByTheKey_repeatsTheKeyRangeInItsOnClause`, a copy split at
+its ON clause over `t.id > ? and id < ? and x = ? and (id = 5 or id = 6) and id between ? and 90
+order by id`: the ON clause gains `AND m."id" > ? AND m."id" < ? AND m."id" between ? and 90`, nothing
+for `x` nor the OR, the sources `1, 2, 4` then the WHERE's `1, 2, 3, 4` per copy;
+`DecoupledReadCommittedIntegrationTest.aRangeReadInATransaction_reachesTheMetadataRowsByTheKeyRange`,
+a decoupled table of a million rows, a range read in a transaction at READ COMMITTED: the routed ON
+clause `m."id" = t."id" AND m."id" > ? AND m."id" < ?`, the generic plan `Index Scan using
+mil_tx_metadata_pkey on mil_tx_metadata m, Index Cond: ((id > $1) AND (id < $2))` hash-joined to the
+data side's bitmap range scan, no sequential scan of the metadata table, 500 rows read. Without the
+key range the test fails. On the containers: PostgreSQL, MySQL, MySQL lower case, MariaDB and SQL
+Server, 171 each, none failing; Oracle on a fresh database, one class failing in its setup, ScalarDB's
+`importTable` of `OO.IMP` raising ORA-08177 from Oracle's recursive SQL, before the driver runs, the
+class then passing alone, 24; unit tests, 415; `spotbugsIntegrationTest` fails on main's three findings
+alone. Proof: the PostgreSQL YCSB E scan at READ COMMITTED decoupled, 1.68 ms of execution toward 1.0.
+
 ### 2026-10-28: (B) item 1 reviewed mergeable: ae811f9 on pg-on-key-range (the design's note)
 
 Reviewed from `git show ae811f9` (on 98f8d47). The mechanism is the one the design's note gave and

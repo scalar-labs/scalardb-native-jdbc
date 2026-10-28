@@ -572,6 +572,59 @@ class SplitTest {
     return ast.emitSplit(split, copies, Map.of());
   }
 
+  /**
+   * The committed copy's left join to the metadata table on PostgreSQL (design 4.2, todo 334): the
+   * statement's top-level conjuncts comparing a key column with a constant or a placeholder are
+   * repeated in its ON clause over the metadata side, the user's own tokens with their placeholders
+   * bound again; a conjunct on another column, or inside an OR, is not.
+   */
+  @Test
+  void aCopyJoiningTheMetadataByTheKey_repeatsTheKeyRangeInItsOnClause() {
+    SqlAst ast =
+        parse(
+            "select x from t where t.id > ? and id < ? and x = ? and (id = 5 or id = 6)"
+                + " and id between ? and 90 order by id");
+    SqlAst.Split split = ast.split(r -> r.name().equals("t") ? List.of("id") : null);
+    String before = "(select t.id, t.x from t_data t left join t_meta m on m.id = t.id";
+    String after = " where coalesce(m.s, 3) = 3)";
+    List<SqlAst.Copy> copies = new ArrayList<>();
+    for (SqlAst.Piece piece : List.of(SqlAst.Piece.COMMITTED, SqlAst.Piece.IN_FLIGHT)) {
+      copies.add(
+          new SqlAst.Copy() {
+            @Override
+            public @Nullable String replacementFor(SqlAst.TableRef ref) {
+              return fragment(ref, piece);
+            }
+
+            @Override
+            public SqlAst.Piece piece(SqlAst.TableRef ref) {
+              return piece;
+            }
+
+            @Override
+            public String fragment(SqlAst.TableRef ref, SqlAst.Piece p) {
+              return p == SqlAst.Piece.COMMITTED ? before + after : "(select id, x from t_meta m)";
+            }
+
+            @Override
+            public SqlAst.@Nullable KeyRange keyRange(SqlAst.TableRef ref) {
+              return piece == SqlAst.Piece.COMMITTED
+                  ? new SqlAst.KeyRange(before, after, "m", List.of("id"))
+                  : null;
+            }
+          });
+    }
+    SqlAst.SplitText out = Objects.requireNonNull(ast.emitSplit(split, copies, Map.of()));
+    assertThat(out.sql())
+        .contains(
+            "left join t_meta m on m.id = t.id AND m.\"id\" > ? AND m.\"id\" < ? AND m.\"id\""
+                + " between ? and 90 where coalesce(m.s, 3) = 3) t")
+        .doesNotContain("m.\"x\"")
+        .doesNotContain("m.\"id\" = 5");
+    // the committed copy's ON clause, then its WHERE clause, then the in-flight copy's
+    assertThat(out.parameterSources()).containsExactly(1, 2, 4, 1, 2, 3, 4, 1, 2, 3, 4);
+  }
+
   private static Map<String, SqlAst.Place> places(String sql, String... tables) {
     List<String> scalarDb = List.of(tables);
     Map<String, SqlAst.Place> out = new java.util.LinkedHashMap<>();

@@ -1699,8 +1699,9 @@ public final class Proxies {
     }
 
     /**
-     * Whether a prepared split read can be prepared again for a route that differs only in its
-     * committed check: the same placeholders, and no batch the vendor statement already holds.
+     * Whether a prepared split read can be prepared again for another split read of the statement,
+     * its values bound again through the new text's placeholders, and no batch the vendor statement
+     * already holds.
      */
     private boolean canPrepareAgain(Router.Route old, Router.Route now) throws SQLException {
       // not a closed statement, which must keep failing, nor one the application holds unwrapped
@@ -1708,8 +1709,10 @@ public final class Proxies {
           && !unwrapped
           && !vendor().isClosed()
           && !batchPending
+          // a split read's values are bound again through the new text's own placeholders, which
+          // may repeat them elsewhere: PostgreSQL's key range on the metadata side (todo 334)
           && (old.parameterSources != null
-              ? old.parameterSources.equals(now.parameterSources)
+              ? now.parameterSources != null
               : now.parameterSources == null && plain(old) && plain(now) && !streamBound());
     }
 

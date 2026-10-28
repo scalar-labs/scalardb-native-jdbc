@@ -240,36 +240,63 @@ final class SplitRead {
             public String fragment(SqlAst.TableRef ref, SqlAst.Piece piece) {
               TableInfo t = Objects.requireNonNull(scalarDb.get(ref));
               List<String> cols = Objects.requireNonNull(read.get(ref));
-              // the copy's own version columns (todo 329): none, or the row's, or its before
-              // image's, and the row's own state with them
-              Versions v =
-                  own.contains(ref) ? new Versions(t.layout() == Layout.INLINE, state) : null;
+              Versions v = versions(ref, t);
               switch (piece) {
                 case IN_FLIGHT:
                   return inFlight(engine, t, cols, false, v);
                 case UNMATCHED:
                   return none(engine, t, cols, v);
                 default:
-                  return committed(
-                      engine,
-                      t,
-                      cols,
-                      raw
-                          ? Check.NONE
-                          : v != null
-                              ? v.inline ? Check.OWN : Check.LEFT_JOIN
-                              : lock != null
-                                  ? Check.SCALAR
-                                  : perRow.contains(ref) || rowByRowUnderLimit
-                                      ? engine != Engine.SQLSERVER
-                                          ? Check.LEFT_JOIN
-                                          : inCopy == Check.LEFT_JOIN ? inCopy : Check.SEEK
-                                      : engine == Engine.POSTGRESQL && t.layout() == Layout.INLINE
-                                          ? Check.OWN // the row's own state, no probe per row
-                                          : inCopy,
-                      lock,
-                      v);
+                  return committed(engine, t, cols, committedCheck(ref, t, v), lock, v, null);
               }
+            }
+
+            @Override
+            public SqlAst.@Nullable KeyRange keyRange(SqlAst.TableRef ref) {
+              // on PostgreSQL the committed copy's left join to the metadata table, whose ON
+              // clause takes the predicate's key range for the metadata side (design 4.2, todo
+              // 334)
+              TableInfo t = scalarDb.get(ref);
+              if (engine != Engine.POSTGRESQL
+                  || t == null
+                  || !places.containsKey(ref)
+                  || piece(ref) != SqlAst.Piece.COMMITTED) {
+                return null;
+              }
+              Versions v = versions(ref, t);
+              Check c = committedCheck(ref, t, v);
+              if (c != Check.LEFT_JOIN || v == null || v.inline) {
+                return null;
+              }
+              int[] onEnd = {-1};
+              String text =
+                  committed(engine, t, Objects.requireNonNull(read.get(ref)), c, lock, v, onEnd);
+              return onEnd[0] < 0
+                  ? null
+                  : new SqlAst.KeyRange(
+                      text.substring(0, onEnd[0]), text.substring(onEnd[0]), "m", t.keyColumns());
+            }
+
+            // the copy's own version columns (todo 329): none, or the row's, or its before
+            // image's, and the row's own state with them
+            private @Nullable Versions versions(SqlAst.TableRef ref, TableInfo t) {
+              return own.contains(ref) ? new Versions(t.layout() == Layout.INLINE, state) : null;
+            }
+
+            private Check committedCheck(SqlAst.TableRef ref, TableInfo t, @Nullable Versions v) {
+              return raw
+                  ? Check.NONE
+                  : v != null
+                      ? v.inline ? Check.OWN : Check.LEFT_JOIN
+                      : lock != null
+                          ? Check.SCALAR
+                          : perRow.contains(ref) || rowByRowUnderLimit
+                              ? engine != Engine.SQLSERVER
+                                  ? Check.LEFT_JOIN
+                                  : inCopy == Check.LEFT_JOIN ? inCopy : Check.SEEK
+                              : engine == Engine.POSTGRESQL && t.layout() == Layout.INLINE
+                                  ? Check.OWN // the row's own state, no probe per row
+                                  : inCopy;
             }
           });
     }
@@ -355,14 +382,18 @@ final class SplitRead {
     }
   }
 
-  /** The table's rows not in flight, with the columns {@code read} of its own. */
+  /**
+   * The table's rows not in flight, with the columns {@code read} of its own; with {@code onEnd},
+   * where the left join's ON clause ends in the text, -1 where it has none.
+   */
   private static String committed(
       Engine engine,
       TableInfo t,
       List<String> read,
       Check check,
       @Nullable String lock,
-      @Nullable Versions v) {
+      @Nullable Versions v,
+      int @Nullable [] onEnd) {
     String txState = engine.quote("tx_state");
     // on Oracle the row's own state is a filter on the row, never a key: unhinted, the optimizer
     // takes a skip scan of the in-flight index, (tx_state, key), over the key's range (design 4.2
@@ -431,8 +462,11 @@ final class SplitRead {
         sql.append(" LEFT JOIN ")
             .append(meta(engine, t))
             .append(" m ON ")
-            .append(keyJoin(engine, t, "m"))
-            .append(" WHERE COALESCE(m.")
+            .append(keyJoin(engine, t, "m"));
+        if (onEnd != null) {
+          onEnd[0] = sql.length();
+        }
+        sql.append(" WHERE COALESCE(m.")
             .append(txState)
             .append(v != null ? ", 3) NOT IN (1, 2)" : ", 3) = 3");
         break;
