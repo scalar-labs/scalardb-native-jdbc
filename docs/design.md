@@ -831,8 +831,13 @@ union as a derived table.
   indexed by key at the first write to the table (todo 334). On PostgreSQL each copy carries them as
   columns of its own instead of lookups (todo 329): a committed copy of an inline table its row's
   `tx_id` and `tx_version`, the copy kept to the rows whose own state is committed rather than
-  probing the in-flight index per row; a decoupled table's by a left join to its metadata row; an
-  in-flight copy its before image's. A key read of a decoupled table in a transaction then costs the
+  probing the in-flight index per row; a decoupled table's by a left join to its metadata row,
+  whose ON clause repeats, for the metadata side, the predicate's conjuncts that compare a key
+  column with a constant or a placeholder, bound again: PostgreSQL forms no equivalence class across
+  an outer join's ON clause, so without them the metadata side has no key range and a range read
+  probes its metadata row per row, YCSB's scan at twice Oracle's excess, which derives them (todo
+  334's log, 2026-10-28); an in-flight copy its before image's. A key read of a decoupled table in a
+  transaction then costs the
   vendor's probe and the metadata row's, 8 against 5 µs warm, its in-flight arm a probe of an empty
   partial index; a form reading both images from one join of `T` and `T_meta`, a `CASE` per non-key
   column, measured the same and would hide those columns behind expressions (section 3), so there is
@@ -891,7 +896,12 @@ union as a derived table.
   carries them from a left join to its metadata row, `LEFT JOIN T_meta m ON m.k = t.k` with
   `COALESCE(m.tx_state, 3) = 3` in place of the `NOT EXISTS` per row, one access to the metadata row
   where the lookups made two and the exclusion a third; an in-flight copy carries its before
-  image's. The argument is the engine's statement-level read consistency, which Oracle gives at
+  image's; the committed copy of an inline table carries `/*+ NO_INDEX_SS(t) */`, its state
+  condition being a filter on the row and never a key, since the optimizer took an index skip scan of
+  the in-flight index, (tx_state, key), over the primary key's range scan in the sixth run, 133 gets
+  a 500-row scan against the vendor's 100, which a forced skip scan reproduces on the container (272
+  against 184; todo 334's log, 2026-10-28). The argument is the engine's statement-level read
+  consistency, which Oracle gives at
   READ COMMITTED (section 1): the lookups and the columns read the same metadata row in the same
   statement's snapshot, so they agree, and the join adds no row, the metadata row being at most
   one per key. A `*` or `t.*` over such a copy is spelled out as the table's columns, which Oracle
@@ -1794,21 +1804,22 @@ lock, which the inline block's CAS in its UPDATE's WHERE already rests on; a sta
 the condition, so nothing is written while the row is in flight and the wait of section 6 holds no
 lock, the failed statement having locked nothing; and the version in the WHERE is the recorded
 anchor itself, the first read's, which the block compared afterwards. SNAPSHOT keeps its forms.
-Batches keep the forms of 4.4 until the merged form, whose entries take this statement's conditions
-per slot. With it, every nested statement of a block carries a hint comment naming the block's
-shape, the statement's place in it and the block's text (`/*+ scalardb_native_<shape><n>_<hash> */`,
-`Writes.hinted`; a shape alone would leave the clear-table stamp and a block's per-entry texts
-shared): PL/SQL keeps one open cursor per nested text, and a text two blocks share, or one block
-repeats per entry, parses on every call, the MERGE stamp's 44% of executions and the block of
-entries' every nested statement (todo 334's log, 2026-10-27, measured at `session_cached_cursors` 50
-and 500 alike). The name is a hint Oracle does not know, listed as a syntax error in `DBMS_XPLAN`'s
-hint report and ignored, the hints beside it in the same comment, a user's or
-`IGNORE_ROW_ON_DUPKEY_INDEX`, still applied, as the 19c documentation says and the 23ai container
-shows. Expected: the inline READ COMMITTED update from +30% to about SNAPSHOT's +7%, the decoupled
-one from +38% to about +25%, the RMW with them. A write without a read of the key has no anchor:
-waiting on another connection's write to the row, it writes over that write once committed, as the
-vendor's statement does at READ COMMITTED; the block aborted it on its own step 1's version, which
-the transaction had not read (`form2RowWrittenByAnotherWhileTheStatementWaits`).
+Batches take this statement through the vendor's batching on an inline table and, on a decoupled
+one, as the merged block of 4.4, each entry's anchor its own (2026-10-28). With it, every nested
+statement of a block carries a hint comment naming the block's shape, the statement's place in it
+and the block's text (`/*+ scalardb_native_<shape><n>_<hash> */`, `Writes.hinted`; a shape alone
+would leave the clear-table stamp and a block's per-entry texts shared): PL/SQL keeps one open
+cursor per nested text, and a text two blocks share, or one block repeats per entry, parses on every
+call, the MERGE stamp's 44% of executions and the block of entries' every nested statement (todo
+334's log, 2026-10-27, measured at `session_cached_cursors` 50 and 500 alike). The name is a hint
+Oracle does not know, listed as a syntax error in `DBMS_XPLAN`'s hint report and ignored, the hints
+beside it in the same comment, a user's or `IGNORE_ROW_ON_DUPKEY_INDEX`, still applied, as the 19c
+documentation says and the 23ai container shows. Expected: the inline READ COMMITTED update from
++30% to about SNAPSHOT's +7%, the decoupled one from +38% to about +25%, the RMW with them. A write
+without a read of the key has no anchor: waiting on another connection's write to the row, it writes
+over that write once committed, as the vendor's statement does at READ COMMITTED; the block aborted
+it on its own step 1's version, which the transaction had not read
+(`form2RowWrittenByAnotherWhileTheStatementWaits`).
 
 What must keep holding: the keyed write's tests above, their expectation of the statement's
 executions now one on a hit at READ COMMITTED. To add, on both layouts: a key written without a
@@ -2523,6 +2534,75 @@ vendor's own statement, then on AWS with the rest.
   455–515 µs against the vendor's two array executions at 205–285, DB time 2,405–2,510 → 1,125–1,380
   against 610–955, parse calls 40 → 0; index-by table binds in place of the slots (ojdbc's
   `setPlsqlIndexTable`) measured no better at the server and are not taken.
+
+  *The inline layout's entries through the vendor's batching, at both levels (todo 334,
+  2026-10-28).* The vendor's batching of the division above, decided 2026-10-26, was built for the
+  inline INSERT only, and the sixth run priced the omission: NewOrder's stock batch on an inline
+  table runs as the block of entries at 0.33 to 1.69 ms of server CPU and 47 to 141 gets a call by
+  its size, 136 µs an entry against the vendor's 4, each entry's two nested cursors parsed on 80% of
+  the calls, since eleven sizes of five to fifteen entries hold 220 nested texts against a session
+  cache of 50; about a millisecond of CPU and 1.3 of elapsed a NewOrder, the largest driver-specific
+  cost of the cell. Where the keyed write's single form on an inline table is one statement,
+  consecutive entries of one prepared write go as that statement through ojdbc's batching,
+  `addBatch` per entry and one `executeLargeBatch`, before the block of entries
+  (`KeyedPlan.vendorBatch`, as the inline INSERT's), whose nested cursors then leave the session.
+  ojdbc returns each element's own row count (23ai, verified: keys present, missing and repeated
+  count 1, 0, 1, 1, 0), the count the statement alone would have given the entry. At SNAPSHOT the
+  statement is the vendor's statement with the stamp of 4.3, gated on a table the transaction has
+  not found clear and plain on one it has; the gate is one condition for every element in the
+  transaction's snapshot, so any count above 0 marks the table clear and makes every 0 the vendor's,
+  a key without a row, and counts all 0 ask the coarse check, which hands the entries to the block
+  of entries when it finds a row in flight and otherwise marks the table clear with the 0s the
+  vendor's, the rule of the table below. At READ COMMITTED the statement is the statement first of
+  4.3, and the batch takes it when every entry resolves alike: the plain text where the transaction
+  recorded no version of the table's keys, the anchored text with each entry's own version bound
+  after its placeholders where every entry's key has one; otherwise the block of entries as today. A
+  count of 1 is the entry written and stamped, `anchors.wrote(tx_id)` once for the batch; an entry
+  with count 0 runs after the batch, in entry order, as the single form runs a miss, the keyed
+  block, which decides as its table says: no row, the wait on a row in flight and the block again,
+  the abort on a version moved, and the second write of a key this transaction wrote, whose first
+  entry's stamp the second's anchor no longer matches, written by the block at the row's current
+  version, the count the entries one by one would have given. The entries after a 0 are written when
+  the block runs, as the entries before a stop of the block of entries are; the effects take the
+  same order, entries on distinct keys being independent and two on one key reaching the block in
+  order. A failure out of `executeLargeBatch` is `applyVendorBatch`'s: the elements before the
+  failing one written and counted as ojdbc reports them, the error classified as the single form
+  classifies it, ORA-08177 `40001` rollback-only. Measured on the container (todo 334's log), a
+  batch of 5 to 15 updates of a 300,000-row inline table and a commit, server CPU and gets a call
+  from `V$SQL`: the vendor's array UPDATE 55 µs and 32; the stamp statement plain 74 and 39, gated
+  118 and 73, the gate a probe per element; the READ COMMITTED statement with the anchors 126 and
+  54; today's block of entries 328 to 1,289 by size with 20 parse calls a batch; a `FORALL` block of
+  16 slots 115 and 46, the PL/SQL call's 40 over the array, so the vendor's batching is taken and no
+  block built for the inline layout. Expected at AWS: the stock batch at the vendor's 0.04 ms of CPU
+  and 0.1 of elapsed a NewOrder plus a third, the SNAPSHOT inline TPC-C cell from 0.62 toward 0.72
+  and the READ COMMITTED inline one from 0.54 by the same amount.
+
+  *The READ COMMITTED decoupled entries (todo 334, 2026-10-28).* The seventh run, section 3's
+  statistics in place, left the READ COMMITTED decoupled TPC-C at 0.45, with the stock batch's block
+  of entries at 0.7 to 2.6 ms of server CPU and 80 to 241 gets a call, three nested cursors an
+  entry, and the order_line INSERT batch's at 0.35 to 1.7 ms and 68 to 206 gets, where the SNAPSHOT
+  cell's bulk blocks cost 0.28 and 0.12 ms. Two forms take them. The INSERT's bulk block above runs
+  at both levels: its outcomes are the single INSERT block's, which abort a tombstone in flight at
+  either level, and it reads no snapshot, so the SNAPSHOT condition on it is dropped, and the
+  versions the transaction recorded of the table, which the keyed bulk block must not have, do not
+  bear on an INSERT. The keyed write's entries at this level take the merged form above built on the
+  statement first of 4.3 rather than on step 1: one block per write shape and slot types, 16 slots,
+  each slot's placeholders in collections typed as above and, in the anchored text, each slot's
+  anchor beside them, `l_ai(i)` and `l_av(i)`; the user's DML as `FORALL i IN 1 .. l_n` under
+  `EXISTS (SELECT 1 FROM T_meta m WHERE m.k = t.k AND COALESCE(m.tx_state, 3) = 3 AND
+  DECODE(m.tx_id, l_ai(i), 1, 0) = 1 AND COALESCE(m.tx_version, 0) = COALESCE(l_av(i), 0))`, the
+  anchor's two conditions absent from the plain text, with `RETURNING k BULK COLLECT INTO l_w`, the
+  count per slot from `SQL%BULK_ROWCOUNT`; then the slots written mapped onto the keys returned,
+  which `FORALL` appends in slot order, a loop of at most 16, and the CAS of step 3 as one `FORALL`
+  over them, the key as the clear-table stamp spells it, the state condition and the slot's anchor,
+  `SQL%BULK_ROWCOUNT` per row; OUT the count per slot and the rows stamped. The rules are the
+  vendor's batching's above: a count of 1 whose CAS counted 1 is the entry written and stamped; a
+  CAS short of its DML is the abort "a row the statement writes changed after it was read"; a count
+  of 0 is the entry's single form after the block, in order; the batch takes the block only when
+  every entry resolves alike, the block of entries otherwise; a failure undoes the block whole and
+  the entries run one by one. Expected at AWS: the stock batch near the SNAPSHOT bulk block's 0.28
+  ms and 97 gets a call plus a metadata probe per row, the order_line batch at the bulk's 0.12 ms
+  and 70 gets; measured on the container first, as the inline forms were.
 
   What the driver does with the rows of a block of entries, per entry in order:
 

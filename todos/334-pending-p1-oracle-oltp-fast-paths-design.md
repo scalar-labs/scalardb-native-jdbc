@@ -2073,3 +2073,208 @@ the user's word; design section 3's statistics paragraph gains the sentence on t
 column. The proof is the TPC-C cell at READ COMMITTED decoupled at scale 32, expected near the other
 TPC-C cells.
 
+### 2026-10-28: the seventh run read: READ COMMITTED decoupled TPC-C at 0.45 from 0.13, what is left
+
+Run 20261028-1118-ora (6e, main 2ba29f2 with 110a623, the fast network, scale 32, 80231e8): 734
+against 1,640/s, 0.45. The sampling is gone, no `DS_SVC` text, the metadata tables with key-column
+statistics, the CAS and step 1's read of STOCK_tx_metadata out of the top statements. The 0.54–0.63
+expected above (018283c) was short because it priced the stock batch on the inline cell's block of
+entries, and this level's decoupled block costs more: three nested cursors an entry, step 1's read
+through the left join, the DML and the CAS, at 0.72–2.59 ms of server CPU and 80–241 gets a call by
+size (eleven texts, about 1,770 calls each), 2.75 ms of elapsed at fifteen entries; and the
+order_line INSERT batch, the bulk block at SNAPSHOT (0.12 ms, 70 gets a call in the sixth run), runs
+here as the block of entries at 0.35–1.71 ms and 68–206 gets, the bulk being built under `snapshot
+&&` (`Writes.java`, the InsertPlan). Per commit, the harness's figures with the startup gather still
+in them: server CPU 4.94 against 1.62 ms, active 4.65 against 1.29. Two more readings. Delivery at
+25.8 against 8.6 ms p50: its order_line write beyond the key runs the predicate block at 1.43 ms and
+199 gets a call, ten calls a Delivery, of which the keys read (`scalardb_native_p1`) takes 1.02 ms
+and 112 gets for about ten rows, hash-joining the RC view's committed arm through an INDEX SKIP SCAN
+of ORDER_LINE_INFLIGHT and the metadata rows through an INDEX SKIP SCAN of the metadata table's
+primary key, because the key columns' order differs between the two tables (the (C) entry below);
+the vendor's UPDATE is 0.069 ms and 14 gets. And the single keyed writes, the statement-first
+blocks, cost 0.09–0.25 ms of CPU and 7–17 gets a call against the vendor's 0.01–0.05, their nested
+DML parsed on 42% of the calls (the warehouse's: 7,942 of 19,041), the session's cursor cache
+crowded by the batches' per-entry nested texts; both fall with (A).
+
+### 2026-10-28: (A) designed: the inline NewOrder batches through the vendor's batching at both levels; the READ COMMITTED decoupled batches by the INSERT's bulk block and a merged statement-first block; measured on the container
+
+The user approved (A), "the bulk form for INLINE NewOrder batches at SNAPSHOT, and at RC inline if
+it applies", relayed by 6e with the sixth run's figures: SNAPSHOT inline TPC-C 0.62 fast, 0.88 slow,
+server CPU 2.2 against 1.3 ms a commit once the startup gather is excluded.
+
+**What the inline batch costs today.** The stock batch runs as the block of entries, one text per
+size 5–15, about 2,000 calls each: 0.33–1.69 ms of server CPU and 47–141 gets a call, 0.66–2.03 ms
+elapsed, 136 µs and 9.4 gets an entry against the vendor's array UPDATE at 4 µs and 4 gets a row
+(44,658 calls, 0.040 ms, 40 gets). The entry's nested UPDATE itself costs 26–31 µs and 5.3 gets; the
+rest is the block's: its nested cursors parse on 80% of the calls (1,731 of 2,195 for one text)
+despite the per-entry hint names, because eleven sizes of five to fifteen entries hold 220 nested
+texts, far past the session cache of 50, so each entry pays two soft parses and a cursor open. At
+READ COMMITTED inline the same block runs (0.29–1.38 ms CPU, 47–141 gets).
+
+**The form.** The vendor's batching for the inline statement with the stamp was in the division of
+2026-10-26 ("nothing to build but adding the entries' binds") and was built for the inline INSERT
+only, the keyed plan's `vendorBatch()` left null, so the dispatcher's `entries() != null` sends the
+inline keyed batch to the block. Design 4.4 now says it in full ("The inline layout's entries
+through the vendor's batching, at both levels"): at SNAPSHOT the fast statement, gated or clear as
+the transaction found the table, with the count rule of 2026-10-26; at READ COMMITTED the statement
+first of 4.3 with each entry's anchor bound after its placeholders, taken when every entry resolves
+alike (all anchored, or the table without recorded versions), the 0s run after the batch through the
+keyed block in entry order, the outcomes those of the entries one by one; the failure handling
+`applyVendorBatch`'s. ojdbc's per-element counts verified on the container (23ai thin,
+`executeLargeBatch` of an UPDATE over keys present, missing and repeated: 1, 0, 1, 1, 0; with the
+anchor, a key written at its anchor then twice more: 1, 0, 0).
+
+**Measured on the container** (`forms7.jsh` in the scratchpad): a 300,000-row inline table, a batch
+of 5–15 updates (sizes in rotation as NewOrder's) and a commit, 2,200 transactions a round, two
+rounds; `V$MYSTAT` a transaction and `V$SQL` a call.
+
+| form | server CPU µs / tx | DB time | parses / tx | round trips | the text a call: CPU µs, gets |
+|---|---|---|---|---|---|
+| (V) the vendor's array UPDATE | 136 | 450–532 | 0 | 2 | 55, 32 |
+| (E) today's block of entries | 900 | 1,886–2,400 | 20 | 2 | 328 (5 entries) to 1,289 (15); nested SELECT 13, UPDATE 40, parse ratio 1.00 |
+| (S) the stamp statement, clear, array | 150–155 | 555–650 | 0 | 2 | 74, 39 |
+| (SG) the stamp statement, gated, array | 218–300 | 718–736 | 0 | 2 | 118, 73 |
+| (R) the READ COMMITTED statement, anchored, array (+ a read per key) | 441–495 | 1,214–1,400 | 0 | 12 | 126, 54 (the reads 6 µs, 3 gets each) |
+| (F) a FORALL block of 16 slots | 232–241 | 686 | 0 | 2 | 115, 46 |
+
+The stamp statement through the vendor's batching costs 1.35x the vendor's array UPDATE at the
+server and 6x less than today's block; the gate adds a probe per element (33 gets a batch), paid
+only until the table is found clear, which NewOrder's first stock lock read does; the anchored READ
+COMMITTED statement 2.3x the vendor's; a FORALL block of the same statement costs the PL/SQL call's
+40 µs more than the array, so no block is built for the inline layout. Expected at AWS: the stock
+batch from about 1 ms of server CPU and 1.3 of elapsed a NewOrder to the vendor's 0.04 and 0.1 plus
+a third, parse calls from 20 to 0; the SNAPSHOT inline cell from 0.62 toward 0.72 (NewOrder p50
+5,105 → about 3,900 against 3,345), the READ COMMITTED inline cell from 0.54 by the same amount.
+
+**The READ COMMITTED decoupled batches**, the seventh run's remainder, designed in the same 4.4
+paragraph's sibling ("The READ COMMITTED decoupled entries"): the INSERT's bulk block at both levels
+(its outcomes are the single INSERT block's at either level, a tombstone in flight an abort at both,
+and it reads no snapshot; the SNAPSHOT condition and the recorded-anchors condition on it dropped
+for the INSERT), and for the keyed write the merged form of 4.4 built on the statement first rather
+than on step 1: the DML as `FORALL` under the `EXISTS` with the slot's anchor, `RETURNING` the keys,
+the CAS as one `FORALL` over the keys returned with the slot's anchor, the counts per slot and the
+rows stamped back; the same rules as the vendor's batching. Measured on the container
+(`forms8.jsh`): a 300,000-row decoupled pair, the same batches, a read of each key's version before
+the anchored forms as TPC-C's lock read leaves it.
+
+| form | server CPU µs / tx | DB time | parses / tx | round trips | the text a call: CPU µs, gets |
+|---|---|---|---|---|---|
+| (V) the vendor's array UPDATE | 136–150 | 527–555 | 0 | 2 | 65, 32 |
+| (E) today's block of entries | 1,355–1,464 | 2,218–2,300 | 30 | 2 | 576 (5 entries) to 2,085 (15); nested SELECT 17, UPDATE 17, CAS 55, parse ratio 1.00 |
+| (M) the merged statement-first block, anchored (+ a read per key) | 773–827 | 2,127–2,345 | 0 | 12 | 339, 137 (the DML 67 and 63, the CAS 218 and 74; the reads 7 µs, 3 gets each) |
+| (M0) the same without anchors | 568 | 1,468–1,518 | 0 | 2 | 331, 138 |
+
+The merged block costs 5.2x the vendor's array UPDATE at the server and 1.7–6x less than today's
+block by size, the parse calls 30 to 0; the anchor conditions cost nothing (M0 equals M), the cost
+is the layout's: a metadata probe per row in the DML's `EXISTS` (63 gets for ten rows against the
+vendor's 32) and the CAS over the metadata rows, 218 of the 339 µs, the same FORALL the SNAPSHOT
+bulk block runs. Expected at AWS, where the SNAPSHOT bulk block ran at 0.28 ms and 97 gets: the READ
+COMMITTED stock batch at about 0.25–0.3 ms a call from 0.72–2.59 and the order_line batch at 0.12
+from 0.35–1.71, together about 2.3 ms of server CPU and 2.8 of elapsed a NewOrder, and the cursor
+cache relieved of 330 nested texts, which should also end the 42% parse ratio of the single writes;
+the READ COMMITTED decoupled TPC-C cell from 0.45 toward 0.65, Delivery's share then (C)'s.
+
+**For c7 to build** (the user approved the inline parts; the decoupled parts await the user's word,
+asked through 6e): (1) `KeyedPlan.vendorBatch()` on an inline table: at SNAPSHOT the fast statement
+of the context (gated or clear), at READ COMMITTED the statement first's text and anchors resolved
+per entry, null where an entry resolves otherwise; the dispatcher (`Proxies`) taking the vendor
+batch before the block of entries when the plan offers it, and `applyVendorBatch` extended for the
+keyed write: the counts recorded, the 0s handed back in order to the single form (the keyed block,
+as `applyRcFirst`'s miss does), the coarse check on all-0 under the gate at SNAPSHOT, the table
+marked clear on any count above 0, `anchors.wrote` once; (2) the INSERT's bulk block at both levels;
+(3) the merged statement-first block for the decoupled keyed write at READ COMMITTED, one text per
+shape and slot types, anchored and plain, under the existing `Bulk` machinery (the slot typing,
+`SLOTS`, the OUT binds); nested texts hinted as `Writes.hinted` does. Tests: `batches` on both
+layouts at both levels with the single statement's executions counted (one `executeLargeBatch` for
+the inline batch, parse calls 0 across sizes in `V$SQL`), a key missing in the middle of an inline
+batch (count 0, the rest 1), two entries on one key at READ COMMITTED (the second through the block,
+the versions ending two apart), a row in flight in the middle of a batch at READ COMMITTED (the wait
+and then the write, or the abort without the wait setting), an entry failing in the middle
+(ORA-01438 from a value too large: the counts before it, the error the single form's), and at
+SNAPSHOT the gate closed for a batch (the block of entries' outcomes). Proof: the Oracle TPC-C cells
+at scale 32, the inline pair first.
+
+### 2026-10-28: (B) the READ COMMITTED scan: PostgreSQL's range on the metadata side taken into 4.2, the join itself not removable within the read set, the inline layout's coverage and Oracle's inline plan
+
+Asked with the sixth run's figures: YCSB E's scan at READ COMMITTED decoupled Oracle +52% p50 (the
+ScanRecord 1.55), PostgreSQL +88% (1.81); and three questions.
+
+**Why PostgreSQL's join costs twice Oracle's.** 6e's lead (the harness now records PostgreSQL's
+generic plans): on a local PostgreSQL 16 the committed copy's `LEFT JOIN usertable_tx_metadata m`
+has the key range on the data table only, `Index Scan ... (ycsb_key > $1 AND ycsb_key < $2)` hashed
+against a `Seq Scan` of the whole metadata table; Oracle's plan for the same copy (the sixth run's
+server.txt) applies the range to both sides, `INDEX RANGE SCAN SYS_C009058` with `"M"."YCSB_KEY">:1
+AND "M"."YCSB_KEY"<:2`, hash-joined, +17 gets and +0.25 ms of CPU a 500-row scan over the SNAPSHOT
+form. PostgreSQL forms no equivalence class across an outer join's ON clause, so it never derives
+`m.ycsb_key > $1` from `t.ycsb_key > $1`; at a million rows the planner's choice is a probe of the
+metadata table per row (the +1.0 ms: 1.68 ms of execution against the SNAPSHOT form's 0.87 and the
+vendor's 0.65, pg_stat_statements), as 6e supposed. Taken into design 4.2: the ON clause repeats,
+for the metadata side, the predicate's conjuncts that compare a key column with a constant or a
+placeholder (bound again), which gives the metadata side an index range scan and the join two
+500-row range scans; expected to bring the PostgreSQL READ COMMITTED decoupled scan from 1.68 ms
+toward 1.0, the scan cell from 1.81 toward about 1.3; the builder confirms by EXPLAIN, the next
+PostgreSQL run's plans at a million rows by the harness.
+
+**Can the scan carry its versions without joining every row when nothing is in flight?** Not within
+the read set as section 5 defines it: the anchor is the metadata row's `(tx_id, tx_version)` as the
+scan saw it, the identity ScalarDB's prepare compares, and the data row holds nothing of it, so a
+committed copy that records anchors reads the metadata row of every row it returns, in a transaction
+on a writable connection, and reads none otherwise (autocommit, read-only, a grouped or DISTINCT
+read). The gate tells only that no row is in flight, not any row's version. What would drop the join
+is a different anchor: the statement's snapshot marker, kept per scanned key, and at the write the
+engine's own row-change marker checked against it inside the CAS, `ORA_ROWSCN <= :scn` on Oracle and
+the metadata row's `xmin` against the scan's snapshot on PostgreSQL, which is as strong as the
+version comparison where the marker is exact and conservative where it is not. Its costs: the marker
+needs a grant on Oracle (`DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER` or `V$DATABASE`;
+`TIMESTAMP_TO_SCN` is three seconds coarse, which would abort writes of hot keys), `ORA_ROWSCN` is
+block-level on ScalarDB's metadata table (no `ROWDEPENDENCIES`), so a neighbour's change aborts the
+write, and PostgreSQL's `xmin` needs the epoch; a protocol change at this level for 0.4 ms of CPU a
+500-row scan on Oracle. Not taken: the join's cost is the layout's at this level, as todo 337 found
+for the key read (no cheaper anchored key read); recorded here for the day a workload makes the
+case.
+
+**How much an inline recommendation for scan-heavy tables covers.** On PostgreSQL the inline READ
+COMMITTED scan is +16% p50 (1,524 against 1,315 µs; server CPU 1.00 against 0.78 ms a commit), the
+cheapest form of the twelfth run, within the target: the copy reads the row's own state and
+versions, two columns more a row, and the in-flight arm an empty partial index. On Oracle the inline
+READ COMMITTED scan is +34% (2,732 against 2,116 µs p50; the server 1.254 against 0.763 ms elapsed,
+0.586 against 0.308 ms CPU, 133 against 100 gets a scan), worse than the decoupled SNAPSHOT form's
++14%, and its plan says why: the committed copy, `WHERE (key range) AND COALESCE(tx_state, 3) <> 1
+AND <> 2`, is planned as an INDEX SKIP SCAN of USERTABLE_INFLIGHT (tx_state, YCSB_KEY), not the
+primary key's range scan the vendor's statement gets (the optimizer's own report: "columns have
+predicates which preclude their use as keys in index range scan: tx_state"). On the container
+(`scan7.jsh`, `scan8.jsh`: a 300,000-row inline table of YCSB's shape, 500-row ranges, fetch size
+10): the same copy takes the primary key, 184 gets a scan, and a forced skip scan (`INDEX_SS`) costs
+272 gets and 18% more elapsed; the SNAPSHOT inline form 184 gets as well. So the inline READ
+COMMITTED committed copy on Oracle carries `/*+ NO_INDEX_SS(t) */`, added to 4.2's "The read side on
+Oracle": the state condition is a filter on the row, never a key, and the in-flight index is for the
+in-flight arms. Expected: the Oracle inline READ COMMITTED scan near the inline SNAPSHOT's +19%.
+What an inline recommendation then covers: the scan within +16–20% on both engines; what it leaves:
+the decoupled READ COMMITTED scan at the join's cost, Oracle +0.25 ms of CPU a 500-row scan (about
++30% p50 once the run's drift is set aside, the 2026-10-28 reading above), PostgreSQL toward the
+same after the range.
+
+### 2026-10-28: (C) found: an imported composite key's columns are alphabetical in ScalarDB's metadata, so the decoupled metadata table's primary key and the setup's in-flight index are in a different order from the data table's
+
+From the seventh run's Delivery (above). ScalarDB's `JdbcAdmin.getImportTableMetadata` adds the
+partition key's columns in `DatabaseMetaData.getPrimaryKeys`' result order, which the JDBC
+specification orders by COLUMN_NAME, not KEY_SEQ (the ScalarDB source,
+`core/.../jdbc/JdbcAdmin.java`, `builder.addPartitionKey(columnName)` in the result-set loop).
+BenchBase's `ORDER_LINE` has `PRIMARY KEY (OL_W_ID, OL_D_ID, OL_O_ID, OL_NUMBER)`; imported
+decoupled, its partition key is (OL_D_ID, OL_NUMBER, OL_O_ID, OL_W_ID), the metadata table's primary
+key follows (SYS_C008760), and the setup's in-flight index too, `CREATE INDEX ... (tx_state, <keys
+in catalog order>)` (`Setup.java`, `keys(t, "")` from `TableInfo.keyColumns()`). A predicate on a
+prefix of the data key, Delivery's and OrderStatus's (W, D, O) and StockLevel's (W, D, O range), is
+no prefix of the metadata key, and every access to the metadata rows by it is a skip scan: the keys
+read 112 gets and 1.02 ms a call for ten rows, ten calls a Delivery, 25.8 against 8.6 ms p50. YCSB's
+single-column key is untouched; TPC-C's `customer`, `oorder`, `new_order`, `stock` and `district`
+keys are prefixed the same way wherever a statement names a prefix. PostgreSQL's forms join the
+metadata rows from the data rows by the full key, so they do not show it. Options, the user's call:
+(1) an issue to ScalarDB, the import should order the key by KEY_SEQ, the fix at the source but not
+in our hands; (2) the setup creates the in-flight index with the key columns in the data table's
+primary key order, read from the engine's constraint rather than the catalog, and, where the
+metadata table's primary key order differs from the data table's, an index on the metadata table in
+the data order, a second index maintained on inserts and deletes only, since a stamp changes no key
+column; (3) the harness imports with the key in order, which ScalarDB's API does not offer. (2) is
+the driver's own defence and small; measured first on the container as Delivery's keys read, then
+the seventh run's cell again.
