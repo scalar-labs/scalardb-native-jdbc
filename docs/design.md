@@ -631,7 +631,18 @@ stored spelling (`RC_ORDERS` for an Oracle table stored `ORDERS`, `RC_made` for 
 as `"made"`); a name beyond the engine's identifier limit is refused rather than truncated. Per
 table, in order: the index, built without blocking writes where the engine can (`CREATE INDEX
 CONCURRENTLY` on PostgreSQL, `ALGORITHM=INPLACE, LOCK=NONE` on MySQL and MariaDB, `ONLINE` on SQL
-Server editions that have online builds and on Oracle where the edition allows); on an imported
+Server editions that have online builds and on Oracle where the edition allows); its columns are
+`tx_state` first and then the key columns in the data table's primary key order, read from the
+engine's constraint (`DatabaseMetaData.getPrimaryKeys` by `KEY_SEQ`), not from the catalog:
+ScalarDB's import adds an imported composite key's columns in `getPrimaryKeys`' result order, which
+JDBC orders by column name, so the metadata table's primary key is (OL_D_ID, OL_NUMBER, OL_O_ID,
+OL_W_ID) for BenchBase's `order_line (OL_W_ID, OL_D_ID, OL_O_ID, OL_NUMBER)`, and a predicate on a
+prefix of the data key, Delivery's and StockLevel's (W, D, O), reaches the metadata rows only by
+index skip scans, 112 gets for a ten-row read on Oracle (todo 334's log, 2026-10-28). Where the
+metadata table's primary key order differs from the data table's, the setup also builds an index on
+the metadata table over the key columns in the data order, `T_key`, named and folded as the others,
+maintained on inserts and deletes only since a stamp changes no key column; teardown drops it, and
+an in-flight index found in another column order counts as not set up and is rebuilt; on an imported
 table the backfill, which stamps `tx_id = 'scalardb-native-backfill'`; then the view, with `CREATE
 OR REPLACE` (`CREATE OR ALTER` on SQL Server); then, on Oracle and MySQL, a histogram on the
 metadata table's `tx_state`, without which both estimate `tx_state IN (1, 2)` as most of the table
