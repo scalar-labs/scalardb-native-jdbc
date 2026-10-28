@@ -425,6 +425,56 @@ SNAPSHOT and SERIALIZABLE against the ninth.
 
 The raw output is in `bench-env/results/20261026-2334/` (git-ignored).
 
+## Twelfth run: overnight, TPC-C scale 32 and YCSB at 1M rows, three levels, fast and slow (2026-10-28)
+
+Run `20261028-0145-pg` from `bench-env/plans/overnight-postgresql.json` on main `db0bf06`, the
+night's three items included. Those are Oracle's inline INSERT, the result-set fast path and the
+lazy anchor map; the latter two touch PostgreSQL too.
+- Workloads: TPC-C scale 32 and YCSB A, C, E, F at 1M rows.
+- Cells: READ COMMITTED, SNAPSHOT and SERIALIZABLE, both layouts, the fast network and then 250 µs
+  more a round trip.
+- 60 s a run, REPS 2, 4 terminals, `shared_buffers` 8 GB, a client flight recording of every run.
+- Its own stack (`STACK=pg`), beside Oracle's. All 12 cells passed.
+
+Throughput, (c)/(a):
+
+| cell | TPC-C | A | C | E | F |
+|---|---|---|---|---|---|
+| RC decoupled, fast | 0.71 | 0.81 | 0.89 | **0.54** | 0.81 |
+| RC inline, fast | 0.78 | 0.87 | 0.92 | 0.87 | 0.88 |
+| SNAPSHOT decoupled, fast | 0.79 | 0.84 | 0.91 | 0.83 | 0.86 |
+| SNAPSHOT inline, fast | 0.87 | 0.90 | 0.89 | 0.79 | 0.89 |
+| SERIALIZABLE decoupled, fast | 0.84 | 0.86 | 0.86 | 0.80 | 0.87 |
+| SERIALIZABLE inline, fast | **0.96** | 0.92 | 0.86 | 0.78 | 0.94 |
+| RC decoupled, +250 µs | 0.88 | 0.93 | 0.98 | **0.58** | 0.94 |
+| RC inline, +250 µs | 0.89 | 0.95 | 0.98 | 0.84 | 0.96 |
+| SNAPSHOT decoupled, +250 µs | 0.93 | 0.95 | 0.97 | 0.82 | 0.95 |
+| SNAPSHOT inline, +250 µs | 0.93 | 0.97 | 0.97 | 0.82 | 0.97 |
+| SERIALIZABLE decoupled, +250 µs | 0.86 | 0.95 | 0.97 | 0.82 | 0.94 |
+| SERIALIZABLE inline, +250 µs | 0.93 | 0.97 | 0.97 | 0.82 | 0.99 |
+
+YCSB p50 overhead, fast network:
+
+| | read (C) | update | RMW | scan | insert |
+|---|---|---|---|---|---|
+| RC decoupled | +12% | +27% | +27% | **+88%** | +30% |
+| RC inline | +8% | +21% | +17% | +16% | +22% |
+| SNAPSHOT decoupled | +11% | +23% | +18% | +21% | +28% |
+| SNAPSHOT inline | +12% | +8% | +9% | +25% | +20% |
+| SERIALIZABLE decoupled | +15% | +21% | +17% | +26% | +41% |
+| SERIALIZABLE inline | +16% | +7% | +4% | +30% | +18% |
+
+- **TPC-C at scale 32** is 0.71–0.96 fast and 0.86–0.93 slow. The inline layout is ahead at every
+  level, and SERIALIZABLE inline is at 0.96.
+- **Inline meets 10–20%** for reads, updates and read-modify-write at SNAPSHOT and SERIALIZABLE.
+  At READ COMMITTED inline, the update is +21%.
+- **The READ COMMITTED decoupled scan** is the outlier, at +88% (YCSB E 0.54 fast, 0.58 slow). In
+  pg_stat_statements per call, the driver's scan runs 1.68 ms of execution and 0.20 ms of planning,
+  against the vendor's 0.65 and 0.04. At SNAPSHOT decoupled it is 0.87 and 0.23 against 0.71 and
+  0.04. The execution is the metadata join for every scanned row, which READ COMMITTED's anchors
+  need, as on Oracle. Every call is planned, on both sides.
+- **At +250 µs** every YCSB cell but READ COMMITTED decoupled's E is 0.82–0.99.
+
 ## Reports
 
 ### HEAD 93f5217
