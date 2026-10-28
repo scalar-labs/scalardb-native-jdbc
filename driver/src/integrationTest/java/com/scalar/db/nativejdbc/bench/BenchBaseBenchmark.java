@@ -555,6 +555,20 @@ class BenchBaseBenchmark {
             top.add(rs.getString(1));
           }
         }
+        // and the ten of most time a call among those run at least 100 times: a statement far
+        // above the vendor's a call may be small in total (todo 334, D4)
+        try (ResultSet rs =
+            st.executeQuery(
+                "SELECT query FROM pg_stat_statements"
+                    + " WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())"
+                    + " AND calls >= 100 ORDER BY mean_exec_time + COALESCE(mean_plan_time, 0)"
+                    + " DESC LIMIT 10")) {
+          while (rs.next()) {
+            if (!top.contains(rs.getString(1))) {
+              top.add(rs.getString(1));
+            }
+          }
+        }
         st.execute("SET search_path TO " + e.engine().quote(e.storedSchema(SCHEMA)) + ", public");
         // through PL/pgSQL's EXECUTE: the extended protocol's parse would want the $n bound
         st.execute(
@@ -909,12 +923,29 @@ class BenchBaseBenchmark {
                 w.getValue()[0],
                 w.getValue()[1] / 1000));
       }
-      // the ten statements of most elapsed time: their cursors by child, then their plans; lines
+      // the ten statements of most elapsed time, and of most a call: their cursors by child, then
+      // their plans; lines
       // indented, so that a reader of the statements above (a count in the first column) skips
       // them (todo 334)
       List<String> top = new ArrayList<>();
       for (Map.Entry<String, double[]> g : grown.subList(0, Math.min(10, grown.size()))) {
         top.add(g.getKey());
+      }
+      // and the ten of most elapsed time a call among those run at least 100 times: a statement
+      // far above the vendor's a call may be small in total (todo 334, D4)
+      List<Map.Entry<String, double[]>> perCall = new ArrayList<>();
+      for (Map.Entry<String, double[]> g : grown) {
+        if (g.getValue()[0] >= 100) {
+          perCall.add(g);
+        }
+      }
+      perCall.sort(
+          (x, y) ->
+              Double.compare(y.getValue()[1] / y.getValue()[0], x.getValue()[1] / x.getValue()[0]));
+      for (Map.Entry<String, double[]> g : perCall.subList(0, Math.min(10, perCall.size()))) {
+        if (!top.contains(g.getKey())) {
+          top.add(g.getKey());
+        }
       }
       try (Connection c = e.open()) {
         out.append(
