@@ -53,7 +53,10 @@ repeated.
 - `--grant user` grants SELECT on the read views to an application's user or role; repeat it for
   several, `--grant app1 --grant app2`. On PostgreSQL before 15, SQL Server and Oracle the view runs
   with its owner's rights, so grant it only to users that may read every column of the table
-  ([Database users](configuration.md#database-users)).
+  ([Database users](configuration.md#database-users)). Give the same `--grant` users on every run:
+  a run may drop a read view and create it again, which drops its grants. It does so for a view an
+  earlier version made in another column order, and on PostgreSQL for one that reads a `SMALLINT`
+  column as `INTEGER`.
 - `--dry-run` prints the statements instead of running them.
 - After setting up a table for the first time, it waits out the applications' [catalog](concepts.md#catalog) TTL,
   `--catalog-ttl` seconds (60), and then says ScalarDB transactions may write it. `--no-wait` prints

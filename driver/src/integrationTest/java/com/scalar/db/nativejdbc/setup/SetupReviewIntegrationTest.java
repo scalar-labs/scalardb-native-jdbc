@@ -11,6 +11,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -171,6 +172,42 @@ class SetupReviewIntegrationTest {
       assertThat(rs.getMetaData().getColumnName(1)).isEqualTo("x");
       assertThat(rs.next()).isTrue();
       assertThat(rs.getString(1) + rs.getInt(2)).isEqualTo("a1");
+    }
+  }
+
+  @Test
+  void todo356_aViewOfAnEarlierSetupReadingSmallintAsInteger_isReplaced() throws Exception {
+    try (Connection c = PG.open()) {
+      PG.execute(
+          c,
+          "CREATE SCHEMA r356",
+          "CREATE TABLE r356.t (id INT PRIMARY KEY, v SMALLINT)",
+          "INSERT INTO r356.t VALUES (1, 7)");
+    }
+    try (DistributedTransactionAdmin admin = PG.admin()) {
+      admin.createNamespace("r356", true);
+      admin.importTable("r356", "t", DECOUPLED, Map.of());
+    }
+    try (Connection c = PG.open()) {
+      // the read view an earlier setup made: the before image uncast, so v reads as integer
+      PG.execute(
+          c,
+          "CREATE VIEW r356.rc_t AS SELECT t.id, t.v FROM r356.t t"
+              + " UNION ALL SELECT t.id, m.before_v AS v FROM r356.t t"
+              + " JOIN r356.t_tx_metadata m ON m.id = t.id");
+    }
+    assertThat(setup(catalog(), "r356", Duration.ofSeconds(2))).isEqualTo("completed");
+    try (Connection c = PG.open();
+        Statement st = c.createStatement();
+        ResultSet rs = st.executeQuery("SELECT v FROM r356.rc_t")) {
+      assertThat(rs.getMetaData().getColumnType(1)).isEqualTo(Types.SMALLINT);
+      assertThat(rs.next()).isTrue();
+      assertThat(rs.getInt(1)).isEqualTo(7);
+    }
+    try (Connection c = PG.openDriver();
+        Statement st = c.createStatement();
+        ResultSet rs = st.executeQuery("SELECT * FROM r356.t")) {
+      assertThat(rs.getMetaData().getColumnType(2)).isEqualTo(Types.SMALLINT);
     }
   }
 

@@ -359,7 +359,7 @@ public final class Setup {
       if (reorders) {
         execute("DROP VIEW " + name(ns, view)); // CREATE OR REPLACE cannot reorder columns
       }
-      execute(viewDdl(t, view));
+      replaceView(t, view, found.hasView(ns, view));
       created = planned == null && !found.hasView(ns, view);
       done(actions, (found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);
       if (gatherHistogram(t)) {
@@ -610,6 +610,40 @@ public final class Setup {
         txState,
         engine.quote("before_tx_id"),
         engine.quote("before_tx_version"));
+  }
+
+  /**
+   * Creates or replaces the read view. PostgreSQL's {@code CREATE OR REPLACE VIEW} keeps each
+   * column's type, and a read view of a setup before todo 356 reads a {@code SMALLINT} column as
+   * {@code INTEGER}: such a view is dropped and created again in one transaction, which readers of
+   * it wait for.
+   */
+  private void replaceView(TableInfo t, String view, boolean exists) throws SQLException {
+    String ddl = viewDdl(t, view);
+    if (engine != Engine.POSTGRESQL || !exists || planned != null) {
+      execute(ddl);
+      return;
+    }
+    connection.setAutoCommit(false);
+    try {
+      try {
+        execute("SAVEPOINT scalardb_native_view");
+        execute(ddl);
+      } catch (SQLException e) {
+        if (!"42P16".equals(e.getSQLState())) { // cannot change a view column's type
+          throw e;
+        }
+        execute("ROLLBACK TO SAVEPOINT scalardb_native_view");
+        execute("DROP VIEW " + name(t.namespace(), view));
+        execute(ddl);
+      }
+      connection.commit();
+    } catch (SQLException e) {
+      connection.rollback();
+      throw e;
+    } finally {
+      connection.setAutoCommit(true);
+    }
   }
 
   private String createView(String view) throws SQLException {

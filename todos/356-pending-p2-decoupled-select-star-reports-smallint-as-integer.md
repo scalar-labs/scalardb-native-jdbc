@@ -59,9 +59,20 @@ report `INTEGER`, `k + k` no longer overflows where the table raises "smallint o
 
 Option 1, on branch `smallint-types`.
 
+### The read view of an earlier setup (review, 2026-10-28)
+`rc_T` casts the before image too, but a view an earlier setup made keeps reading the column as
+`INTEGER`, and PostgreSQL's `CREATE OR REPLACE VIEW` cannot change a view column's type (42P16):
+the setup run again failed. `Setup.replaceView` drops and creates such a view in one transaction
+on PostgreSQL; SQL Server's `CREATE OR ALTER VIEW` replaces it. The drop drops the view's grants,
+as todo 316's reorder already did: setting-up-tables.md says to give the same `--grant` users on
+every run.
+
 ## Acceptance Criteria
 
 - [x] The regress suite's layout d has no `int2_tbl differs` failure (seed 1, settled and in flight: 4,354, 634, 1, as layout i).
+- [x] `SetupReviewIntegrationTest.todo356_aViewOfAnEarlierSetupReadingSmallintAsInteger_isReplaced`:
+  the setup replaces such a view; `rc_T` and `SELECT *` report `SMALLINT` (fails without the fix
+  with 42P16).
 - [x] `ReadIntegrationTest.narrowIntegers_keepTheirType_whileRowsAreInFlight`, PostgreSQL and SQL
   Server, both layouts: the plain table's types and the before image's values (fails without the
   fix in all four).
