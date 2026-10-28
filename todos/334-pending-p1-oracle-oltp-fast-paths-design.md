@@ -2917,3 +2917,40 @@ steps, and the gets against the vendor's. Measured on the container, a call: inl
 row the price of todo 292); decoupled 299 and 166 against 734 and 562 (55.4 against 72.7, the CAS's
 36 unchanged). Mergeable; landing as before; the proof Delivery at READ COMMITTED, about 3.5 ms a
 transaction inline and 2.6 decoupled.
+
+### 2026-10-28: D2 reviewed: f4c9055 on oracle-gated-reads, mergeable with one change (the design's note)
+
+Reviewed from `git show f4c9055` (on 4a41577). `SqlAst.gated` emits the statement as written over
+the data tables with a gate column per ScalarDB table appended to its select list, `(SELECT COUNT(*)
+FROM dual WHERE EXISTS (SELECT /*+ INDEX(m T_inflight) */ 1 FROM T_meta m WHERE m.tx_state IN (1, 2)
+AND <the key conjuncts over m>))` as `scalardb_native_g<i>`, in `MAX()` where the statement groups
+or aggregates, each conjunct a run of the statement's own tokens as B1's, its placeholders recorded
+where they stand; null for a statement that is not one plain select, a bare `*`, or a ranged gate
+without a conjunct. `Router.gated` adds it to an anchor-less read's route on Oracle (the split read
+with no anchored table, and the views path), ranged at READ COMMITTED and whole at SNAPSHOT with
+`marks`, not for a locking read or a `*` over an inline table; `KeyRange.elsewhere` lets an
+unqualified column of a join be the reference's key column where no other ScalarDB table of the
+statement has one of its name, known only when every table is ScalarDB's, so StockLevel's join gets
+both gates and nothing else changes. `Proxies.StatementHandler.gated` runs it before the SNAPSHOT
+checks and the autocommit read's own transaction, on a vendor statement of its own with the settings
+replayed and the parameters bound through the gated text's sources (a value not bound leaving the
+read to the route, which reports it), reads the first row, every gate 0 handing the rows out through
+`GatedRows` (the peeked row again at the first `next`, `isBeforeFirst`, `isFirst` and `getRow`
+answered for it, the gate columns hidden from the metadata and the getters, the vendor statement
+closed with the rows or at the statement's next execute), a gate of 1 or NULL closing it for the
+split read, and at SNAPSHOT in a transaction marking each table clear; no row at READ COMMITTED the
+split read, at SNAPSHOT the coarse checks; an error other than a serialization failure, the
+transaction's end or a cancel the split read as before. The three choices confirmed and in 4.2's
+paragraph, with the suite's three and the elsewhere rule. One change asked before landing: the
+statement's `close` path closes `alternate` but not `gatedOpen`, so a Statement closed with its
+gated ResultSet still open would leak the gated vendor statement, an open cursor on Oracle; two nits
+that may follow, `cancel` not reaching the gated statement while it runs, and
+`SqlAst.aggregatesToOneRow` unused. The test covers the list on both layouts: Delivery's SUM one
+round trip with the gate open and two with it closed, the before image's amount then; a GROUP BY and
+a DISTINCT with the gate columns hidden; a DISTINCT over no row through the split read; StockLevel's
+count over the join with both gates; a predicate without key conjuncts keeping the split; at
+SNAPSHOT one round trip and the plain statement next; `form1`'s aggregate from 2 round trips to 1
+and from 5 to 1 in autocommit. Measured on the container, Delivery's SUM a call on D3's main: inline
+7.1 gets, 51 µs, 15 µs of CPU against the split read's 10.3, 126, 54 and the vendor's 5.1, 29, 10;
+decoupled 7.1, 33, 11 against 10.2, 90, 42. Mergeable once the close is in; the proof Delivery's SUM
+and StockLevel at READ COMMITTED, StockLevel from +53-62% toward +25%.

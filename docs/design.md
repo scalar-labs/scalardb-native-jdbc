@@ -1008,14 +1008,23 @@ union as a derived table.
   statement before the read. The rules are the writes' count rule (4.3): an aggregate without GROUP
   BY returns one row, whose gates decide, any 1 discarding it and running the split read instead;
   any other shape carries the gates on every row, all alike, the first row's 1 discarding the result
-  for the split read, and no row at all takes the coarse check, which stands as empty where the
-  table is clear and takes the split read where it is not. Measured on the container, a 10-row SUM
-  over the committed rows of an order with 48 rows of the table in flight: the split read 96 µs, 45
-  µs of CPU and 14.3 gets, the hash anti-join and the union's view; the statement as written with
-  the range gate 38 µs, 17 µs and 10.5 gets, the gate open; the vendor's about 25 µs and 5.8 gets.
-  Expected at AWS: Delivery's SUM from 220 to about 80 µs, StockLevel's count from 1.5 ms toward 0.9
-  with order_line's range gate and stock's warehouse gate (`S_W_ID = ?` is a key conjunct),
-  StockLevel at READ COMMITTED from +53-62% toward +25%.
+  for the split read; no row at all takes the split read at READ COMMITTED, where a check after the
+  read would read another snapshot and could miss a row in flight at the read's that committed
+  between the two, and at SNAPSHOT in a transaction the coarse checks, which share its snapshot,
+  empty where each finds nothing (as built, 2026-10-28). The gated form takes an `executeQuery` of a
+  forward-only result not unwrapped, on a vendor statement of its own closed with its rows, the
+  first row read for its gates and handed out again, the gate columns hidden; a bare `*`, which
+  Oracle takes beside no other item, keeps the split read, as does a `*` over an inline table; an
+  unqualified column of a join is a table's key column where no other ScalarDB table of the
+  statement has a column of its name, StockLevel's `ol_o` and `s_w`; and an error of the gated
+  statement that is not a serialization failure, the transaction's end or a cancel, a CLOB the
+  statement as written cannot compare, say, falls back to the split read, which may abort as before.
+  Measured on the container, a 10-row SUM over the committed rows of an order with 48 rows of the
+  table in flight: the split read 96 µs, 45 µs of CPU and 14.3 gets, the hash anti-join and the
+  union's view; the statement as written with the range gate 38 µs, 17 µs and 10.5 gets, the gate
+  open; the vendor's about 25 µs and 5.8 gets. Expected at AWS: Delivery's SUM from 220 to about 80
+  µs, StockLevel's count from 1.5 ms toward 0.9 with order_line's range gate and stock's warehouse
+  gate (`S_W_ID = ?` is a key conjunct), StockLevel at READ COMMITTED from +53-62% toward +25%.
 
   **A table found clear** (todo 329). The snapshot is the transaction's: a table that has no row in
   flight in it at one statement has none at any later statement either, since only the
