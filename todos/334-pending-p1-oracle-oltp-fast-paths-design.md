@@ -2629,3 +2629,41 @@ The Oracle suite's one failure was ScalarDB's `importTable` raising ORA-08177 in
 before the driver ran, the class passing alone; the change touches no Oracle text. Mergeable;
 landing as A2's; the proof the PostgreSQL YCSB E scan at READ COMMITTED decoupled, 1.68 ms of
 execution toward 1.0, the cell from 1.81 toward about 1.3.
+
+### 2026-10-28: the PostgreSQL thirteenth run read: B1 proven, every call planned on both sides, the plan dump's two artefacts
+
+Run 20261028-1706-pg (99e9c86), YCSB E at 1M rows, READ COMMITTED, fast, 6e's write-up in
+`docs/benchmarks/benchbase-postgresql-aws.md` (98fc23b). RC decoupled (c)/(a) 0.71 from 0.54, the
+scan p50 +42% from +88%; per call from `server.txt`, execution 1.045/0.992 ms (two repeats) against
+the vendor's 0.674/0.678, where the twelfth run had 1.684/1.748 against 0.654/0.736: B1 took 0.65 ms
+of execution a scan, as expected (1.68 toward 1.0). RC inline 0.79 from 0.87, the scan +28% from
++16%: execution 0.861/1.048 against the vendor's 0.688/0.793, planning 0.140/0.151 against
+0.040/0.041. Nothing in the round touches the inline path on PostgreSQL (`keyRange` is null for an
+inline copy, `canPrepareAgain` sees the same sources, C's order is the single key, A1, A2 and B3 are
+Oracle's), the repeats spread 13 to 20% on both sides, and the twelfth run kept no inline server
+figures to compare, so the +28% is the run's spread, as 6e wrote.
+
+Two things the file shows beyond the write-up. First, `plans` equals `calls` on every statement of
+both sides, the vendor's scan included (181,834 plans for 181,830 calls): PostgreSQL plans this
+parameterized range anew on every call, since the generic plan's estimate for `key > $1 AND key <
+$2` is 0.005 of the table, 5,000 rows a side (the dump's `rows=4985`), ten times the custom plan's
+500, so the cached generic plan costs more than the average custom plan and `plan_cache_mode = auto`
+never takes it. The planning is therefore a per-call cost that grows with the statement: the
+vendor's 0.04 ms, the driver's 0.14 ms inline and 0.23 ms decoupled, two arms of an Append and a
+join to plan; that is 0.10 of the inline gap's 0.27 ms a call and 0.19 of the decoupled gap's 0.56.
+The cheap A/B that sizes it: one YCSB E cell per layout with `plan_cache_mode = force_generic_plan`
+on both sides' connections (pgjdbc's URL `options=-c plan_cache_mode=force_generic_plan`, no server
+change), expected to take the driver's planning to near the vendor's and the scan from +42% toward
++27% at RC decoupled; if it pays, a driver option that sets it on its own PostgreSQL connections is
+the user's call, since it changes the application's own plans too. Second, the dumped plans are
+`EXPLAIN (GENERIC_PLAN)` of pg_stat_statements' normalized text, in which the driver's literals, the
+states 3, 1 and 2, are `$n` as well: the in-flight arm's `tx_state = ANY (ARRAY[$10, $11])` cannot
+match the partial in-flight index's `WHERE tx_state IN (1, 2)`, so the dump shows it as an index
+scan of the metadata primary key over the whole range with a filter, which the real text, literals
+intact, need not plan so; and since every call runs a custom plan, the generic dump is not the plan
+that ran in any case. The harness's own caveat says the second; the first is new. What would show
+the plans that run: `EXPLAIN (ANALYZE, BUFFERS)` of the driver's routed texts with sample bounds, as
+the B1 integration test's `generic` helper takes them, added to the harness's dump; that would also
+say whether the decoupled scan's remaining +0.37 ms of execution is the join's second index range
+scan and 500 heap reads of the metadata table alone, the layout's cost, or the in-flight arm reading
+the range a second time. Both are routed to 6e; the Oracle targeted run is in progress.
