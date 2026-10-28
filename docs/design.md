@@ -1954,32 +1954,40 @@ Delivery's ten order lines on a decoupled table and 70 for the inline DML, where
 UPDATE over the predicate costs 14 (the eighth run). Without recorded anchors, the condition above,
 the write goes as the statement first of 4.3 over the predicate instead of the key: the DML as
 written over the predicate, which the optimizer serves by one range scan, under a savepoint,
-returning what the CAS needs, then the CAS over what it returned. On an inline table the DML stamps
-in the same statement, as the SNAPSHOT gated statement does, with the row's own state folded into
-the version, `tx_version = CASE WHEN COALESCE(tx_state, 3) NOT IN (1, 2) THEN <next> ELSE -1 END`,
-`RETURNING tx_version BULK COLLECT INTO` a collection, and the block returns the rows written and
-the rows marked -1: any -1 is a row in flight the predicate matched, the block rolls back to the
-savepoint and the driver takes step 1's outcome for a key in flight, the wait and then the write
-again, or the abort; a row the DML waits for on its lock is the keyed statement first's case, the
-holder's prepare, bounded by its transaction. A row in flight whose before image matches the
-predicate while its after image does not, the DML never touches, so after it the block checks the
-in-flight copy over the predicate, step 1's arm, a range of the in-flight index under the key
-conjuncts, and holds on a row found as on a -1; after rather than before the DML, so that a row gone
-in flight between the two statements is caught too, and what remains, a prepare and its abort both
-inside the block's few microseconds, is accepted (c7's finding, 2026-10-28). At READ COMMITTED this
-replaces the block, 416 µs and 88 gets a call in the eighth run, by one statement near the vendor's
-14 gets; at SNAPSHOT the gated statement stays, its gate the whole table's. On a decoupled table the
-DML is the user's over the predicate alone, `RETURNING <key> BULK COLLECT INTO` collections, and the
-CAS is step 3's over them, a FORALL per key under the committed state, `DELETE` for a created
-table's DELETE, the stamp's UPDATE otherwise; a CAS short of the DML's count is a row the predicate
-matched in flight or without a metadata row, the block rolls back to the savepoint and the driver
-runs the block of steps above, which tells the two apart, so the fast form is exact and the slow one
-is the rare case's. The CAS as one statement over the key conjuncts and the free key column's list
-through Oracle's own `SYS.ODCINUMBERLIST` in `TABLE()`, which needs no type of the setup's and does
-run in an anonymous block, measured no cheaper than the FORALL on the container (`ora/odci.jsh`), so
-the FORALL stays. Expected at AWS: the RC decoupled order_line block from 714 toward 450 µs (the
-keys read and the DML by key gone, the CAS kept), SNAPSHOT decoupled from 315 toward 200, RC inline
-from 416 toward 60; about 3.5 ms a Delivery at RC inline and 2.6 at RC decoupled.
+returning what the CAS needs, then the CAS over what it returned. Before the DML the block locks the
+predicate's rows, `SELECT 1 ... FROM <data> WHERE <predicate> FOR UPDATE NOWAIT`, one more range
+scan: a row another transaction holds (ORA-00054, ORA-30006) sends the statement to the block of
+steps, which waits and applies the version rule, since a DML that waits on a lock restarts on the
+row's new committed version and writes it where todo 292's rule aborts a row that still matches, a
+driver writer's race (c7's finding, 2026-10-28); with the locks held no change can reach the DML,
+and a change committed before the lock is the current version for both forms alike. A row in flight
+is not locked, its prepare's transaction having committed, so the lock passes it and the DML marks
+it. On an inline table the DML stamps in the same statement, as the SNAPSHOT gated statement does,
+with the row's own state folded into the version, `tx_version = CASE WHEN COALESCE(tx_state, 3) NOT
+IN (1, 2) THEN <next> ELSE -1 END`, `RETURNING tx_version BULK COLLECT INTO` a collection, and the
+block returns the rows written and the rows marked -1: any -1 is a row in flight the predicate
+matched, the block rolls back to the savepoint and the driver takes step 1's outcome for a key in
+flight, the wait and then the write again, or the abort; a row the DML waits for on its lock is the
+keyed statement first's case, the holder's prepare, bounded by its transaction. A row in flight
+whose before image matches the predicate while its after image does not, the DML never touches, so
+after it the block checks the in-flight copy over the predicate, step 1's arm, a range of the
+in-flight index under the key conjuncts, and holds on a row found as on a -1; after rather than
+before the DML, so that a row gone in flight between the two statements is caught too, and what
+remains, a prepare and its abort both inside the block's few microseconds, is accepted (c7's
+finding, 2026-10-28). At READ COMMITTED this replaces the block, 416 µs and 88 gets a call in the
+eighth run, by one statement near the vendor's 14 gets; at SNAPSHOT the gated statement stays, its
+gate the whole table's. On a decoupled table the DML is the user's over the predicate alone,
+`RETURNING <key> BULK COLLECT INTO` collections, and the CAS is step 3's over them, a FORALL per key
+under the committed state, `DELETE` for a created table's DELETE, the stamp's UPDATE otherwise; a
+CAS short of the DML's count is a row the predicate matched in flight or without a metadata row, the
+block rolls back to the savepoint and the driver runs the block of steps above, which tells the two
+apart, so the fast form is exact and the slow one is the rare case's. The CAS as one statement over
+the key conjuncts and the free key column's list through Oracle's own `SYS.ODCINUMBERLIST` in
+`TABLE()`, which needs no type of the setup's and does run in an anonymous block, measured no
+cheaper than the FORALL on the container (`ora/odci.jsh`), so the FORALL stays. Expected at AWS: the
+RC decoupled order_line block from 714 toward 450 µs (the keys read and the DML by key gone, the CAS
+kept), SNAPSHOT decoupled from 315 toward 200, RC inline from 416 toward 60; about 3.5 ms a Delivery
+at RC inline and 2.6 at RC decoupled.
 
 Why the block is exact. Its keys read is step 1's statement, the committed images through `rc_T`
 with their metadata rows, each key with whether it has a metadata row, its version and its state;
