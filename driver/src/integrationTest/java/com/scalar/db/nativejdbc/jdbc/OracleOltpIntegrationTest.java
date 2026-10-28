@@ -2001,6 +2001,86 @@ class OracleOltpIntegrationTest {
   }
 
   /**
+   * Form 6 on an inline table (design 4.2 "The read side on Oracle", todo 334): the committed copy
+   * at READ COMMITTED carries {@code NO_INDEX_SS(t "T_INFLIGHT")}, its state condition a filter on
+   * the row and never a key, and a range scan in a transaction reaches the rows by the primary
+   * key's range, not a skip scan of the in-flight index (tx_state, key), as the sixth run's plan
+   * had it.
+   */
+  @Test
+  void form6InlineRangeScanTakesThePrimaryKey() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      admin.createTable(
+          N(NS),
+          N("tscan"),
+          TableMetadata.newBuilder()
+              .addColumn(N("id"), intType())
+              .addColumn(N("x"), DataType.TEXT)
+              .addPartitionKey(N("id"))
+              .build(),
+          true);
+    }
+    try (Connection v = ORA.open()) {
+      // 30,000 committed rows, as ScalarDB leaves them
+      ORA.execute(
+          v,
+          "INSERT INTO "
+              + NS
+              + ".tscan (id, x, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+              + " \"tx_committed_at\") SELECT LEVEL, 'r', 'seed', 3, 1, 1, 1 FROM dual CONNECT BY"
+              + " LEVEL <= 30000",
+          "COMMIT");
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().equals(N("tscan")),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .hasSize(1)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    String tag = "/* ns" + System.nanoTime() + " */";
+    String sql = "SELECT " + tag + " x FROM " + NS + ".tscan WHERE id BETWEEN 1000 AND 1499";
+    // a catalog read afresh: one cached since before the table was created would not route it
+    try (Connection d = ORA.openDriver();
+        Connection v = ORA.open()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(false);
+      assertThat(d.nativeSQL(sql)).contains("/*+ NO_INDEX_SS(t \"TSCAN_INFLIGHT\") */");
+      assertThat(rows(d, sql)).hasSize(500);
+      d.commit();
+      d.setAutoCommit(true);
+      String pk =
+          rows(
+                  v,
+                  "SELECT index_name FROM all_constraints WHERE owner = '"
+                      + N(NS)
+                      + "' AND table_name = '"
+                      + N("TSCAN")
+                      + "' AND constraint_type = 'P'")
+              .get(0);
+      StringBuilder plan = new StringBuilder();
+      try (Statement st = v.createStatement();
+          ResultSet rs =
+              st.executeQuery(
+                  "SELECT p.plan_table_output FROM v$sql s, TABLE(DBMS_XPLAN.DISPLAY_CURSOR(s.sql_id,"
+                      + " s.child_number)) p WHERE s.sql_text LIKE '%"
+                      + tag
+                      + "%' AND s.sql_text NOT LIKE '%v$sql%'")) {
+        while (rs.next()) {
+          plan.append(rs.getString(1)).append('\n');
+        }
+      }
+      log("form 6 (inline): a 500-row range scan at READ COMMITTED, the plan\n" + plan);
+      // the committed copy by the primary key's range; the in-flight arm by the in-flight index
+      assertThat(plan.toString())
+          .containsPattern("INDEX RANGE SCAN +\\| " + pk + " ")
+          .doesNotContain("SKIP SCAN");
+    }
+  }
+
+  /**
    * Form 6 (design 4.2, "The read side on Oracle"): at READ COMMITTED a read's anchors are the
    * copies' own columns, the inline row's or the metadata row's through a left join, no lookup per
    * row; the write of a row read then holds to that version.

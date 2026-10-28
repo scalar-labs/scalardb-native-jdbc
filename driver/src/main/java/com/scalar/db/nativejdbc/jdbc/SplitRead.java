@@ -364,7 +364,15 @@ final class SplitRead {
       @Nullable String lock,
       @Nullable Versions v) {
     String txState = engine.quote("tx_state");
-    StringBuilder sql = new StringBuilder("(SELECT ");
+    // on Oracle the row's own state is a filter on the row, never a key: unhinted, the optimizer
+    // takes a skip scan of the in-flight index, (tx_state, key), over the key's range (design 4.2
+    // "The read side on Oracle", todo 334); that index alone, a skip scan of another one, the
+    // primary key's for a predicate on its trailing columns, can be the better plan
+    StringBuilder sql =
+        new StringBuilder(
+            engine == Engine.ORACLE && check == Check.OWN
+                ? "(SELECT /*+ NO_INDEX_SS(t " + engine.quote(t.inflightIndex(engine)) + ") */ "
+                : "(SELECT ");
     List<String> cols = new ArrayList<>();
     for (String c : read) {
       cols.add("t." + engine.quote(c));

@@ -2449,6 +2449,24 @@ counts before it; `WritesTest` asserts the plain and anchored texts. Mergeable; 
 user's call; the proof the Oracle TPC-C READ COMMITTED decoupled cells at scale 32, expected from
 0.45 toward 0.65, with (C) for Delivery.
 
+### 2026-10-28: (B) item 3 built: NO_INDEX_SS on Oracle's inline READ COMMITTED committed copy (the builder's note)
+
+As design 4.2 "The read side on Oracle" has it, approved by the user through 6e. `SplitRead.committed`
+opens the copy `(SELECT /*+ NO_INDEX_SS(t "T_inflight") */ ...` on Oracle (the in-flight index named, as the in-flight arm's INDEX hint spells it, so that a skip scan of another index, the primary key's for a predicate on its trailing columns, stays open; the review's change) where the copy's check is `OWN`, the row's
+own state as a filter, which on Oracle is the inline table's committed copy carrying its versions at
+READ COMMITTED; `t` is the alias the copy gives the data table. Nothing else changes. Test,
+`OracleOltpIntegrationTest.form6InlineRangeScanTakesThePrimaryKey`: an inline table of 30,000
+committed rows set up, a 500-row range read in a transaction at READ COMMITTED; the routed text carries
+the hint, the read returns 500 rows, and `DBMS_XPLAN.DISPLAY_CURSOR` of it shows the committed copy as
+an INDEX RANGE SCAN of the primary key and no skip scan (the in-flight arm a range scan of the in-flight
+index, as it should be). As the design's note found, the container plans the primary key without the
+hint too, so against the unhinted code the test fails on the routed text, not on the plan: the plan
+check guards the hinted copy's plan, the AWS cell's plan dump the effect. The test's driver connection
+reads its catalog afresh, since one cached across the class would not know the table it creates. On
+the container: the whole Oracle suite on a fresh database, 170 tests, one failing, this test on that
+cached catalog before the fix, then the class alone, 23 tests, none failing; unit tests, 414;
+`spotbugsIntegrationTest` fails on main's three findings alone.
+
 ### 2026-10-28: (B) item 3 reviewed mergeable: 0339739 on oracle-inline-noss (the design's note)
 
 Reviewed from `git show d288f45` and then `0339739` (on cc491c8). `SplitRead.committed` opens the
