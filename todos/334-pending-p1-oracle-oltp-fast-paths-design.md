@@ -2667,3 +2667,78 @@ the B1 integration test's `generic` helper takes them, added to the harness's du
 say whether the decoupled scan's remaining +0.37 ms of execution is the join's second index range
 scan and 500 heap reads of the metadata table alone, the layout's cost, or the in-flight arm reading
 the range a second time. Both are routed to 6e; the Oracle targeted run is in progress.
+
+### 2026-10-28: the Oracle eighth run read: the five fixes confirmed, what is left and four proposals
+
+Run 20261028-1706-ora (99e9c86), 6e's write-up in `docs/benchmarks/benchbase-oracle-aws.md`
+(24c2ae1), the cells' archives read in the scratchpad (`ora8/`). TPC-C (c)/(a): RC decoupled 0.45 to
+0.58, RC inline 0.54 to 0.70, SNAPSHOT decoupled 0.63 to 0.66, SNAPSHOT inline 0.62 to 0.84. The
+markers hold: A1, no block of entries in the inline cells, the stock update ojdbc's batch at 102 µs
+and 53 gets; A2, the RC decoupled blocks 0.4 to 0.7 ms a call (the stock block 559 µs, 131 gets, 342
+µs CPU against the vendor's 101, 40, 39, and the SNAPSHOT bulk's 425, 97, 222: the two FORALLs are
+the floor); C, Delivery's keys read an INDEX RANGE SCAN of ORDER_LINE_KEY at 15 gets against 112, no
+skip scan in TPC-C; B3, the inline RC scan 110 gets against the vendor's 104 (133 before), +22%.
+Three facts for the write-up: the 14 SKIP SCAN lines in the inline RC YCSB cell are Oracle's
+dictionary queries (ALL_TRIGGERS, ALL_TAB_COLUMNS, ALL_OBJECTS, ALL_VIEWS, ALL_INDEXES, on I_USER2
+and I_OBJ2), the driver's catalog load and the setup's listing, not the benchmark's; the key index
+shows no insert price (the SNAPSHOT decoupled order_line INSERT ALL went from 65 to 43 gets a call
+between the sixth run and this one, the statistics fix in between); and OrderStatus's +41 to +75% is
+not new, the sixth run had +54 to +98% in every cell.
+
+Where the rest is, per statement from server.txt. OrderStatus is server-side: the 10-row order_line
+read costs 141 µs and 25.5 gets at RC inline, 192 and 13.6 at RC decoupled, 145 and 27.6 at SNAPSHOT
+inline, 73 and 15.4 at SNAPSHOT decoupled, against the vendor's 26 to 33 µs and 5.2 gets; the
+last-order read through the RC view 60 to 87 µs against 21 to 26; the customer reads 38 to 53
+against 29 to 34. Delivery at RC decoupled (20.9 against 8.7 ms) is the order_line write beyond the
+key, 714 µs and 103 gets a call ten times a transaction against the vendor's 63 and 14 (its steps:
+the keys read 283 µs and 15 gets, the data UPDATE by key 110 and 31, the metadata CAS by key 229 and
+56), the SUM read 157 against 19, new_order's delete and its ROWNUM read, the customer and oorder
+single writes; at RC inline the same block 416 µs and 88 gets (the data UPDATE by key 271 and 70 for
+ten rows the vendor updates in 14 gets), the SUM read 220 µs, 34.5 gets and 153 µs CPU against 21,
+4.2 and 11. StockLevel's count at RC inline 1,533 µs, 665 gets and 814 µs CPU against 843, 608 and
+256: the gets are the vendor's, the CPU is three times, from the split's hash anti-joins, views and
+union branches; at SNAPSHOT inline the same count runs as written on a table found clear, 674
+against 565.
+
+Two forms measured on the container, an inline composite-key table OLT (W, D, O, N) of 300k rows
+with the in-flight index (tx_state, W, D, O, N), the setup's fixed statistics, 48 rows in flight, a
+10-row prefix read 3,000 times a form (`ora/os9.jsh`, `os10.jsh`). The SNAPSHOT state column as
+deployed, `CASE WHEN NOT EXISTS (gate) THEN 0 WHEN (key) IN (SELECT key FROM T WHERE tx_state IN (1,
+2)) THEN 1 END`, costs 30.1 gets a read against the vendor's 6.4: with any row of the table in
+flight the gate is closed and Oracle runs the IN subquery as two probes of the in-flight index per
+row (the plan's correlated access on all four key columns), not as one hashed set; the AWS SNAPSHOT
+inline order_line read's 27.6 gets is this. The row's own state behind the gate, `WHEN t.tx_state IN
+(1, 2) THEN 1`, costs 8.1 gets, 29 µs, 8 µs CPU; the subquery restricted to the predicate's prefix
+8.3, still planned per row. The RC anchored form as deployed costs 9.3 gets on the container (the
+committed copy's PK range and the arm's), so the AWS RC inline read's 25.5 for the same text is a
+plan the dump does not hold. The SUM-shaped anchor-less read: the deployed split (NOT EXISTS per row
+as a HASH JOIN ANTI, the arm, a UNION ALL view) 14.3 gets, 96 µs, 45 µs CPU; the statement as
+written with a gate column over the predicate's key range, `SELECT v.*, (SELECT COUNT(*) FROM dual
+WHERE EXISTS (SELECT /*+ INDEX */ 1 FROM T m WHERE m.tx_state IN (1, 2) AND m.W = :4 AND m.D = :5
+AND m.O = :6)) FROM (<as written>) v`, 10.5 gets, 38 µs, 17 µs CPU, the gate open since no row of
+that order is in flight; the whole table's gate is cheaper still (7.1) but closed whenever anything
+is in flight, which in TPC-C on order_line is most of the time.
+
+**Proposals** (routed to 6e for the user). D1, the SNAPSHOT state column on an inline table as the
+row's own state behind the gate (`Router` ~1199, inline tables only; a decoupled table's state is in
+the metadata table and keeps the subquery): the AWS SNAPSHOT inline order_line read from 27.6 gets
+toward 8, OrderStatus at SNAPSHOT inline from +75% toward +30%, Payment's and NewOrder's first read
+of each table likewise, and a 500-row SNAPSHOT inline scan under a closed gate from a thousand
+probes to the gate alone. D2, anchor-less reads on Oracle (a grouped, DISTINCT or aggregate read,
+which records no anchor) as the statement as written with a gate column per table over the
+predicate's key conjuncts on that table (B1's extraction; the whole table where it has none),
+through the writes' count rule: an aggregate without GROUP BY returns one row whose gate decides, 1
+running the split instead; other shapes carry the gate on every row and an empty result takes the
+coarse check. Expected: Delivery's SUM from 220 to about 80 µs, 1.4 ms a Delivery at RC inline and
+1.0 at RC decoupled; StockLevel's count from 1.5 toward 0.9 ms with the order_line range gate and
+stock's warehouse gate (`S_W_ID = ?` is a key conjunct), StockLevel at RC from +53-62% toward +25%.
+D3, the write beyond the key's steps 2 and 3 carrying the predicate's key conjuncts beside the key
+list, so that the data UPDATE and the metadata CAS reach the rows by one range scan (the PK's, or
+T_key's) instead of a probe per key, which cannot change the rows written: Delivery's order_line
+block from 714 toward 530 µs at RC decoupled and from 416 toward 250 at RC inline, 1.7 to 1.8 ms a
+Delivery, about 1 ms at SNAPSHOT. D4, the harness: plans also for the statements of the highest
+per-call ratio against the vendor's, not only the top eleven by total time, since the OrderStatus
+and Payment reads' plans are missing and the RC inline order_line read's 25.5 gets needs its AWS
+plan. Together D1 to D3 are worth about 0.03 to 0.05 on each TPC-C cell and the visible lines are
+OrderStatus, StockLevel and Delivery; NewOrder at RC decoupled (+55%) is now its blocks at their
+floor plus the layout's per-statement costs.
