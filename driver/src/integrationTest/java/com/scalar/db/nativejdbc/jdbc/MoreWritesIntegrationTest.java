@@ -1739,8 +1739,9 @@ class MoreWritesIntegrationTest {
         Statement st = d.createStatement()) {
       st.executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (80, 'a')");
       st.executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (81, 'b')");
-      // the wait for 81 to settle uses most of the timeout; the DML of 80 then waits on a plain
-      // lock past it, within the 1 s the vendor statement was given
+      // the wait for 81 to settle uses half the timeout, 1.5 s of slack for the rollback to show
+      // (todo 358); the DML of 80 then waits on a plain lock past the timeout, within the 2 s the
+      // vendor statement is given (what is left, rounded up)
       TwoPhaseCommitTransaction held = prepared(tpc, t, 81, "p");
       locker.setAutoCommit(false);
       rows(locker, "SELECT x FROM " + t.sql + " WHERE id = 80 FOR UPDATE");
@@ -1754,12 +1755,12 @@ class MoreWritesIntegrationTest {
       Future<?> unlock =
           pool.submit(
               () -> {
-                Thread.sleep(2200);
+                Thread.sleep(3250);
                 locker.commit();
                 return null;
               });
       d.setAutoCommit(false);
-      st.setQueryTimeout(2);
+      st.setQueryTimeout(3);
       if (oneStatement) {
         // a write is one statement on PostgreSQL, decoupled (todo 328) or inline (todo 329), and
         // one block on Oracle (todo 334): no point between a key's DML and its stamp, and the
