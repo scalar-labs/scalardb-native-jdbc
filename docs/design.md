@@ -1046,168 +1046,179 @@ union as a derived table.
   that point fails with ORA-08177, raised by the statement that meets the row: the user's DML
   meeting the data row, or the CAS meeting the metadata row where only that moved (the backfill of
   section 1 stamps metadata rows alone). The failure is conservative, never permissive: Oracle
-  raises it too where a block's transaction list cannot tell whether the row changed (an `INITRANS`
-  too small), an abort where none was needed, never a write where one was; and a ScalarDB prepare
-  rolled back after the snapshot has changed the row twice, so the write of a row that is back at
-  the version read aborts the same way, where PostgreSQL may write it (todo 134). So no read records
-  an anchor at SNAPSHOT on Oracle, by the same state column as on PostgreSQL in Oracle's spelling,
-  `CASE WHEN NOT EXISTS (SELECT 1 FROM T_meta WHERE tx_state IN (1, 2)) THEN 0 WHEN (<key>) IN
-  (SELECT <key> FROM T_meta WHERE tx_state IN (1, 2)) THEN 1 END`, both subqueries reading the
-  in-flight index `(tx_state, <pk>)` under the `INDEX` hint the split read's in-flight copies carry,
-  since the fixed statistics of todo 094 would send the optimizer elsewhere, the first uncorrelated
-  and evaluated once by the scalar subquery cache; on an inline table, whose row holds its state,
-  the second branch is the row's own state, which its copy carries as a third own column beside the
-  versions, `WHEN <x>."scalardb_native_v2" IN (1, 2) THEN 1` (the copy's alias, since the outer CASE
-  cannot reach the copy's `tx_state` itself), since Oracle plans the key-set subquery as two probes
-  of the in-flight index per row whenever the first branch found a row in flight, 30 gets against
-  the vendor's 6 for a 10-row read on the container where the own state costs 8, which the eighth
-  run's SNAPSHOT inline OrderStatus read paid at 27.6 (todo 334, 2026-10-28), while a decoupled
-  table's state is in its metadata row and keeps the subquery; a `SKIP LOCKED` read keeps its
-  versions, as on PostgreSQL; and a transaction remembers each table it found clear, by the same
-  four ways, the coarse check in its Oracle form, `SELECT 1 FROM dual WHERE EXISTS (SELECT 1 FROM
-  T_meta WHERE tx_state IN (1, 2))`, and runs on it the vendor's statements: a read of any shape as
-  written on the data tables, a locking read likewise after the coarse check, whose own Oracle form
-  is a later form of todo 334, and a write as written with its stamp (4.3). What differs from
-  PostgreSQL is how the failure surfaces and what it leaves. ORA-08177 fails the statement alone and
-  Oracle keeps the transaction open; the driver reports it as `40001` and marks the transaction
-  rollback-only, as it does already (section 5), and nothing of the failed statement remains, a
-  PL/SQL block included (4.3). In autocommit the session runs at READ COMMITTED on Oracle (section
-  5), so nothing is remembered and reads keep their anchors, as at that level elsewhere; the
-  transaction an autocommit read shares with its checks (todo 283) runs that one statement and
-  remembers nothing either. READ COMMITTED's own forms are 4.3's. - **Why one statement, not two.**
-  Under READ COMMITTED every statement has its own snapshot. A row in flight with `x = x2` and
-  `before_x = x1` fails the `P` arm; if its writer rolls back before a second statement runs, the
-  row is committed with `x = x1` and no before image, and fails the in-flight arm too. Both arms
-  miss a committed match. One statement reads both arms from one snapshot and cannot. Pipelining or
-  a multi-statement string still gives two snapshots. Under SNAPSHOT and SERIALIZABLE the snapshot
-  is transaction-wide, so two statements would be safe there and the single statement is only
-  cheaper. - **The split read** (READ COMMITTED, any shape). A statement naming ScalarDB tables `T1
-  ... Tn` is repeated once per combination of their **copies**, 2^n statements joined by UNION ALL
-  into one: in a copy each table is either *committed*, `T` with its rows in flight excluded and its
-  own columns, or *in flight*, `T JOIN T_meta` restricted to the rows in flight that have a before
-  image, with every non-key column `c` read as `before_c`. Either reads only the columns the
-  statement may read from the table, every column it qualifies by the table and every unqualified
-  one, and all of them under a `*` or a NATURAL or USING join; on a 50-column table this shortens
-  the statement up to 5x, which MySQL and MariaDB parse on every execution. A row is in exactly one
-  copy of its table, so the copies are disjoint and need no dedup, and each copy is the user's own
-  statement over base tables, so every join and filter keeps its indexes; the copies with a table in
-  flight start from the in-flight index and are empty unless a matching row is in flight. Measured
-  (`docs/benchmarks/read-overhead.md`): one-table shapes 1.0-1.7x the plain query, joins of two
-  tables up to 2.6x, three tables up to 3.1x, four up to 5x, full scans up to 2.5x; with a 1 ms
-  round trip to the database short queries come within 1.0-1.8x. A form with n + 1 copies through
-  LATERAL was measured and rejected: a table after the in-flight one can be joined only through its
-  unindexed before image. - **How a committed table excludes its rows in flight**, per engine: `NOT
-  EXISTS (SELECT 1 FROM T_meta q WHERE q.<pk> = t.<pk> AND q.tx_state IN (1, 2))` on PostgreSQL and
-  Oracle, on PostgreSQL behind one probe of the in-flight index per statement, `(SELECT 1 FROM
-  T_meta WHERE tx_state IN (1, 2) ORDER BY <key> LIMIT 1) IS NULL OR NOT EXISTS (<the probe>)` (todo
-  337, the spelling of the READ COMMITTED bullet's state probe above): the planner reads the first
-  once from the statement's snapshot, an InitPlan, and makes the second a hashed set of the keys in
-  flight, built only where the first found a row, and the probe per row again where the set is
-  estimated past `work_mem`, the EXISTS then kept as written (the state column at SNAPSHOT rests on
-  the same set, todo 329; the builder confirms both plans by EXPLAIN). The inline layout's copy
-  keeps the row's own state, a probe of nothing. Measured on StockLevel's four copies, decoupled,
-  prepared: execution at the vendor's, 623 against 616 µs mean, 262 against 284 min, 785 against 776
-  blocks, from 706, 296 and 800 with the probe per row; planning 705 against the vendor's 125 µs a
-  plan, from 1,091; a key read without an anchor, autocommit or read-only, 6 against the vendor's 5
-  µs, from 8. On MySQL and MariaDB a left join to `(SELECT DISTINCT <pk> FROM T_meta WHERE tx_state
-  IN (1, 2))` with the key NULL, which makes them build the in-flight keys once instead of probing
-  the metadata per row (the set grows with the in-flight count, so a table the statement reaches
-  through the first column of its primary key, in the database's order, or a ScalarDB-indexed
-  column, by = or IN with a list in a top-level conjunct of the WHERE or an ON clause, from
-  constants or tables already reached, takes the per-row left join on `T_meta`'s key instead once it
-  has more than 500 rows in flight, which measured flat for tables reached through their key while
-  the set grew 1.6-23x from 1,000 rows (todo 113); a table reached only through a range, which may
-  read thousands of rows, once it has more than 5,000; either goes back to the set below half its
-  threshold (todo 112); the count is read through the in-flight index, capped at 5,001, and kept for
-  a second per connection, and a prepared statement whose form the count changes is prepared again
-  with its settings and parameters replayed, so pooled statements follow the count, todo 103); on
-  SQL Server `NOT EXISTS` in the all-committed copy of a statement over one or two ScalarDB tables
-  and the DISTINCT set over three or more, and in the copies with a table in flight a left join on
-  `T_meta`'s key with `COALESCE(tx_state, 3) = 3`, since SQL Server otherwise plans those copies as
-  if empty and scans the in-flight index once per row (5-10x with rows in flight); and a table with
-  a row in flight, by the same count, takes `NOT EXISTS` with `WITH (FORCESEEK)` in the copies
-  without one: SQL Server estimates the in-flight index's rows from the index as it is when it
-  compiles, whatever its statistics, and a plan compiled while rows are in flight scans the index
-  once per row through the ghost records ScalarDB's writes leave (EC2, a join beside sixteen
-  writers: 13-26 reads a second, 189-271 seeking). Forced always, the seek costs a 100,000-row read
-  3x, so a table with none in flight keeps SQL Server's own plan. - **On top of the union**: the
-  user's ORDER BY, row limit, DISTINCT and window functions, over the copies as a derived table. A
-  statement with ORDER BY and a row limit also sorts and stops each copy after offset + n rows, so
-  pagination does not read every matching row (todo 089: 20 of 500k rows 36-365x down to 1.1-1.5x):
-  `LIMIT` inside the copy on PostgreSQL, MySQL and MariaDB, `WHERE ROWNUM <=` around the ordered
-  copy on Oracle, whose `FETCH FIRST` numbers the whole copy, and nothing on SQL Server, whose plan
-  already stops early over the union. On MySQL every committed table of such a statement uses the
-  per-row left join when offset + n is at most 1,000, since the DISTINCT set and NOT EXISTS are
-  built whole before the first row. Only for a literal offset and count, or a count placeholder
-  without offset, and not under DISTINCT or an aggregate. A whole-query aggregate that decomposes
-  (`COUNT`, `SUM`, `MIN`, `MAX`, `AVG` as `SUM` and `COUNT`, each with its `GROUP BY`) is computed
-  per copy and combined on top on every engine but PostgreSQL, so that no copy streams its rows
-  through the union (full scans 3-10x down to 1.2-2.5x); any other aggregate is applied on top of
-  the union. Per copy, each copy groups by the GROUP BY columns and selects one partial result per
-  aggregate, and the statement on top groups again and combines them: COUNT as SUM (cast back to
-  BIGINT on MySQL and MariaDB), SUM, MIN and MAX as themselves, AVG as SUM over COUNT. A DISTINCT
-  aggregate, and AVG on SQL Server, whose AVG of a decimal rounds differently from SUM over COUNT,
-  are applied on top. The split takes GROUP BY over columns only, with every column outside an
-  aggregate grouped, and COUNT, SUM, MIN, MAX and AVG; anything else stays on `rc_T`. An unaliased
-  item keeps the label the engine gives the original: PostgreSQL names a function call by the
-  function, SQL Server names no expression, and MySQL, MariaDB and Oracle name it by its text, which
-  the item on top takes as its alias. - **Which tables are split.** The statement is repeated per
-  combination of *pieces* of its ScalarDB table references, each piece reading the table through the
-  fragment of its copy. Four kinds of reference, by where the table stands (todo 095): 1. **Inner**:
-  a table joined by an inner join in the top-level FROM clause, a LEFT JOIN's preserved side
-  included. Two pieces, committed and in flight. A row of the result comes from exactly one row of
-  the table, which is in exactly one copy. 2. **Nullable**: one table, not a join, on the nullable
-  side of a top-level LEFT JOIN with an ON clause (a RIGHT JOIN, USING and NATURAL stay on `rc_T`),
-  the ON clause naming only it and the tables before it, every column qualified: the unmatched piece
-  repeats the ON clause in the WHERE clause, where an unqualified column could also name a table
-  joined later (todo 123). Three pieces. In the committed and the in-flight piece the LEFT JOIN
-  becomes an inner join with that copy's fragment. The **unmatched piece** joins an empty fragment,
-  `(SELECT <columns> FROM T WHERE 1 = 0)`, so every column of the table is NULL with its own type,
-  and adds to the WHERE clause ```sql NOT EXISTS (SELECT 1 FROM <committed fragment> b WHERE <ON
-  clause>) AND NOT EXISTS (SELECT 1 FROM <in-flight fragment> b WHERE <ON clause>) ``` The
-  subqueries keep the table's alias, so the ON clause is copied unchanged and its references to the
-  table resolve to the subquery. A preserved row with matches gets one row per matching row, each in
-  exactly one copy; one without matches gets exactly one NULL-extended row; an ON clause that is
-  UNKNOWN is no match both in the join and in `NOT EXISTS`. Predicates after the join see the values
-  of the plain statement, NULLs in the unmatched piece. Measured with one inner table (6 pieces):
-  1.3-2.5x by hand, against 376-1495x through `rc_T` on MySQL and MariaDB; through the driver
-  1.2-2.3x on every engine (todo 095). 3. **Semi-joined**: the one ScalarDB table of an `IN
-  (subquery)` or `EXISTS (subquery)` that is a top-level conjunct of the WHERE clause, the subquery
-  a single SELECT naming no other ScalarDB table, without aggregates, GROUP BY, HAVING, a row limit,
-  window functions or a set operation. The table is joined inside the subquery by an inner join, so
-  that the subquery's rows are the union of its rows over each piece. Two pieces, as for an inner
-  table, so the engine can still drive the plan from the subquery's index. An outer row must come
-  out of exactly one piece: the committed piece keeps the subquery over the committed fragment; the
-  in-flight piece keeps it over the in-flight fragment and adds that it does not match over the
-  committed fragment: `NOT EXISTS (S_c)` for EXISTS; for `x IN (SELECT y FROM ... WHERE w)`, `NOT
-  EXISTS (SELECT 1 FROM ... WHERE (w) AND (y) = (x))` over the committed fragment, which probes the
-  subquery's index row by row. A row the committed piece returns is not returned again, and an
-  UNKNOWN comparison is no match there as it is in IN. The correlated form needs x to be one column
-  qualified by a name the subquery's FROM clause does not use, or the subquery could read it as its
-  own; otherwise the IN is repeated whole, `CASE WHEN x IN (S_c) THEN 1 ELSE 0 END = 0`, which
-  PostgreSQL computes by hashing the whole committed subquery (1205x at 10,000 rows in flight in the
-  benchmark's shape). On PostgreSQL, when the subquery selects the table's key, a single column,
-  each value is in exactly one copy and the condition is left out: the table is split as an inner
-  one. The other engines compare a text key with a number as numbers, so '1' committed and '01' in
-  flight would both match 1, and the key case is split as above (todo 121), at about the same cost
-  (MySQL, MariaDB and Oracle unchanged, SQL Server 2.7x against 2.1x at 100 rows in flight).
-  Measured for the key case, before that change: 1.7-3.7x by hand, against 109-1200x through the
-  view on MySQL and MariaDB, where an IN over a union runs once per outer row; through the driver
-  0.4-2.4x at 100 rows in flight, up to 16x on MySQL at 10,000. The non-key case, with the
-  correlated `NOT EXISTS`: 1.7-5.4x at 100 rows in flight, against 190-1520x through the view on
-  PostgreSQL, MySQL and MariaDB; at 10,000 up to 6.8x, 27x on MySQL (todo 118). 4. **In an
-  expression**: `NOT IN`, `NOT EXISTS`, and an IN or EXISTS under OR or NOT, anywhere in the WHERE
-  clause, over a subquery of the same form; in the select list, the ON clauses and HAVING a
-  subquery's table stays on `rc_T`. These add no pieces: the subquery is written twice inside every
-  piece, as `x NOT IN (S_c) AND x NOT IN (S_f)`, `NOT EXISTS (S_c) AND NOT EXISTS (S_f)`, `(x IN
-  (S_c) OR x IN (S_f))` or `(EXISTS (S_c) OR EXISTS (S_f))`, `S_c` and `S_f` the subquery over the
-  committed and the in-flight fragment. In three-valued logic each equals the quantifier over the
-  union of the two, De Morgan's laws included, and an outer row is returned once. A NOT EXISTS
-  replaces only the EXISTS under its NOT, which De Morgan turns into the AND. ANY, SOME and ALL,
-  which would follow IN and NOT IN, stay on `rc_T` so far. On MySQL the in-flight writing carries
-  `/*+ NO_SEMIJOIN() */`: built whole as an anti-join, it is read by a scan of the metadata table,
-  whose state MySQL estimates at every row (93-399x through the view, 13.6x at 100 rows in flight
-  and 2.0x at 10,000 with the hint; elsewhere 1.1-6.3x).
+  raises it too where a block's transaction list cannot tell whether the row changed (an
+  `INITRANS` too small), an abort where none was needed, never a write where one was; and a
+  ScalarDB prepare rolled back after the snapshot has changed the row twice, so the write of a row
+  that is back at the version read aborts the same way, where PostgreSQL may write it (todo 134).
+  So no read records an anchor at SNAPSHOT on Oracle, by the same state column as on PostgreSQL in
+  Oracle's spelling, `CASE WHEN NOT EXISTS (SELECT 1 FROM T_meta WHERE tx_state IN (1, 2)) THEN 0
+  WHEN (<key>) IN (SELECT <key> FROM T_meta WHERE tx_state IN (1, 2)) THEN 1 END`, both subqueries
+  reading the in-flight index `(tx_state, <pk>)` under the `INDEX` hint the split read's in-flight
+  copies carry, since the fixed statistics of todo 094 would send the optimizer elsewhere, the
+  first uncorrelated and evaluated once by the scalar subquery cache; on an inline table, whose row
+  holds its state, the second branch is the row's own state, which its copy carries as a third own
+  column beside the versions, `WHEN <x>."scalardb_native_v2" IN (1, 2) THEN 1` (the copy's alias,
+  since the outer CASE cannot reach the copy's `tx_state` itself), since Oracle plans the key-set
+  subquery as two probes of the in-flight index per row whenever the first branch found a row in
+  flight, 30 gets against the vendor's 6 for a 10-row read on the container where the own state
+  costs 8, which the eighth run's SNAPSHOT inline OrderStatus read paid at 27.6 (todo 334,
+  2026-10-28), while a decoupled table's state is in its metadata row and keeps the subquery; a
+  `SKIP LOCKED` read keeps its versions, as on PostgreSQL; and a transaction remembers each table it
+  found clear, by the
+  same four ways, the coarse check in its Oracle form, `SELECT 1 FROM dual WHERE EXISTS (SELECT 1
+  FROM T_meta WHERE tx_state IN (1, 2))`, and runs on it the vendor's statements: a read of any
+  shape as written on the data tables, a locking read likewise after the coarse check, whose own
+  Oracle form is a later form of todo 334, and a write as written with its stamp (4.3). What
+  differs from PostgreSQL is how the failure surfaces and what it leaves. ORA-08177 fails the
+  statement alone and Oracle keeps the transaction open; the driver reports it as `40001` and
+  marks the transaction rollback-only, as it does already (section 5), and nothing of the failed
+  statement remains, a PL/SQL block included (4.3). In autocommit the session runs at READ
+  COMMITTED on Oracle (section 5), so nothing is remembered and reads keep their anchors, as at that
+  level elsewhere; the transaction an autocommit read shares with its checks (todo 283) runs that
+  one statement and remembers nothing either. READ COMMITTED's own forms are 4.3's.
+- **Why one statement, not two.** Under READ COMMITTED every statement has its own snapshot. A row in
+  flight with `x = x2` and `before_x = x1` fails the `P` arm; if its writer rolls back before a second
+  statement runs, the row is committed with `x = x1` and no before image, and fails the in-flight arm
+  too. Both arms miss a committed match. One statement reads both arms from one snapshot and cannot.
+  Pipelining or a multi-statement string still gives two snapshots. Under SNAPSHOT and SERIALIZABLE the
+  snapshot is transaction-wide, so two statements would be safe there and the single statement is only
+  cheaper.
+- **The split read** (READ COMMITTED, any shape). A statement naming ScalarDB tables `T1 ... Tn` is
+  repeated once per combination of their **copies**, 2^n statements joined by UNION ALL into one: in a
+  copy each table is either *committed*, `T` with its rows in flight excluded and its own columns, or
+  *in flight*, `T JOIN T_meta` restricted to the rows in flight that have a before image, with every
+  non-key column `c` read as `before_c`. Either reads only the columns the statement may read from
+  the table, every column it qualifies by the table and every unqualified one, and all of them under
+  a `*` or a NATURAL or USING join; on a 50-column table this shortens the statement up to 5x, which
+  MySQL and MariaDB parse on every execution. A row is in exactly one copy of its table, so the copies are
+  disjoint and need no dedup, and each copy is the user's own statement over base tables, so every
+  join and filter keeps its indexes; the copies with a table in flight start from the in-flight index
+  and are empty unless a matching row is in flight. Measured (`docs/benchmarks/read-overhead.md`):
+  one-table shapes 1.0-1.7x the plain query, joins of two tables up to 2.6x, three tables up to 3.1x,
+  four up to 5x, full scans up to 2.5x; with a 1 ms round trip to the database short queries come
+  within 1.0-1.8x. A form with n + 1 copies through LATERAL was measured and rejected: a table after
+  the in-flight one can be joined only through its unindexed before image.
+  - **How a committed table excludes its rows in flight**, per engine: `NOT EXISTS (SELECT 1 FROM
+    T_meta q WHERE q.<pk> = t.<pk> AND q.tx_state IN (1, 2))` on PostgreSQL and Oracle, on
+    PostgreSQL behind one probe of the in-flight index per statement, `(SELECT 1 FROM T_meta WHERE
+    tx_state IN (1, 2) ORDER BY <key> LIMIT 1) IS NULL OR NOT EXISTS (<the probe>)` (todo 337, the
+    spelling of the READ COMMITTED bullet's state probe above): the planner reads the
+    first once from the statement's snapshot, an InitPlan, and makes the second a hashed set of the
+    keys in flight, built only where the first found a row, and the probe per row again where the
+    set is estimated past `work_mem`, the EXISTS then kept as written (the state column at
+    SNAPSHOT rests on the same set, todo 329; the builder confirms both plans by EXPLAIN). The
+    inline layout's copy keeps the row's own state, a probe of nothing. Measured on StockLevel's
+    four copies, decoupled, prepared: execution at the vendor's, 623 against 616 µs mean, 262
+    against 284 min, 785 against 776 blocks, from 706, 296 and 800 with the probe per row;
+    planning 705 against the vendor's 125 µs a plan, from 1,091; a key read without an anchor,
+    autocommit or read-only, 6 against the vendor's 5 µs, from 8. On MySQL and
+    MariaDB a left join to `(SELECT DISTINCT <pk> FROM T_meta WHERE tx_state IN (1, 2))` with the key
+    NULL, which makes them build the in-flight keys once instead of probing the metadata per row (the
+    set grows with the in-flight count, so a table the statement reaches through the first column
+    of its primary key, in the database's order, or a ScalarDB-indexed column, by = or IN with a
+    list in a top-level conjunct of the WHERE or an ON clause, from constants or tables already
+    reached, takes the per-row left join on `T_meta`'s key instead once it has more than 500 rows in
+    flight, which measured flat for tables reached through their key while the set grew 1.6-23x
+    from 1,000 rows (todo 113); a table reached only
+    through a range, which may read thousands of rows, once it has more than 5,000; either goes back
+    to the set below half its threshold (todo 112); the count is read through the in-flight index,
+    capped at 5,001, and kept for a second per connection, and a
+    prepared statement whose form the count changes is prepared again with its settings and
+    parameters replayed, so pooled statements follow the count, todo 103); on
+    SQL Server `NOT EXISTS` in the all-committed copy of a statement over one or two ScalarDB tables
+    and the DISTINCT set over three or more, and in the copies with a table in flight a left join on
+    `T_meta`'s key with `COALESCE(tx_state, 3) = 3`, since SQL Server otherwise plans those copies as
+    if empty and scans the in-flight index once per row (5-10x with rows in flight); and a table
+    with a row in flight, by the same count, takes `NOT EXISTS` with `WITH (FORCESEEK)` in the
+    copies without one: SQL Server estimates the in-flight index's rows from the index as it is
+    when it compiles, whatever its statistics, and a plan compiled while rows are in flight scans
+    the index once per row through the ghost records ScalarDB's writes leave (EC2, a join beside
+    sixteen writers: 13-26 reads a second, 189-271 seeking). Forced always, the seek costs a
+    100,000-row read 3x, so a table with none in flight keeps SQL Server's own plan.
+  - **On top of the union**: the user's ORDER BY, row limit, DISTINCT and window functions, over the
+    copies as a derived table. A statement with ORDER BY and a row limit also sorts and stops each
+    copy after offset + n rows, so pagination does not read every matching row (todo 089: 20 of
+    500k rows 36-365x down to 1.1-1.5x): `LIMIT` inside the copy on PostgreSQL, MySQL and MariaDB,
+    `WHERE ROWNUM <=` around the ordered copy on Oracle, whose `FETCH FIRST` numbers the whole
+    copy, and nothing on SQL Server, whose plan already stops early over the union. On MySQL every
+    committed table of such a statement uses the per-row left join when offset + n is at most
+    1,000, since the DISTINCT set and NOT EXISTS are built whole before the first row. Only for a literal offset and count, or a
+    count placeholder without offset, and not under DISTINCT or an aggregate. A whole-query aggregate that decomposes (`COUNT`, `SUM`, `MIN`, `MAX`,
+    `AVG` as `SUM` and `COUNT`, each with its `GROUP BY`) is computed per copy and combined on top on
+    every engine but PostgreSQL, so that no copy streams its rows through the union (full scans
+    3-10x down to 1.2-2.5x); any other aggregate is applied on top of the union. Per copy, each copy
+    groups by the GROUP BY columns and selects one partial result per aggregate, and the statement
+    on top groups again and combines them: COUNT as SUM (cast back to BIGINT on MySQL and MariaDB),
+    SUM, MIN and MAX as themselves, AVG as SUM over COUNT. A DISTINCT aggregate, and AVG on SQL
+    Server, whose AVG of a decimal rounds differently from SUM over COUNT, are applied on top. The
+    split takes GROUP BY over columns only, with every column outside an aggregate grouped, and
+    COUNT, SUM, MIN, MAX and AVG; anything else stays on `rc_T`. An unaliased item keeps the label
+    the engine gives the original: PostgreSQL names a function call by the function, SQL Server
+    names no expression, and MySQL, MariaDB and Oracle name it by its text, which the item on top
+    takes as its alias.
+  - **Which tables are split.** The statement is repeated per combination of *pieces* of its ScalarDB
+    table references, each piece reading the table through the fragment of its copy. Four kinds of
+    reference, by where the table stands (todo 095):
+    1. **Inner**: a table joined by an inner join in the top-level FROM clause, a LEFT JOIN's
+       preserved side included. Two pieces, committed and in flight. A row of the result comes from
+       exactly one row of the table, which is in exactly one copy.
+    2. **Nullable**: one table, not a join, on the nullable side of a top-level LEFT JOIN with an ON
+       clause (a RIGHT JOIN, USING and NATURAL stay on `rc_T`), the ON clause naming only it and the
+       tables before it, every column qualified: the unmatched piece repeats the ON clause in the
+       WHERE clause, where an unqualified column could also name a table joined later (todo 123).
+       Three pieces. In the committed and the in-flight piece the LEFT JOIN becomes an inner join
+       with that copy's fragment. The **unmatched piece** joins an empty fragment, `(SELECT <columns> FROM T WHERE
+       1 = 0)`, so every column of the table is NULL with its own type, and adds to the WHERE clause
+       ```sql
+       NOT EXISTS (SELECT 1 FROM <committed fragment> b WHERE <ON clause>)
+       AND NOT EXISTS (SELECT 1 FROM <in-flight fragment> b WHERE <ON clause>)
+       ```
+       The subqueries keep the table's alias, so the ON clause is copied unchanged and its references
+       to the table resolve to the subquery. A preserved row with matches gets one row per matching
+       row, each in exactly one copy; one without matches gets exactly one NULL-extended row; an ON
+       clause that is UNKNOWN is no match both in the join and in `NOT EXISTS`. Predicates after the
+       join see the values of the plain statement, NULLs in the unmatched piece. Measured with one
+       inner table (6 pieces): 1.3-2.5x by hand, against 376-1495x through `rc_T` on MySQL and
+       MariaDB; through the driver 1.2-2.3x on every engine (todo 095).
+    3. **Semi-joined**: the one ScalarDB table of an `IN (subquery)` or `EXISTS (subquery)` that is
+       a top-level conjunct of the WHERE clause, the subquery a single SELECT naming no other
+       ScalarDB table, without aggregates, GROUP BY, HAVING, a row limit, window functions or a set
+       operation. The table is joined inside the subquery by an inner join, so that the subquery's
+       rows are the union of its rows over each piece. Two pieces, as for an inner table, so the
+       engine can still drive the plan from the subquery's index. An outer row must come out of
+       exactly one piece: the committed piece keeps the subquery over the committed fragment; the
+       in-flight piece keeps it over the in-flight fragment and adds that it does not match over the
+       committed fragment: `NOT EXISTS (S_c)` for EXISTS; for `x IN (SELECT y FROM ... WHERE w)`,
+       `NOT EXISTS (SELECT 1 FROM ... WHERE (w) AND (y) = (x))` over the committed fragment, which
+       probes the subquery's index row by row. A row the committed piece returns is not returned
+       again, and an UNKNOWN comparison is no match there as it is in IN. The correlated form needs
+       x to be one column qualified by a name the subquery's FROM clause does not use, or the
+       subquery could read it as its own; otherwise the IN is repeated whole, `CASE WHEN x IN (S_c)
+       THEN 1 ELSE 0 END = 0`, which PostgreSQL computes by hashing the whole committed subquery
+       (1205x at 10,000 rows in flight in the benchmark's shape). On PostgreSQL, when the subquery
+       selects the table's key, a single column, each value is in exactly one copy and the condition
+       is left out: the table is split as an inner one. The other engines compare a text key with a
+       number as numbers, so '1' committed and '01' in flight would both match 1, and the key case
+       is split as above (todo 121), at about the same cost (MySQL, MariaDB and Oracle unchanged,
+       SQL Server 2.7x against 2.1x at 100 rows in flight). Measured for the key case, before that
+       change: 1.7-3.7x by hand, against 109-1200x through the view on MySQL and MariaDB, where an
+       IN over a union runs once per outer row; through the driver 0.4-2.4x at 100 rows in flight,
+       up to 16x on MySQL at 10,000. The non-key case, with the correlated `NOT EXISTS`: 1.7-5.4x at
+       100 rows in flight, against 190-1520x through the view on PostgreSQL, MySQL and MariaDB; at
+       10,000 up to 6.8x, 27x on MySQL (todo 118).
+    4. **In an expression**: `NOT IN`, `NOT EXISTS`, and an IN or EXISTS under OR or NOT, anywhere
+       in the WHERE clause, over a subquery of the same form; in the select list, the ON clauses
+       and HAVING a subquery's table stays on `rc_T`. These add no pieces: the subquery is written
+       twice inside every piece, as `x NOT IN (S_c) AND x NOT IN (S_f)`, `NOT EXISTS (S_c) AND NOT
+       EXISTS (S_f)`, `(x IN (S_c) OR x IN (S_f))` or `(EXISTS (S_c) OR EXISTS (S_f))`, `S_c` and
+       `S_f` the subquery over the committed and the in-flight fragment. In three-valued logic each
+       equals the quantifier over the union of the two, De Morgan's laws included, and an outer row
+       is returned once. A NOT EXISTS replaces only the EXISTS under its NOT, which De Morgan turns
+       into the AND. ANY, SOME and ALL, which would follow IN and NOT IN, stay on `rc_T` so far.
+       On MySQL the in-flight writing carries `/*+ NO_SEMIJOIN() */`: built whole as an anti-join,
+       it is read by a scan of the metadata table, whose state MySQL estimates at every row (93-399x
+       through the view, 13.6x at 100 rows in flight and 2.0x at 10,000 with the hint; elsewhere
+       1.1-6.3x).
 
     A statement is split into at most 16 copies, four inner tables or a nullable table with two
     inner ones; one that needs more is read through `rc_T` (todo 095). Splitting a subquery's
