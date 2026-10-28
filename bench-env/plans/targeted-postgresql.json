@@ -1,0 +1,33 @@
+{
+  "description": "Targeted, PostgreSQL: YCSB E at 1M rows at READ COMMITTED, both layouts, the fast network (B1, the committed copy's range on the metadata side)",
+  "workloads": {
+    "ycsb-e": {
+      "benchmark": "ycsb",
+      "weights": "0,5,95,0,0,0",
+      "scale": 1000
+    }
+  },
+  "matrix": {
+    "workloads": [
+      "ycsb-e"
+    ],
+    "levels": [
+      "READ_COMMITTED"
+    ],
+    "layouts": [
+      "decoupled",
+      "inline"
+    ],
+    "delays_us": [
+      0
+    ]
+  },
+  "runs": "a,c",
+  "reps": 2,
+  "time_s": 60,
+  "terminals": 4,
+  "loader_threads": 8,
+  "jvm_args": [
+    "-XX:StartFlightRecording:settings=profile,jdk.CPUTimeSample#enabled=true,jdk.CPUTimeSample#throttle=1ms,filename={dir}/execute.jfr"
+  ]
+}
