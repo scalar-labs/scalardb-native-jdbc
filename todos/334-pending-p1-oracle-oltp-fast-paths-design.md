@@ -2034,3 +2034,22 @@ The proof, the user's call: the two builds on one stack back to back, YCSB E at 
 decoupled, fast network, 60 s × 2 repetitions each, about 10 minutes of runtime; the fifth run's
 build is 313fd4e or 0cf9ac0 (item 1 only, which does not touch the scan), main's the current head.
 The design predicts main's excess under the fifth's by 50–150 µs a scan there, as on the container.
+
+### 2026-10-28: the setup's statistics on every column of the metadata table, built (the builder's note)
+
+The user approved -89's fix (ac5eeec, 144c623, 018283c) through 6e. `Setup.ORACLE_FIXED_STATISTICS`
+gathers with `method_opt => 'FOR ALL COLUMNS SIZE REPEAT'` in place of `'FOR COLUMNS ' || c || ' SIZE
+1'`; the fixed histogram's `SET_COLUMN_STATS` and the lock follow as before. The test,
+`OracleOltpIntegrationTest.theSetupsStatistics_coverEveryColumn_andAKeyedParseSamplesNothing`, for the
+decoupled table's `T_tx_metadata` and the inline `TI`: every column has a row in
+`ALL_TAB_COL_STATISTICS` (ALL_, which the test user reads on any database), tx_state's `num_distinct`
+still 3, and a hard parse of a keyed write (`UPDATE /* stats <nanos> */ ... WHERE id = -1 AND
+COALESCE(tx_state, 3) = 3`) adds no execution of a `SELECT /* DS_SVC */` text naming the table to
+V$SQL. Against the old line it fails on both: every column but tx_state without statistics, and 2
+samplings at the parse; with the fix both layouts have every column's, and none. On the container:
+the class 21 tests (the 2 measures skipped), `SetupIntegrationTest`, and the whole Oracle suite on a
+fresh database, 164 tests, none failing; `check`'s MySQL, MySQL lower case and MariaDB suites pass,
+its `spotbugsIntegrationTest` failing on main's three findings alone (InFlightCheckBenchmark, the two
+RoutingIntegrationTest lambdas), none in this change. A database set up before the fix keeps the
+sampling until the setup runs again (`force` past the lock). The proof is an Oracle TPC-C RC
+decoupled cell at scale 32.

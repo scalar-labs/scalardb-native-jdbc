@@ -439,15 +439,18 @@ public final class Setup {
   /**
    * The table's statistics with fixed ones on {@code tx_state}, then, unless the last bind is 0,
    * locked so that neither the nightly job nor a manual gather replaces them; {@code force} past an
-   * earlier run's lock. Binds the owner and table quoted, so that DBMS_STATS takes them as stored,
-   * the column, the rows in flight to assume, and whether to lock.
+   * earlier run's lock. Every column's: a key column without them makes each hard parse of a keyed
+   * statement sample the table through the in-flight index, 0.3 s a text at 3.2M rows (todo 334);
+   * {@code SIZE REPEAT} keeps an inline table's own histograms. Binds the owner and table quoted,
+   * so that DBMS_STATS takes them as stored, the column, the rows in flight to assume, and whether
+   * to lock.
    */
   private static final String ORACLE_FIXED_STATISTICS =
       "DECLARE o VARCHAR2(260) := ?; t VARCHAR2(260) := ?; c VARCHAR2(260) := ?;"
           + " n NUMBER; b NUMBER; l NUMBER; f NUMBER; r DBMS_STATS.STATREC;"
           + " BEGIN"
           + " DBMS_STATS.GATHER_TABLE_STATS(ownname => o, tabname => t,"
-          + " method_opt => 'FOR COLUMNS ' || c || ' SIZE 1', force => TRUE);"
+          + " method_opt => 'FOR ALL COLUMNS SIZE REPEAT', force => TRUE);"
           + " DBMS_STATS.GET_TABLE_STATS(o, t, numrows => n, numblks => b, avgrlen => l);"
           + " f := LEAST(?, GREATEST(1, FLOOR(n / 2)));"
           + " r.epc := 3; r.bkvals := DBMS_STATS.NUMARRAY(f, 1, GREATEST(1, n - f - 1));"

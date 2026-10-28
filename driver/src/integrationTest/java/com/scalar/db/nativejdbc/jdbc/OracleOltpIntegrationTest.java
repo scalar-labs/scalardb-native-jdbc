@@ -218,6 +218,76 @@ class OracleOltpIntegrationTest {
   }
 
   /**
+   * The setup's statistics on the table that holds the metadata, each layout's: every column has
+   * them, tx_state still the fixed histogram's three values, and so a hard parse of a keyed write
+   * runs no dynamic sampling of the table, which without the key's statistics counted the predicate
+   * through the whole in-flight index at each parse (todo 334, 0.3 s a text at 3.2M rows).
+   */
+  @Test
+  void theSetupsStatistics_coverEveryColumn_andAKeyedParseSamplesNothing() throws Exception {
+    try (Connection v = ORA.open()) {
+      for (String table : List.of("t", "ti")) {
+        String meta =
+            table.equals("t")
+                ? java.util.Objects.requireNonNull(tableInfo(table).metadataTable())
+                : N(table);
+        String layout = table.equals("t") ? "decoupled" : "inline";
+        try (PreparedStatement ps =
+            v.prepareStatement(
+                "SELECT c.column_name, s.num_distinct FROM all_tab_columns c LEFT JOIN"
+                    + " all_tab_col_statistics s ON s.owner = c.owner AND s.table_name ="
+                    + " c.table_name AND s.column_name = c.column_name WHERE c.owner = ? AND"
+                    + " c.table_name = ? ORDER BY c.column_id")) {
+          ps.setString(1, N(NS));
+          ps.setString(2, meta);
+          Map<String, @Nullable Long> distinct = new java.util.LinkedHashMap<>();
+          try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+              String column = rs.getString(1);
+              long n = rs.getLong(2);
+              distinct.put(column, rs.wasNull() ? null : n);
+            }
+          }
+          log("statistics (" + layout + "): " + meta + " " + distinct);
+          assertThat(distinct).as(layout + ": the columns").containsKey("tx_state");
+          assertThat(distinct.values())
+              .as(layout + ": every column's statistics")
+              .doesNotContainNull();
+          assertThat(distinct.get("tx_state")).as(layout + ": the fixed histogram").isEqualTo(3L);
+        }
+        long before = samplings(v, meta);
+        // a text of its own, hard-parsed now; no row has the key
+        update(
+            v,
+            "UPDATE /* stats "
+                + System.nanoTime()
+                + " */ "
+                + NS
+                + "."
+                + Q(meta)
+                + " SET \"tx_state\" = \"tx_state\" WHERE id = -1 AND COALESCE(\"tx_state\", 3) = 3");
+        assertThat(samplings(v, meta))
+            .as(layout + ": dynamic sampling at the parse")
+            .isEqualTo(before);
+      }
+    }
+  }
+
+  /** The executions {@code V$SQL} has of dynamic sampling queries over {@code table}. */
+  private static long samplings(Connection v, String table) throws SQLException {
+    try (PreparedStatement ps =
+        v.prepareStatement(
+            "SELECT NVL(SUM(executions), 0) FROM v$sql WHERE sql_text LIKE 'SELECT /* DS_SVC */%'"
+                + " AND DBMS_LOB.INSTR(sql_fulltext, '\"' || ? || '\"') > 0")) {
+      ps.setString(1, table);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getLong(1);
+      }
+    }
+  }
+
+  /**
    * Form 1 (design 4.2, "On Oracle both hold"): at SNAPSHOT in a transaction no read records an
    * anchor, the state column's two probes and the coarse check read the in-flight index under the
    * INDEX hint, and a table found clear is remembered: its later reads run as the vendor's, without
