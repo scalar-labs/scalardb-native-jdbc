@@ -419,3 +419,31 @@ estimated (ac5eeec). The merged form's item remains for the 9–13 gets an entry
   one stack (YCSB E, RC decoupled, about 10 minutes).
 
 At +250 µs every YCSB cell is 0.82–0.98.
+
+## Seventh run: the metadata statistics fix, TPC-C RC decoupled at scale 32 (2026-10-28)
+
+Run `20261028-1118-ora` from `bench-env/plans/oracle-rc-tpcc-stats.json` on main `2ba29f2`. That
+main has `110a623`: the setup gathers every column of an Oracle metadata table (`FOR ALL COLUMNS
+SIZE REPEAT`) before the fixed `tx_state` histogram. One cell: TPC-C scale 32, READ COMMITTED
+decoupled, the fast network, 60 s × 2, statement cache 128. About 25 minutes of instances.
+
+| RC decoupled TPC-C, scale 32 | sixth run | seventh run |
+|---|---|---|
+| (c)/(a) | 0.13 | **0.45** (734 against 1,640/s) |
+| `DS_SVC` sampling, a run | 371 texts, 120 s | **0** |
+| the stock block of entries, a call | 33–55 ms | 1.6–2.6 ms CPU, 161–241 gets |
+| the CAS and step 1's read on STOCK_tx_metadata | 1.4 / 0.7 ms CPU a call | below the top 80 statements |
+| server CPU / active a commit | — | 4.94 / 4.65 ms (vendor 1.62 / 1.29) |
+| redo a commit | — | 22.4 KB (7.8) |
+
+- The metadata tables now have statistics on their key columns (STOCK_tx_metadata.S_I_ID 100,824
+  distinct, S_W_ID 32), and no hard parse samples.
+- TPC-C p50, vendor → driver: NewOrder 3,436 → 7,454 µs, Payment 1,043 → 1,698, Delivery 8,594 →
+  25,816, OrderStatus 519 → 835, StockLevel 1,106 → 1,545.
+- The cell is still below SNAPSHOT decoupled (0.63) and RC inline (0.54). What remains is the RC
+  block of entries: one PL/SQL text per batch size, each about 2 ms of CPU and 160–240 gets a call,
+  where SNAPSHOT's bulk form takes the batch in one statement a shape. That is the merged form's
+  item at READ COMMITTED (design 4.4). Delivery, whose order_line update and stamps run through it,
+  is 3 times the vendor's.
+- This run's harness predates `d0fd2c2`, so its per-commit CPU still includes BenchBase's startup
+  statistics gathering (9 `GATHER_TABLE_STATS` calls).
