@@ -65,6 +65,15 @@ holder's stack, and loop the MariaDB suite under load. Then decide between 2 and
 
 - Found in the integration run on merged main 1e9f967; reruns passed (alone twice, the MariaDB task
   once). Traced through `Catalog`, `NativeJdbcDriver.catalog` and the test; reproduction started.
+- Reproduction at d80b6d8 with `Catalog` instrumented (every stale snapshot or resolution served
+  at 500 ms or older, with the lock holder's stack; every load of 500 ms or more): six rounds of the
+  MariaDB, MySQL and MySQL lower-case tasks three at a time, 9–11 min each, load average 7–17.
+  Not reproduced: no failure, and no stale serve of 500 ms or more in any round. Loads were slow
+  under load, up to 3.75 s in the round at load 16 (23 loads over 500 ms, in
+  `InterleavingIntegrationTest`, `MoreWritesIntegrationTest` and `ReadIntegrationTest`), and some ran
+  on test pool threads (`pool-87-thread-1`, `pool-131-thread-1`), so a load on another thread does
+  happen in this JVM. The hypothesis stands unobserved; the original run had six engines, two
+  containers at a time, over 42 min.
 
 ## Resources
 
