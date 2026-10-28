@@ -498,8 +498,18 @@ Server CPU a commit, TPC-C, driver against vendor (startup gathering excluded):
     and 100 gets a call.
 - **B3, the RC inline scan +29% → +22%** (expected about +19%). 110 gets a call against the
   vendor's 104 (133 before).
-- **Still open:**
-  - OrderStatus is +41% to +75% in every cell.
-  - StockLevel's count at RC inline is 0.8 ms and 665 gets a call.
-  - The RC decoupled scan is +38%: the join of every scanned row with its metadata row, the
+- The 14 SKIP SCAN lines in the RC inline cell's YCSB E plans are Oracle's dictionary queries
+  (ALL_TRIGGERS, ALL_TAB_COLUMNS, ALL_OBJECTS, ALL_VIEWS, ALL_INDEXES), from the driver's catalog
+  load and the setup. The committed copy's plan is clean.
+- C's key index costs inserts nothing visible: the SNAPSHOT decoupled order_line INSERT ALL is 43
+  gets a call, against 65 in the sixth run.
+- **Still open** (todo 334, the design session's reading after 99e9c86):
+  - **OrderStatus**, +41% to +75% in every cell. It is not new (+54% to +98% in the sixth run), and
+    it is the server's. The 10-row order_line read costs 73–192 µs and 13.6–27.6 gets against the
+    vendor's 26–33 µs and 5.2. At SNAPSHOT inline, the state column runs as two in-flight-index
+    probes a row whenever any row of the table is in flight.
+  - **StockLevel's count at RC inline**: the vendor's gets (665 against 608) at three times the
+    CPU (814 against 256 µs), from the split's hash anti-joins and union branches.
+  - **Delivery**: its order_line SUM, and the write beyond the key probing once a key.
+  - **The RC decoupled scan**, +38%: the join of every scanned row with its metadata row, the
     layout's cost at RC.
