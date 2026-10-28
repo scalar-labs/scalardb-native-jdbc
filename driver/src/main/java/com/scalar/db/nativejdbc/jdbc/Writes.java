@@ -5835,11 +5835,15 @@ final class Writes {
    * (design 4.4, todo 334): the one plain statement with each entry's binds and its stamp, one
    * {@code executeBatch}. Every entry's count is recorded; a failure, ORA-00001 among them, leaves
    * the entries before the failing one written and counted, as ojdbc reports them, and is thrown
-   * classified as the single form classifies it.
+   * classified as the single form classifies it. False where the plan's entries do not go so, and
+   * nothing was run: a keyed write's, as {@link KeyedPlan#applyVendorBatch} says.
    */
-  static void applyVendorBatch(
+  static boolean applyVendorBatch(
       Connection vendor, Plan plan, List<Context> contexts, Finalized finalized)
       throws SQLException {
+    if (plan instanceof KeyedPlan) {
+      return ((KeyedPlan) plan).applyVendorBatch(vendor, contexts, finalized);
+    }
     Step step = Objects.requireNonNull(plan.vendorBatch());
     List<Run> runs = new ArrayList<>();
     for (Context c : contexts) {
@@ -5869,6 +5873,7 @@ final class Writes {
         runs.get(i).context.anchors().wrote(runs.get(i).txId);
         finalized.record(i, counts[i]);
       }
+      return true;
     } finally {
       lead.context.running(null);
     }
@@ -6738,6 +6743,10 @@ final class Writes {
     // at READ COMMITTED on Oracle, the write by the key as one statement before the block (todo
     // 334)
     final @Nullable RcFirst rcFirst;
+    // on an inline table, rcFirst's two texts as steps, for a batch's entries through the vendor's
+    // batching (design 4.4, todo 334)
+    private final @Nullable Step rcPlain;
+    private final @Nullable Step rcAnchored;
 
     KeyedPlan(
         Names n,
@@ -6768,6 +6777,14 @@ final class Writes {
       super(n);
       this.bulk = bulk;
       this.rcFirst = rcFirst;
+      if (rcFirst != null && rcFirst.inline) {
+        int stampAfter = rcFirst.stamps ? 0 : -1;
+        this.rcPlain = new Step(rcFirst.plain, rcFirst.binds, Set.of(), stampAfter);
+        this.rcAnchored = new Step(rcFirst.anchored, rcFirst.binds, Set.of(), stampAfter);
+      } else {
+        this.rcPlain = null;
+        this.rcAnchored = null;
+      }
       this.clearRc = clearRc;
       this.clearMergeRc = clearMergeRc;
       this.predicateRc = predicateRc;
@@ -6861,28 +6878,7 @@ final class Writes {
         }
       }
       if (block != null || predicateBlock != null) {
-        // a write beyond the key on a table the transaction recorded anchors of keeps the steps,
-        // which compare each key with its anchor
-        Long written =
-            block != null
-                ? applyBlock(run)
-                : run.context.anchors().recorded(n.table) ? null : applyPredicateBlock(run);
-        if (written != null) {
-          return written;
-        }
-        Savepoint sp = run.v.setSavepoint();
-        try {
-          long count = applySteps(run);
-          release(n.engine, run.v, sp);
-          return count;
-        } catch (SQLException | RuntimeException e) {
-          try {
-            run.v.rollback(sp);
-          } catch (SQLException r) {
-            e.addSuppressed(r);
-          }
-          throw e;
-        }
+        return applyOracleBlocks(run);
       }
       if (slim != null) {
         Long written;
@@ -6905,6 +6901,145 @@ final class Writes {
         }
       }
       return applySteps(run);
+    }
+
+    /**
+     * On Oracle, the write as its block, by the key or beyond it, and the steps one by one where
+     * the block leaves the write to them, under a savepoint of their own.
+     */
+    private long applyOracleBlocks(Run run) throws SQLException {
+      // a write beyond the key on a table the transaction recorded anchors of keeps the steps,
+      // which compare each key with its anchor
+      Long written =
+          block != null
+              ? applyBlock(run)
+              : run.context.anchors().recorded(n.table) ? null : applyPredicateBlock(run);
+      if (written != null) {
+        return written;
+      }
+      Savepoint sp = run.v.setSavepoint();
+      try {
+        long count = applySteps(run);
+        release(n.engine, run.v, sp);
+        return count;
+      } catch (SQLException | RuntimeException e) {
+        try {
+          run.v.rollback(sp);
+        } catch (SQLException r) {
+          e.addSuppressed(r);
+        }
+        throw e;
+      }
+    }
+
+    @Override
+    @Nullable Step vendorBatch() {
+      if (!inline || entries == null) {
+        return null;
+      }
+      return fast != null && fastClear != null ? fast : rcPlain;
+    }
+
+    /**
+     * A batch's entries on an inline table as the single form's statement through the vendor's
+     * batching (design 4.4 "The inline layout's entries through the vendor's batching", todo 334):
+     * false, nothing run, where the entries do not resolve alike, a key of a table with recorded
+     * versions without its own, or at SNAPSHOT where every count is 0 and the coarse check finds a
+     * row in flight, the gate closed; the block of entries then takes them. Otherwise every entry
+     * is recorded in order: a count above 0 is the entry written and stamped, and at SNAPSHOT marks
+     * the table clear, every 0 then the vendor's; at READ COMMITTED a 0 runs as the single form
+     * runs a miss, through the keyed block. A failure leaves the entries before the failing one
+     * decided as they are, then is thrown as ojdbc reports it.
+     */
+    boolean applyVendorBatch(Connection vendor, List<Context> contexts, Finalized finalized)
+        throws SQLException {
+      Context first = contexts.get(0);
+      Anchors anchors = first.anchors();
+      boolean snapshot = fast != null && fastClear != null;
+      boolean passed = false;
+      Step step;
+      List<Anchors.Version> versions = null;
+      if (snapshot) {
+        if (anchors.recorded(n.table)) {
+          return false; // as the single form: the steps compare each key with its anchor
+        }
+        passed = first.passed(check);
+        step = passed ? fastClear : fast;
+      } else {
+        RcFirst f = Objects.requireNonNull(rcFirst);
+        if (anchors.recorded(n.table)) {
+          versions = new ArrayList<>();
+          for (Context c : contexts) {
+            Object[] key = f.key(c);
+            Anchors.Version v = key == null ? null : anchors.version(n.table, key);
+            if (v == null) {
+              return false;
+            }
+            versions.add(v);
+          }
+        }
+        step = versions == null ? rcPlain : rcAnchored;
+      }
+      Step s = Objects.requireNonNull(step);
+      List<Run> runs = new ArrayList<>();
+      for (Context c : contexts) {
+        runs.add(new Run(vendor, c));
+      }
+      Run lead = runs.get(0);
+      long[] counts;
+      @Nullable SQLException failure = null;
+      try (PreparedStatement ps = lead.prepare(s.sql)) {
+        for (int i = 0; i < runs.size(); i++) {
+          runs.get(i).bindStep(ps, s, null);
+          if (versions != null) {
+            bindAnchor(ps, s.parameters() + 1, versions.get(i));
+          }
+          ps.addBatch();
+        }
+        try {
+          counts = ps.executeLargeBatch();
+        } catch (BatchUpdateException b) {
+          long[] before = b.getLargeUpdateCounts();
+          counts = Arrays.copyOf(before, Math.min(before.length, runs.size()));
+          failure = b.getNextException() != null ? b.getNextException() : b;
+        }
+      } finally {
+        lead.context.running(null);
+      }
+      boolean wrote = false;
+      for (long c : counts) {
+        wrote |= c > 0;
+      }
+      if (snapshot && !passed) {
+        if (wrote) {
+          first.pass(check); // the gate was open: no row of the table is in flight
+        } else if (failure == null) {
+          try (PreparedStatement ps = lead.prepare(check);
+              ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+              return false; // the gate was closed: nothing written, the block of entries decides
+            }
+          }
+          first.pass(check);
+        }
+      }
+      // at SNAPSHOT a 0 is the vendor's once the table is clear; before a failure with nothing
+      // written, the gate may have been closed, and the 0 is the single form's to decide
+      boolean clear = snapshot && (passed || wrote || failure == null);
+      if (wrote) {
+        anchors.wrote(lead.txId);
+      }
+      for (int i = 0; i < counts.length; i++) {
+        long c = counts[i];
+        if (c > 1) {
+          throw new Aborted("a key matched " + c + " rows");
+        }
+        finalized.record(i, c > 0 || clear ? c : applyOracleBlocks(runs.get(i)));
+      }
+      if (failure != null) {
+        throw failure;
+      }
+      return true;
     }
 
     /**

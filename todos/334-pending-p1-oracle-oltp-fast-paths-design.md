@@ -2278,6 +2278,49 @@ the data order, a second index maintained on inserts and deletes only, since a s
 column; (3) the harness imports with the key in order, which ScalarDB's API does not offer. (2) is
 the driver's own defence and small; measured first on the container as Delivery's keys read, then
 the seventh run's cell again.
+
+### 2026-10-28: (A) item (1) built: the inline keyed batch through the vendor's batching at both levels (the builder's note)
+
+As designed in 4.4 ("The inline layout's entries through the vendor's batching") and the "For c7 to
+build" list's item (1). `KeyedPlan.vendorBatch()` offers the single form's statement on an inline
+table with a block of entries: at SNAPSHOT `fast`, at READ COMMITTED `rcFirst`'s plain text (its two
+texts held as steps, `rcPlain` and `rcAnchored`, the stamp first as `applyRcFirst` binds it).
+`KeyedPlan.applyVendorBatch` resolves the batch: at SNAPSHOT declined where the transaction recorded
+versions of the table (as the single form, which then takes the steps), else `fastClear` on a table
+found clear and `fast` otherwise; at READ COMMITTED the plain text where nothing of the table is
+recorded, the anchored text with each entry's version bound after its placeholders where every
+entry's key has one, declined where one has none. One `executeLargeBatch`; a count above 1 is the
+single form's abort "a key matched N rows". At SNAPSHOT any count above 0 marks the table clear and
+every 0 is the vendor's; all 0 under the gate asks the coarse check, which declines on a row in
+flight, nothing having been written or recorded, and otherwise marks the table clear. At READ
+COMMITTED each 0 runs after the batch, in entry order, through the keyed block and the steps after it
+(`applyOracleBlocks`, the tail of `apply` after `applyRcFirst`'s miss, extracted). `anchors.wrote`
+once for the batch. A failure out of `executeLargeBatch` decides the entries before the failing one
+first, a 0 among them through the block as above (at SNAPSHOT a 0 before a failure with nothing
+written may be the gate's, so it goes there too), then throws the error as ojdbc reports it, as the
+inline INSERT's vendor batch does. The dispatcher (`Proxies.runBatch`) takes the vendor batch before
+the block of entries when the plan offers one and no generated keys are asked for, up to `MERGE_MAX`
+entries; declined, the block of entries over the first `ENTRIES_MAX` of them as before. An inline
+INSERT has no block of entries, so its batches are unchanged.
+
+Tests, `OracleOltpIntegrationTest.form4InlineKeyedBatchesThroughTheVendorsBatching`, with ojdbc's
+statement cache on as the benchmarks run it (`oracle.jdbc.implicitStatementCacheSize`): at both
+levels four batches of 5, 9, 15 and 7 on both layouts, every count 1, the inline UPDATE one cursor in
+V$SQL with 1 parse call and 4 executions (the decoupled table's none, the block of entries); a key
+without a row in the middle, `1, 1, 0, 1`, and a batch of missing keys alone on a table not yet clear,
+`0, 0`; at READ COMMITTED two entries on one key, without and with the key read first, the version 2
+on as the same two writes one by one; a row in flight in the middle with the wait set, the wait and
+`1, 1, 1`, and without it `40001` with the counts `1`; ORA-01438 as the third entry at both levels,
+the counts `1, 1` and the single form's SQLState and error code; at SNAPSHOT a row in flight elsewhere
+in the table, the gate closed and the block of entries writing `1, 1`. `form4BatchesAsOneBlock`'s
+inline first-use batch is now 1 round trip, no block and no OUT-bind check (was 2); its in-flight
+cases now run through the vendor's batch and pass unchanged. The test fails against each of: no
+vendor batch (no inline cursor), the READ COMMITTED 0s recorded as 0 (`1, 0`), a closed gate taken
+for a clear table (`0, 0`). Without the statement cache each batch's prepare is a parse call (4 for 4
+batches), as the single form's prepare is. On the container: the whole Oracle suite on a fresh
+database, 169 tests, none failing; the PostgreSQL suite, 169; unit tests, 414; `spotbugsIntegrationTest`
+fails on main's three findings alone. Proof: the Oracle TPC-C inline cells at scale 32.
+
 ### 2026-10-28: (A) item (1) reviewed mergeable: c8825e9 on inline-vendor-batch (the design's note)
 
 Reviewed from `git show c8825e9` (on 966e3f3): `KeyedPlan.vendorBatch()` offers the single form's

@@ -1510,14 +1510,12 @@ public final class Proxies {
               for (int i = 0; i < size; ) {
                 // the next entries of one plan with a merged form, as one statement (todo 329)
                 Writes.Plan first = routes.apply(i).write;
-                // on Oracle, consecutive parameter sets of one write as one block of entries, or
-                // through the vendor's own batching where the write is one plain statement and no
-                // generated keys are asked for (design 4.4 "Batches on Oracle", todo 334)
-                if (i >= unmerged
-                    && first != null
-                    && (first.entries() != null || (first.vendorBatch() != null && keys == null))) {
-                  boolean block = first.entries() != null;
-                  int max = block ? Writes.ENTRIES_MAX : Writes.MERGE_MAX;
+                // on Oracle, consecutive parameter sets of one write through the vendor's own
+                // batching where the write is one statement and no generated keys are asked for,
+                // else as one block of entries (design 4.4 "Batches on Oracle", todo 334)
+                boolean vendorBatch = first != null && first.vendorBatch() != null && keys == null;
+                if (i >= unmerged && first != null && (first.entries() != null || vendorBatch)) {
+                  int max = vendorBatch ? Writes.MERGE_MAX : Writes.ENTRIES_MAX;
                   int same = i;
                   while (same < size
                       && same - i < max
@@ -1536,23 +1534,27 @@ public final class Proxies {
                           owner.ran(routes.apply(at + j));
                           done[0]++;
                         };
-                    if (block) {
+                    if (vendorBatch
+                        && Writes.applyVendorBatch(owner.vendor, first, contexts, finalized)) {
+                      last[0] = first;
+                      i = same;
+                      continue;
+                    }
+                    // declined, nothing run: the block of entries, over as many as it takes
+                    if (first.entries() != null) {
+                      int blockEnd = Math.min(same, i + Writes.ENTRIES_MAX);
                       int finalizedCount =
-                          Writes.applyOracleEntries(owner.vendor, first, contexts, finalized);
+                          Writes.applyOracleEntries(
+                              owner.vendor, first, contexts.subList(0, blockEnd - i), finalized);
                       if (finalizedCount > 0) {
                         last[0] = first;
                         i += finalizedCount;
                         continue;
                       }
                       if (finalizedCount < 0) {
-                        unmerged = same; // the block failed, undone whole: one by one from here
+                        unmerged = blockEnd; // the block failed, undone whole: one by one from here
                       }
                       // 0: the first entry's outcome is the single form's to make, below
-                    } else {
-                      Writes.applyVendorBatch(owner.vendor, first, contexts, finalized);
-                      last[0] = first;
-                      i = same;
-                      continue;
                     }
                   }
                 }
