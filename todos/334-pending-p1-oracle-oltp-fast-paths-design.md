@@ -2053,3 +2053,23 @@ its `spotbugsIntegrationTest` failing on main's three findings alone (InFlightCh
 RoutingIntegrationTest lambdas), none in this change. A database set up before the fix keeps the
 sampling until the setup runs again (`force` past the lock). The proof is an Oracle TPC-C RC
 decoupled cell at scale 32.
+
+### 2026-10-28: 110a623 reviewed, the setup's gather of every column's statistics on main (the design's note)
+
+Reviewed from `git show`. The gather is the one line as designed, `FOR ALL COLUMNS SIZE REPEAT` with
+`force`, the fixed histogram's `SET_COLUMN_STATS` and the lock after it unchanged, and the javadoc
+says why. The test, `theSetupsStatistics_coverEveryColumn_andAKeyedParseSamplesNothing`, is
+meaningful on both layouts: the dictionary read for every column of the decoupled table's metadata
+table and of the inline table (all with statistics, tx_state's three values kept), then a fresh keyed
+update with the CAS's `COALESCE(tx_state, 3) = 3` predicate hard-parsed, and V$SQL's sampling
+executions naming the table unchanged; it fails on the old line on both layouts (two samplings at
+the parse, every column but tx_state without statistics) and passes with the fix, the whole Oracle
+suite green on a fresh database. The container experiment of 018283c agrees on the effect. Two
+notes, neither blocking: a setup run on a table that already has the fixed histogram regathers
+tx_state's from the data under `SIZE REPEAT` and the set after it overwrites that as before, so the
+end state is the same; and a database set up before the fix keeps the sampling until the setup runs
+again, which the harness does at every cell. Landed by c7 as a fast-forward of main from 460a5b2 on
+the user's word; design section 3's statistics paragraph gains the sentence on the gather of every
+column. The proof is the TPC-C cell at READ COMMITTED decoupled at scale 32, expected near the other
+TPC-C cells.
+
