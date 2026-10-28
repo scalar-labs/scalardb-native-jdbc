@@ -496,8 +496,17 @@ minutes.
 - **The plan** is now a Merge Left Join of two index scans: the data table's primary key, and
   the metadata table's with the range in its Index Cond, where it was a Hash Right Join over a
   sequential scan of the metadata table. This is the generic plan in `server.txt`.
-- **What remains** at RC decoupled is +0.37 ms of execution a scan, the join itself (the layout's
-  cost at RC, design 4.2), and 0.19 ms of planning, every call planned on both sides.
+- **The plans shown are generic plans of pg_stat_statements' normalized texts**, not the plans
+  that ran. Every call is custom-planned, on both sides (181,834 plans for the vendor's 181,830
+  scans): the generic estimate for the range is 5,000 rows a side, ten times the custom plan's 500,
+  so `plan_cache_mode=auto` never keeps the generic plan. The normalized texts also turn the
+  driver's literal states into `$n`, so the in-flight arm cannot match the partial in-flight index
+  there, as the real text can.
+- **What remains** at RC decoupled is +0.37 ms of execution a scan and 0.19 ms of planning. Planning
+  grows with the statement: 0.04 ms for the vendor, 0.14 inline, 0.23 decoupled. That is 0.10 of
+  the inline gap's 0.27 ms a call, and 0.19 of the decoupled gap's 0.56. Whether the execution is
+  the join's second index range scan and its heap reads (the layout's cost at RC, design 4.2) or
+  the in-flight arm reading the range again needs the plans that run (todo 334).
 - **The inline cell** has no change of its own in this round. Its 0.79 against 0.87 is the
   variation between two runs, here and in the vendor's own figures.
 
