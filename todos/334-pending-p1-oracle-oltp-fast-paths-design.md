@@ -2349,3 +2349,50 @@ ORA-01438 as the third entry at both levels with the single form's state and cod
 by a row in flight elsewhere. Mergeable; landing is the user's call; the proof the Oracle TPC-C
 inline cells at scale 32, expected toward 0.72 at SNAPSHOT from 0.62 and the same amount at READ
 COMMITTED from 0.54.
+
+### 2026-10-28: (A) items (2) and (3) reviewed mergeable: f324372 on rc-decoupled-batches (the design's note)
+
+Reviewed from `git show f324372` (on 1e9f967). (2) The INSERT's bulk block at both levels: the
+InsertPlan builds `Bulk.insert` without the SNAPSHOT condition, and `applyOracleEntries` takes an
+INSERT's bulk whatever versions of the table the transaction recorded; the block has no gate of its
+own and reads no version, so its outcomes are the single INSERT block's at either level: a tombstone
+taken over but not stamped, the abort; a duplicate, ORA-00001, undoable, the entries one by one. (3)
+`Bulk.keyedRc` holds the plan's bulk slot at READ COMMITTED on a decoupled table, where the plan has
+no `fast` and so no SNAPSHOT keyed bulk, and is null on the inline layout, whose batch is the
+vendor's. Its DML is the statement first's to the letter, `rcFirstText`'s `EXISTS (SELECT 1 FROM
+T_meta m WHERE m.k = t.k AND COALESCE(m.tx_state, 3) = 3 [AND DECODE(m.tx_id, l_ai(i), 1, 0) = 1 AND
+COALESCE(m.tx_version, 0) = COALESCE(l_av(i), 0)])` with the slot's collections in the binds' place,
+in two piece lists; `buildRc` is the merged block measured in the log above (forms8): the stamp and
+`l_n`, the slots' values and anchors, `FORALL i IN 1 .. l_n` the DML `RETURNING` the keys `BULK
+COLLECT INTO l_w*`, `SQL%BULK_ROWCOUNT` per slot, then the CAS as one `FORALL j IN 1 .. l_r` by
+`l_w*(j)` under the state and the anchor, a `DELETE` for a created table's DELETE as the single
+form's CAS, the stamp's UPDATE otherwise, OUT `l_r`, `l_s` and the 16 counts (`outs()` 2 + SLOTS);
+one text per slot types and form, the nested statements hinted `q` and `qa`. Two differences from
+the design's wording, both equivalent: the CAS's anchors are appended once per row each slot's DML
+returned (`FOR r IN 1 .. l_o(i)`) rather than mapped from the slots written, the same sequence since
+`FORALL` returns in slot order and a keyed DML returns at most one row, and a loop of at most 16
+either way; and the 0s go through `applyOracleBlocks` in entry order after the block, as the vendor
+batch's do.
+
+`applyOracleBulkRc` mirrors `applyOracleBulk`: chunks of 16 (`ENTRIES_MAX` is 16, so a batch's block
+call is one chunk), `rcVersions` per chunk, plain where the transaction recorded no version of the
+table, anchored where every entry's key has one, 0 for the block of entries otherwise; the stamp and
+`l_n` bound as `Run.stamp` does, the unused slots NULL, the anchors by `bindAnchor`, made
+package-private; an undoable failure -1 for the entries one by one, or the chunks done before it,
+the failing one tried once more as the SNAPSHOT bulk's is; `l_s` short of `l_r` the abort "changed
+after it was read"; a count above 1 the abort; `anchors.wrote` once where anything was written. The
+decline on two entries of one key is the design table's rule and necessary in the anchored form:
+both DMLs pass under the recorded version, the first CAS moves it and the second misses it, an abort
+the entries one by one do not give; in the plain form the second CAS would pass and the version end
+two on, so there the decline is the table's rule alone, as is the decline on a key not read back
+from its binds, which the check needs; TPC-C binds every key. The dispatcher is unchanged: a
+decoupled plan offers no vendor batch, so `applyOracleEntries` runs over up to 16 entries, the bulk
+first, the block of entries where it declines. The test covers the list: the block one cursor, one
+parse and four executions over sizes 5 to 15 with ojdbc's cache on, its two nested statements
+likewise; the key without a row in the middle; two entries on one key, read first or not, the
+version two on as one by one; the row in flight in the middle with the wait and without; the version
+moved by another connection after the read, 40001 with the two counts before it; the INSERT batch
+over a tombstone as one bulk execution and one round trip, then the duplicate in the middle with the
+counts before it; `WritesTest` asserts the plain and anchored texts. Mergeable; landing is the
+user's call; the proof the Oracle TPC-C READ COMMITTED decoupled cells at scale 32, expected from
+0.45 toward 0.65, with (C) for Delivery.
