@@ -212,6 +212,36 @@ class SetupReviewIntegrationTest {
   }
 
   @Test
+  void todo356_aViewOverTheReadView_failsItsReplacement_andLeavesItAsItWas() throws Exception {
+    try (Connection c = PG.open()) {
+      PG.execute(
+          c,
+          "CREATE SCHEMA r356b",
+          "CREATE TABLE r356b.t (id INT PRIMARY KEY, v SMALLINT)",
+          "INSERT INTO r356b.t VALUES (1, 7)");
+    }
+    try (DistributedTransactionAdmin admin = PG.admin()) {
+      admin.createNamespace("r356b", true);
+      admin.importTable("r356b", "t", DECOUPLED, Map.of());
+    }
+    try (Connection c = PG.open()) {
+      PG.execute(
+          c,
+          "CREATE VIEW r356b.rc_t AS SELECT t.id, t.v FROM r356b.t t"
+              + " UNION ALL SELECT t.id, m.before_v AS v FROM r356b.t t"
+              + " JOIN r356b.t_tx_metadata m ON m.id = t.id",
+          "CREATE VIEW r356b.dep AS SELECT v FROM r356b.rc_t");
+    }
+    assertThat(setup(catalog(), "r356b", Duration.ofSeconds(2))).isEqualTo("failed 2BP01");
+    try (Connection c = PG.open();
+        Statement st = c.createStatement();
+        ResultSet rs = st.executeQuery("SELECT v FROM r356b.dep")) {
+      assertThat(rs.getMetaData().getColumnType(1)).isEqualTo(Types.INTEGER);
+      assertThat(rs.next()).isTrue();
+    }
+  }
+
+  @Test
   void todo071_aPredicateOnANonKeyColumn_usesTheTablesIndexThroughTheView() throws Exception {
     try (Connection c = PG.open()) {
       PG.execute(

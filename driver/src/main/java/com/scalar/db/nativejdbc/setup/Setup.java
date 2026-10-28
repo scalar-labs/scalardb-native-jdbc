@@ -359,7 +359,7 @@ public final class Setup {
       if (reorders) {
         execute("DROP VIEW " + name(ns, view)); // CREATE OR REPLACE cannot reorder columns
       }
-      replaceView(t, view, found.hasView(ns, view));
+      replaceView(t, view, found.hasView(ns, view) && !reorders);
       created = planned == null && !found.hasView(ns, view);
       done(actions, (found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);
       if (gatherHistogram(t)) {
@@ -625,6 +625,7 @@ public final class Setup {
       return;
     }
     connection.setAutoCommit(false);
+    SQLException failed = null;
     try {
       try {
         execute("SAVEPOINT scalardb_native_view");
@@ -634,15 +635,43 @@ public final class Setup {
           throw e;
         }
         execute("ROLLBACK TO SAVEPOINT scalardb_native_view");
-        execute("DROP VIEW " + name(t.namespace(), view));
+        try {
+          execute("DROP VIEW " + name(t.namespace(), view));
+        } catch (SQLException d) {
+          SQLException out =
+              new SQLNonTransientException(
+                  "the read view "
+                      + t.namespace()
+                      + "."
+                      + view
+                      + " reads a column in another type than the setup now makes it, and"
+                      + " replacing it needs it dropped: "
+                      + d.getMessage(),
+                  d.getSQLState(),
+                  d);
+          out.addSuppressed(e);
+          throw out;
+        }
         execute(ddl);
       }
       connection.commit();
     } catch (SQLException e) {
-      connection.rollback();
+      failed = e;
+      try {
+        connection.rollback();
+      } catch (SQLException r) {
+        e.addSuppressed(r);
+      }
       throw e;
     } finally {
-      connection.setAutoCommit(true);
+      try {
+        connection.setAutoCommit(true);
+      } catch (SQLException a) {
+        if (failed == null) {
+          throw a;
+        }
+        failed.addSuppressed(a);
+      }
     }
   }
 
