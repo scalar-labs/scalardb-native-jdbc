@@ -2794,6 +2794,27 @@ table's DELETE, an imported row without a metadata row stamped by the slow path;
 against the vendor's. If D3's decoupled part does not fit before tonight's run, land the inline part
 and send the decoupled one after.
 
+### 2026-10-28: D1 built (c7): the SNAPSHOT state column on an inline table as the row's own state
+
+As designed: on Oracle, at SNAPSHOT without versions, `Router` puts each inline table among the read's
+anchored references in the set whose copies carry their own columns (`SplitRead`'s `Versions`, the
+state as `scalardb_native_v2`), and the state column's second branch reads it, `WHEN <x>."scalardb_native_v2"
+IN (1, 2) THEN 1`. The split read's copies at SNAPSHOT are the whole data table and the before images
+in flight, so the row's state is the committed copy's `t."tx_state"` and the in-flight copy's
+`m."tx_state"`, which the outer CASE cannot reach unless the copy carries it: the first try,
+`<x>."tx_state"` on the copy's alias, was ORA-00904. A decoupled table's text keeps the key set; a `*`
+the copies cannot spell out falls back to the text without own columns, the key set, as before. The
+copies' versions extras now pass `own.contains(r)` per reference, not `!own.isEmpty()`, and `emit`'s
+state flag is `states`.
+
+Measured on the container (`form1InlineStateColumnIsTheRowsOwn`, 30,000 committed rows ten to an
+order, the in-flight index, the setup's statistics, one row of another order in flight, a 10-row read
+300 times, each in its own transaction): 11.1 gets a read and the plan's in-flight index
+twice, each copy's gate; main's text on the same table 28.2 gets, the index four times, the key set's
+probe per copy. The column 1 for the row in flight, NULL for a committed row, 0 once the table is
+clear. Suites: unit, Oracle and PostgreSQL integration pass; `spotbugsIntegrationTest` has main's three
+findings only (RoutingIntegrationTest, InFlightCheckBenchmark).
+
 ### 2026-10-28: D1 reviewed mergeable: 2c3b91b on oracle-inline-state (the design's note)
 
 Reviewed from `git show 2c3b91b` (on d9c2e14). `Router` puts each inline reference of a SNAPSHOT

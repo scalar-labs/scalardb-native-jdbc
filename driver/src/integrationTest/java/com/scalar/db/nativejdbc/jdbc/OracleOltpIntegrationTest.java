@@ -2081,6 +2081,133 @@ class OracleOltpIntegrationTest {
   }
 
   /**
+   * The SNAPSHOT state column on an inline table (design 4.2 "On Oracle both hold", todo 334 D1):
+   * the row's own state behind the gate, not the key set of the in-flight index, which Oracle plans
+   * as two probes of that index per row once a row elsewhere in the table closes the gate. A 10-row
+   * prefix read's gets near the vendor's with a row in flight elsewhere; the column 1 for the row
+   * in flight and 0 for a clear table; a decoupled table's text keeps the key set.
+   */
+  @Test
+  void form1InlineStateColumnIsTheRowsOwn() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      admin.createTable(
+          N(NS),
+          N("tstate"),
+          TableMetadata.newBuilder()
+              .addColumn(N("w"), intType())
+              .addColumn(N("o"), intType())
+              .addColumn(N("n"), intType())
+              .addColumn(N("x"), DataType.TEXT)
+              .addPartitionKey(N("w"))
+              .addClusteringKey(N("o"))
+              .addClusteringKey(N("n"))
+              .build(),
+          true);
+    }
+    String insert =
+        "INSERT INTO "
+            + NS
+            + ".tstate (w, o, n, x, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+            + " \"tx_committed_at\") ";
+    try (Connection v = ORA.open()) {
+      // 30,000 committed rows, ten to an order, as ScalarDB leaves them
+      ORA.execute(
+          v,
+          insert
+              + "SELECT 1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10), 'r', 'seed', 3, 1, 1, 1"
+              + " FROM dual CONNECT BY LEVEL <= 30000",
+          "COMMIT");
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().equals(N("tstate")),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .hasSize(1)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+      // a row of another order in flight, prepared and not committed
+      ORA.execute(v, insert + "VALUES (1, 5000, 0, 'p', 'other', 2, 1, 1, NULL)", "COMMIT");
+    }
+    String tag = "/* st" + System.nanoTime() + " */";
+    String sql = "SELECT " + tag + " x FROM " + NS + ".tstate WHERE w = 1 AND o = 1200";
+    try (Connection d = ORA.openDriver();
+        Connection v = ORA.open()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      d.setAutoCommit(false);
+      String routed = d.nativeSQL(sql);
+      log("form 1 (inline): the state column at SNAPSHOT: " + routed);
+      assertThat(routed)
+          .contains("\"scalardb_native_v2\" IN (1, 2) THEN 1 END")
+          .doesNotContain(") IN (SELECT");
+      assertThat(d.nativeSQL("SELECT x FROM " + NS + ".t WHERE id = 1"))
+          .as("decoupled: the key set kept")
+          .contains(") IN (SELECT");
+      for (int i = 0; i < 300; i++) {
+        assertThat(rows(d, sql)).hasSize(10);
+        d.rollback(); // each read in its own transaction, the table never remembered clear
+      }
+      long[] gets = new long[2];
+      try (Statement st = v.createStatement();
+          ResultSet rs =
+              st.executeQuery(
+                  "SELECT SUM(buffer_gets), SUM(executions) FROM v$sql WHERE sql_text LIKE '%"
+                      + tag
+                      + "%' AND sql_text NOT LIKE '%v$sql%'")) {
+        rs.next();
+        gets[0] = rs.getLong(1);
+        gets[1] = rs.getLong(2);
+      }
+      StringBuilder plan = new StringBuilder();
+      try (Statement st = v.createStatement();
+          ResultSet rs =
+              st.executeQuery(
+                  "SELECT p.plan_table_output FROM v$sql s, TABLE(DBMS_XPLAN.DISPLAY_CURSOR(s.sql_id,"
+                      + " s.child_number)) p WHERE s.sql_text LIKE '%"
+                      + tag
+                      + "%' AND s.sql_text NOT LIKE '%v$sql%'")) {
+        while (rs.next()) {
+          plan.append(rs.getString(1)).append('\n');
+        }
+      }
+      double perRead = (double) gets[0] / gets[1];
+      log(
+          "form 1 (inline): a 10-row read at SNAPSHOT with a row in flight elsewhere, "
+              + gets[1]
+              + " executions, "
+              + String.format("%.1f", perRead)
+              + " gets a read, the plan\n"
+              + plan);
+      // each copy's gate alone reads the in-flight index, no probe per row: about 11 gets, where
+      // the key set's probes cost about 30 and the vendor's read 6
+      assertThat(gets[1]).isGreaterThanOrEqualTo(300);
+      assertThat(perRead).isLessThan(15);
+      assertThat(plan.toString().lines().filter(l -> l.contains("| TSTATE_INFLIGHT "))).hasSize(2);
+      // the column itself: 1 for the row in flight, NULL for a committed row; 0 for a clear table
+      String one =
+          d.nativeSQL("SELECT x FROM " + NS + ".tstate WHERE w = 1 AND o = 5000 AND n = 0");
+      String committed =
+          d.nativeSQL("SELECT x FROM " + NS + ".tstate WHERE w = 1 AND o = 1200 AND n = 0");
+      d.rollback();
+      assertThat(lastColumn(v, one)).isEqualTo("1");
+      assertThat(lastColumn(v, committed)).isNull();
+      ORA.execute(v, "DELETE FROM " + NS + ".tstate WHERE o = 5000", "COMMIT");
+      assertThat(lastColumn(v, committed)).isEqualTo("0");
+    }
+  }
+
+  /** The last column of a statement's one row, as the vendor reads it. */
+  private static @Nullable String lastColumn(Connection v, String sql) throws SQLException {
+    try (Statement st = v.createStatement();
+        ResultSet rs = st.executeQuery(sql)) {
+      assertThat(rs.next()).isTrue();
+      String value = rs.getString(rs.getMetaData().getColumnCount());
+      assertThat(rs.next()).isFalse();
+      return value;
+    }
+  }
+
+  /**
    * Form 6 (design 4.2, "The read side on Oracle"): at READ COMMITTED a read's anchors are the
    * copies' own columns, the inline row's or the metadata row's through a left join, no lookup per
    * row; the write of a row read then holds to that version.

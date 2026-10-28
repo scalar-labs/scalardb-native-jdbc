@@ -1148,7 +1148,8 @@ final class Router {
   /**
    * As {@link #versions(SqlAst.TableRef, Writes.Names, SqlAst.Piece, boolean, boolean)}; with
    * {@code own}, the versions are the copy's own columns, which it carries in place of a lookup per
-   * row ({@link SplitRead#OWN}, todo 329), the state among them with {@code states}.
+   * row ({@link SplitRead#OWN}, todo 329), the state among them with {@code states}; without {@code
+   * versioned}, only that state, an inline table's on Oracle (todo 334).
    */
   private List<String> versions(
       SqlAst.TableRef ref,
@@ -1183,6 +1184,24 @@ final class Router {
           inFlight.add(m + "." + engine.quote(k));
         }
         String held = m + "." + engine.quote("tx_state") + " IN (1, 2)";
+        // with own, an inline table's on Oracle, the row's own state, which its copy carries:
+        // the key set is planned as two probes of the in-flight index per row once the first
+        // branch found a row in flight (todo 334, D1)
+        String inFlightRow =
+            own
+                ? x + "." + engine.quote(SplitRead.OWN + 2) + " IN (1, 2)"
+                : "("
+                    + String.join(", ", keys)
+                    + ") IN (SELECT "
+                    + n.inflightHint(m)
+                    + String.join(", ", inFlight)
+                    + " FROM "
+                    + n.meta
+                    + " "
+                    + m
+                    + " WHERE "
+                    + held
+                    + ")";
         out.add(
             "CASE WHEN "
                 + (engine == Engine.POSTGRESQL
@@ -1196,18 +1215,9 @@ final class Router {
                         + " WHERE "
                         + held
                         + ")")
-                + " THEN 0 WHEN ("
-                + String.join(", ", keys)
-                + ") IN (SELECT "
-                + n.inflightHint(m)
-                + String.join(", ", inFlight)
-                + " FROM "
-                + n.meta
-                + " "
-                + m
-                + " WHERE "
-                + held
-                + ") THEN 1 END");
+                + " THEN 0 WHEN "
+                + inFlightRow
+                + " THEN 1 END");
       }
       return out;
     }
@@ -1829,6 +1839,13 @@ final class Router {
     Set<SqlAst.TableRef> own = Collections.newSetFromMap(new IdentityHashMap<>());
     if ((engine == Engine.POSTGRESQL || engine == Engine.ORACLE) && versioned) {
       own.addAll(anchored); // on Oracle, design 4.2 "The read side on Oracle" (todo 334)
+    } else if (engine == Engine.ORACLE && states) {
+      // the state column of an inline table as the row's own (design 4.2 "On Oracle both hold")
+      for (SqlAst.TableRef r : anchored) {
+        if (Objects.requireNonNull(scalarDb.get(r)).layout() == Layout.INLINE) {
+          own.add(r);
+        }
+      }
     }
     IdentityHashMap<SqlAst.TableRef, Writes.Names> anchorNames = new IdentityHashMap<>();
     List<String> anchorTables = new ArrayList<>();
@@ -1857,12 +1874,12 @@ final class Router {
                     piece,
                     states,
                     versioned,
-                    !own.isEmpty()),
+                    own.contains(r)),
             false,
             states,
             null,
             own,
-            false);
+            states);
     if (text == null && !own.isEmpty()) {
       // a * the copies cannot spell out: the versions looked up per row
       text =
