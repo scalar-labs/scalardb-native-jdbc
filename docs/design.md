@@ -2565,14 +2565,17 @@ vendor's own statement, then on AWS with the rest.
   version, the count the entries one by one would have given. The entries after a 0 are written when
   the block runs, as the entries before a stop of the block of entries are; the effects take the
   same order, entries on distinct keys being independent and two on one key reaching the block in
-  order. A failure out of `executeLargeBatch` is `applyVendorBatch`'s: the elements before the
-  failing one written and counted as ojdbc reports them, the error classified as the single form
-  classifies it, ORA-08177 `40001` rollback-only. Measured on the container (todo 334's log), a
-  batch of 5 to 15 updates of a 300,000-row inline table and a commit, server CPU and gets a call
-  from `V$SQL`: the vendor's array UPDATE 55 µs and 32; the stamp statement plain 74 and 39, gated
-  118 and 73, the gate a probe per element; the READ COMMITTED statement with the anchors 126 and
-  54; today's block of entries 328 to 1,289 by size with 20 parse calls a batch; a `FORALL` block of
-  16 slots 115 and 46, the PL/SQL call's 40 over the array, so the vendor's batching is taken and no
+  order. A failure out of `executeLargeBatch` leaves the elements before the failing one written,
+  and they are decided first, a 0 among them through the block as above, at SNAPSHOT too where
+  nothing was written under the gate, as the entries one by one would have decided them before
+  reaching the failing one; then the error is thrown as ojdbc reports it, classified as the single
+  form classifies it, ORA-08177 `40001` rollback-only (the builder's reading, c8825e9, truer to the
+  entries one by one than recording those 0s). Measured on the container (todo 334's log), a batch
+  of 5 to 15 updates of a 300,000-row inline table and a commit, server CPU and gets a call from
+  `V$SQL`: the vendor's array UPDATE 55 µs and 32; the stamp statement plain 74 and 39, gated 118
+  and 73, the gate a probe per element; the READ COMMITTED statement with the anchors 126 and 54;
+  today's block of entries 328 to 1,289 by size with 20 parse calls a batch; a `FORALL` block of 16
+  slots 115 and 46, the PL/SQL call's 40 over the array, so the vendor's batching is taken and no
   block built for the inline layout. Expected at AWS: the stock batch at the vendor's 0.04 ms of CPU
   and 0.1 of elapsed a NewOrder plus a third, the SNAPSHOT inline TPC-C cell from 0.62 toward 0.72
   and the READ COMMITTED inline one from 0.54 by the same amount.

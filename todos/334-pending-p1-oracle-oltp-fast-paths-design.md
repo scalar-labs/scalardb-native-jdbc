@@ -2278,3 +2278,31 @@ the data order, a second index maintained on inserts and deletes only, since a s
 column; (3) the harness imports with the key in order, which ScalarDB's API does not offer. (2) is
 the driver's own defence and small; measured first on the container as Delivery's keys read, then
 the seventh run's cell again.
+### 2026-10-28: (A) item (1) reviewed mergeable: c8825e9 on inline-vendor-batch (the design's note)
+
+Reviewed from `git show c8825e9` (on 966e3f3): `KeyedPlan.vendorBatch()` offers the single form's
+statement on an inline table with a block of entries, `fast` at SNAPSHOT and `rcFirst`'s plain text
+at READ COMMITTED, the two READ COMMITTED texts held as steps with the stamp first, as
+`applyRcFirst` binds them and `Run.bindStep` honours (`stampAfter` 0), the anchor bound after
+`Step.parameters()`, binds and stamp, as the single form does. `KeyedPlan.applyVendorBatch` resolves
+the batch as 4.4 says: declined, nothing run, at SNAPSHOT with versions of the table recorded, at
+READ COMMITTED where an entry's key has no version while the table has some, and at SNAPSHOT where
+every count is 0 under the gate and the coarse check finds a row in flight; otherwise one
+`executeLargeBatch`, the counts recorded in order, a count above 1 the abort, at SNAPSHOT any count
+above 0 passing the check and every 0 the vendor's, at READ COMMITTED each 0 through the keyed block
+and the steps after it (`applyOracleBlocks`, the tail of `apply` extracted unchanged),
+`anchors.wrote` once. The dispatcher takes the vendor batch first over up to `MERGE_MAX` entries and,
+declined, the block of entries over the first `ENTRIES_MAX`, `unmerged` then the block's end rather
+than the run's, which is right: only the failed block's entries replay one by one. One deviation,
+adopted into 4.4: on a `BatchUpdateException` the entries before the failing one are decided first,
+a 0 among them through the block, then the error thrown, which is what the entries one by one would
+have done (an entry in flight waits and writes, or aborts with `40001` before the failing entry's
+error is reached), where recording the 0s would have reported a missing row for one that exists.
+The test covers the list: the inline UPDATE one cursor, one parse and four executions across sizes 5
+to 15 with ojdbc's cache on, the decoupled table's none; the missing key in the middle and the
+all-missing batch on a table not yet clear; two entries on one key at READ COMMITTED read first or
+not, the version two on as one by one; the row in flight in the middle with and without the wait;
+ORA-01438 as the third entry at both levels with the single form's state and code; the gate closed
+by a row in flight elsewhere. Mergeable; landing is the user's call; the proof the Oracle TPC-C
+inline cells at scale 32, expected toward 0.72 at SNAPSHOT from 0.62 and the same amount at READ
+COMMITTED from 0.54.
