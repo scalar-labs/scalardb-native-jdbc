@@ -66,7 +66,8 @@ public final class Check {
     }
 
     /**
-     * Returns whether the setup has been run for the table.
+     * Returns whether the setup has been run for the table, its indexes in the data table's key
+     * order: one set up before they were is not, until the setup runs again.
      *
      * @return whether it is set up
      */
@@ -235,7 +236,12 @@ public final class Check {
           out.add(
               new Result(
                   name,
-                  t.isSetUp(),
+                  t.isSetUp()
+                      && KeyOrder.inOrder(
+                          connection,
+                          engine,
+                          t,
+                          Objects.requireNonNull(t.metadataTable(), "metadata table")),
                   stuck,
                   stuck == 0 ? null : Duration.ofMillis(now - min),
                   null));

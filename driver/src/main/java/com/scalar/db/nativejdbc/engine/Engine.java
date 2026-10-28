@@ -231,6 +231,18 @@ public enum Engine {
   }
 
   /**
+   * Returns the name of the index the setup creates on a table's metadata table over the key in the
+   * data table's order, where the metadata table's primary key orders it otherwise (design section
+   * 3).
+   *
+   * @param table the name statements use for the table, in its stored spelling
+   * @return the index's name
+   */
+  public String keyIndexName(String table) {
+    return table + affix("_key");
+  }
+
+  /**
    * Lists the read views, with their columns, and the usable in-flight indexes of the given names:
    * only these names, so a load does not list every object of an application schema. An index the
    * engine holds unusable (PostgreSQL {@code indisvalid}, Oracle {@code STATUS}, SQL Server {@code

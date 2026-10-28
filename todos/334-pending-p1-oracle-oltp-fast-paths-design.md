@@ -2487,6 +2487,42 @@ plans the primary key without the hint too, as the design's note found, so the p
 hinted plan and the AWS cell's plan dump shows the effect. Mergeable; landing as A2's; the proof the
 Oracle YCSB E inline READ COMMITTED cell, expected from +52% toward +19%.
 
+### 2026-10-28: (C) built: the setup's indexes in the data table's key order (the builder's note)
+
+As design section 3 has it (942b81a, 5a07d92), approved by the user through 6e. A new package-private
+`setup.KeyOrder` reads, through `DatabaseMetaData` on every engine (the catalog argument the schema on
+MySQL and MariaDB, null elsewhere): a table's primary key by `KEY_SEQ` (`primaryKey`, the catalog's
+order where the engine lists none), and an index's columns by `ORDINAL_POSITION` (`indexColumns`,
+`getIndexInfo` with approximate true, since an exact listing on Oracle analyzes the table over the
+setup's locked statistics). `Setup.up` builds the in-flight index over the data table's key in that
+order (`createIndex` takes the key), its shape per engine as before (PostgreSQL's and SQL Server's on
+a metadata table filtered to the rows in flight over the key alone, `tx_state` first elsewhere); an
+in-flight index found in another column order is dropped and built again ("rebuilt in-flight index
+... in the data table's key order"; PostgreSQL's build drops it itself); and on a decoupled table
+whose metadata table's primary key orders the key otherwise, it builds `T_key` (`Engine.keyIndexName`,
+`TableInfo.keyIndex`, the affix folded as the others, the name checked against the engine's limit)
+over the key in the data order, without blocking writes where the engine can, as the in-flight index
+is. Teardown drops `T_key` where it exists (`DROP INDEX CONCURRENTLY IF EXISTS` on PostgreSQL). `Check`
+reports a table set up only where `KeyOrder.inOrder` holds as well; the catalog's `isSetUp` is
+unchanged, as section 3 now says: the old order serves every read, only slower.
+
+The engines (the test's premise, for section 3's sentence and 6e's ScalarDB issue): ScalarDB's import
+keys the metadata table of an imported table declared `PRIMARY KEY (b, a)` by column name, (a, b), on
+Oracle, MySQL and MariaDB, and in the data table's order, (b, a), on PostgreSQL and SQL Server, whose
+drivers return `getPrimaryKeys` by `KEY_SEQ`; so `T_key` is built on the first three only.
+
+Test, `SetupIntegrationTest.anImportedKeyOutOfNameOrder_isIndexedInTheDataTablesOrder`, on all five
+engines, its own `getPrimaryKeys` and `getIndexInfo` reads: the data key (b, a), the metadata key (a, b)
+or (b, a) as above; after setup the in-flight index (tx_state, b, a), or (b, a) where filtered, and
+`T_key` (b, a) where the metadata key is by name, none otherwise; `check` set up; on Oracle a read of
+the metadata rows by the data key's prefix, `b` alone, under `INDEX(m)` an INDEX RANGE SCAN and no
+skip scan; setup again, no index action; the in-flight index rebuilt by hand in the catalog's order,
+`check` not set up, setup "rebuilt ...", the columns right, `check` set up; teardown "dropped key
+index" where there was one, both indexes gone. On the containers: every suite, Oracle on a fresh
+database 170 tests with one failing, `WriteIntegrationTest` refused a connection (ORA-12516), which
+passes alone on a fresh database, 6; PostgreSQL, MySQL, MySQL lower case, MariaDB and SQL Server, 170
+each, none failing; unit tests, 414; `spotbugsIntegrationTest` fails on main's three findings alone.
+
 ### 2026-10-28: (C) reviewed mergeable: 7389753 on key-order (the design's note)
 
 Reviewed from `git show 7389753` (on 3ebf06b). `KeyOrder` reads what section 3 names: the data

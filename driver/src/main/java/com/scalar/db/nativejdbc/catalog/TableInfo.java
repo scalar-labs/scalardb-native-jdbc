@@ -152,6 +152,17 @@ public final class TableInfo {
   }
 
   /**
+   * Returns the name of the setup's index on the metadata table over the key in the data table's
+   * order, where the metadata table's primary key orders it otherwise.
+   *
+   * @param engine the engine, which spells the affix
+   * @return the index's name
+   */
+  public String keyIndex(Engine engine) {
+    return engine.keyIndexName(table);
+  }
+
+  /**
    * Returns the namespace, the schema the user's statement names or the connection's current one.
    *
    * @return the namespace

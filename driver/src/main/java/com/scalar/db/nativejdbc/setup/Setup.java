@@ -324,8 +324,9 @@ public final class Setup {
       String ns = t.namespace();
       String view = t.readView(engine);
       String index = t.inflightIndex(engine);
+      String keyIndex = t.keyIndex(engine);
       String meta = metadataTable(t);
-      for (String n : List.of(view, index)) {
+      for (String n : List.of(view, index, keyIndex)) {
         if (!engine.fitsIdentifier(n)) {
           throw new SQLSyntaxErrorException(
               "the name " + n + " the setup needs is longer than the engine allows", "42622");
@@ -346,9 +347,23 @@ public final class Setup {
                 + " view it did not create: drop or rename it",
             "55000");
       }
+      // the key in the data table's order, the engine's constraint's: an imported composite key's
+      // metadata table is keyed by column name (design section 3)
+      List<String> key = KeyOrder.primaryKey(connection, engine, ns, t.dataTable(), t.keyColumns());
       if (!found.hasIndex(ns, meta, index)) {
-        createIndex(t, index);
+        createIndex(t, index, key);
         done(actions, "created in-flight index " + index);
+      } else if (!KeyOrder.inflightInOrder(connection, engine, t, meta, key)) {
+        if (engine != Engine.POSTGRESQL) {
+          execute(dropIndex(t, index)); // PostgreSQL's build drops the old one itself
+        }
+        createIndex(t, index, key);
+        done(actions, "rebuilt in-flight index " + index + " in the data table's key order");
+      }
+      if (t.layout() != Layout.INLINE
+          && !KeyOrder.keyIndexInPlace(connection, engine, t, meta, key)) {
+        createKeyIndex(t, keyIndex, key);
+        done(actions, "created key index " + keyIndex + " in the data table's key order");
       }
       // an inline table imported into ScalarDB holds its rows with NULL metadata, as an imported
       // decoupled one does without metadata rows; one ScalarDB created has none, and costs a count
@@ -402,6 +417,15 @@ public final class Setup {
       } else if (found.hasIndex(ns, metadataTable(t), index)) {
         execute(dropIndex(t, index));
         done(actions, "dropped in-flight index " + index);
+      }
+      String keyIndex = t.keyIndex(engine);
+      if (t.layout() != Layout.INLINE
+          && KeyOrder.indexColumns(connection, engine, ns, metadataTable(t), keyIndex) != null) {
+        execute(
+            engine == Engine.POSTGRESQL
+                ? "DROP INDEX CONCURRENTLY IF EXISTS " + name(ns, keyIndex)
+                : dropIndex(t, keyIndex));
+        done(actions, "dropped key index " + keyIndex);
       }
       if (engine == Engine.ORACLE) {
         // the fixed histogram goes too: it would mislead the optimizer once nothing keeps it true
@@ -711,9 +735,9 @@ public final class Setup {
    * on SQL Server editions that have online builds, {@code (tx_state, key)} in place on MySQL and
    * MariaDB, online on Oracle where the edition allows.
    */
-  private void createIndex(TableInfo t, String index) throws SQLException {
+  private void createIndex(TableInfo t, String index, List<String> key) throws SQLException {
     String on = name(t.namespace(), metadataTable(t));
-    String keys = keys(t, "");
+    String keys = quoted(key);
     switch (engine) {
       case POSTGRESQL:
         // a failed concurrent build leaves an invalid index of the name; the listing omits it
@@ -760,6 +784,61 @@ public final class Setup {
         return;
     }
     throw new AssertionError(engine);
+  }
+
+  /**
+   * Creates the key index on the metadata table, built as the in-flight index is, without blocking
+   * writes where the engine can; a stamp changes no key column, so only inserts and deletes
+   * maintain it.
+   */
+  private void createKeyIndex(TableInfo t, String index, List<String> key) throws SQLException {
+    String on = name(t.namespace(), metadataTable(t));
+    String keys = quoted(key);
+    switch (engine) {
+      case POSTGRESQL:
+        execute("DROP INDEX CONCURRENTLY IF EXISTS " + name(t.namespace(), index));
+        execute(
+            String.format(
+                "CREATE INDEX CONCURRENTLY %s ON %s (%s)", engine.quote(index), on, keys));
+        return;
+      case SQLSERVER:
+        execute(
+            String.format(
+                "CREATE INDEX %s ON %s (%s)%s",
+                engine.quote(index),
+                on,
+                keys,
+                sqlServerHasOnlineIndexBuilds() ? " WITH (ONLINE = ON)" : ""));
+        return;
+      case MYSQL:
+      case MARIADB:
+        execute(
+            String.format(
+                "CREATE INDEX %s ON %s (%s) ALGORITHM=INPLACE LOCK=NONE",
+                engine.quote(index), on, keys));
+        return;
+      case ORACLE:
+        String ddl =
+            String.format("CREATE INDEX %s ON %s (%s)", name(t.namespace(), index), on, keys);
+        try {
+          execute(ddl + " ONLINE");
+        } catch (SQLException e) {
+          if (e.getErrorCode() != 439) { // ORA-00439: feature not enabled in this edition
+            throw e;
+          }
+          execute(ddl);
+        }
+        return;
+    }
+    throw new AssertionError(engine);
+  }
+
+  private String quoted(List<String> columns) {
+    List<String> out = new ArrayList<>();
+    for (String c : columns) {
+      out.add(engine.quote(c));
+    }
+    return String.join(", ", out);
   }
 
   private String dropIndex(TableInfo t, String index) {

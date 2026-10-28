@@ -264,6 +264,187 @@ class SetupIntegrationTest {
     }
   }
 
+  /**
+   * An imported table whose primary key is declared out of name order (design section 3, todo 334):
+   * ScalarDB keys its metadata table by column name, (a, b) for (b, a); the setup builds the
+   * in-flight index over the data table's order and a key index on the metadata table in that
+   * order, and teardown drops both; an in-flight index found in the old order makes {@code check}
+   * report the table not set up, and the setup rebuilds it. On Oracle a read of the metadata rows
+   * by the data key's prefix then reaches them by a range scan, not a skip scan of the primary key.
+   */
+  @ParameterizedTest
+  @MethodSource("engines")
+  void anImportedKeyOutOfNameOrder_isIndexedInTheDataTablesOrder(Engines e) throws Exception {
+    Engine engine = e.engine();
+    String sk = e.storedSchema("sk");
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          e.createSchema("sk"),
+          "CREATE TABLE sk.ord (b "
+              + e.intType()
+              + " NOT NULL, a "
+              + e.intType()
+              + " NOT NULL, x VARCHAR(10), PRIMARY KEY (b, a))",
+          "INSERT INTO sk.ord VALUES (1, 2, 'p')",
+          "INSERT INTO sk.ord VALUES (1, 3, 'q')",
+          "INSERT INTO sk.ord VALUES (2, 1, 'r')");
+    }
+    try (DistributedTransactionAdmin admin = e.admin()) {
+      admin.createNamespace(sk, true);
+      admin.importTable(sk, e.storedTable("ord"), DECOUPLED, Map.of());
+    }
+    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    TableInfo t = catalog.lookup(List.of(), sk, e.storedTable("ord"));
+    String meta = Objects.requireNonNull(t.metadataTable());
+    String a = e.storedColumn("a");
+    String b = e.storedColumn("b");
+    List<String> inflight =
+        engine == Engine.POSTGRESQL || engine == Engine.SQLSERVER
+            ? List.of(b, a) // filtered to the rows in flight
+            : List.of("tx_state", b, a);
+    // where ScalarDB keyed the metadata table by name, (a, b), the key index; where it kept the
+    // data table's order, none
+    boolean byName;
+    try (Connection c = e.open()) {
+      assertThat(primaryKey(engine, c, sk, t.dataTable())).containsExactly(b, a);
+      List<String> metaKey = primaryKey(engine, c, sk, meta);
+      assertThat(metaKey).containsExactlyInAnyOrder(a, b);
+      byName = metaKey.equals(List.of(a, b));
+    }
+    System.out.println("[334] " + engine + ": the imported metadata table keyed by name " + byName);
+    String keyIndexCreated =
+        "created key index " + t.keyIndex(engine) + " in the data table's key order";
+    List<Setup.Result> up = setup(e, catalog, sk);
+    assertThat(up).allMatch(Setup.Result::succeeded, "succeeded");
+    if (byName) {
+      assertThat(up.get(0).actions()).contains(keyIndexCreated);
+    } else {
+      assertThat(up.get(0).actions()).doesNotContain(keyIndexCreated);
+    }
+    try (Connection c = e.open()) {
+      assertThat(indexColumns(engine, c, sk, meta, t.inflightIndex(engine)))
+          .containsExactlyElementsOf(inflight);
+      assertThat(indexColumns(engine, c, sk, meta, t.keyIndex(engine)))
+          .isEqualTo(byName ? List.of(b, a) : List.of());
+      assertThat(Check.tables(catalog, c, x -> x.namespace().equals(sk), Check.DEFAULT_LIFETIME))
+          .allMatch(Check.Result::setUp, "set up");
+      if (engine == Engine.ORACLE) {
+        String plan =
+            oraclePlan(
+                c,
+                "SELECT /*+ INDEX(m) */ * FROM "
+                    + name(engine, sk, meta)
+                    + " m WHERE m."
+                    + engine.quote(b)
+                    + " = 1");
+        assertThat(plan).contains("INDEX RANGE SCAN").doesNotContain("SKIP SCAN");
+      }
+      // again: nothing to create
+      assertThat(setup(e, catalog, sk).get(0).actions()).noneMatch(x -> x.contains("index"));
+      // an in-flight index in the catalog's order, as a setup before the key order left it
+      String index =
+          engine == Engine.ORACLE || engine == Engine.POSTGRESQL
+              ? name(engine, sk, t.inflightIndex(engine))
+              : engine.quote(t.inflightIndex(engine));
+      String on = name(engine, sk, meta);
+      String state = engine.quote("tx_state");
+      String old = engine.quote(a) + ", " + engine.quote(b);
+      e.execute(
+          c,
+          engine == Engine.ORACLE || engine == Engine.POSTGRESQL
+              ? "DROP INDEX " + index
+              : "DROP INDEX " + index + " ON " + on,
+          engine == Engine.POSTGRESQL || engine == Engine.SQLSERVER
+              ? "CREATE INDEX "
+                  + (engine == Engine.POSTGRESQL ? engine.quote(t.inflightIndex(engine)) : index)
+                  + " ON "
+                  + on
+                  + " ("
+                  + old
+                  + ") WHERE "
+                  + state
+                  + " IN (1, 2)"
+              : "CREATE INDEX " + index + " ON " + on + " (" + state + ", " + old + ")");
+      assertThat(Check.tables(catalog, c, x -> x.namespace().equals(sk), Check.DEFAULT_LIFETIME))
+          .as("an in-flight index in the old order")
+          .noneMatch(Check.Result::setUp);
+    }
+    List<Setup.Result> rebuilt = setup(e, catalog, sk);
+    assertThat(rebuilt).allMatch(Setup.Result::succeeded, "succeeded");
+    assertThat(rebuilt.get(0).actions())
+        .contains(
+            "rebuilt in-flight index "
+                + t.inflightIndex(engine)
+                + " in the data table's key order");
+    try (Connection c = e.open()) {
+      assertThat(indexColumns(engine, c, sk, meta, t.inflightIndex(engine)))
+          .containsExactlyElementsOf(inflight);
+      assertThat(Check.tables(catalog, c, x -> x.namespace().equals(sk), Check.DEFAULT_LIFETIME))
+          .allMatch(Check.Result::setUp, "set up");
+      List<Setup.Result> down = Setup.teardown(catalog, c, x -> x.namespace().equals(sk));
+      assertThat(down).allMatch(Setup.Result::succeeded, "succeeded");
+      if (byName) {
+        assertThat(down.get(0).actions()).contains("dropped key index " + t.keyIndex(engine));
+      }
+      assertThat(indexColumns(engine, c, sk, meta, t.inflightIndex(engine))).isEmpty();
+      assertThat(indexColumns(engine, c, sk, meta, t.keyIndex(engine))).isEmpty();
+    }
+  }
+
+  private static List<Setup.Result> setup(Engines e, Catalog catalog, String schema)
+      throws SQLException {
+    try (Connection c = e.open()) {
+      return Setup.run(
+          catalog, c, t -> t.namespace().equals(schema), Duration.ofMinutes(1), List.of());
+    }
+  }
+
+  /** The table's primary key columns by KEY_SEQ, through the vendor's DatabaseMetaData. */
+  private static List<String> primaryKey(Engine engine, Connection c, String schema, String table)
+      throws SQLException {
+    java.util.TreeMap<Integer, String> out = new java.util.TreeMap<>();
+    boolean catalogs = engine == Engine.MYSQL || engine == Engine.MARIADB;
+    try (ResultSet rs = c.getMetaData().getPrimaryKeys(catalogs ? schema : null, schema, table)) {
+      while (rs.next()) {
+        out.put(rs.getInt("KEY_SEQ"), rs.getString("COLUMN_NAME"));
+      }
+    }
+    return List.copyOf(out.values());
+  }
+
+  /** An index's columns in order, through the vendor's getIndexInfo; empty where it is absent. */
+  private static List<String> indexColumns(
+      Engine engine, Connection c, String schema, String table, String index) throws SQLException {
+    java.util.TreeMap<Integer, String> out = new java.util.TreeMap<>();
+    boolean catalogs = engine == Engine.MYSQL || engine == Engine.MARIADB;
+    try (ResultSet rs =
+        c.getMetaData().getIndexInfo(catalogs ? schema : null, schema, table, false, true)) {
+      while (rs.next()) {
+        if (index.equalsIgnoreCase(rs.getString("INDEX_NAME"))) {
+          out.put((int) rs.getShort("ORDINAL_POSITION"), rs.getString("COLUMN_NAME"));
+        }
+      }
+    }
+    return List.copyOf(out.values());
+  }
+
+  /** Oracle's plan for a query, as DBMS_XPLAN prints it. */
+  @SuppressFBWarnings(value = "SQL_INJECTION_JDBC", justification = "test queries from constants")
+  private static String oraclePlan(Connection c, String sql) throws SQLException {
+    StringBuilder out = new StringBuilder();
+    try (Statement st = c.createStatement()) {
+      st.execute("EXPLAIN PLAN FOR " + sql);
+      try (ResultSet rs =
+          st.executeQuery("SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY())")) {
+        while (rs.next()) {
+          out.append(rs.getString(1)).append('\n');
+        }
+      }
+    }
+    return out.toString();
+  }
+
   private static List<Setup.Result> setup(Engines e, Catalog catalog, Duration wait)
       throws SQLException {
     String su = e.storedSchema("su");
