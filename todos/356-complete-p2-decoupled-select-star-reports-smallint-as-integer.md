@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "356"
 tags: [read, result-metadata, postgresql, sqlserver, regression]
