@@ -513,3 +513,71 @@ Server CPU a commit, TPC-C, driver against vendor (startup gathering excluded):
   - **Delivery**: its order_line SUM, and the write beyond the key probing once a key.
   - **The RC decoupled scan**, +38%: the join of every scanned row with its metadata row, the
     layout's cost at RC.
+
+## Ninth run: overnight with D1–D3, TPC-C scale 32 and YCSB at 1M rows, fast and slow (2026-10-29)
+
+Run `20261028-2259-ora` from `bench-env/plans/overnight-oracle.json` on main `f5c4628`. That main
+has the round after the eighth run (todo 334):
+- **D1** `5c39f67`: the SNAPSHOT state column on an inline table reads the row's own state, carried
+  by the split read's copies, behind the gate.
+- **D2** `dd008ae` + `f5c4628`: an anchor-less read runs as written behind a gate column a table,
+  over the predicate's key range at READ COMMITTED and the whole table at SNAPSHOT. The split read
+  runs only where a gate is closed.
+- **D3** `4a41577`: the write beyond the key as the statement first, in both layouts.
+- **D4** `0a0a5c4`: the harness also dumps the plans of the ten statements of most time a call.
+
+TPC-C scale 32 and YCSB A, C, E, F at 1M rows. READ COMMITTED and SNAPSHOT, both layouts, the fast
+network and then 250 µs more a round trip. 60 s a run, REPS 2, 4 terminals, statement cache 128, a
+client flight recording of every run. It ran on its own stack (`STACK=ora`) beside PostgreSQL's.
+All 8 cells passed, 39–49 min each.
+
+Throughput, (c)/(a) (sixth run in brackets):
+
+| cell | TPC-C | A | C | E | F |
+|---|---|---|---|---|---|
+| RC decoupled, fast | 0.61 (0.13) | 0.75 (0.80) | 0.85 (0.84) | 0.73 (0.66) | 0.78 (0.77) |
+| RC inline, fast | 0.63 (0.54) | 0.90 (0.90) | 0.85 (0.86) | 0.84 (0.77) | 0.87 (0.88) |
+| SNAPSHOT decoupled, fast | 0.67 (0.63) | 0.75 (0.76) | 0.84 (0.85) | 0.92 (0.88) | 0.77 (0.79) |
+| SNAPSHOT inline, fast | 0.82 (0.62) | 0.89 (0.97) | 0.86 (0.87) | 0.87 (0.84) | 0.90 (0.92) |
+| RC decoupled, +250 µs | 0.82 (0.16) | 0.92 (0.92) | 0.94 (0.94) | 0.82 (0.82) | 0.91 (0.91) |
+| RC inline, +250 µs | 0.87 (0.81) | **0.96** (0.96) | **0.95** (0.97) | 0.87 (0.84) | **0.97** (0.98) |
+| SNAPSHOT decoupled, +250 µs | 0.87 (0.86) | **0.90** (0.90) | **0.96** (0.97) | **0.93** (0.93) | **0.92** (0.92) |
+| SNAPSHOT inline, +250 µs | **0.94** (0.88) | **0.95** (0.95) | **0.96** (0.96) | **0.92** (0.92) | **0.96** (0.96) |
+
+The eighth run's TPC-C, fast: 0.58, 0.70, 0.66, 0.84.
+
+p50 overhead against the vendor, fast network (eighth run in brackets):
+
+| | Delivery | NewOrder | OrderStatus | Payment | StockLevel | scan | insert |
+|---|---|---|---|---|---|---|---|
+| RC decoupled | **+91%** (+142) | +53% (+55) | +61% (+71) | +58% (+57) | **+19%** (+53) | +37% (+38) | +31% (+28) |
+| RC inline | **+64%** (+92) | +23% (+20) | +39% (+41) | +25% (+20) | **+31%** (+62) | +19% (+22) | +10% (+11) |
+| SNAPSHOT decoupled | +76% (+71) | +44% (+41) | **+32%** (+71) | +53% (+48) | +23% (+25) | +8% (+8) | +20% (+14) |
+| SNAPSHOT inline | +23% (+30) | +12% (+12) | **+36%** (+75) | +20% (+17) | +24% (+30) | +14% (+19) | +9% (+28) |
+
+YCSB p50 overhead, fast network: read (C) +16% to +19% in every cell. Update +36% and +40%
+decoupled, +10% and +11% inline. Read-modify-write +33% decoupled, +13% and +8% inline. At +250 µs,
+SNAPSHOT inline's TPC-C transactions are +6% to +12% and its YCSB operations +4% to +8%.
+
+- **D3, Delivery** +142% → +91% at RC decoupled and +92% → +64% at RC inline (expected about +100%
+  and +50%).
+- **D2, StockLevel** +53% → +19% at RC decoupled and +62% → +31% at RC inline (expected about
+  +25%). The gated count (`scalardb_native_g0`) runs on AWS as designed: 770–950 µs a call, 255–330
+  µs CPU and 617–647 gets, against the vendor's 650–780 µs, 195–235 µs and 607–612. The split
+  fallback (`COUNT(DISTINCT(v.c1))`) runs on about 15% of calls, at about 1.2 ms and 1.05 ms CPU,
+  where a gate is closed. Delivery's gated SUM is 48 µs a call, against 220 (expected about 80).
+- **OrderStatus** +71% → +32% at SNAPSHOT decoupled and +75% → +36% at SNAPSHOT inline (D1 expected
+  about +30% inline). Its OORDER read now runs as a gated text. D1's state column is
+  in the order_line read's text (`WHEN order_line."scalardb_native_v2" IN (1, 2)`), but that read is
+  still 141–175 µs and 27.7 gets a call against the vendor's 29–33 µs and 5.2. The plan keeps the
+  split read's two in-flight-index branches, where the container showed about 8 gets. At RC the
+  read is unchanged, +39% and +61%.
+- **RC inline TPC-C is 0.63 against the eighth run's 0.70**, while the driver's p50, p95 and p99
+  are all below the eighth run's (2,069 / 6,545 / 15,410 µs against 2,234 / 6,698 / 18,441), and
+  so are all five transactions' p50. The driver's throughput is 1,040/s against 1,116, and the
+  vendor's 1,658 against 1,595. A mean above the eighth run's under every percentile below it points
+  to a few very long transactions beyond p99. That is open.
+- **At SNAPSHOT inline**, Payment's district read (`SELECT D_STREET_1 ...`) is 419 µs a call with 11 µs
+  of CPU: waits on the district blocks, Oracle SERIALIZABLE's hot-block cost.
+- **At +250 µs**, SNAPSHOT inline is within 8% on every workload, and every cell's YCSB A, C and F
+  is 0.90–0.97.

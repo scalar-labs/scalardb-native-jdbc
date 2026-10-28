@@ -510,6 +510,63 @@ minutes.
 - **The inline cell** has no change of its own in this round. Its 0.79 against 0.87 is the
   variation between two runs, here and in the vendor's own figures.
 
+## Fourteenth run: overnight on main with D1–D4, three levels, fast and slow (2026-10-29)
+
+Run `20261029-0022-pg` from `bench-env/plans/overnight-postgresql.json` on main `5de26b9`. D1–D3
+are Oracle's and change nothing here, so this is the baseline after B1 (`99e9c86`). D4 adds the
+plans of the ten statements of most time a call to `server.txt`.
+- The first attempt (`20261028-2259-pg`, on `f5c4628`) failed every cell in the harness. D4's plan
+  dump cut a statement's whitespace-collapsed text at the original text's length, which ran past its
+  end (`IndexOutOfBoundsException` in `Server.plans`). `5de26b9` cuts the collapsed text; the stack
+  was destroyed and the run restarted.
+- Workloads: TPC-C scale 32 and YCSB A, C, E, F at 1M rows.
+- Cells: READ COMMITTED, SNAPSHOT and SERIALIZABLE, both layouts, the fast network and then 250 µs
+  more a round trip.
+- 60 s a run, REPS 2, 4 terminals, `shared_buffers` 8 GB, a client flight recording of every run.
+- Its own stack (`STACK=pg`), beside Oracle's. All 12 cells passed, 35–43 min each.
+
+Throughput, (c)/(a) (twelfth run in brackets):
+
+| cell | TPC-C | A | C | E | F |
+|---|---|---|---|---|---|
+| RC decoupled, fast | 0.70 (0.71) | 0.81 (0.81) | 0.87 (0.89) | **0.67** (0.54) | 0.81 (0.81) |
+| RC inline, fast | 0.76 (0.78) | 0.85 (0.87) | 0.95 (0.92) | 0.84 (0.87) | 0.87 (0.88) |
+| SNAPSHOT decoupled, fast | 0.80 (0.79) | 0.83 (0.84) | 0.88 (0.91) | 0.87 (0.83) | 0.81 (0.86) |
+| SNAPSHOT inline, fast | 0.83 (0.87) | **0.91** (0.90) | 0.88 (0.89) | 0.83 (0.79) | **0.90** (0.89) |
+| SERIALIZABLE decoupled, fast | 0.78 (0.84) | 0.83 (0.86) | 0.88 (0.86) | 0.80 (0.80) | 0.85 (0.87) |
+| SERIALIZABLE inline, fast | **0.96** (0.96) | 0.88 (0.92) | 0.86 (0.86) | 0.76 (0.78) | **0.90** (0.94) |
+| RC decoupled, +250 µs | 0.87 (0.88) | **0.93** (0.93) | **0.97** (0.98) | **0.70** (0.58) | **0.94** (0.94) |
+| RC inline, +250 µs | 0.89 (0.89) | **0.95** (0.95) | **0.98** (0.98) | 0.78 (0.84) | **0.96** (0.96) |
+| SNAPSHOT decoupled, +250 µs | **0.91** (0.93) | **0.94** (0.95) | **0.96** (0.97) | 0.81 (0.82) | **0.95** (0.95) |
+| SNAPSHOT inline, +250 µs | **0.94** (0.93) | **0.95** (0.97) | **0.98** (0.97) | 0.80 (0.82) | **0.97** (0.97) |
+| SERIALIZABLE decoupled, +250 µs | **0.97** (0.86) | **0.93** (0.95) | **0.97** (0.97) | 0.84 (0.82) | **0.96** (0.94) |
+| SERIALIZABLE inline, +250 µs | **0.96** (0.93) | **0.95** (0.97) | **0.96** (0.97) | 0.82 (0.82) | **0.98** (0.99) |
+
+p50 overhead against the vendor, fast network:
+
+| | Delivery | NewOrder | OrderStatus | Payment | StockLevel | read (C) | update | RMW | scan | insert |
+|---|---|---|---|---|---|---|---|---|---|---|
+| RC decoupled | +79% | +34% | +41% | +43% | +54% | +13% | +29% | +26% | **+50%** | +31% |
+| RC inline | +63% | +24% | +28% | +36% | +48% | +6% | +20% | +18% | +20% | +11% |
+| SNAPSHOT decoupled | +38% | +20% | +36% | +30% | +9% | +14% | +24% | +21% | +14% | +28% |
+| SNAPSHOT inline | +13% | +18% | +42% | +19% | +45% | +13% | +7% | +6% | +21% | +20% |
+| SERIALIZABLE decoupled | +40% | +21% | +38% | +31% | +11% | +13% | +22% | +20% | +26% | +30% |
+| SERIALIZABLE inline | +10% | +10% | +37% | +9% | +34% | +16% | +8% | +7% | +32% | +29% |
+
+- **The same as the twelfth run within the variation between runs**, as expected, with one change:
+  the READ COMMITTED decoupled scan is +50% (+88% in the twelfth run), YCSB E 0.67 fast and 0.70
+  slow (0.54 and 0.58). That is B1, as in the thirteenth run (0.71).
+- **At +250 µs, every cell's YCSB A, C and F is within 10%** (0.93–0.98), and TPC-C is within 10%
+  at SNAPSHOT and SERIALIZABLE (0.91–0.97). There, TPC-C transactions are +3% to +13% except
+  StockLevel. Reads, updates and read-modify-write are +1% to +9% at every level.
+- **The scan (YCSB E) is the gap left** at every level: +14% to +32% fast except RC decoupled's
+  +50%, and +20% to +44% at +250 µs. Its execution and per-call planning are in the thirteenth run.
+- **StockLevel on the inline layout** is +34% to +48% fast and +26% to +40% at +250 µs, where the
+  decoupled layout is +9% to +11% at SNAPSHOT and SERIALIZABLE.
+- **SERIALIZABLE TPC-C at 0.96–0.97** compares against a vendor that also runs SERIALIZABLE, whose
+  own serialization failures lower (a). Its p50 overheads, +9% to +10% for Delivery, NewOrder and
+  Payment inline, are the closer measure.
+
 ## Reports
 
 ### HEAD 93f5217
