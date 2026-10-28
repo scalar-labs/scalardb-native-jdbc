@@ -39,8 +39,10 @@ run of 2026-10-21 had 1 failure in each layout.
 
 ### Option 1: cast as todo 303 does, the key too
 The catalog lists each `SMALLINT` and SQL Server `TINYINT` column of a data table
-(`Engine.addBeforeTypes`), and the split read casts the before image and the metadata table's key
-to it (`TableInfo.metadataKey`). A predicate on the cast key cannot use the metadata table's key
+(`Engine.addBeforeTypes`), and the split read casts the before image and, on PostgreSQL and SQL
+Server only, the metadata table's key to it (`TableInfo.metadataKey`). MySQL and MariaDB keep the
+key uncast: todo 303 lists their `CHAR`, `VARCHAR`, `DATETIME` and `TIMESTAMP` columns, and a cast
+`VARCHAR` key would cost as below on a common kind of key. A predicate on the cast key cannot use the metadata table's key
 index: a read by key reads every row of the table in flight through the in-flight index. Measured
 on PostgreSQL 16, 65,536 rows (a `SMALLINT` key's most), the before-image arm of `k = 5000`: 0.010
 against 0.012 ms with 10 rows in flight, 0.010 against 0.21 ms with 1,000, 0.017 against 4.6 ms (a

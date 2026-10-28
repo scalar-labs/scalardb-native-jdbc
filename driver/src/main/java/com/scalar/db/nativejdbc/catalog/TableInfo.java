@@ -110,8 +110,10 @@ public final class TableInfo {
   }
 
   /**
-   * Returns a key column as the metadata table holds it, as a select-list expression with the
-   * column's own type: ScalarDB keeps a {@code SMALLINT} key there as {@code INT} (todo 356).
+   * Returns a key column as the metadata table holds it, as a select-list expression: on PostgreSQL
+   * and SQL Server with the column's own type, where ScalarDB keeps a {@code SMALLINT} key there as
+   * {@code INT} (todo 356). A predicate on the cast key cannot use the metadata table's key index,
+   * so MySQL and MariaDB, whose listed types are of text and time columns, keep the key as it is.
    *
    * @param engine the engine
    * @param alias the metadata table's alias
@@ -119,7 +121,8 @@ public final class TableInfo {
    * @return the expression
    */
   public String metadataKey(Engine engine, String alias, String column) {
-    return cast(alias + "." + engine.quote(column), column);
+    String key = alias + "." + engine.quote(column);
+    return engine == Engine.POSTGRESQL || engine == Engine.SQLSERVER ? cast(key, column) : key;
   }
 
   private String cast(String expression, String column) {
