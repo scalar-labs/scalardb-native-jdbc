@@ -654,10 +654,9 @@ in-flight index once per row of a read, through the ghost records its churn leav
 compiles while rows are in flight seek the index by a hint instead (the split read below). Keeping
 the statistics as the setup took them (`NORECOMPUTE`) did no better beside that hint, and twice in
 four runs left the in-flight check a plan 30-40x slower (`docs/benchmarks/inflight-check.md`). Last
-a grant of `SELECT` on the view to each application user given. Last a grant of `SELECT` on the view
-to each application user given. The backfill waits only for rows ScalarDB has in flight over a
-deemed-committed row, which carry `before_tx_id` NULL and `before_tx_version` 0, never for an
-in-flight insert.
+a grant of `SELECT` on the view to each application user given. The backfill waits only for rows
+ScalarDB has in flight over a deemed-committed row, which carry `before_tx_id` NULL and
+`before_tx_version` 0, never for an in-flight insert.
 
 A table is set up when its index exists and is usable (an invalid index a failed concurrent build left
 does not count) and its view exists with exactly the table's columns, in order. Because the view comes
