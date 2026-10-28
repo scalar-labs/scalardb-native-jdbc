@@ -2742,3 +2742,54 @@ and Payment reads' plans are missing and the RC inline order_line read's 25.5 ge
 plan. Together D1 to D3 are worth about 0.03 to 0.05 on each TPC-C cell and the visible lines are
 OrderStatus, StockLevel and Delivery; NewOrder at RC decoupled (+55%) is now its blocks at their
 floor plus the layout's per-statement costs.
+
+### 2026-10-28: D1, D2 and D3 designed for c7 (the user approved D1-D4 through 6e; D4 is 6e's, on main)
+
+Design 4.2 and 4.3 take the three (the commit after 0a0a5c4). D1, 4.2's Oracle SNAPSHOT paragraph:
+on an inline table the state column's second branch is the row's own column, `WHEN t.tx_state IN (1,
+2) THEN 1`, the key-set subquery kept for decoupled tables. D2, 4.2 after "The read side on Oracle":
+anchor-less reads as the statement as written over the data tables with a gate column per ScalarDB
+table, the range gate by the predicate's key conjuncts at READ COMMITTED (a table without key
+conjuncts keeps the split there), the whole table's at SNAPSHOT marking the table clear, `MAX()`
+around it where the select list aggregates or groups, stripped by the result set, the writes' count
+rule deciding (one-row aggregate: the gate; other shapes: every row's gate, the empty result through
+the coarse check), the split read on a closed gate. D3, 4.3 after "The write beyond the key on
+Oracle": the write as the statement first over the predicate, under a savepoint, one range scan;
+inline: the DML stamps itself with `tx_version = CASE WHEN COALESCE(tx_state, 3) NOT IN (1, 2) THEN
+<next> ELSE -1 END` and returns the versions, any -1 the row in flight the predicate matched, the
+rollback to the savepoint and step 1's outcome (the wait and the write again, or the abort), at READ
+COMMITTED in place of the block, the SNAPSHOT gated statement kept; decoupled, both levels: the
+user's DML over the predicate returning the keys, the CAS as step 3's FORALL over them, a CAS short
+of the DML's count the rollback and the block of steps as today, which tells a row in flight from
+one without a metadata row. A correction to what was proposed: the block's steps 2 and 3 already
+carry the predicate; their cost is the FORALL's probe per key, so the fix is the statement first,
+not a conjunct added, and it is a new write form rather than a spelling. Measured for it on the
+container (`ora/odci.jsh`): one UPDATE over a 10-row prefix under the own state 5.5 gets; Oracle's
+own `SYS.ODCINUMBERLIST` in `TABLE()` runs in an anonymous block without a setup type, so the CAS as
+one statement over a key list is possible, but no cheaper than the FORALL there, so the FORALL
+stays.
+
+**For c7 to build**, one branch each, in this order, each reviewed from `git show` as before; the
+full run tonight starts when the last is on main. (D1) `Router` ~1199: the inline branch; test: form
+6 at SNAPSHOT on an inline table with a row in flight elsewhere in the table, a 10-row prefix read's
+`V$SQL` gets near the vendor's plus the gate (about 8 against 30) and its plan without the per-row
+probe, the column still 1 for a row in flight and 0 for a clear table, the decoupled text unchanged.
+(D2) the gated form in `SplitRead`/`Router` with the gate column per table (the range by B1's
+conjunct extraction over the metadata alias at READ COMMITTED, the whole table at SNAPSHOT, `MAX()`
+for an aggregate or grouped select list), the result set's strip, the count rule and the split on a
+closed gate, the SNAPSHOT 0 marking the table clear; tests on both layouts: Delivery's SUM shape at
+READ COMMITTED as one round trip with the right sum when a row of another order is in flight (the
+gate open) and the split's result when one of the order is (its before image's amount), a GROUP BY
+shape, a DISTINCT shape, an empty result through the coarse check, a predicate without key conjuncts
+keeping the split at READ COMMITTED, at SNAPSHOT the whole-table gate and the next statement as
+written on the table found clear; `V$SQL` executions of the gated text and gets against the
+vendor's. (D3) the statement-first block of the write beyond the key in `Writes`, inline at READ
+COMMITTED first, then decoupled at both levels: the texts, the savepoint, the -1 marking and the
+returned versions or keys, the FORALL CAS, the fallback to the block of steps on a short CAS, the
+wait and abort outcomes; tests: Delivery's order_line UPDATE shape at READ COMMITTED on an inline
+table as one nested statement with the count 10, a row of the order in flight giving the wait then
+the write with the wait setting and `40001` without, a DELETE beyond the key; on a decoupled table
+at both levels the DML and CAS counts, a row in flight through the slow block's outcome, a created
+table's DELETE, an imported row without a metadata row stamped by the slow path; `V$SQL` gets a call
+against the vendor's. If D3's decoupled part does not fit before tonight's run, land the inline part
+and send the decoupled one after.

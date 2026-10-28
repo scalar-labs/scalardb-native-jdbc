@@ -991,6 +991,32 @@ union as a derived table.
   the hashed state costs the scans 1.07x (measured in todo 329). MySQL and MariaDB keep the
   anchors: an UPDATE there reads the newest committed version.
 
+  *Anchor-less reads as written behind a gate column (todo 334, 2026-10-28).* A read that records no
+  anchor, a grouped, aggregate or DISTINCT read, one in autocommit or on a read-only connection, on
+  a table the transaction has not found clear, runs as the statement as written over the data tables
+  with one gate column per ScalarDB table of it appended to its select list, `(SELECT COUNT(*) FROM
+  dual WHERE EXISTS (SELECT /*+ INDEX(m T_inflight) */ 1 FROM T_meta m WHERE m.tx_state IN (1, 2)
+  AND <range>))`, wrapped in `MAX()` where the select list aggregates or the statement groups, and
+  stripped by the result set as the anchor columns are. At READ COMMITTED the range is the
+  predicate's conjuncts on that table's key columns over `m`, those 4.2's PostgreSQL copy repeats
+  (B1's extraction), since nothing is remembered across statements and the range is clear far more
+  often than the table: in TPC-C order_line has a row in flight most of the time, the order being
+  summed never; a table whose predicate has no key conjunct keeps the split read there, a
+  whole-table gate under load being closed more often than open and its second round trip dearer
+  than the split. At SNAPSHOT the gate is the whole table's and a 0 marks the table clear for the
+  transaction, as the state column's probe does, in place of the pending per-table checks sent as a
+  statement before the read. The rules are the writes' count rule (4.3): an aggregate without GROUP
+  BY returns one row, whose gates decide, any 1 discarding it and running the split read instead;
+  any other shape carries the gates on every row, all alike, the first row's 1 discarding the result
+  for the split read, and no row at all takes the coarse check, which stands as empty where the
+  table is clear and takes the split read where it is not. Measured on the container, a 10-row SUM
+  over the committed rows of an order with 48 rows of the table in flight: the split read 96 µs, 45
+  µs of CPU and 14.3 gets, the hash anti-join and the union's view; the statement as written with
+  the range gate 38 µs, 17 µs and 10.5 gets, the gate open; the vendor's about 25 µs and 5.8 gets.
+  Expected at AWS: Delivery's SUM from 220 to about 80 µs, StockLevel's count from 1.5 ms toward 0.9
+  with order_line's range gate and stock's warehouse gate (`S_W_ID = ?` is a key conjunct),
+  StockLevel at READ COMMITTED from +53-62% toward +25%.
+
   **A table found clear** (todo 329). The snapshot is the transaction's: a table that has no row in
   flight in it at one statement has none at any later statement either, since only the
   transaction's own writes, stamped committed, change what it sees. So a transaction remembers,
@@ -1029,8 +1055,14 @@ union as a derived table.
   WHEN (<key>) IN (SELECT <key> FROM T_meta WHERE tx_state IN (1, 2)) THEN 1 END`, both subqueries
   reading the in-flight index `(tx_state, <pk>)` under the `INDEX` hint the split read's in-flight
   copies carry, since the fixed statistics of todo 094 would send the optimizer elsewhere, the
-  first uncorrelated and evaluated once by the scalar subquery cache; a `SKIP LOCKED` read keeps
-  its versions, as on PostgreSQL; and a transaction remembers each table it found clear, by the
+  first uncorrelated and evaluated once by the scalar subquery cache; on an inline table, whose row
+  holds its state, the second branch is the row's own column, `WHEN t.tx_state IN (1, 2) THEN 1`,
+  since Oracle plans the key-set subquery as two probes of the in-flight index per row whenever the
+  first branch found a row in flight, 30 gets against the vendor's 6 for a 10-row read on the
+  container where the own state costs 8, which the eighth run's SNAPSHOT inline OrderStatus read
+  paid at 27.6 (todo 334, 2026-10-28), while a decoupled table's state is in its metadata row and
+  keeps the subquery; a `SKIP LOCKED` read keeps its versions, as on PostgreSQL; and a transaction
+  remembers each table it found clear, by the
   same four ways, the coarse check in its Oracle form, `SELECT 1 FROM dual WHERE EXISTS (SELECT 1
   FROM T_meta WHERE tx_state IN (1, 2))`, and runs on it the vendor's statements: a read of any
   shape as written on the data tables, a locking read likewise after the coarse check, whose own
@@ -1913,6 +1945,34 @@ its table keeps the steps, the keys read, each key's DML and CAS, as today; a va
 the keys in one round trip and sends them with their anchors into a block of a per-count text, two
 round trips, is the follow-up if a workload shows the case (TPC-C's predicate write, Delivery's
 `order_line`, follows an aggregate, which records nothing).
+
+*The write beyond the key as the statement first (todo 334, 2026-10-28).* The block above reaches
+each key by a probe, step 2's DML and step 3's CAS once per key as FORALLs: 31 and 56 gets for
+Delivery's ten order lines on a decoupled table and 70 for the inline DML, where the vendor's one
+UPDATE over the predicate costs 14 (the eighth run). Without recorded anchors, the condition above,
+the write goes as the statement first of 4.3 over the predicate instead of the key: the DML as
+written over the predicate, which the optimizer serves by one range scan, under a savepoint,
+returning what the CAS needs, then the CAS over what it returned. On an inline table the DML stamps
+in the same statement, as the SNAPSHOT gated statement does, with the row's own state folded into
+the version, `tx_version = CASE WHEN COALESCE(tx_state, 3) NOT IN (1, 2) THEN <next> ELSE -1 END`,
+`RETURNING tx_version BULK COLLECT INTO` a collection, and the block returns the rows written and
+the rows marked -1: any -1 is a row in flight the predicate matched, the block rolls back to the
+savepoint and the driver takes step 1's outcome for a key in flight, the wait and then the write
+again, or the abort; a row the DML waits for on its lock is the keyed statement first's case, the
+holder's prepare, bounded by its transaction. At READ COMMITTED this replaces the block, 416 µs and
+88 gets a call in the eighth run, by one statement near the vendor's 14 gets; at SNAPSHOT the gated
+statement stays, its gate the whole table's. On a decoupled table the DML is the user's over the
+predicate alone, `RETURNING <key> BULK COLLECT INTO` collections, and the CAS is step 3's over them,
+a FORALL per key under the committed state, `DELETE` for a created table's DELETE, the stamp's
+UPDATE otherwise; a CAS short of the DML's count is a row the predicate matched in flight or without
+a metadata row, the block rolls back to the savepoint and the driver runs the block of steps above,
+which tells the two apart, so the fast form is exact and the slow one is the rare case's. The CAS as
+one statement over the key conjuncts and the free key column's list through Oracle's own
+`SYS.ODCINUMBERLIST` in `TABLE()`, which needs no type of the setup's and does run in an anonymous
+block, measured no cheaper than the FORALL on the container (`ora/odci.jsh`), so the FORALL stays.
+Expected at AWS: the RC decoupled order_line block from 714 toward 450 µs (the keys read and the DML
+by key gone, the CAS kept), SNAPSHOT decoupled from 315 toward 200, RC inline from 416 toward 60;
+about 3.5 ms a Delivery at RC inline and 2.6 at RC decoupled.
 
 Why the block is exact. Its keys read is step 1's statement, the committed images through `rc_T`
 with their metadata rows, each key with whether it has a metadata row, its version and its state;
