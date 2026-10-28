@@ -584,7 +584,8 @@ class BenchBaseBenchmark {
               || head.startsWith("DELETE"))) {
             continue;
           }
-          out.append("  -- ").append(q.replaceAll("\\s+", " "), 0, Math.min(q.length(), 200));
+          String flat = q.replaceAll("\\s+", " ");
+          out.append("  -- ").append(flat, 0, Math.min(flat.length(), 200));
           out.append('\n');
           try (PreparedStatement ps =
               c.prepareStatement("SELECT * FROM pg_temp.scalardb_native_plan(?)")) {
