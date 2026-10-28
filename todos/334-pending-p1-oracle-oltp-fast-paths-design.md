@@ -2448,3 +2448,23 @@ over a tombstone as one bulk execution and one round trip, then the duplicate in
 counts before it; `WritesTest` asserts the plain and anchored texts. Mergeable; landing is the
 user's call; the proof the Oracle TPC-C READ COMMITTED decoupled cells at scale 32, expected from
 0.45 toward 0.65, with (C) for Delivery.
+
+### 2026-10-28: (B) item 3 reviewed mergeable: 0339739 on oracle-inline-noss (the design's note)
+
+Reviewed from `git show d288f45` and then `0339739` (on cc491c8). `SplitRead.committed` opens the
+copy with the hint on Oracle where its check is `OWN`, which is exactly the inline table's committed
+copy carrying its versions at READ COMMITTED: `OWN` comes from `v.inline`, Oracle's SNAPSHOT form
+reads no versions, and PostgreSQL's own `OWN` is excluded by the engine; `t` is always the copy's
+alias. One change asked and made: the hint names the in-flight index, `NO_INDEX_SS(t "T_inflight")`,
+spelled as the in-flight arm's INDEX hint spells it, since the bare `NO_INDEX_SS(t)` would also have
+forbidden a skip scan of the primary key for a predicate on its trailing columns alone, which today
+serves such a read over the warehouses, while the design's argument names only the in-flight index,
+whose leading column is the row's state and never a key; where the index does not exist the hint is
+ignored. Design 4.2's sentence says so (cc491c8). The test sets up an inline table of 30,000
+committed rows, asserts the setup found it (`hasSize(1)`, so the plan check cannot pass vacuously),
+reads a 500-row range at READ COMMITTED in a transaction with the named hint in the routed text, and
+reads the plan from `DBMS_XPLAN.DISPLAY_CURSOR`: the committed copy an INDEX RANGE SCAN of the
+primary key, no skip scan, the in-flight arm a range scan of the in-flight index. The container
+plans the primary key without the hint too, as the design's note found, so the plan check guards the
+hinted plan and the AWS cell's plan dump shows the effect. Mergeable; landing as A2's; the proof the
+Oracle YCSB E inline READ COMMITTED cell, expected from +52% toward +19%.
