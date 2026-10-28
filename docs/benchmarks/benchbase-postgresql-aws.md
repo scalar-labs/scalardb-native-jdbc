@@ -475,6 +475,32 @@ YCSB p50 overhead, fast network:
   need, as on Oracle. Every call is planned, on both sides.
 - **At +250 µs** every YCSB cell but READ COMMITTED decoupled's E is 0.82–0.99.
 
+## Thirteenth run: B1, the committed copy's key range on the metadata side (2026-10-28)
+
+Run `20261028-1706-pg` from `bench-env/plans/targeted-postgresql.json` on main `99e9c86`. Among
+the round's five fixes, B1 (`99e9c86`) is PostgreSQL's: the committed copy's outer join repeats
+the predicate's key conjuncts in its ON clause for the metadata side, since PostgreSQL carries no
+inequality across an outer join (todo 334, 966e3f3). YCSB E at 1M rows, READ COMMITTED, both
+layouts, the fast network, 60 s × 2, 4 terminals. It ran beside Oracle's targeted run; about 15
+minutes.
+
+| YCSB E, RC | twelfth run | thirteenth run |
+|---|---|---|
+| decoupled, (c)/(a) | 0.54 | **0.71** |
+| decoupled scan p50, vendor → driver | +88% | 1,314 → 1,870 µs (+42%) |
+| decoupled scan, execution / planning a call | 1.68 / 0.20 ms (vendor 0.65 / 0.04) | **1.04** / 0.23 ms (vendor 0.67 / 0.04) |
+| inline, (c)/(a) | 0.87 | 0.79 |
+| inline scan p50 | +16% | 1,318 → 1,691 µs (+28%) |
+| inline scan, execution / planning a call | — | 0.86 / 0.14 ms (vendor 0.69 / 0.04) |
+
+- **The plan** is now a Merge Left Join of two index scans: the data table's primary key, and
+  the metadata table's with the range in its Index Cond, where it was a Hash Right Join over a
+  sequential scan of the metadata table. This is the generic plan in `server.txt`.
+- **What remains** at RC decoupled is +0.37 ms of execution a scan, the join itself (the layout's
+  cost at RC, design 4.2), and 0.19 ms of planning, every call planned on both sides.
+- **The inline cell** has no change of its own in this round. Its 0.79 against 0.87 is the
+  variation between two runs, here and in the vendor's own figures.
+
 ## Reports
 
 ### HEAD 93f5217
