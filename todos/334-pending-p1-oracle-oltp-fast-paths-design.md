@@ -2486,3 +2486,30 @@ primary key, no skip scan, the in-flight arm a range scan of the in-flight index
 plans the primary key without the hint too, as the design's note found, so the plan check guards the
 hinted plan and the AWS cell's plan dump shows the effect. Mergeable; landing as A2's; the proof the
 Oracle YCSB E inline READ COMMITTED cell, expected from +52% toward +19%.
+
+### 2026-10-28: (C) reviewed mergeable: 7389753 on key-order (the design's note)
+
+Reviewed from `git show 7389753` (on 3ebf06b). `KeyOrder` reads what section 3 names: the data
+table's primary key by `KEY_SEQ` through `getPrimaryKeys` (the catalog's order only where the engine
+lists none), an index's columns by `ORDINAL_POSITION` through `getIndexInfo` with approximate true,
+which matters on Oracle where an exact listing analyzes the table over the setup's locked
+statistics; the catalog argument the schema on MySQL and MariaDB, null elsewhere; names compared by
+`Engine.columnKey`. `inflightColumns` is each engine's index shape as `createIndex` builds it,
+checked against the DDL: the key alone on PostgreSQL and on a SQL Server metadata table, both
+filtered to the rows in flight, `tx_state` first on Oracle, MySQL, MariaDB and a SQL Server inline
+table. `Setup.up`: the in-flight index built over the engine's key order; one found in another order
+dropped and built again (PostgreSQL's build drops it itself); `T_key` on a decoupled table whose
+metadata primary key is not in that order and that has no such index yet, built as the in-flight
+index is, online where the engine allows; teardown drops it where `getIndexInfo` finds it. `Check`
+adds `KeyOrder.inOrder` to `isSetUp`; the catalog is untouched (5a07d92). The engine fact, now in
+section 3's sentence: the import keys the metadata table by name on Oracle, MySQL and MariaDB, whose
+drivers sort `getPrimaryKeys` by column name as the specification says, and in the data order on
+PostgreSQL and SQL Server, whose drivers return it by `KEY_SEQ`; `T_key` is built on the first three
+only. The rebuild path on Oracle creates an index under the table's locked statistics, which the
+test exercises and 23ai allows. The test on all five engines covers the list, with its own metadata
+reads: the data key (b, a) and the metadata key (a, b) or (b, a) per engine; the in-flight index's
+columns after setup, `T_key` where the metadata key is by name and none otherwise; `check` set up;
+on Oracle the prefix read of the metadata rows an INDEX RANGE SCAN under `INDEX(m)`, no skip scan; a
+second setup with no index action; an in-flight index put back in the old order, `check` not set up,
+setup "rebuilt", `check` set up; teardown dropping both. Mergeable; landing as A2's; the proof the
+Oracle TPC-C READ COMMITTED decoupled cell's Delivery and StockLevel, with A2 toward 0.65.

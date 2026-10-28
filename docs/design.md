@@ -635,7 +635,9 @@ Server editions that have online builds and on Oracle where the edition allows);
 `tx_state` first and then the key columns in the data table's primary key order, read from the
 engine's constraint (`DatabaseMetaData.getPrimaryKeys` by `KEY_SEQ`), not from the catalog:
 ScalarDB's import adds an imported composite key's columns in `getPrimaryKeys`' result order, which
-JDBC orders by column name, so the metadata table's primary key is (OL_D_ID, OL_NUMBER, OL_O_ID,
+Oracle's, MySQL's and MariaDB's drivers sort by column name as the JDBC specification says, while
+PostgreSQL's and SQL Server's return it by `KEY_SEQ` and the metadata key keeps the data order
+there, so on the first three the metadata table's primary key is (OL_D_ID, OL_NUMBER, OL_O_ID,
 OL_W_ID) for BenchBase's `order_line (OL_W_ID, OL_D_ID, OL_O_ID, OL_NUMBER)`, and a predicate on a
 prefix of the data key, Delivery's and StockLevel's (W, D, O), reaches the metadata rows only by
 index skip scans, 112 gets for a ten-row read on Oracle (todo 334's log, 2026-10-28). Where the
