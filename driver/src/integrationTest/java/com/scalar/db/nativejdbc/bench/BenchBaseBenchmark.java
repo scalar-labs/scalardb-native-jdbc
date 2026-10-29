@@ -341,8 +341,16 @@ class BenchBaseBenchmark {
       Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
       try (Connection c = e.open()) {
         assertThat(
+                // decoupled tables backfilled and inline ones not, as the runs since 20289be,
+                // whatever
+                // the setup's default (off on every table since the user's decision of 2026-10-29)
                 Setup.run(
-                    catalog, c, t -> t.namespace().equals(ns), Duration.ofMinutes(10), List.of()))
+                    catalog,
+                    c,
+                    t -> t.namespace().equals(ns),
+                    Duration.ofMinutes(10),
+                    List.of(),
+                    DECOUPLED))
             .allMatch(Setup.Result::succeeded, "succeeded");
       }
     }
