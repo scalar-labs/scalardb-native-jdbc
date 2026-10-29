@@ -47,25 +47,29 @@ class ShellIntegrationTest {
   private static final Set<Engines> READY =
       Collections.synchronizedSet(EnumSet.noneOf(Engines.class));
 
-  /** Every engine but MySQL with lower-case table names, which changes nothing in the shell. */
+  /**
+   * Every engine but MySQL with lower-case table names, which changes nothing in the shell. That
+   * engine's own task therefore runs no case, which the tests allow (allowZeroInvocations).
+   */
   static List<Engines> engines() {
     List<Engines> engines = new ArrayList<>(Engines.selected());
     engines.remove(Engines.MYSQL_LOWER_CASE);
     return engines;
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(allowZeroInvocations = true)
   @MethodSource("engines")
   void aScript_rollsBackAndCommits(Engines e, @TempDir Path dir) throws Exception {
     prepare(e);
     Path script = dir.resolve("script.sql");
+    // a level every engine takes, in lower case: Oracle refuses SERIALIZABLE (design section 5)
     Files.writeString(
         script,
         """
         BEGIN;
         INSERT INTO sh.plain VALUES (1, 'rolled back');
         ROLLBACK;
-        begin isolation level serializable;
+        begin isolation level repeatable read;
         INSERT INTO sh.plain
           VALUES (2, 'committed');
         COMMIT;
@@ -81,7 +85,7 @@ class ShellIntegrationTest {
     assertThat(rows(e)).containsExactly("2:committed");
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(allowZeroInvocations = true)
   @MethodSource("engines")
   void onErrorStop_stopsAtTheFirstError(Engines e) throws Exception {
     prepare(e);
@@ -105,7 +109,7 @@ class ShellIntegrationTest {
     assertThat(rows(e)).isEmpty();
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(allowZeroInvocations = true)
   @MethodSource("engines")
   void catalogCommands_markScalarDbTables(Engines e) throws Exception {
     prepare(e);
@@ -144,7 +148,7 @@ class ShellIntegrationTest {
         .containsPattern("(?i)-\\[ RECORD 1 \\]-*\nname \\| first\n");
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(allowZeroInvocations = true)
   @MethodSource("engines")
   void passthrough_runsWhatTheDriverRefuses(Engines e) throws Exception {
     prepare(e);
@@ -182,7 +186,7 @@ class ShellIntegrationTest {
         .contains("names a ScalarDB table");
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(allowZeroInvocations = true)
   @MethodSource("engines")
   void cancel_stopsTheRunningStatement(Engines e) throws Exception {
     prepare(e);
@@ -220,7 +224,7 @@ class ShellIntegrationTest {
     }
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(allowZeroInvocations = true)
   @MethodSource("engines")
   void completion_offersTheCurrentSchemasNames(Engines e) throws Exception {
     prepare(e);
@@ -249,7 +253,7 @@ class ShellIntegrationTest {
     }
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(allowZeroInvocations = true)
   @MethodSource("engines")
   void mysql_goesThroughMariaDbConnectorJ(Engines e) throws Exception {
     Assumptions.assumeTrue(e == Engines.MYSQL, "MySQL only");
@@ -261,7 +265,7 @@ class ShellIntegrationTest {
     assertThat(run.out).contains("MySQL").contains("MariaDB Connector/J");
   }
 
-  @ParameterizedTest
+  @ParameterizedTest(allowZeroInvocations = true)
   @MethodSource("engines")
   void connect_switchesDatabases_orKeepsTheConnection(Engines e) throws Exception {
     Assumptions.assumeTrue(e == Engines.POSTGRESQL, "PostgreSQL has a second database to hand");
@@ -287,7 +291,7 @@ class ShellIntegrationTest {
   }
 
   /** Why snsql translates BEGIN: the driver refuses it as SQL. */
-  @ParameterizedTest
+  @ParameterizedTest(allowZeroInvocations = true)
   @MethodSource("engines")
   void theDriver_refusesBeginAsSql(Engines e) throws Exception {
     Assumptions.assumeTrue(e == Engines.POSTGRESQL, "the same refusal on every engine");
