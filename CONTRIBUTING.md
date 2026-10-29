@@ -52,3 +52,9 @@ Name the levels READ COMMITTED, SNAPSHOT and SERIALIZABLE in prose; write a JDBC
 reader types. "Transaction metadata" is what ScalarDB keeps per row; ScalarDB's "table catalog" is
 `scalardb.metadata` and `scalardb.virtual_tables`; "the setup" is the preparation, `setup` the
 subcommand that runs it.
+
+## Changelog entries
+
+A change users can see adds a changelog entry in the same commit, with `changie new`; a refactor,
+tests, benchmarks, CI and the design notes add none. How to write one: "Changelog" in
+[RELEASING.md](RELEASING.md#changelog).

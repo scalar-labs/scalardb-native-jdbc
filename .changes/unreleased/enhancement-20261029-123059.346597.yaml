@@ -1,0 +1,3 @@
+kind: enhancement
+body: '`snsql`, a psql-like interactive shell that goes through the driver on all five databases, shipped as `scalardb-native-shell-<version>.zip` on the GitHub release. See `docs/snsql.md`.'
+time: 2026-10-29T12:30:59.346597+09:00

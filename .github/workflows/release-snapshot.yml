@@ -1,0 +1,104 @@
+name: Publish snapshot
+
+# Every commit on main and on each version branch publishes the driver's snapshot to the Maven Central
+# snapshot repository, so a team member or a downstream build can try the line without building this
+# repository (docs/development-builds.md). The patterns match the unprefixed branch names in
+# RELEASING.md: `3` for a major version branch, `3.20` for a minor one.
+on:
+  push:
+    branches:
+      - main
+      - "[0-9]+"
+      - "[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+# One publication at a time per branch, never cancelled midway, which could leave a partial snapshot
+# until the next run. Per branch, because each branch publishes its own version (the version job
+# below refuses one from another line)
+concurrency:
+  group: snapshot-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Whether this commit publishes, and under which version. A release commit on a version branch
+  # carries a released version, which is the release workflow's to publish; a version branch carrying
+  # a version from another line, such as one just cut that still has its parent's, would overwrite
+  # the parent's snapshot. Both skip rather than fail. RELEASING.md bumps the parent before cutting a
+  # branch, since this check cannot tell the two apart while they carry the same version
+  version:
+    # not in a fork, which has none of the secrets
+    if: github.repository == 'scalar-labs/scalardb-native-jdbc'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.snapshot.outputs.version }}
+      publish: ${{ steps.snapshot.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check that the version is a snapshot on this branch's line
+        id: snapshot
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version=//p' gradle.properties)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          skip() {
+            echo "::notice::$1; nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          case "${version}" in
+            *-SNAPSHOT) ;;
+            *) skip "version ${version} is not a snapshot" ;;
+          esac
+          if [ "${BRANCH}" != main ]; then
+            case "${version}" in
+              "${BRANCH}".*) ;;
+              *) skip "version ${version} is not on the ${BRANCH} line" ;;
+            esac
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    # the concurrency group never cancels, so bound a hung upload rather than hold it for six hours
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      # no cache, as in release.yml: this job signs with the same key
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-disabled: true
+
+      # A commit that fails the driver's unit tests and static checks does not replace the snapshot.
+      # The engines' integration tests run in ci.yml on the same push, in parallel, and do not gate a
+      # snapshot: it is mutable, and the next green commit replaces it.
+      - name: Check the driver
+        run: ./gradlew :driver:check -Dnativejdbc.engines=none --no-build-cache
+
+      # the plugin reads these as Gradle properties, so they are never written to a file
+      - name: Publish to the Maven Central snapshot repository
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_CENTRAL_GPG_SECRET_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_CENTRAL_GPG_PASSPHRASE }}
+        run: ./gradlew publishToMavenCentral --no-configuration-cache --no-build-cache

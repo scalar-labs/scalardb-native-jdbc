@@ -9,6 +9,10 @@ on:
       - "[0-9]+"
       - "[0-9]+.[0-9]+"
   pull_request:
+  # release.yml runs it on the tagged commit before anything is signed: a tag can be pushed before,
+  # or regardless of, the branch's own run. Called, github.workflow is the caller's name, so the group
+  # below is "Release-<tag>", which release.yml's own group must not equal.
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

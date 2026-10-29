@@ -1,0 +1,292 @@
+name: Release
+
+# Cut a release by tagging a commit on its minor version branch that already carries the release
+# version in gradle.properties and its release notes in .changes/ (RELEASING.md). workflow_dispatch
+# re-runs a release whose tag exists, such as one that failed after Central accepted the upload: pick
+# the tag as the ref.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a release in flight: a half-uploaded deployment is worse than a duplicate run. Not
+# "Release-<tag>", which is the group ci.yml takes when this workflow calls it.
+concurrency:
+  group: release-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Guards the mistakes a release cannot undo, since a version on Central is immutable: a jar whose
+  # version disagrees with its tag, a commit that never went through its release branch (a tag can be
+  # pushed to any commit), and a release without its notes
+  verify-version:
+    # not in a fork, which has none of the secrets
+    if: github.repository == 'scalar-labs/scalardb-native-jdbc'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      notes: ${{ steps.notes.outputs.notes }}
+    steps:
+      # a dispatch on a branch would fail below with a confusing tag mismatch
+      - name: Reject a ref that is not a tag
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::error::this workflow releases a tag; ${GITHUB_REF} is not one. Re-run the dispatch" \
+            "with the tag selected as the ref."
+          exit 1
+
+      # full history, so that the reachability check below has the branch to walk; pinned to the
+      # commit the run was triggered for, which is the one publish-maven builds
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag against gradle.properties
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version=//p' gradle.properties)
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [ -z "${version}" ]; then
+            echo "::error::no version= line found in gradle.properties"
+            exit 1
+          fi
+          # a dispatch can name any tag; the branch check below relies on digits and dots
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::${tag} is not a release tag; expected v<major>.<minor>.<patch> with an" \
+              "optional pre-release suffix"
+            exit 1
+          fi
+          if [ "v${version}" != "${tag}" ]; then
+            echo "::error::tag ${tag} does not match gradle.properties version ${version} (expected v${version})"
+            exit 1
+          fi
+          case "${version}" in
+            *-SNAPSHOT)
+              echo "::error::refusing to release a SNAPSHOT version (${version})"
+              exit 1
+              ;;
+          esac
+          echo "Releasing ${version}"
+
+      # The release commit is made on the minor version branch (3.20 for 3.20.x) and never merges
+      # back, so the branch is derived from the version. Git answers 1 for "not an ancestor" and
+      # 128 when it could not tell; both fail, with different messages
+      - name: Check the tag is on its release branch
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          core="${VERSION%%-*}"
+          line="${core%.*}"
+          rc=0
+          heads=$(git ls-remote --heads origin "refs/heads/${line}") || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            echo "::error::could not reach origin to look for release branch '${line}' (git exited ${rc})"
+            exit 1
+          fi
+          if [ -z "${heads}" ]; then
+            echo "::error::no release branch '${line}' on origin; a release is cut from its minor" \
+              "version branch, never from main or a major version branch (see RELEASING.md)"
+            exit 1
+          fi
+          git fetch --no-tags --quiet origin "+refs/heads/${line}:refs/remotes/origin/${line}"
+          rc=0
+          git merge-base --is-ancestor "${GITHUB_SHA}" "refs/remotes/origin/${line}" || rc=$?
+          case "${rc}" in
+            0) echo "${GITHUB_SHA} is on ${line}" ;;
+            1)
+              echo "::error::tag ${GITHUB_REF#refs/tags/} points at a commit that is not on release" \
+                "branch ${line}; merge it there first"
+              exit 1
+              ;;
+            *)
+              echo "::error::could not determine whether ${GITHUB_SHA} is on ${line} (git exited ${rc})"
+              exit 1
+              ;;
+          esac
+
+      # The release notes are the version's changie file, written by `changie batch` before the tag
+      # (see "Changelog" in RELEASING.md). Read here, before publish-maven, because a release without
+      # them is a mistake to stop while nothing is out yet: by the time github-release runs, the
+      # Central deployment has already gone.
+      #
+      # Unlike Saga and the PostgreSQL frontend, a pre-release is batched like any release: the betas
+      # are versions on Central that users depend on, so each has notes of its own rather than a
+      # preview of the next. Entries still pending fail the tag too. They are in the tagged tree, so
+      # they ship in this release, and leaving them would credit them to the next one; RELEASING.md
+      # says how to fold them in.
+      - name: Read the release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          file=".changes/${tag}.md"
+          if [ ! -f "${file}" ]; then
+            echo "::error::${file} does not exist. Run \`changie batch ${tag}\` and \`changie merge\`" \
+              "before tagging; see \"Changelog\" in RELEASING.md."
+            exit 1
+          fi
+          # The file's first line is its `## [<version>] - <date>` heading, which the release title
+          # already says.
+          notes=$(tail -n +2 "${file}" | sed '/./,$!d')
+          if ! grep -q '^- ' <<< "${notes}"; then
+            echo "::error::${file} lists no changes"
+            exit 1
+          fi
+          if compgen -G ".changes/unreleased/*.yaml" > /dev/null; then
+            echo "::error::.changes/unreleased/ still holds entries, which ship in ${tag} but are not in" \
+              "${file}. Fold them in as \"When releasing\" in RELEASING.md describes, then tag again."
+            exit 1
+          fi
+          delimiter="NOTES_$(openssl rand -hex 16)"
+          {
+            echo "notes<<${delimiter}"
+            echo "${notes}"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+          echo "${notes}"
+
+  # The whole of CI on the tagged commit, the six engine configurations included, before anything
+  # signed leaves: a tag can be pushed before, or regardless of, the branch's own run, and a version on
+  # Central cannot be taken back. The daily isolation tests are not repeated here; certifying the line
+  # covers them (RELEASING.md).
+  ci:
+    needs: verify-version
+    uses: ./.github/workflows/ci.yml
+
+  # Uploads the driver as a USER_MANAGED deployment: the Portal validates it and waits for someone to
+  # release it (RELEASING.md). The job ends at the upload, so a deployment the Portal rejects still
+  # leaves it green
+  publish-maven:
+    needs: [verify-version, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # the verified commit, not the tag name resolved again; no token left for the build to read
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      # No cache on the release path: a tag job would restore what CI last saved on main, and the
+      # release would be built and signed from outputs no reviewed commit accounts for
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-disabled: true
+
+      # The signing key is optional for a local build, so check it here rather than upload an
+      # unsigned deployment the Portal rejects only after this job has gone green
+      - name: Check the publishing secrets are set
+        env:
+          KEY: ${{ secrets.MAVEN_CENTRAL_GPG_SECRET_KEY }}
+          USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        run: |
+          if [ -z "${KEY}" ] || [ -z "${USERNAME}" ] || [ -z "${PASSWORD}" ]; then
+            echo "::error::a MAVEN_CENTRAL_* secret is not set for this repository (RELEASING.md)"
+            exit 1
+          fi
+
+      # Only the driver applies the publishing conventions, so this uploads the driver alone; the
+      # build cache stays off so that the signed jars are compiled here
+      - name: Publish to Maven Central
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_CENTRAL_GPG_SECRET_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_CENTRAL_GPG_PASSPHRASE }}
+        run: ./gradlew publishToMavenCentral --no-configuration-cache --no-build-cache
+
+  # The GitHub release, with the notes verify-version read and the snsql and tools zips. After the
+  # upload, so that a failed upload leaves no release page pointing at a driver that is not there. A
+  # pre-release version is marked as one, and only the highest release takes the Latest badge, so a
+  # patch to an older line does not. On a re-run an existing release is left as it is, since its notes
+  # may have been edited since, and only the zips it lacks are added
+  github-release:
+    needs: [verify-version, publish-maven]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      # every tag, to find the highest release; no token left in the workspace, gh reads GH_TOKEN
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      # no cache, as in publish-maven: the zips are built from this commit alone
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-disabled: true
+
+      - name: Build the distribution archives
+        run: ./gradlew :shell:distZip :tools:distZip --no-build-cache
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: ${{ needs.verify-version.outputs.notes }}
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          zips=(
+            "shell/build/distributions/scalardb-native-shell-${VERSION}.zip"
+            "tools/build/distributions/scalardb-native-tools-${VERSION}.zip"
+          )
+          for zip in "${zips[@]}"; do
+            [ -f "${zip}" ] || { echo "::error::${zip} was not built"; exit 1; }
+          done
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "GitHub release ${tag} exists; its notes are left as they are"
+            # an asset already attached is never replaced, since people may have downloaded it
+            attached=$(gh release view "${tag}" --json assets --jq '.assets[].name')
+            for zip in "${zips[@]}"; do
+              if grep -qxF "$(basename "${zip}")" <<< "${attached}"; then
+                echo "$(basename "${zip}") is attached already"
+              else
+                gh release upload "${tag}" "${zip}"
+              fi
+            done
+            exit 0
+          fi
+          printf '%s\n' "${NOTES}" > "${RUNNER_TEMP}/notes.md"
+          args=(--verify-tag --title "${tag}" --notes-file "${RUNNER_TEMP}/notes.md")
+          case "${tag}" in
+            *-*) args+=(--prerelease --latest=false) ;;
+            *)
+              highest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+              if [ "${tag}" = "${highest}" ]; then
+                args+=(--latest)
+              else
+                args+=(--latest=false)
+              fi
+              ;;
+          esac
+          gh release create "${tag}" "${args[@]}" "${zips[@]}"

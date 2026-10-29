@@ -1,0 +1,73 @@
+name: Changelog
+
+# A pull request that changes what users see adds a changie entry to .changes/unreleased/, which the
+# release collects into CHANGELOG.md; see "Changelog" in RELEASING.md. The entry is a file of its own,
+# never an edit to CHANGELOG.md, so Auto-PR's cherry-pick carries it to a release line without
+# conflicting or landing in a section that line has already released.
+#
+# Its own workflow rather than a step in ci.yml, because the labels are inputs too: adding or removing
+# no-changelog has to re-run this check, and re-running the whole build for it would be waste.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  entry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # The merge commit and its parents: its first parent is the base the pull request merges onto.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-changie
+
+      # Every pending entry, not only this pull request's: a malformed one fails `changie batch` at
+      # release time, and finding out there is too late. changie refuses an unknown kind or broken
+      # YAML by itself, but accepts an entry with no body, which renders as a bare `- `, or as just
+      # its pull request link when it has one; both are checked here.
+      - name: Check the pending entries are valid
+        run: |
+          set -euo pipefail
+          rendered=$(changie batch v0.0.0 --dry-run)
+          if grep -Eqx -- '- *( \(\[#[0-9]+\]\([^)]*\)\))? *' <<< "${rendered}"; then
+            echo "::error::an entry in .changes/unreleased/ has no body"
+            exit 1
+          fi
+
+      # Titles here do not follow Conventional Commits, so unlike Saga's check this one cannot tell a
+      # user-facing pull request from its title: every pull request adds an entry unless it is labelled
+      # no-changelog (tests, benchmarks, CI, refactors, the design notes). Dependabot's bumps are
+      # exempt; a bump users see, such as a vendor driver in the snsql zip, gets its entry by hand.
+      - name: Check the pull request adds an entry
+        env:
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          if [ "${SKIP}" = "true" ]; then
+            echo "Labelled no-changelog; no entry is required"
+            exit 0
+          fi
+          if [ "${AUTHOR}" = "dependabot[bot]" ]; then
+            echo "A Dependabot bump; no entry is required"
+            exit 0
+          fi
+          added=$(git diff --name-only --diff-filter=A HEAD^1 HEAD -- '.changes/unreleased/*.yaml')
+          if [ -z "${added}" ]; then
+            echo "::error::this pull request adds no changelog entry. Run \`changie new\` and commit" \
+              "the file it writes (see \"Changelog\" in RELEASING.md), or add the no-changelog label" \
+              "if users cannot see the change."
+            exit 1
+          fi
+          echo "Entry added: ${added}"
