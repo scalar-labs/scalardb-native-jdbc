@@ -82,10 +82,10 @@ jobs:
           shopt -u nocasematch
           echo "Releasing ${version}"
 
-      # The README and the getting-started guide tell users which version to download, and the
-      # guide's example takes that version unless told otherwise; a release that names an older one
-      # would send new users to it. A pre-release names none of its own, so it is not checked
-      - name: Check the README and the getting-started guide name this release
+      # The getting-started example takes the driver at this default unless told otherwise; the
+      # README and the guide say <VERSION> and leave the version to it. A release that left an older
+      # default would run the guide on it. A pre-release is never the default, so it is not checked
+      - name: Check the getting-started example takes this release
         if: ${{ !contains(steps.version.outputs.version, '-') }}
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -94,12 +94,10 @@ jobs:
           missing=0
           check() {
             if ! grep -qF -- "$2" "$1"; then
-              echo "::error::$1 does not name ${VERSION}: expected $2 (RELEASING.md, step 3)"
+              echo "::error::$1 does not take ${VERSION}: expected $2 (RELEASING.md, step 3)"
               missing=1
             fi
           }
-          check README.md "scalardb-native-jdbc:${VERSION}\""
-          check docs/getting-started.md "scalardb-native-shell-${VERSION}.zip"
           check samples/getting-started/build.gradle.kts "getOrElse(\"${VERSION}\")"
           exit "${missing}"
 

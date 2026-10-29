@@ -20,18 +20,21 @@ through the driver.
 
 ## Getting it
 
+`<VERSION>` below is the latest release, on [Maven Central](https://central.sonatype.com/artifact/com.scalar-labs/scalardb-native-jdbc) and the
+[GitHub releases](https://github.com/scalar-labs/scalardb-native-jdbc/releases).
+
 - **The driver**, `com.scalar-labs:scalardb-native-jdbc` on Maven Central, which the application
   connects through with `jdbc:scalardb-native:postgresql:...`:
 
   ```kotlin
-  implementation("com.scalar-labs:scalardb-native-jdbc:3.20.0")
+  implementation("com.scalar-labs:scalardb-native-jdbc:<VERSION>")
   ```
 
   ```xml
   <dependency>
     <groupId>com.scalar-labs</groupId>
     <artifactId>scalardb-native-jdbc</artifactId>
-    <version>3.20.0</version>
+    <version><VERSION></version>
   </dependency>
   ```
 

@@ -199,12 +199,11 @@ For `3.20.0`:
    notes, `changie merge`. For the first release of a line this is on `main`, then bump `main` and cut
    `3.20` as in [Cutting a branch](#cutting-a-branch). For a later release it is on `3.20`, in the
    next step's commit.
-3. On `3.20`, make the release commit: `version=3.20.0` in `gradle.properties`, and the released
-   version where the docs name it, which `verify-version` checks: the README's dependency snippets,
-   `docs/getting-started.md` (the driver, the zips and the Schema Loader) and the default in
-   `samples/getting-started/build.gradle.kts`. Check that `.changes/v3.20.0.md` carries today's
-   date, which is the date `changie batch` ran; correct it and run `changie merge` if not. Push it
-   and wait for CI.
+3. On `3.20`, make the release commit: `version=3.20.0` in `gradle.properties`, and the default in
+   `samples/getting-started/build.gradle.kts`, which `verify-version` checks. The README and the
+   guide say `<VERSION>`; the guide's Schema Loader changes only with the ScalarDB line, for a new
+   minor. Check that `.changes/v3.20.0.md` carries today's date, which is the date `changie batch`
+   ran; correct it and run `changie merge` if not. Push it and wait for CI.
 4. Tag that commit and push the tag:
 
    ```bash

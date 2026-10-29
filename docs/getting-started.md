@@ -70,18 +70,18 @@ causes.
 - Docker, for the database in this guide. Any PostgreSQL you can create tables in will do.
 - This repository's [`samples/getting-started`](../samples/getting-started) directory. It holds every
   file the guide uses, so you don't copy any from this page.
-- From the [ScalarDB releases](https://github.com/scalar-labs/scalardb/releases), the Schema Loader
-  `scalardb-schema-loader-3.20.0.jar`, about 170 MB. Download `scalardb-schema-loader`, not
+- From the [ScalarDB releases](https://github.com/scalar-labs/scalardb/releases), ScalarDB 3.20's
+  Schema Loader, `scalardb-schema-loader-3.20.0.jar`, about 170 MB. Download `scalardb-schema-loader`, not
   `scalardb-cluster-schema-loader`, which is for ScalarDB Cluster. Put it in
   `samples/getting-started`.
-- From the [ScalarDB Native JDBC releases](https://github.com/scalar-labs/scalardb-native-jdbc/releases),
-  `scalardb-native-shell-3.20.0.zip` (`snsql`) and `scalardb-native-tools-3.20.0.zip`
-  (`scalardb-native-tools`). Unzip both and put their `bin`
+- From the latest of the [ScalarDB Native JDBC releases](https://github.com/scalar-labs/scalardb-native-jdbc/releases),
+  `scalardb-native-shell-<VERSION>.zip` (`snsql`) and `scalardb-native-tools-<VERSION>.zip`
+  (`scalardb-native-tools`), where `<VERSION>` is the release's version. Unzip both and put their `bin`
   directories on your `PATH`. Both bundle the JDBC drivers of PostgreSQL, MariaDB (also used for
   MySQL), SQL Server and Oracle.
 
-You do not build the driver: the example program gets it from Maven Central as
-`com.scalar-labs:scalardb-native-jdbc:3.20.0`.
+You do not build the driver: the example program gets the latest release from Maven Central as
+`com.scalar-labs:scalardb-native-jdbc`.
 
 Run every command in this guide from `samples/getting-started`:
 
@@ -397,7 +397,7 @@ API, with it:
 
 ```kotlin
 dependencies {
-    implementation("com.scalar-labs:scalardb-native-jdbc:3.20.0")
+    implementation("com.scalar-labs:scalardb-native-jdbc:<VERSION>")
     runtimeOnly("org.postgresql:postgresql:42.7.14")
     runtimeOnly("org.slf4j:slf4j-simple:1.7.36")
 }
@@ -409,7 +409,7 @@ With Maven, the same dependencies are:
 <dependency>
   <groupId>com.scalar-labs</groupId>
   <artifactId>scalardb-native-jdbc</artifactId>
-  <version>3.20.0</version>
+  <version><VERSION></version>
 </dependency>
 <dependency>
   <groupId>org.postgresql</groupId>
