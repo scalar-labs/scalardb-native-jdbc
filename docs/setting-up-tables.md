@@ -91,7 +91,8 @@ Writes the transaction metadata of an imported decoupled table's rows that have 
 the rows ScalarDB left with NULL metadata, on tables that are set up. It runs only DML on the
 metadata table, so it needs no DDL privileges, and it can run at any time and be repeated. It waits
 for rows ScalarDB has in flight, up to `--backfill-wait` seconds per table (60). On Oracle it then
-sets the metadata table's statistics again, as the setup does. `--dry-run` prints the statements and
+sets the metadata table's statistics again, and on MySQL it runs `ANALYZE TABLE` on it, as the setup
+does after a backfill. `--dry-run` prints the statements and
 the number of rows it would write.
 
 The driver doesn't need the backfill. ScalarDB does, on an imported decoupled table: a ScalarDB
