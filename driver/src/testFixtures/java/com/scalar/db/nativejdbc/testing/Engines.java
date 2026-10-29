@@ -328,7 +328,7 @@ public enum Engines {
   /** The DDL that creates a schema for application tables; on Oracle a schema is a user. */
   public String createSchema(String name) {
     return switch (this) {
-      case MYSQL, MARIADB -> "CREATE DATABASE " + name;
+      case MYSQL, MYSQL_LOWER_CASE, MARIADB -> "CREATE DATABASE " + name;
       case ORACLE -> "CREATE USER " + name + " IDENTIFIED BY " + name + " QUOTA UNLIMITED ON USERS";
       default -> "CREATE SCHEMA " + name;
     };
@@ -346,7 +346,7 @@ public enum Engines {
           c,
           switch (this) {
             case POSTGRESQL -> "DROP SCHEMA IF EXISTS " + schema + " CASCADE";
-            case MYSQL, MARIADB -> "DROP DATABASE IF EXISTS " + schema;
+            case MYSQL, MYSQL_LOWER_CASE, MARIADB -> "DROP DATABASE IF EXISTS " + schema;
             case ORACLE ->
                 "BEGIN EXECUTE IMMEDIATE 'DROP USER "
                     + schema
@@ -370,7 +370,7 @@ public enum Engines {
                   + "; EXEC sp_executesql @d; DROP SCHEMA IF EXISTS "
                   + schema;
             }
-            default -> throw new UnsupportedOperationException("dropSchemas on " + engine);
+            default -> throw new UnsupportedOperationException("dropSchemas on " + this);
           });
     }
   }
@@ -379,7 +379,7 @@ public enum Engines {
   public String useSchema(String schema) {
     return switch (this) {
       case POSTGRESQL -> "SET search_path TO " + schema + ", public";
-      case MYSQL, MARIADB -> "USE " + schema;
+      case MYSQL, MYSQL_LOWER_CASE, MARIADB -> "USE " + schema;
       case ORACLE -> "ALTER SESSION SET CURRENT_SCHEMA = " + schema;
       default ->
           throw new UnsupportedOperationException(
