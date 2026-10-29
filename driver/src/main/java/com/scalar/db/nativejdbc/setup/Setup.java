@@ -49,6 +49,9 @@ public final class Setup {
   /** The {@code tx_id} the backfill writes on a row ScalarDB deems committed. */
   static final String BACKFILL_TX_ID = "scalardb-native-backfill";
 
+  /** Oracle's error code for a statement the user lacks the privilege for, ORA-01031. */
+  private static final int ORA_INSUFFICIENT_PRIVILEGES = 1031;
+
   private static final Duration DEFAULT_BACKFILL_WAIT = Duration.ofMinutes(1);
 
   /** The outcome for one table. */
@@ -522,13 +525,11 @@ public final class Setup {
         done(actions, "created key index " + keyIndex + " in the data table's key order");
       }
       if (engine == Engine.ORACLE) {
-        Set<String> physical = new LinkedHashSet<>(List.of(t.dataTable()));
-        if (t.metadataTable() != null) {
-          physical.add(t.metadataTable());
-        }
-        for (String table : physical) {
-          if (createSegment(ns, table)) {
-            done(actions, "created the segment of " + table);
+        // an inline table's metadata table is the data table itself
+        for (String table : new LinkedHashSet<>(List.of(t.dataTable(), meta))) {
+          String outcome = createSegment(ns, table);
+          if (outcome != null) {
+            done(actions, outcome);
           }
         }
       }
@@ -844,28 +845,58 @@ public final class Setup {
   }
 
   /**
-   * On Oracle, creates the segment of a table that has none yet. Oracle defers a new table's
-   * segment to its first insert, and in a SERIALIZABLE transaction, which is how the driver runs
-   * SNAPSHOT, that insert fails with ORA-08177: the first transactional insert into a table just
-   * set up would fail, and its metadata table's after it. ALLOCATE EXTENT reserves one extent and
-   * reads no rows. A table that has a segment is left alone, since each run would add an extent.
+   * On Oracle, creates the segments of a table that has none yet. Oracle defers a new table's
+   * segment, and each partition's, to its first insert, and in a SERIALIZABLE transaction, which is
+   * how the driver runs SNAPSHOT, that insert fails with ORA-08177: the first transactional insert
+   * into a table just set up would fail, and its metadata table's after it. ALLOCATE EXTENT creates
+   * a segment with its indexes' and LOBs' and reads no rows: on the table, or on each partition or
+   * subpartition without one, since a range or list partitioned table refuses it whole (ORA-14254).
+   * A segment that exists is left alone, since each run would add an extent.
    *
-   * @return whether the segment was created
+   * <p>Without the ALTER privilege on a table it does not own, the setup user cannot: the step is
+   * reported and the rest of the setup goes on, since the table only fails its first transactional
+   * insert once, retryably.
+   *
+   * @return what was done, or {@code null} when every segment exists
    */
-  private boolean createSegment(String schema, String table) throws SQLException {
+  private @Nullable String createSegment(String schema, String table) throws SQLException {
+    List<String> clauses = new ArrayList<>();
     try (PreparedStatement ps =
         connection.prepareStatement(
-            "SELECT segment_created FROM all_tables WHERE owner = ? AND table_name = ?")) {
-      ps.setString(1, schema);
-      ps.setString(2, table);
+            "SELECT NULL, NULL FROM all_tables WHERE owner = ? AND table_name = ?"
+                + " AND segment_created = 'NO' UNION ALL SELECT 'PARTITION', partition_name"
+                + " FROM all_tab_partitions WHERE table_owner = ? AND table_name = ?"
+                + " AND segment_created = 'NO' UNION ALL SELECT 'SUBPARTITION', subpartition_name"
+                + " FROM all_tab_subpartitions WHERE table_owner = ? AND table_name = ?"
+                + " AND segment_created = 'NO'")) {
+      for (int i = 0; i < 3; i++) {
+        ps.setString(2 * i + 1, schema);
+        ps.setString(2 * i + 2, table);
+      }
       try (ResultSet rs = ps.executeQuery()) {
-        if (!rs.next() || !"NO".equals(rs.getString(1))) {
-          return false;
+        while (rs.next()) {
+          String kind = rs.getString(1);
+          clauses.add(kind == null ? "" : " MODIFY " + kind + " " + engine.quote(rs.getString(2)));
         }
       }
     }
-    execute("ALTER TABLE " + name(schema, table) + " ALLOCATE EXTENT");
-    return true;
+    if (clauses.isEmpty()) {
+      return null;
+    }
+    try {
+      for (String clause : clauses) {
+        execute("ALTER TABLE " + name(schema, table) + clause + " ALLOCATE EXTENT");
+      }
+    } catch (SQLException e) {
+      if (e.getErrorCode() != ORA_INSUFFICIENT_PRIVILEGES) {
+        throw e;
+      }
+      return "segment of "
+          + table
+          + " not created: the setup user needs ALTER on it (ORA-01031); until it holds a row, its"
+          + " first insert in a transaction fails once with 40001";
+    }
+    return "created the segments of " + table;
   }
 
   private String name(String schema, String object) {
