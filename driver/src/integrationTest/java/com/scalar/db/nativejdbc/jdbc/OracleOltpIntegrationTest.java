@@ -4117,6 +4117,309 @@ class OracleOltpIntegrationTest {
     return out;
   }
 
+  /**
+   * Todo 360: on an imported decoupled table, a key without a metadata row (the backfill not yet
+   * there) is written by the blocks themselves, the DML and the key's version-1 metadata row in the
+   * same call: by key and over a predicate, in a batch through the block of entries, at READ
+   * COMMITTED and, where the keyed block runs (an anchor of the table recorded), at SNAPSHOT. A
+   * metadata row created since the read, or held uncommitted by another writer while the block
+   * runs, aborts. Keys whose block of ten is odd (11-20, 31-40, ...) have no metadata row.
+   */
+  @Test
+  void todo360_aKeyWithoutAMetadataRowIsWrittenInTheBlocks() throws Exception {
+    try (Connection v = ORA.open()) {
+      ORA.execute(
+          v,
+          "CREATE TABLE " + NS + ".unst (k NUMBER(10) PRIMARY KEY, x NUMBER(10))",
+          "INSERT INTO " + NS + ".unst SELECT LEVEL, 0 FROM dual CONNECT BY LEVEL <= 100");
+    }
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      admin.importTable(N(NS), N("unst"), DECOUPLED, Map.of());
+    }
+    catalog.invalidate();
+    String meta;
+    try (Connection v = ORA.open()) {
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().equals(N("unst")),
+                  Duration.ofMinutes(1),
+                  List.of()))
+          .hasSize(1)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+      meta = NS + ".\"" + Objects.requireNonNull(tableInfo("unst").metadataTable()) + "\"";
+      ORA.execute(v, "DELETE FROM " + meta + " WHERE MOD(FLOOR((k - 1) / 10), 2) = 1", "COMMIT");
+    }
+    String table = NS + ".unst";
+    String version = "SELECT \"tx_version\" || '/' || \"tx_state\" FROM " + meta + " WHERE k = ";
+    // a catalog of its own, read after the table was imported (the driver shares one per TTL)
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59360");
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try (Connection d = ORA.openDriver(ttl);
+        Connection v = ORA.open()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(false);
+      Counter rt = new Counter(d);
+      long byKey;
+      long deleted;
+      long range;
+      try (PreparedStatement up =
+              d.prepareStatement("UPDATE " + table + " SET x = x + 1 WHERE k = ?");
+          PreparedStatement del = d.prepareStatement("DELETE FROM " + table + " WHERE k = ?");
+          PreparedStatement between =
+              d.prepareStatement("UPDATE " + table + " SET x = x + 1 WHERE k BETWEEN ? AND ?")) {
+        up.setInt(1, 16);
+        assertThat(up.executeUpdate()).isEqualTo(1); // the texts' first parses, unmeasured
+        d.commit();
+        byKey =
+            rt.measure(
+                () -> {
+                  up.setInt(1, 17);
+                  assertThat(up.executeUpdate()).isEqualTo(1);
+                });
+        deleted =
+            rt.measure(
+                () -> {
+                  del.setInt(1, 18);
+                  assertThat(del.executeUpdate()).isEqualTo(1);
+                });
+        // five keys with a metadata row (6-10), five without (11-15)
+        range =
+            rt.measure(
+                () -> {
+                  between.setInt(1, 6);
+                  between.setInt(2, 15);
+                  assertThat(between.executeUpdate()).isEqualTo(10);
+                });
+      }
+      d.commit();
+      log(
+          "todo 360 (READ COMMITTED): a key without a metadata row, an UPDATE by key "
+              + byKey
+              + ", a DELETE by key "
+              + deleted
+              + ", an UPDATE of a 10-key range, five without, "
+              + range
+              + " round trip(s)");
+      assertThat(rows(v, version + "17")).containsExactly("1/3");
+      assertThat(rows(v, version + "18")).as("the tombstone").containsExactly("1/3");
+      assertThat(rows(v, "SELECT COUNT(*) FROM " + table + " WHERE k = 18")).containsExactly("0");
+      assertThat(
+              rows(
+                  v,
+                  "SELECT COUNT(*) FROM "
+                      + meta
+                      + " WHERE k BETWEEN 11 AND 15 AND"
+                      + " \"tx_version\" = 1 AND \"tx_state\" = 3"))
+          .containsExactly("5");
+      assertThat(
+              rows(
+                  v,
+                  "SELECT COUNT(*) FROM "
+                      + meta
+                      + " WHERE k BETWEEN 6 AND 10 AND"
+                      + " \"tx_version\" = 2"))
+          .containsExactly("5");
+      assertThat(rows(v, "SELECT SUM(x) FROM " + table + " WHERE k BETWEEN 6 AND 15"))
+          .containsExactly("10");
+      assertThat(byKey).isEqualTo(2);
+      assertThat(deleted).isEqualTo(2);
+      assertThat(range).isEqualTo(2);
+      assertThat(scalarDbK("unst", 17)).isEqualTo(1);
+
+      // read first, then a ScalarDB transaction gives the key its metadata row: an abort
+      assertThat(rows(d, "SELECT x FROM " + table + " WHERE k = 19")).containsExactly("0");
+      scalarDbSetK("unst", 19, 5);
+      assertAborts(d, "UPDATE " + table + " SET x = x + 1 WHERE k = 19", "read before ScalarDB");
+      d.rollback();
+      // without the read: written at the version ScalarDB left
+      scalarDbSetK("unst", 20, 5);
+      String left = rows(v, version + "20").get(0);
+      assertThat(update(d, "UPDATE " + table + " SET x = x + 1 WHERE k = 20")).isEqualTo(1);
+      d.commit();
+      assertThat(rows(v, version + "20"))
+          .containsExactly((Long.parseLong(left.split("/")[0]) + 1) + "/3");
+      assertThat(scalarDbK("unst", 20)).isEqualTo(6);
+
+      // another writer holds an uncommitted metadata row of the key: the insert waits on it, then
+      // skips it once committed, an abort
+      v.setAutoCommit(false);
+      update(
+          v,
+          "INSERT INTO "
+              + meta
+              + " (k, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+              + " \"tx_committed_at\") VALUES (31, 'other', 3, 1, 1, 1)");
+      Future<Integer> write =
+          pool.submit(() -> update(d, "UPDATE " + table + " SET x = x + 1 WHERE k = 31"));
+      Thread.sleep(700);
+      assertThat(write.isDone()).as("waits on the other writer's metadata row").isFalse();
+      v.commit();
+      v.setAutoCommit(true);
+      assertThatThrownBy(() -> write.get(20, TimeUnit.SECONDS))
+          .hasCauseInstanceOf(SQLTransactionRollbackException.class)
+          .hasMessageContaining("given metadata after it was read");
+      d.rollback();
+      assertThat(rows(v, "SELECT x FROM " + table + " WHERE k = 31")).containsExactly("0");
+
+      // a batch of ten entries without a metadata row: the merged form, then one block of entries
+      long batch;
+      try (PreparedStatement ps =
+          d.prepareStatement("UPDATE " + table + " SET x = x + 1 WHERE k = ?")) {
+        for (int k = 51; k <= 60; k++) {
+          ps.setInt(1, k);
+          ps.addBatch();
+        }
+        assertThat(ps.executeBatch()).containsOnly(1); // the texts' first parses, unmeasured
+        d.commit();
+        batch =
+            rt.measure(
+                () -> {
+                  for (int k = 71; k <= 80; k++) {
+                    ps.setInt(1, k);
+                    ps.addBatch();
+                  }
+                  assertThat(ps.executeBatch()).hasSize(10).containsOnly(1);
+                });
+      }
+      d.commit();
+      log("todo 360 (READ COMMITTED): a batch of ten such UPDATEs " + batch + " round trip(s)");
+      assertThat(batch).isEqualTo(2);
+      assertThat(
+              rows(
+                  v,
+                  "SELECT COUNT(*) FROM "
+                      + meta
+                      + " WHERE k BETWEEN 71 AND 80 AND"
+                      + " \"tx_version\" = 1"))
+          .containsExactly("10");
+
+      // at SNAPSHOT, the keyed block where the transaction recorded an anchor of the table
+      d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      long snapshotKey;
+      long snapshotDelete;
+      long snapshotRange;
+      long snapshotBatch;
+      try (PreparedStatement up =
+              d.prepareStatement("UPDATE " + table + " SET x = x + 1 WHERE k = ?");
+          PreparedStatement del = d.prepareStatement("DELETE FROM " + table + " WHERE k = ?");
+          PreparedStatement between =
+              d.prepareStatement("UPDATE " + table + " SET x = x + 1 WHERE k BETWEEN ? AND ?")) {
+        assertThat(rows(d, "SELECT x FROM " + table + " WHERE k = 1")).hasSize(1);
+        up.setInt(1, 36);
+        assertThat(up.executeUpdate()).isEqualTo(1); // the texts' first parses, unmeasured
+        d.commit();
+        assertThat(rows(d, "SELECT x FROM " + table + " WHERE k = 1")).hasSize(1);
+        snapshotKey =
+            rt.measure(
+                () -> {
+                  up.setInt(1, 37);
+                  assertThat(up.executeUpdate()).isEqualTo(1);
+                });
+        snapshotDelete =
+            rt.measure(
+                () -> {
+                  del.setInt(1, 38);
+                  assertThat(del.executeUpdate()).isEqualTo(1);
+                });
+        d.commit();
+        // six with a metadata row (26-31, 31 from the other writer above), four without (32-35)
+        assertThat(rows(d, "SELECT x FROM " + table + " WHERE k = 1")).hasSize(1);
+        snapshotRange =
+            rt.measure(
+                () -> {
+                  between.setInt(1, 26);
+                  between.setInt(2, 35);
+                  assertThat(between.executeUpdate()).isEqualTo(10);
+                });
+        d.commit();
+        assertThat(rows(d, "SELECT x FROM " + table + " WHERE k = 1")).hasSize(1);
+        snapshotBatch =
+            rt.measure(
+                () -> {
+                  for (int k = 91; k <= 100; k++) {
+                    up.setInt(1, k);
+                    up.addBatch();
+                  }
+                  assertThat(up.executeBatch()).hasSize(10).containsOnly(1);
+                });
+      }
+      d.commit();
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      log(
+          "todo 360 (SNAPSHOT, an anchor recorded): an UPDATE by key "
+              + snapshotKey
+              + ", a DELETE by key "
+              + snapshotDelete
+              + ", the range "
+              + snapshotRange
+              + ", the batch of ten "
+              + snapshotBatch
+              + " round trip(s)");
+      assertThat(rows(v, version + "37")).containsExactly("1/3");
+      assertThat(rows(v, version + "38")).as("the tombstone").containsExactly("1/3");
+      assertThat(
+              rows(
+                  v,
+                  "SELECT COUNT(*) FROM "
+                      + meta
+                      + " WHERE k BETWEEN 32 AND 35 AND"
+                      + " \"tx_version\" = 1"))
+          .containsExactly("4");
+      // 31 got its metadata row from the other writer above
+      assertThat(rows(v, version + "31")).containsExactly("2/3");
+      assertThat(
+              rows(
+                  v,
+                  "SELECT COUNT(*) FROM "
+                      + meta
+                      + " WHERE k BETWEEN 91 AND 100 AND"
+                      + " \"tx_version\" = 1"))
+          .containsExactly("10");
+      assertThat(snapshotKey).isEqualTo(1);
+      assertThat(snapshotDelete).isEqualTo(1);
+      assertThat(snapshotRange).isEqualTo(1);
+      assertThat(snapshotBatch).isEqualTo(1);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /** ScalarDB's read of an imported table's {@code x} by its key {@code k}, its virtual table. */
+  private static long scalarDbK(String table, int k) throws Exception {
+    try (DistributedTransactionManager tm = factory.getTransactionManager()) {
+      DistributedTransaction tx = tm.begin();
+      long x =
+          tx.get(
+                  com.scalar.db.api.Get.newBuilder()
+                      .namespace(N(NS))
+                      .table(tableInfo(table).virtualTable())
+                      .partitionKey(ScalarDbNames.key("k", k))
+                      .build())
+              .orElseThrow()
+              .getBigInt(N("x"));
+      tx.commit();
+      return x;
+    }
+  }
+
+  /** ScalarDB's update of an imported table's {@code x} by its key {@code k}, committed. */
+  private static void scalarDbSetK(String table, int k, int x) throws Exception {
+    try (DistributedTransactionManager tm = factory.getTransactionManager()) {
+      DistributedTransaction tx = tm.begin();
+      tx.update(
+          Update.newBuilder()
+              .namespace(N(NS))
+              .table(tableInfo(table).virtualTable())
+              .partitionKey(ScalarDbNames.key("k", k))
+              .bigIntValue(N("x"), x)
+              .build());
+      tx.commit();
+    }
+  }
+
   private static int update(Connection c, String sql) throws SQLException {
     try (Statement st = c.createStatement()) {
       return st.executeUpdate(sql);

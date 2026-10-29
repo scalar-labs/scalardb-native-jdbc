@@ -2369,11 +2369,16 @@ Not taken:
 - The statement first over the predicate inserting for its short CAS before rolling back, 2 round
   trips for the range, for the same reason.
 
-Expected on the container, `UnstampedWriteBenchmark` on Oracle at READ COMMITTED: 3 round trips
-for an UPDATE or a DELETE by key (the statement first, the block, the commit), 3 for the range (the
-statement first, the block, the commit) and 3 for the batch of 10 (the merged form, one block of
-entries, the commit), from 7, 26 and 52. The times should fall near the stamped write's plus one
-round trip.
+Measured on the container after the build (`UnstampedWriteBenchmark`, Oracle, 2026-10-29), the
+median write and commit with a metadata row against without one. At READ COMMITTED: an UPDATE by
+key 1,816 against 2,001 µs, 2 round trips against 3 (the statement first, the block, the commit);
+a DELETE by key 1,076 against 1,538, 2 against 3; an UPDATE of a 10-key range 1,352 against 3,535,
+2 against 3 (the statement first, the block, the commit); a batch of 10 UPDATEs by key 1,305 against
+3,214, 2 against 3 (the merged form, one block of entries, the commit). That is from 7, 26 and 52 round
+trips, with every write creating its rows' version-1 metadata rows, one per key. The range and the
+batch still take 2.6x and 2.5x the stamped write's time with one round trip more: the rest is
+inside the calls, which insert ten metadata rows, and was not broken down further. At SNAPSHOT,
+0.9–1.2x, 2 round trips either way, as before.
 
 What must keep holding: the keyed block's, the predicate block's and the batches' tests above, the
 imported-table cases among them (`MoreWritesIntegrationTest.batches`' tombstone taken over in a

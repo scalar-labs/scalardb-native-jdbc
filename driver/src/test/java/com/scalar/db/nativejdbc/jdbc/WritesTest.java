@@ -836,14 +836,25 @@ class WritesTest {
                 + "DELETE FROM \"ns\".\"t_data\" t WHERE (\"id\" = ?); l_written := SQL%ROWCOUNT;"
                 + " IF l_written = 1 THEN DELETE FROM \"ns\".\"t_meta\""
                 + metaCas);
+    // an imported table's block also writes a key without a metadata row and inserts its
+    // version-1 row, the stamp bound again for it (todo 360)
     List<String> imported = oracle(table(), "DELETE FROM t WHERE \"id\" = ?", false);
     assertThat(imported.get(imported.size() - 1))
         .isEqualTo(
-            decoupledHead.replace("%DATA%", "t")
+            decoupledHead
+                    .replace("%DATA%", "t")
+                    .replace(
+                        "l_meta = 1 AND COALESCE(l_state, 3) = 3 THEN ",
+                        "(l_meta = 0 OR COALESCE(l_state, 3) = 3) THEN ")
                 + "DELETE FROM t WHERE (\"id\" = ?); l_written := SQL%ROWCOUNT;"
-                + " IF l_written = 1 THEN UPDATE \"ns\".\"t_meta\" SET "
+                + " IF l_written = 1 AND l_meta = 1 THEN UPDATE \"ns\".\"t_meta\" SET "
                 + stamp
-                + metaCas);
+                + metaCas.replace(
+                    " END IF; END IF;",
+                    " ELSIF l_written = 1 THEN INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (\"id\")) */"
+                        + " INTO \"ns\".\"t_meta\" x (\"id\", \"tx_id\", \"tx_state\","
+                        + " \"tx_version\", \"tx_prepared_at\", \"tx_committed_at\") VALUES (l_k0, ?,"
+                        + " 3, 1, ?, ?); l_stamped := SQL%ROWCOUNT; END IF; END IF;"));
     // at SNAPSHOT the inline layout has the vendor's statement with the stamp first, gated on the
     // in-flight index under its hint, then the same for a table found clear, then the block; the
     // decoupled layout has no PostgreSQL text, its clear-table block a later form

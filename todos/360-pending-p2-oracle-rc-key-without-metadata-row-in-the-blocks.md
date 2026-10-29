@@ -39,14 +39,20 @@ Expected: 3 round trips for each of the four writes.
 
 ## Acceptance Criteria
 
-- [ ] The keyed block's branch for `rows 1, meta 0`, UPDATE and DELETE.
-- [ ] The predicate block writes keys without a metadata row, with step 3 in two parts.
-- [ ] A batch's 0-count entries at READ COMMITTED go to the block of entries. The block of entries
+- [x] The keyed block's branch for `rows 1, meta 0`, UPDATE and DELETE.
+- [x] The predicate block writes keys without a metadata row, with step 3 in two parts.
+- [x] A batch's 0-count entries at READ COMMITTED go to the block of entries. The block of entries
       no longer stops at a key without a metadata row.
-- [ ] The tests listed in the design paragraph, at READ COMMITTED and SNAPSHOT.
-- [ ] `UnstampedWriteBenchmark` rerun on Oracle, with its figures in the design paragraph.
+- [x] The tests listed in the design paragraph, at READ COMMITTED and SNAPSHOT.
+- [x] `UnstampedWriteBenchmark` rerun on Oracle, with its figures in the design paragraph.
 
 ## Work Log
 
 - 2026-10-29: designed (option 1 of the discussion; the statement first accepting a missing
   metadata row was not taken).
+- 2026-10-29: built on branch oracle-unstamped-blocks (c7): the keyed block's branch with the
+  stamp bound twice, the predicate block's second FORALL, a batch's 0-count entries as blocks of
+  entries; `OracleOltpIntegrationTest.todo360_aKeyWithoutAMetadataRowIsWrittenInTheBlocks`; the
+  full Oracle suite passes but for `ScalarDbNullMetadataIntegrationTest`, which fails the same way
+  on main (a ScalarDB-only test building an int key for a BIGINT column). `UnstampedWriteBenchmark`
+  at READ COMMITTED: 3 round trips for each write, from 7, 26, 52 and 7; figures in design 4.3.

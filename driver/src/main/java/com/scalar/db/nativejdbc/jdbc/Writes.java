@@ -167,6 +167,9 @@ final class Writes {
     // after them all by the plan itself, or none: an Oracle block binds the stamp between its read
     // and its DML (todo 334); 0 is stampFirst
     final int stampAfter;
+    // how many times the stamp's three values are bound there, one after the other: twice in an
+    // imported table's keyed block, whose version-1 insert follows the CAS (todo 360)
+    final int stamps;
 
     Step(String sql, List<Integer> binds) {
       this(sql, binds, Set.of());
@@ -191,10 +194,22 @@ final class Writes {
         int stampAfter,
         List<Integer> outTypes,
         boolean cursor) {
+      this(sql, binds, floatKeys, stampAfter, 1, outTypes, cursor);
+    }
+
+    Step(
+        String sql,
+        List<Integer> binds,
+        Set<Integer> floatKeys,
+        int stampAfter,
+        int stamps,
+        List<Integer> outTypes,
+        boolean cursor) {
       this.sql = sql;
       this.binds = List.copyOf(binds);
       this.floatKeys = Set.copyOf(floatKeys);
       this.stampAfter = stampAfter;
+      this.stamps = stamps;
       this.stampFirst = stampAfter == 0;
       this.outTypes = List.copyOf(outTypes);
       this.cursor = cursor;
@@ -207,7 +222,7 @@ final class Writes {
 
     /** The placeholders the step binds itself: its binds and, where it has one, the stamp. */
     int parameters() {
-      return binds.size() + (stampAfter >= 0 ? 3 : 0);
+      return binds.size() + (stampAfter >= 0 ? 3 * stamps : 0);
     }
 
     /** The position of the first OUT bind. */
@@ -1072,6 +1087,7 @@ final class Writes {
     b.append(" TYPE t_n IS TABLE OF NUMBER; l_nometa t_n; l_version t_n; l_state t_n;")
         .append(inline && !delete ? " l_v t_n;" : "")
         .append(" TYPE t_ix IS TABLE OF PLS_INTEGER INDEX BY PLS_INTEGER; l_cnt t_ix; l_do t_ix;")
+        .append(imported ? " l_new t_ix;" : "")
         .append(" TYPE t_id IS TABLE OF ")
         .append(metaTable)
         .append(".")
@@ -1186,7 +1202,10 @@ final class Writes {
           .append(");");
       binds.addAll(inWhere);
     }
-    b.append(" IF l_held = 0 AND l_missing = 0 AND l_after = 0 AND l_found > 0 THEN");
+    // on an imported table a key without a metadata row is written with the others (todo 360)
+    b.append(" IF l_held = 0")
+        .append(imported ? "" : " AND l_missing = 0")
+        .append(" AND l_after = 0 AND l_found > 0 THEN");
     // step 2, the user's DML once per key
     String keyNow = String.join(" AND ", byKeyNow);
     String committedNow = "COALESCE(" + x + "." + n.txState + ", 3) = 3";
@@ -1270,7 +1289,11 @@ final class Writes {
         .append("; FOR i IN 1 .. l_found LOOP l_cnt(i) := SQL%BULK_ROWCOUNT(i); END LOOP;")
         .append(" FOR i IN 1 .. l_found LOOP IF l_cnt(i) = 1 THEN l_written := l_written + 1;")
         .append(
-            " l_do(l_do.COUNT + 1) := i; ELSIF l_cnt(i) > 1 THEN l_abort := 5; EXIT; ELSE BEGIN");
+            imported
+                ? " IF l_nometa(i) = 1 THEN l_new(l_new.COUNT + 1) := i; ELSE"
+                    + " l_do(l_do.COUNT + 1) := i; END IF;"
+                : " l_do(l_do.COUNT + 1) := i;")
+        .append(" ELSIF l_cnt(i) > 1 THEN l_abort := 5; EXIT; ELSE BEGIN");
     // step 2's zero-row rule: the row read again by its key, as it is now
     if (inline) {
       b.append(" SELECT 0, ")
@@ -1373,6 +1396,18 @@ final class Writes {
                       + ", 0) + 1 END WHERE "
                       + metaCas)
           .append("; l_stamped := SQL%ROWCOUNT; END IF;");
+      if (imported) {
+        // the keys written without a metadata row: their version-1 rows, each key as the data row
+        // holds it; a row another writer inserted since the read is skipped, l_stamped short
+        List<String> newKeys = new ArrayList<>();
+        for (String k : keyLocals) {
+          newKeys.add(k + "(i)");
+        }
+        b.append(" IF l_abort = 0 AND l_new.COUNT > 0 THEN FORALL i IN VALUES OF l_new ")
+            .append(
+                n.insertStamp("VALUES (" + String.join(", ", newKeys) + ", l_i, 3, 1, l_p, l_c)"))
+            .append("; l_stamped := l_stamped + SQL%ROWCOUNT; END IF;");
+      }
     }
     b.append(" END IF; ? := l_found; ? := l_held; ? := l_missing; ? := l_after; ? := l_written;")
         .append(" ? := l_stamped; ? := l_skipped; ? := l_abort; END;");
@@ -1958,6 +1993,7 @@ final class Writes {
     final OracleBody body;
     final List<Integer> binds;
     final int stampAfter;
+    final int stamps;
     final List<Integer> rowTypes; // the row's items before the key
     final @Nullable List<Integer> keyTypes;
     final String table;
@@ -1967,12 +2003,14 @@ final class Writes {
         OracleBody body,
         List<Integer> binds,
         int stampAfter,
+        int stamps,
         List<Integer> rowTypes,
         @Nullable List<Integer> keyTypes,
         String table) {
       this.body = body;
       this.binds = List.copyOf(binds);
       this.stampAfter = stampAfter;
+      this.stamps = stamps;
       this.rowTypes = List.copyOf(rowTypes);
       this.keyTypes = keyTypes == null ? null : List.copyOf(keyTypes);
       this.table = table;
@@ -1992,7 +2030,8 @@ final class Writes {
               out.addAll(rowTypes);
               out.addAll(Objects.requireNonNull(keyTypes));
             }
-            return new Step(body.block(x), binds, Set.of(), stampAfter, out, x != Variant.OUT);
+            return new Step(
+                body.block(x), binds, Set.of(), stampAfter, stamps, out, x != Variant.OUT);
           });
     }
   }
@@ -2252,6 +2291,7 @@ final class Writes {
     private final IntFunction<OracleBody> body;
     final List<Integer> binds; // each entry's, in text order
     final int stampAfter; // where the stamp's three values sit among an entry's binds
+    final int stamps; // how many times they are bound there, as Step#stamps
     final List<Integer> rowTypes; // the write's row before the key
     final @Nullable List<Integer> keyTypes;
     final String table;
@@ -2261,12 +2301,14 @@ final class Writes {
         IntFunction<OracleBody> body,
         List<Integer> binds,
         int stampAfter,
+        int stamps,
         List<Integer> rowTypes,
         @Nullable List<Integer> keyTypes,
         String table) {
       this.body = body;
       this.binds = List.copyOf(binds);
       this.stampAfter = stampAfter;
+      this.stamps = stamps;
       this.rowTypes = List.copyOf(rowTypes);
       this.keyTypes = keyTypes == null ? null : List.copyOf(keyTypes);
       this.table = table;
@@ -2334,7 +2376,7 @@ final class Writes {
 
     /** The placeholders one entry binds, its stamp included. */
     int parameters() {
-      return binds.size() + (stampAfter >= 0 ? 3 : 0);
+      return binds.size() + (stampAfter >= 0 ? 3 * stamps : 0);
     }
   }
 
@@ -2959,7 +3001,9 @@ final class Writes {
    * resolve differently or not at all ({@link KeyedPlan#rcVersions}) or have no slot types, for the
    * block of entries; -1 where the block failed and was undone whole. A count of 1 is the entry
    * written and stamped; fewer rows stamped than written, an abort; a count of 0 is the entry's
-   * single form after the block, in order, through the keyed block.
+   * single form after the block, in order, through the keyed block: up to {@link #ENTRIES_MAX}
+   * consecutive such entries as one block of entries, without the bulk block again (todo 360), and
+   * an entry that block does not decide alone.
    */
   private static int applyOracleBulkRc(
       Connection vendor, KeyedPlan plan, Bulk bulk, List<Context> contexts, Finalized finalized)
@@ -3020,14 +3064,42 @@ final class Writes {
       } finally {
         lead.context.running(null);
       }
-      for (int e = 0; e < chunk.size(); e++) {
+      // no row, a row in flight or moved, a key without metadata: the single form's block tells
+      int alone = 0; // up to here the 0s run one by one: a block of entries failed over them
+      for (int e = 0; e < chunk.size(); ) {
         long c = counts[e];
         if (c > 1) {
           throw new Aborted("a key matched " + c + " rows");
         }
-        // no row, a row in flight or moved, a key without metadata: the single form's block tells
-        finalized.record(
-            done + e, c == 1 ? 1 : plan.applyOracleBlocks(new Run(vendor, chunk.get(e))));
+        if (c == 1) {
+          finalized.record(done + e, 1);
+          e++;
+          continue;
+        }
+        int zeros = e;
+        while (zeros < chunk.size() && zeros - e < ENTRIES_MAX && counts[zeros] == 0) {
+          zeros++;
+        }
+        if (e >= alone && zeros - e > 1 && plan.entries() != null) {
+          int from = done + e;
+          int got =
+              applyEntriesBlock(
+                  vendor,
+                  plan,
+                  chunk.subList(e, zeros),
+                  (j, count) -> finalized.record(from + j, count));
+          if (got > 0) {
+            e += got;
+            if (e == zeros) {
+              continue;
+            }
+          } else if (got < 0) {
+            alone = zeros; // undone whole: one by one
+          }
+        }
+        // an entry the block of entries stopped at, or one alone: the keyed block decides it
+        finalized.record(done + e, plan.applyOracleBlocks(new Run(vendor, chunk.get(e))));
+        e++;
       }
       done += chunk.size();
     }
@@ -3358,8 +3430,9 @@ final class Writes {
    * rows, meta, tx_id, tx_version, tx_state, written, stamped, k...}, the key as the data row reads
    * it. The binds, in text order: the predicate's placeholders for the read; then in the inline
    * UPDATE the stamp, the user's SET placeholders and the predicate's; in the decoupled block the
-   * user's placeholders and, where a stamp is written, the stamp's values; the cursor last. Null
-   * when the text cannot be rewritten.
+   * user's placeholders and, where a stamp is written, the stamp's values, on an imported table
+   * twice, the CAS's and then the version-1 insert's of a key without a metadata row (todo 360);
+   * the cursor last. Null when the text cannot be rewritten.
    */
   private static @Nullable Block oracleKeyedBlock(
       Names n,
@@ -3385,6 +3458,7 @@ final class Writes {
         b,
         binds,
         keyedStampAfter(inline, delete, imported, inWhere.size(), all.size()),
+        !inline && imported ? 2 : 1,
         KEYED_ROW_TYPES,
         keyTypes,
         n.table);
@@ -3416,6 +3490,7 @@ final class Writes {
                 keyedBody(n, ast, t, exposed, span, delete, imported, from, end, "_" + i)),
         binds,
         keyedStampAfter(inline, delete, imported, inWhere.size(), all.size()),
+        !inline && imported ? 2 : 1,
         KEYED_ROW_TYPES,
         keyTypes,
         n.table);
@@ -3578,7 +3653,15 @@ final class Writes {
           .append(n.meta)
           .append(" m ON ")
           .append(n.keyJoin("m", "d"));
-      committed = lRows + " = 1 AND " + lMeta + " = 1 AND COALESCE(" + lState + ", 3) = 3";
+      // on an imported table a key without a metadata row is written too (todo 360)
+      committed =
+          lRows
+              + " = 1 AND "
+              + (imported ? "(" + lMeta + " = 0 OR " : lMeta + " = 1 AND ")
+              + "COALESCE("
+              + lState
+              + ", 3) = 3"
+              + (imported ? ")" : "");
     }
     block
         .append("; EXCEPTION WHEN NO_DATA_FOUND THEN NULL; END; IF ")
@@ -3654,14 +3737,29 @@ final class Writes {
       block
           .append(" IF ")
           .append(lWritten)
-          .append(" = 1 THEN ")
+          .append(" = 1")
+          .append(imported ? " AND " + lMeta + " = 1" : "")
+          .append(" THEN ")
           .append(
               delete && !imported
                   ? "DELETE FROM " + n.meta + " WHERE " + metaCas
                   : "UPDATE " + n.meta + " SET " + inlineStampSets(n) + " WHERE " + metaCas)
           .append("; ")
           .append(lStamped)
-          .append(" := SQL%ROWCOUNT; END IF;");
+          .append(" := SQL%ROWCOUNT;");
+      if (imported) {
+        // a key without a metadata row: its version-1 row, the key as the data row holds it, as
+        // stampFromData copies it; a row another writer inserted since the read is skipped
+        block
+            .append(" ELSIF ")
+            .append(lWritten)
+            .append(" = 1 THEN ")
+            .append(n.insertStamp("VALUES (" + String.join(", ", keyLocals) + ", ?, 3, 1, ?, ?)"))
+            .append("; ")
+            .append(lStamped)
+            .append(" := SQL%ROWCOUNT;");
+      }
+      block.append(" END IF;");
     }
     block.append(" END IF;");
     List<String> items =
@@ -5760,7 +5858,7 @@ final class Writes {
       int end,
       @Nullable List<Integer> keyTypes) {
     OracleBody b = insertBody(n, ast, t, end, "");
-    return b == null ? null : new Block(b, all, 0, INSERT_ROW_TYPES, keyTypes, n.table);
+    return b == null ? null : new Block(b, all, 0, 1, INSERT_ROW_TYPES, keyTypes, n.table);
   }
 
   /** The INSERT block over a batch's entries (design 4.4), null where it cannot be built. */
@@ -5778,6 +5876,7 @@ final class Writes {
         i -> Objects.requireNonNull(insertBody(n, ast, t, end, "_" + i)),
         all,
         0,
+        1,
         INSERT_ROW_TYPES,
         keyTypes,
         n.table);
@@ -6318,6 +6417,13 @@ final class Writes {
         return got;
       }
     }
+    return applyEntriesBlock(vendor, plan, contexts, finalized);
+  }
+
+  /** {@link #applyOracleEntries}'s block of entries, after its bulk forms, with its returns. */
+  private static int applyEntriesBlock(
+      Connection vendor, Plan plan, List<Context> contexts, Finalized finalized)
+      throws SQLException {
     Entries e = Objects.requireNonNull(plan.entries());
     List<Run> runs = new ArrayList<>();
     for (Context c : contexts) {
@@ -6795,7 +6901,9 @@ final class Writes {
         for (Run r : runs) {
           for (int j = 0; j <= e.binds.size(); j++) {
             if (j == e.stampAfter) {
-              at = r.stamp(cs, at);
+              for (int s = 0; s < e.stamps; s++) {
+                at = r.stamp(cs, at);
+              }
             }
             if (j < e.binds.size()) {
               r.context.bind(cs, at++, e.binds.get(j), false);
@@ -6845,7 +6953,9 @@ final class Writes {
       int i = 1;
       for (int at = 0; at <= step.binds.size(); at++) {
         if (at == step.stampAfter) {
-          i = stamp(ps, i);
+          for (int s = 0; s < step.stamps; s++) {
+            i = stamp(ps, i);
+          }
         }
         if (at < step.binds.size()) {
           int b = step.binds.get(at);
@@ -7877,12 +7987,13 @@ final class Writes {
     /**
      * The keyed write on Oracle as one block (design 4.3 "The keyed write on Oracle", todo 334),
      * and what the driver does with the row it returns, in the design's order: no data row, count
-     * 0; a data row without a metadata row, null, the steps one by one, which stamp it; a row in
-     * flight, the bounded wait and the block again at READ COMMITTED with a wait set, else an
-     * abort; a state that is no image, count 0; the version read not the one the transaction read
-     * for the key, an abort; written and stamped, count 1; written and not stamped, or not written
-     * after a committed row was read, or several rows written, an abort. The block raises nothing
-     * of its own; an engine error, ORA-08177 among them, undoes it whole and is mapped as today.
+     * 0; a data row without a metadata row, on an imported table written and given its version-1
+     * metadata row by the block (todo 360), on a created one null, the steps; a row in flight, the
+     * bounded wait and the block again at READ COMMITTED with a wait set, else an abort; a state
+     * that is no image, count 0; the version read not the one the transaction read for the key, an
+     * abort; written and stamped, count 1; written and not stamped, or not written after a
+     * committed row was read, or several rows written, an abort. The block raises nothing of its
+     * own; an engine error, ORA-08177 among them, undoes it whole and is mapped as today.
      */
     private @Nullable Long applyBlock(Run run) throws SQLException {
       Block b = Objects.requireNonNull(block);
@@ -7925,7 +8036,7 @@ final class Writes {
           return count;
         }
         if (row.meta == 0) {
-          return null; // an imported table's row before its backfill: the steps stamp it
+          return null; // a created table's row without a metadata row: the steps stamp it
         }
         if (afterImages != null) {
           // SNAPSHOT: the snapshot shows the row in flight, and would until the transaction ends
@@ -7938,8 +8049,8 @@ final class Writes {
 
     /**
      * What the keyed block's row means, as the design's table has it: the count where the outcome
-     * is final, null for a row in flight or without a metadata row, which the caller waits on or
-     * sends to the steps, and an abort thrown for the rest.
+     * is final, null for a row in flight, which the caller waits on, or a created table's row
+     * without a metadata row, which it sends to the steps, and an abort thrown for the rest.
      */
     private @Nullable Long decide(Run run, KeyedRow r) throws SQLException {
       int rows = r.rows;
@@ -7953,7 +8064,7 @@ final class Writes {
       if (rows == 0 || key == null) {
         return 0L; // no row for the key, as the vendor's statement finds none
       }
-      if (meta == 0 || inFlight(state)) {
+      if ((meta == 0 && !imported) || inFlight(state)) {
         return null;
       }
       if (state != null && ((Number) state).intValue() != 3) {
@@ -7969,6 +8080,10 @@ final class Writes {
       }
       if (written > 1) {
         throw new Aborted("a key matched " + written + " rows");
+      }
+      if (meta == 0 && written == 1) {
+        // the version-1 insert skipped the key: another writer gave it a metadata row since
+        throw new Aborted("a row the statement writes was given metadata after it was read");
       }
       // the row moved, went in flight, lost its metadata or was deleted between the read and
       // the DML or the CAS
@@ -8012,10 +8127,11 @@ final class Writes {
      * Oracle", todo 334), and what the driver does with its row of counts, in the design's order:
      * nothing matched, count 0; an after image matched (SNAPSHOT), an abort; a key in flight, the
      * bounded wait and the block again at READ COMMITTED with a wait set, else an abort; a key
-     * without a metadata row, null, the steps; an abort code, an abort (a key the DML skipped was
-     * deleted, went in flight, is still at its version, still matches the inline DELETE's
-     * predicate, or matched several rows); a stamp short of the rows written, an abort; else the
-     * rows written, the skipped keys counting for nothing.
+     * without a metadata row, on an imported table written and given its version-1 metadata row by
+     * the block (todo 360), counted in the stamp, on a created one null, the steps; an abort code,
+     * an abort (a key the DML skipped was deleted, went in flight, is still at its version, still
+     * matches the inline DELETE's predicate, or matched several rows); a stamp short of the rows
+     * written, an abort; else the rows written, the skipped keys counting for nothing.
      */
     private @Nullable Long applyPredicateBlock(Run run) throws SQLException {
       Step step = Objects.requireNonNull(predicateBlock);
@@ -8056,8 +8172,8 @@ final class Writes {
           run.sleep(until, "a row the statement writes is being written by a ScalarDB transaction");
           continue;
         }
-        if (missing > 0) {
-          return null; // an imported table's rows before its backfill: the steps stamp them
+        if (missing > 0 && !imported) {
+          return null; // a created table's rows without a metadata row: the steps stamp them
         }
         switch (abort) {
           case 1:
