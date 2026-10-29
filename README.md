@@ -109,9 +109,8 @@ Tested in 3.20.0 against ScalarDB 3.19.1: PostgreSQL, MySQL, MariaDB and SQL Ser
 COMMITTED, SNAPSHOT and SERIALIZABLE, and Oracle at READ COMMITTED and SNAPSHOT. ScalarDB 3.20 writes
 the same transaction metadata columns and states as 3.19.
 
-The application supplies its database's JDBC driver, and the driver uses whichever version is on the
-classpath. 3.20.0 was tested with these servers and JDBC drivers; other versions are not verified,
-and one that behaves differently can fail as a wrong result or an odd error rather than at connect:
+The application supplies its database's JDBC driver. 3.20.0 is tested with the servers and JDBC
+drivers below; use these driver versions where you can:
 
 | Database | Server | JDBC driver |
 | --- | --- | --- |
