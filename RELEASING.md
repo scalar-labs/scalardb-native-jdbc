@@ -38,9 +38,10 @@ request with a `ScalarDB <version>` project attached). Version branches never me
 
 ### Cutting a branch
 
-Bump the parent (`main`) to its next snapshot version first, then cut the new branch from the commit
-just before the bump. Cutting first would leave both branches carrying the same version, and each
-would publish its own build under that one snapshot version:
+Bump the parent (`main`) to its next snapshot version first (`4.0.0-SNAPSHOT` when `3.20` is cut),
+then cut the new branch from the commit just before the bump. Cutting first would leave both
+branches carrying the same version, and each would publish its own build under that one snapshot
+version:
 
 ```bash
 # after the bump has landed on main

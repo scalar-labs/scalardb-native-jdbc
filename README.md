@@ -28,7 +28,10 @@ The driver is not on Maven Central yet, and there is no GitHub release to downlo
 - **The driver**, `com.scalar-labs:scalardb-native-jdbc`, which the application connects through with
   `jdbc:scalardb-native:postgresql:...`. With Maven or Gradle, its POM brings its dependencies,
   JSQLParser 5.4 and slf4j-api. With the jar alone, put those two on the classpath beside it. Either
-  way, add your database's own JDBC driver.
+  way, add your database's own JDBC driver. If your application also uses JSQLParser, directly or
+  through a library such as MyBatis-Plus or PageHelper, your build resolves one version for both:
+  pin it to 5.4, the version the driver is tested with, or the driver can fail at run time, for
+  example with `NoSuchMethodError`.
 - **`snsql`**, the psql-like shell, `scalardb-native-shell-<version>.zip`.
 - **`scalardb-native-tools`**, which sets ScalarDB tables up for the driver,
   `scalardb-native-tools-<version>.zip`.
