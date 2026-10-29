@@ -109,6 +109,21 @@ Tested in 3.20.0 against ScalarDB 3.19.1: PostgreSQL, MySQL, MariaDB and SQL Ser
 COMMITTED, SNAPSHOT and SERIALIZABLE, and Oracle at READ COMMITTED and SNAPSHOT. ScalarDB 3.20 writes
 the same transaction metadata columns and states as 3.19.
 
+The application supplies its database's JDBC driver, and the driver uses whichever version is on the
+classpath. 3.20.0 was tested with these servers and JDBC drivers; other versions are not verified,
+and one that behaves differently can fail as a wrong result or an odd error rather than at connect:
+
+| Database | Server | JDBC driver |
+| --- | --- | --- |
+| PostgreSQL | 16 | pgjdbc (`org.postgresql:postgresql`) 42.7.14 |
+| MySQL | 8.4, also with `lower_case_table_names=1` | MySQL Connector/J (`com.mysql:mysql-connector-j`) 26.7.0 |
+| MariaDB | 11.4 | MariaDB Connector/J (`org.mariadb.jdbc:mariadb-java-client`) 3.5.10 |
+| SQL Server | 2022 | mssql-jdbc (`com.microsoft.sqlserver:mssql-jdbc`) 13.6.0.jre11 |
+| Oracle | Oracle Database Free 23 | ojdbc11 (`com.oracle.database.jdbc:ojdbc11`) 23.26.3.0.0 |
+
+`snsql` and `scalardb-native-tools` bundle pgjdbc, MariaDB Connector/J, which they use for MySQL too,
+mssql-jdbc and ojdbc11 at these versions; not MySQL Connector/J.
+
 ## Building
 
 Building the driver and running its tests: [CONTRIBUTING.md](CONTRIBUTING.md).
