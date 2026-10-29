@@ -45,6 +45,8 @@ import javax.xml.transform.OutputKeys;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
+import jdk.jfr.consumer.RecordedEvent;
+import jdk.jfr.consumer.RecordingFile;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -425,7 +427,34 @@ class BenchBaseBenchmark {
                 : pgAtStart[0] == null
                     ? null
                     : Server.since(e, pgAtStart[0], sampler, roundTrip, dir.resolve("server.txt"));
-    return Result.read(run, dir, histograms, imported, plain, server);
+    return Result.read(
+        run, dir, histograms, imported, plain, server, stalls(dir.resolve("execute.jfr")));
+  }
+
+  /**
+   * The socket reads of 990 to 1,100 ms in the run's recording ({@code {dir}/execute.jfr}, from
+   * {@code nativejdbc.benchbase.jvmArgs}), -1 without one. On Oracle each is a buffer busy wait
+   * that reached the server's one-second timeout, and their count equals the run's busy-wait
+   * seconds (todo 334's log, 2026-10-29); identical runs have from none to over 80, so a cell's
+   * median is read with each repetition's count beside its throughput.
+   */
+  private static int stalls(Path jfr) throws IOException {
+    if (!Files.exists(jfr)) {
+      return -1;
+    }
+    int n = 0;
+    try (RecordingFile f = new RecordingFile(jfr)) {
+      while (f.hasMoreEvents()) {
+        RecordedEvent ev = f.readEvent();
+        if (ev.getEventType().getName().equals("jdk.SocketRead")) {
+          long ms = ev.getDuration().toMillis();
+          if (ms >= 990 && ms <= 1100) {
+            n++;
+          }
+        }
+      }
+    }
+    return n;
   }
 
   /**
@@ -786,7 +815,8 @@ class BenchBaseBenchmark {
             st.executeQuery(
                 "SELECT name, value FROM v$sysstat WHERE name IN ('user commits', 'redo size',"
                     + " 'SQL*Net roundtrips to/from client', 'CR blocks created',"
-                    + " 'data blocks consistent reads - undo records applied')")) {
+                    + " 'data blocks consistent reads - undo records applied',"
+                    + " 'table fetch continued row')")) {
           while (rs.next()) {
             sys.put(rs.getString(1), rs.getLong(2));
           }
@@ -844,7 +874,8 @@ class BenchBaseBenchmark {
           }
         }
         // waits by block class, and the consistent reads' work, for the hot blocks of TPC-C at a
-        // small scale (todo 334)
+        // small scale (todo 334); the fetches of migrated or chained rows, for an inline table's
+        // rows that grow at their first write (todo 334's log, 2026-10-29)
         Map<String, double[]> blocks = new HashMap<>();
         try (ResultSet rs = st.executeQuery("SELECT class, count, time FROM v$waitstat")) {
           while (rs.next()) {
@@ -852,7 +883,10 @@ class BenchBaseBenchmark {
           }
         }
         for (String name :
-            List.of("CR blocks created", "data blocks consistent reads - undo records applied")) {
+            List.of(
+                "CR blocks created",
+                "data blocks consistent reads - undo records applied",
+                "table fetch continued row")) {
           blocks.put(name, new double[] {sys.getOrDefault(name, 0L), 0});
         }
         return new Counters(
@@ -1422,7 +1456,8 @@ class BenchBaseBenchmark {
       Map<String, long[]> latencies,
       List<String> imported,
       List<String> plain,
-      @Nullable Server server) {
+      @Nullable Server server,
+      int stalls) {
 
     private static final Pattern NUMBER = Pattern.compile("\"([^\"]+)\": *([0-9.E+-]+)");
 
@@ -1438,7 +1473,8 @@ class BenchBaseBenchmark {
         Path histograms,
         List<String> imported,
         List<String> plain,
-        @Nullable Server server)
+        @Nullable Server server,
+        int stalls)
         throws IOException {
       Path out = dir.resolve("execute");
       Path summary = only(out, ".summary.json");
@@ -1484,7 +1520,8 @@ class BenchBaseBenchmark {
           latencies,
           imported,
           plain,
-          server);
+          server,
+          stalls);
     }
 
     private static Double number(Map<String, Double> numbers, String key) {
@@ -1550,6 +1587,24 @@ class BenchBaseBenchmark {
                   Math.round(median(med(rs, "95th Percentile"))),
                   Math.round(median(med(rs, "99th Percentile")))));
         });
+    // each repetition beside its one-second stalls, which the medians above blend (todo 334's log)
+    if (results.values().stream().flatMap(List::stream).anyMatch(r -> r.stalls() >= 0)) {
+      out.append(
+          "\n| run | repetition | throughput/s | one-second socket reads |\n|---|---|---|---|\n");
+      results.forEach(
+          (run, rs) -> {
+            for (int i = 0; i < rs.size(); i++) {
+              out.append(
+                  String.format(
+                      Locale.ROOT,
+                      "| (%s) | %d | %.1f | %s |%n",
+                      run,
+                      i + 1,
+                      rs.get(i).throughput(),
+                      rs.get(i).stalls() < 0 ? "n/a" : String.valueOf(rs.get(i).stalls())));
+            }
+          });
+    }
     if (results.values().stream().flatMap(List::stream).anyMatch(r -> r.server() != null)) {
       out.append(
           "\n| run | commits | active ms/commit | idle in transaction ms/commit | WAL KB/commit |"
