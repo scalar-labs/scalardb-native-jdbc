@@ -73,9 +73,12 @@ import org.junit.jupiter.params.provider.MethodSource;
       "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE",
       "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
       "PREDICTABLE_RANDOM",
-      "DMI_RANDOM_USED_ONLY_ONCE"
+      "DMI_RANDOM_USED_ONLY_ONCE",
+      "ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"
     },
-    justification = "benchmark SQL written in this file; seeded randoms, so runs repeat")
+    justification =
+        "benchmark SQL written in this file; seeded randoms, so runs repeat; one test per run sets"
+            + " the static the writers' helpers read")
 class InFlightCheckBenchmark {
 
   private static final int ROWS = 100_000;

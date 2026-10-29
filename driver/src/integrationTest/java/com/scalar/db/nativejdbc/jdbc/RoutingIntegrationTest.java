@@ -256,14 +256,15 @@ class RoutingIntegrationTest {
     }
   }
 
+  // read as a SELECT, the UPDATE reached the decoupled data table itself at SNAPSHOT, and wrote it
+  // without its metadata (todo 288); constants, so that SpotBugs sees the lambdas run no input
+  private static final String WITH_WRITE_ON_SCALARDB =
+      "WITH u AS (UPDATE m1.s SET x = 'w' WHERE id = 1 RETURNING id) SELECT * FROM u";
+  private static final String WITH_WRITE_READS_SCALARDB =
+      "WITH u AS (DELETE FROM m1plain.s WHERE id = -1 RETURNING id) SELECT x FROM m1.s";
+
   @Test
   void aWithItemThatWrites_isRefusedOnAScalarDbTable_atEveryLevel() throws SQLException {
-    // read as a SELECT, the UPDATE reached the decoupled data table itself at SNAPSHOT, and wrote
-    // it without its metadata (todo 288)
-    String onScalarDb =
-        "WITH u AS (UPDATE m1.s SET x = 'w' WHERE id = 1 RETURNING id) SELECT * FROM u";
-    String readsScalarDb =
-        "WITH u AS (DELETE FROM m1plain.s WHERE id = -1 RETURNING id) SELECT x FROM m1.s";
     try (Connection c = connect();
         Statement st = c.createStatement()) {
       for (int level :
@@ -274,9 +275,11 @@ class RoutingIntegrationTest {
           }) {
         c.setTransactionIsolation(level);
         c.setAutoCommit(false);
-        assertRefused(() -> st.executeQuery(onScalarDb), "0AN01", "WITH item that writes");
+        assertRefused(
+            () -> st.executeQuery(WITH_WRITE_ON_SCALARDB), "0AN01", "WITH item that writes");
         c.rollback();
-        assertRefused(() -> st.executeQuery(readsScalarDb), "0AN01", "WITH item that writes");
+        assertRefused(
+            () -> st.executeQuery(WITH_WRITE_READS_SCALARDB), "0AN01", "WITH item that writes");
         c.rollback();
         c.setAutoCommit(true);
       }
