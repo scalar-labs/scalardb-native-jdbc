@@ -1055,29 +1055,24 @@ class BenchBaseBenchmark {
   }
 
   /**
-   * On Oracle, over a run's execute phase, every 500 ms on a connection of its own: each session in
-   * a buffer busy wait of more than 300 ms, with the session {@code V$SESSION} names as its
-   * blocker, and with every other active session at that sample, since Oracle often names none for
-   * this wait. A one-second wait stays past the threshold for 700 ms, so each is sampled at least
-   * once; the wait's {@code SEQ#} groups its samples. At the end, each waited-on block's segment
-   * ({@code DBA_EXTENTS} by file and block) and each sampled statement's text. Licence-free: {@code
-   * V$SESSION}, not the Diagnostics Pack's session history (todo 334's log, 2026-10-29). Written to
-   * the run's {@code waits.txt}.
+   * On Oracle, over a run's execute phase, every 500 ms on a connection of its own: one reading of
+   * every active session, background ones included, kept when a session in it has been in a buffer
+   * busy wait for more than 300 ms. One statement, so that the holder's row is of the same instant
+   * as the waiter's; {@code blocking_session} only as a hint, since {@code V$SESSION} often lacks
+   * it for this wait; the log writer's row is evidence too. A one-second wait stays past the
+   * threshold for 700 ms, so each is read at least once; the wait's {@code SEQ#} groups its
+   * readings. At the end, each waited-on block's segment ({@code DBA_EXTENTS} by file and block)
+   * and each read statement's text. Licence-free: {@code V$SESSION}, not the Diagnostics Pack's
+   * session history (todo 334's log, 2026-10-29; checked against that history on the container).
+   * Written to the run's {@code waits.txt}.
    */
   static final class OracleWaits implements AutoCloseable {
 
-    private static final String WAITERS =
-        "SELECT w.sid, w.seq#, w.wait_time_micro, w.sql_id, w.p1, w.p2, w.p3, w.row_wait_obj#,"
-            + " w.blocking_session, w.blocking_session_status,"
-            + " b.state, b.event, b.sql_id, b.wait_time_micro"
-            + " FROM v$session w LEFT JOIN v$session b ON b.sid = w.blocking_session"
-            + " WHERE w.event = 'buffer busy waits' AND w.state = 'WAITING'"
-            + " AND w.wait_time_micro > 300000";
-
-    private static final String ACTIVE =
-        "SELECT sid, state, event, wait_time_micro, sql_id, p1, p2, p3 FROM v$session"
-            + " WHERE type = 'USER' AND status = 'ACTIVE'"
-            + " AND (state <> 'WAITING' OR wait_class <> 'Idle')"
+    private static final String SESSIONS =
+        "SELECT sid, serial#, type, program, state, event, wait_class, seq#, wait_time_micro,"
+            + " sql_id, TO_CHAR(sql_exec_start, 'HH24:MI:SS'), p1, p2, p3, blocking_session,"
+            + " blocking_session_status, row_wait_obj# FROM v$session"
+            + " WHERE status = 'ACTIVE' AND (state <> 'WAITING' OR wait_class <> 'Idle')"
             + " AND sid <> SYS_CONTEXT('USERENV', 'SID')";
 
     private final Thread thread;
@@ -1102,60 +1097,34 @@ class BenchBaseBenchmark {
           Statement st = c.createStatement()) {
         while (!stop) {
           long at = System.currentTimeMillis();
-          StringBuilder found = new StringBuilder();
-          try (ResultSet rs = st.executeQuery(WAITERS)) {
+          StringBuilder sample = new StringBuilder();
+          List<String> waited = new ArrayList<>();
+          List<String> ids = new ArrayList<>();
+          try (ResultSet rs = st.executeQuery(SESSIONS)) {
             while (rs.next()) {
-              found.append(
-                  String.join(
-                      "\t",
-                      "wait",
-                      String.valueOf(at),
-                      rs.getString(1),
-                      rs.getString(2),
-                      String.valueOf(rs.getLong(3) / 1000),
-                      String.valueOf(rs.getString(4)),
-                      rs.getString(5),
-                      rs.getString(6),
-                      rs.getString(7),
-                      rs.getString(8),
-                      String.valueOf(rs.getString(9)),
-                      String.valueOf(rs.getString(10)),
-                      String.valueOf(rs.getString(11)),
-                      String.valueOf(rs.getString(12)),
-                      String.valueOf(rs.getString(13)),
-                      rs.getString(14) == null ? "null" : String.valueOf(rs.getLong(14) / 1000)));
-              found.append('\n');
-              blocks.putIfAbsent(rs.getString(5) + "\t" + rs.getString(6), "");
-              sqlIds.putIfAbsent(String.valueOf(rs.getString(4)), "");
-              sqlIds.putIfAbsent(String.valueOf(rs.getString(13)), "");
-            }
-          }
-          if (found.length() > 0) {
-            try (ResultSet rs = st.executeQuery(ACTIVE)) {
-              while (rs.next()) {
-                found.append(
-                    String.join(
-                        "\t",
-                        "  active",
-                        String.valueOf(at),
-                        rs.getString(1),
-                        rs.getString(2),
-                        rs.getString(3),
-                        String.valueOf(rs.getLong(4) / 1000),
-                        String.valueOf(rs.getString(5)),
-                        rs.getString(6),
-                        rs.getString(7),
-                        rs.getString(8)));
-                found.append('\n');
-                sqlIds.putIfAbsent(String.valueOf(rs.getString(5)), "");
+              boolean waiter =
+                  "buffer busy waits".equals(rs.getString(6))
+                      && "WAITING".equals(rs.getString(5))
+                      && rs.getLong(9) > 300_000;
+              StringBuilder line = new StringBuilder(waiter ? "wait" : "  active");
+              line.append('\t').append(at);
+              for (int i = 1; i <= 17; i++) {
+                line.append('\t').append(i == 9 ? rs.getLong(9) / 1000 : rs.getString(i));
               }
+              sample.append(line).append('\n');
+              if (waiter) {
+                waited.add(rs.getString(12) + "\t" + rs.getString(13));
+              }
+              ids.add(String.valueOf(rs.getString(10)));
             }
           }
           synchronized (this) {
             samples++;
-            if (found.length() > 0) {
+            if (!waited.isEmpty()) {
               hits++;
-              lines.append(found);
+              lines.append(sample);
+              waited.forEach(b -> blocks.putIfAbsent(b, ""));
+              ids.forEach(i -> sqlIds.putIfAbsent(i, ""));
             }
           }
           Thread.sleep(500);
@@ -1173,7 +1142,7 @@ class BenchBaseBenchmark {
       thread.join(10_000);
     }
 
-    /** Writes waits.txt: the samples, then the blocks' segments and the statements' texts. */
+    /** Writes waits.txt: the kept readings, then the blocks' segments and the statements' texts. */
     synchronized void write(Engines e) throws IOException {
       StringBuilder out =
           new StringBuilder("samples\t")
@@ -1185,10 +1154,9 @@ class BenchBaseBenchmark {
         out.append("sampler failed: ").append(failure).append('\n');
       }
       out.append(
-              "\nwait\tat ms\tsid\tseq#\twaited ms\tsql_id\tfile\tblock\tclass\trow_wait_obj#"
-                  + "\tblocking sid\tblocking status\tblocker state\tblocker event\tblocker sql_id"
-                  + "\tblocker waited ms\n"
-                  + "  active\tat ms\tsid\tstate\tevent\twaited ms\tsql_id\tp1\tp2\tp3\n")
+              "\nrow\tat ms\tsid\tserial#\ttype\tprogram\tstate\tevent\twait class\tseq#"
+                  + "\twaited ms\tsql_id\tsql started\tp1 (file)\tp2 (block)\tp3 (class)"
+                  + "\tblocking sid\tblocking status\trow_wait_obj#\n")
           .append(lines);
       try (Connection c = e.open();
           PreparedStatement seg =
