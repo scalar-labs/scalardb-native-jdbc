@@ -3111,3 +3111,10 @@ connect-time refusal's, with the configuration table and section 1's error table
 sentence in transactions.md on what the default implies, the `40001` retry and the kept snapshot.
 Section 5 opens with the default now. The benchmarks are unaffected, the harness setting its level
 itself; the headline cells become the SNAPSHOT ones.
+
+Follow-up f7d7e88 reviewed mergeable: `getDefaultTransactionIsolation` answered
+`TRANSACTION_REPEATABLE_READ` for every engine's metadata proxy, the connect-time refusal `08004`
+and `setTransactionIsolation`'s later one `55000`, both naming `ALLOW_SNAPSHOT_ISOLATION`, the
+configuration, errors and transactions pages following, the dated note on the benchmark status page;
+the isolation, routing and serializable suites pass per engine. Landing on the user's word, as a
+fast-forward onto main after the rebase.
