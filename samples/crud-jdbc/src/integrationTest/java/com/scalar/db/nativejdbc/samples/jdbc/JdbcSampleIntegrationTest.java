@@ -154,8 +154,10 @@ class JdbcSampleIntegrationTest {
       assertThat(store.setQty(read, 2)).isFalse();
       assertThat(store.find(apple).orElseThrow().qty).isEqualTo(1);
 
-      // a ScalarDB transaction holds the row prepared: the application's write is a retryable
-      // conflict, and the row stays as ScalarDB's transaction leaves it
+      // a ScalarDB transaction holds the row prepared: at SNAPSHOT, the connection's default, the
+      // application's read and its write are both retryable conflicts, and the row stays as
+      // ScalarDB's transaction leaves it
+      Item pearBefore = store.find(pear).orElseThrow();
       TwoPhaseCommitTransaction held = tpc.begin();
       try {
         held.update(
@@ -166,16 +168,20 @@ class JdbcSampleIntegrationTest {
                 .value(intColumn(e, "qty", 40))
                 .build());
         held.prepare();
-        Item pearNow = store.find(pear).orElseThrow();
-        assertThat(pearNow.qty).as("the committed value, not the prepared one").isEqualTo(4);
-        assertThatThrownBy(() -> store.setQty(pearNow, 5))
+        assertThatThrownBy(() -> store.find(pear))
+            .isInstanceOf(SQLException.class)
+            .extracting(ex -> ((SQLException) ex).getSQLState())
+            .isEqualTo("40001");
+        assertThatThrownBy(() -> store.setQty(pearBefore, 5))
             .isInstanceOf(SQLException.class)
             .extracting(ex -> ((SQLException) ex).getSQLState())
             .isEqualTo("40001");
       } finally {
         held.rollback();
       }
-      assertThat(store.find(pear).orElseThrow().qty).isEqualTo(4);
+      assertThat(store.find(pear).orElseThrow().qty)
+          .as("the committed value, not the prepared one")
+          .isEqualTo(4);
 
       assertThat(store.remove(pear)).isTrue();
       assertThat(store.find(pear)).isEmpty();

@@ -30,6 +30,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import javax.sql.DataSource;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -199,8 +200,10 @@ class SpringDataSampleIntegrationTest {
           .isInstanceOf(OptimisticLockingFailureException.class);
       assertThat(items.findById(appleId).orElseThrow().getQty()).isEqualTo(1);
 
-      // a ScalarDB transaction holds the row prepared: the application reads the committed value
-      // and its write is a transient failure, SQLState 40001, which the caller retries
+      // a ScalarDB transaction holds the row prepared: at SNAPSHOT, the connection's default, the
+      // application's read and its write are both transient failures, SQLState 40001, which the
+      // caller retries
+      Item pearBefore = items.findById(pearId).orElseThrow();
       TwoPhaseCommitTransaction held = tpc.begin();
       try {
         held.update(
@@ -211,30 +214,36 @@ class SpringDataSampleIntegrationTest {
                 .value(intColumn(e, "qty", 40))
                 .build());
         held.prepare();
-        Item pearNow = items.findById(pearId).orElseThrow();
-        assertThat(pearNow.getQty()).as("the committed value").isEqualTo(4);
-        pearNow.setQty(5);
-        assertThatThrownBy(() -> items.save(pearNow))
-            .isInstanceOf(TransientDataAccessException.class)
-            .satisfies(
-                ex -> {
-                  Throwable c = ex;
-                  while (c != null
-                      && !(c instanceof SQLException
-                          && "40001".equals(((SQLException) c).getSQLState()))) {
-                    c = c.getCause();
-                  }
-                  assertThat(c).as("a 40001 among the causes").isNotNull();
-                });
+        assertTransient40001(() -> items.findById(pearId));
+        pearBefore.setQty(5);
+        assertTransient40001(() -> items.save(pearBefore));
       } finally {
         held.rollback();
       }
-      assertThat(items.findById(pearId).orElseThrow().getQty()).isEqualTo(4);
+      assertThat(items.findById(pearId).orElseThrow().getQty())
+          .as("the committed value, not the prepared one")
+          .isEqualTo(4);
 
       items.deleteById(pearId);
       assertThat(items.findById(pearId)).isEmpty();
       assertThat(items.count()).isEqualTo(1);
     }
+  }
+
+  /** Spring's transient failure, with the driver's SQLState 40001 among its causes. */
+  private static void assertTransient40001(ThrowingCallable call) {
+    assertThatThrownBy(call)
+        .isInstanceOf(TransientDataAccessException.class)
+        .satisfies(
+            ex -> {
+              Throwable c = ex;
+              while (c != null
+                  && !(c instanceof SQLException
+                      && "40001".equals(((SQLException) c).getSQLState()))) {
+                c = c.getCause();
+              }
+              assertThat(c).as("a 40001 among the causes").isNotNull();
+            });
   }
 
   /**
