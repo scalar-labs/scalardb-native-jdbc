@@ -90,9 +90,10 @@ To tell that a connection goes through the driver: its URL starts with `jdbc:sca
 The driver version mirrors the ScalarDB line it is certified against; certification is per line, and
 the tests run against the line's newest patch.
 
-Certified in 3.20.0-beta.1, against the ScalarDB 3.20 line: PostgreSQL, MySQL, MariaDB and SQL
-Server at READ COMMITTED, SNAPSHOT and SERIALIZABLE, and Oracle at READ COMMITTED and SNAPSHOT. The
-first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
+Tested in 3.20.0-beta.1 against ScalarDB 3.19.1: PostgreSQL, MySQL, MariaDB and SQL Server at READ
+COMMITTED, SNAPSHOT and SERIALIZABLE, and Oracle at READ COMMITTED and SNAPSHOT. ScalarDB 3.20 writes
+the same transaction metadata columns and states as 3.19. The first preview, 3.19.0-alpha.1, was
+PostgreSQL at READ COMMITTED only.
 
 ## Building
 

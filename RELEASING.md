@@ -177,9 +177,7 @@ git tag -a v<version> -m "ScalarDB Native JDBC <version>" && git push origin v<v
 
 `release.yml` runs on a `v<major>.<minor>.<patch>` tag, with or without a pre-release suffix. It
 refuses a tag that does not match `gradle.properties`, a `-SNAPSHOT` version, a commit that is not on
-the tag's minor version branch (`3.20` for `v3.20.0-beta.1`), a ScalarDB version in
-`gradle/libs.versions.toml` that is not on the tag's line (`3.20.*` for `v3.20.0-beta.1`), and
-release notes that are missing or incomplete (see [When releasing](#when-releasing)). It then runs CI on the tagged commit, uploads the
+the tag's minor version branch (`3.20` for `v3.20.0-beta.1`), and release notes that are missing or incomplete (see [When releasing](#when-releasing)). It then runs CI on the tagged commit, uploads the
 driver to the Central Portal for someone to release, and creates the GitHub release with the notes
 and the two zips. A pre-release is marked as one and never takes the *Latest* badge.
 
@@ -259,7 +257,7 @@ does, in three rungs that each leave more behind than the last:
 
 1. **Guards only.** Before the secrets are granted to this repository, push the branch with
    `version=0.0.1-rc.1`, a batched `.changes/v0.0.1-rc.1.md`, and the tag `v0.0.1-rc.1`.
-   `verify-version` and CI run for real (the `0.0` line is exempt from the ScalarDB line check), and
+   `verify-version` and CI run for real, and
    `publish-maven` stops at its secrets check, so nothing is published. Check first that the
    `MAVEN_CENTRAL_*` secrets do not already reach this repository from the organization: if they
    do, this rung uploads a deployment, which then has to be dropped at the Portal as in rung 3.

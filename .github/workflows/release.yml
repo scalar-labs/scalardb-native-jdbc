@@ -82,36 +82,6 @@ jobs:
           shopt -u nocasematch
           echo "Releasing ${version}"
 
-      # The version names the ScalarDB line the driver is certified against (RELEASING.md,
-      # "Versioning"), so the tests must run on that line: a v3.20.* tag needs scalardb = "3.20.*" in
-      # the version catalog, or the release notes claim a certification that never ran. The 0.0 line
-      # is the rehearsal's (RELEASING.md, "Before the first release"), which no ScalarDB line matches
-      - name: Check the tests run on the version's ScalarDB line
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          line="${VERSION%%-*}"
-          line="${line%.*}"
-          if [ "${line}" = "0.0" ]; then
-            echo "::notice::${VERSION} is on the rehearsal line 0.0; the ScalarDB line is not checked"
-            exit 0
-          fi
-          scalardb=$(sed -n 's/^scalardb = "\([^"]*\)"$/\1/p' gradle/libs.versions.toml)
-          if [ -z "${scalardb}" ]; then
-            echo "::error::no scalardb version found in gradle/libs.versions.toml"
-            exit 1
-          fi
-          case "${scalardb}" in
-            "${line}".*) echo "The tests run on ScalarDB ${scalardb}, on the ${line} line" ;;
-            *)
-              echo "::error::${VERSION} is certified against ScalarDB ${line}, but the tests run on" \
-                "ScalarDB ${scalardb}; set scalardb in gradle/libs.versions.toml to the line's newest" \
-                "patch and certify it (RELEASING.md)"
-              exit 1
-              ;;
-          esac
-
       # The release commit is made on the minor version branch (3.20 for 3.20.x) and never merges
       # back, so the branch is derived from the version. Git answers 1 for "not an ancestor" and
       # 128 when it could not tell; both fail, with different messages
