@@ -124,6 +124,21 @@ class SetupIntegrationTest {
       assertThat(rows(c, "SELECT * FROM " + name(engine, su, comp.readView(engine)))).isEmpty();
     }
 
+    if (engine == Engine.MYSQL) {
+      // recounted after the backfill, not left at the empty table's 0 (todo 362)
+      try (Connection c = e.open()) {
+        assertThat(
+                rows(
+                    c,
+                    "SELECT n_rows FROM mysql.innodb_table_stats WHERE database_name = '"
+                        + su
+                        + "' AND table_name = '"
+                        + imp.metadataTable()
+                        + "'"))
+            .containsExactly("3");
+      }
+      assertThat(result(first, "imp").actions()).contains("analyzed " + imp.metadataTable());
+    }
     if (engine == Engine.ORACLE) {
       // fixed statistics assuming rows in flight, locked (todo 094): of 3 rows, 1 prepared (half,
       // rounded down), 1 deleted and 1 committed, as cumulative endpoints

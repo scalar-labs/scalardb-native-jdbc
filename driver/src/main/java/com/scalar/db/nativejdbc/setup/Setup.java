@@ -418,6 +418,9 @@ public final class Setup {
       }
       stamped = backfill(t);
       done(actions, "backfilled " + stamped + " rows");
+      if (recount(t)) {
+        done(actions, "analyzed " + metadataTable(t));
+      }
       if (engine == Engine.ORACLE && t.layout() != Layout.INLINE && gatherHistogram(t, false)) {
         done(actions, "set and locked fixed statistics on " + metadataTable(t) + ".tx_state");
       }
@@ -523,6 +526,9 @@ public final class Setup {
       if (backfills(t)) {
         stamped = backfill(t);
         done(actions, "backfilled " + stamped + " rows");
+        if (recount(t)) {
+          done(actions, "analyzed " + meta);
+        }
       } else if (t.layout() == Layout.DECOUPLED_IMPORTED || t.layout() == Layout.INLINE) {
         done(actions, "backfill skipped (--backfill runs it)");
       }
@@ -703,6 +709,40 @@ public final class Setup {
                 + " force => TRUE);"
                 + keys
                 + " END IF;");
+  }
+
+  /**
+   * On MySQL, an {@code ANALYZE TABLE} of the metadata table the backfill has just filled (todo
+   * 362): until InnoDB recounts it on its own, its persistent statistics still say the rows it had
+   * before, none on a new import, and reads scan it, 26.8 ms and 300,007 handler reads a point read
+   * of a 300,000-row table against 1.2 ms and 7. The histogram on {@code tx_state} does not update
+   * them. MariaDB's statistics lag the same way, but its plans did not suffer (measured, todo 362).
+   *
+   * @return whether it ran
+   */
+  private boolean recount(TableInfo t) throws SQLException {
+    if (engine != Engine.MYSQL) {
+      return false;
+    }
+    String sql = "ANALYZE TABLE " + name(t.namespace(), metadataTable(t));
+    if (planned != null) {
+      planned.add(sql);
+      return true;
+    }
+    try (Statement st = connection.createStatement();
+        ResultSet rs = st.executeQuery(sql)) {
+      // a failure comes back as a row, not an exception
+      while (rs.next()) {
+        if (rs.getString("Msg_type").equalsIgnoreCase("error")) {
+          throw new SQLException(
+              "the statistics of "
+                  + metadataTable(t)
+                  + " were not updated: "
+                  + rs.getString("Msg_text"));
+        }
+      }
+    }
+    return true;
   }
 
   /**

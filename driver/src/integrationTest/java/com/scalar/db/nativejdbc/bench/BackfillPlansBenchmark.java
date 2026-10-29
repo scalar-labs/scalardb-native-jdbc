@@ -87,7 +87,9 @@ class BackfillPlansBenchmark {
   void plansWithAndWithoutTheBackfill(Engines e) throws Exception {
     assumeTrue(Boolean.getBoolean("nativejdbc.bench"), "-Dnativejdbc.bench=true runs it");
     Engine engine = e.engine();
-    assumeTrue(engine == Engine.ORACLE || engine == Engine.MYSQL, "Oracle and MySQL");
+    assumeTrue(
+        engine == Engine.ORACLE || engine == Engine.MYSQL || engine == Engine.MARIADB,
+        "Oracle, MySQL and MariaDB");
     String name = "bp" + System.currentTimeMillis() % 1_000_000;
     String ns = e.storedSchema(name);
     String n = e.intType();
@@ -248,7 +250,9 @@ class BackfillPlansBenchmark {
       vendor.setAutoCommit(true);
       String session = session(engine, driver);
       String[] phases = {"none written", "10% written", "all written"};
-      for (int p = 0; p < phases.length; p++) {
+      // -Dnativejdbc.bench.phases=1 stops after the first, the statistics right after the setup
+      int last = Math.min(phases.length, Integer.getInteger("nativejdbc.bench.phases", 3));
+      for (int p = 0; p < last; p++) {
         // the phase's writes through the driver, on both tables alike
         int from = p == 1 ? 1 : p == 2 ? 30_001 : 0;
         int to = p == 1 ? 30_000 : p == 2 ? ROWS : -1;
@@ -288,7 +292,7 @@ class BackfillPlansBenchmark {
               m.op.run(driver, table, k);
               times[i] = System.nanoTime() - start;
             }
-            reads = (reads(engine, vendor, session) - reads) / MEASURED;
+            reads = reads < 0 ? -1 : (reads(engine, vendor, session) - reads) / MEASURED;
             got.computeIfAbsent(m.name, x -> new HashMap<>())
                 .put(t, new long[] {median(times), reads});
           }
@@ -307,7 +311,7 @@ class BackfillPlansBenchmark {
         }
         if (engine == Engine.ORACLE) {
           out.append(oracleTexts(vendor, ns));
-        } else {
+        } else if (engine == Engine.MYSQL) {
           out.append(mysqlTexts(vendor, ns));
         }
       }
@@ -369,7 +373,10 @@ class BackfillPlansBenchmark {
     }
   }
 
-  /** The driver session's reads so far: Oracle's logical reads, MySQL's handler reads. */
+  /**
+   * The driver session's reads so far: Oracle's logical reads, MySQL's handler reads; -1 where
+   * performance_schema is off, as MariaDB's is by default.
+   */
   private static long reads(Engine engine, Connection vendor, String session) throws SQLException {
     String sql =
         engine == Engine.ORACLE
@@ -382,8 +389,13 @@ class BackfillPlansBenchmark {
       ps.setLong(1, Long.parseLong(session));
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
-        return rs.getLong(1);
+        return rs.getObject(1) == null ? -1 : rs.getLong(1);
       }
+    } catch (SQLException e) {
+      if (engine == Engine.ORACLE) {
+        throw e;
+      }
+      return -1;
     }
   }
 

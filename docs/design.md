@@ -759,9 +759,12 @@ So the backfill becomes an option, with a default by layout.
   - MySQL's plans don't suffer: the table not backfilled reads and writes within 0.8–1.4x of the
     backfilled one from 10% written on, with the same handler reads, its empty histogram
     notwithstanding. So MySQL keeps the setup's histogram as it is. The backfilled table is the one
-    that suffers on MySQL, until InnoDB recounts it: right after the setup its persistent statistics
-    still say 0 rows, and a point read scans the metadata table, 26.8 ms and 300,007 handler reads
-    against 1.2 ms and 7.
+    that suffered on MySQL, until InnoDB recounted it: right after the setup its persistent statistics
+    still said 0 rows, and a point read scanned the metadata table, 26.8 ms and 300,007 handler reads
+    against 1.2 ms and 7. So on MySQL the setup and `backfill` run a plain `ANALYZE TABLE` of the
+    metadata table after the backfill, before the histogram (todo 362); right after the setup the
+    point read is then 1.6 ms and 7 handler reads. MariaDB's statistics lag the same way, but its
+    plans did not suffer (0.85 ms a point read on the backfilled table), so it runs none.
 
 Nothing changes at run time. A table is set up as before, when its index and view exist, but the
 view no longer says the backfill completed; nothing reads that meaning, only comments say it

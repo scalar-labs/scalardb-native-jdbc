@@ -30,13 +30,19 @@ command. The failure comes back as a row, as for the histogram. Add a sentence t
 
 ## Acceptance Criteria
 
-- [ ] A plain `ANALYZE TABLE` of the metadata table after the backfill, in `setup` and `backfill`,
+- [x] A plain `ANALYZE TABLE` of the metadata table after the backfill, in `setup` and `backfill`,
       and in their `--dry-run` output.
-- [ ] `BackfillPlansBenchmark` on MySQL: the backfilled table right after the setup reads like the
+- [x] `BackfillPlansBenchmark` on MySQL: the backfilled table right after the setup reads like the
       one InnoDB has recounted (the point read about 1.2 ms and 7 handler reads).
-- [ ] A check of whether MariaDB has the same gap, with the fix there if so.
-- [ ] Design section 3's MySQL bullet says what the setup does.
+- [x] A check of whether MariaDB has the same gap, with the fix there if so.
+- [x] Design section 3's MySQL bullet says what the setup does.
 
 ## Work Log
 
 - 2026-10-29: found by c7 while measuring todo 361; opened at the user's request.
+- 2026-10-29: built on branch mysql-analyze (c7): `Setup.recount`, a plain `ANALYZE TABLE` of the
+  metadata table after the backfill on MySQL, in `setup` and `backfill` and their dry runs.
+  `BackfillPlansBenchmark` on MySQL right after the setup: the backfilled table's InnoDB row count
+  298,700 (was 0), a point read 1.6 ms and 7 handler reads (was 26.8 ms and 300,007), an UPDATE by
+  key 3.9 ms (was 119). MariaDB: its statistics also say 0 rows, but its plans don't suffer (a
+  point read 0.85 ms on the backfilled table, 1.02 on the other), so no fix there.

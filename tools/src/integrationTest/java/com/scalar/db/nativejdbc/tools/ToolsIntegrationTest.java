@@ -248,6 +248,10 @@ class ToolsIntegrationTest {
       Run plan = tool(e, "backfill", "--dry-run", "--table", impName);
       assertThat(plan.exit).as(plan.all()).isZero();
       assertThat(plan.out).contains("-- the backfill: 2 rows to stamp now");
+      if (engine == Engine.MYSQL) {
+        // the recount after the backfill (todo 362)
+        assertThat(plan.out).contains("ANALYZE TABLE `" + ns + "`.`" + imp + "_tx_metadata`;");
+      }
       assertThat(tool(e, "check", "--table", impName).exit).isEqualTo(Main.EXIT_FOUND);
 
       Run backfill = tool(e, "backfill", "--table", impName, "--table", inlName);
