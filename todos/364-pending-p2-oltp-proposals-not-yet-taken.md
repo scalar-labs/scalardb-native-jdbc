@@ -52,3 +52,19 @@ todo 334's log and the design sections named.
   Oracle's full buffer-busy timeout and wakes to a free buffer, a lost post. Expected in `waits.txt`:
   the waiter at 300 to 1,000 ms with no holder in the sample; the object and class say whether the
   block is a hot data block, an index leaf (the in-flight index at `tx_state` 1) or space management.
+- 2026-10-29 (item 1, Fable): 6e's local smoke run of the harness (Oracle Free, TPC-C scale 1, 30 s,
+  READ COMMITTED inline, no backfill, from bfa20aa): `table fetch continued row` grew by 225 over the
+  vendor's run and by 11,521 over the driver's. That is the inline layout's row growth: a row's first
+  write adds its metadata (`tx_id` and the four stamps) for good and its before image for the length
+  of the transaction (section 1, items 2 and 5); a stock or customer row's before image is about the
+  row's size, a block's PCTFREE 10 reserve (about 800 bytes) holds the growth of a couple of its
+  rows, so most rows written migrate, and every later fetch of a migrated row by rowid costs a get
+  more. With the backfill the migration happened at setup (the ninth run's inline tables at 2 to 6x
+  the vendor's blocks); without it, it happens during the run, so tonight's inline cells carry the
+  migration's writes as well as its reads, a baseline the ninth run's inline cells did not have. To
+  read beside the counter: the driver's key reads' gets a call against the vendor's in the harness's
+  `V$SQL` figures, about one more per migrated row fetched. The cost is the layout's (ScalarDB's own
+  tables grow the same way); a remedy, if the counter says it matters, is the setup's import
+  rebuilding an inline table with a larger PCTFREE (`ALTER TABLE ... MOVE PCTFREE n`, offline, its
+  indexes rebuilt), on request as the backfill is, the user's call. The poller's keep-and-write path
+  stays untested end to end (no local wait over 300 ms).
