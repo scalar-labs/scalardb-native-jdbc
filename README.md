@@ -1,7 +1,5 @@
 # ScalarDB Native JDBC
 
-**Status: private preview. Not released yet.**
-
 ScalarDB Native JDBC lets an application use its database's own SQL and transactions on tables that
 ScalarDB also manages. ScalarDB's transactions on the same tables keep their guarantees.
 
@@ -22,27 +20,39 @@ through the driver.
 
 ## Getting it
 
-**Before the release, build all three yourself:** [docs/development-builds.md](docs/development-builds.md).
-The driver is not on Maven Central yet, and there is no GitHub release to download from.
+- **The driver**, `com.scalar-labs:scalardb-native-jdbc` on Maven Central, which the application
+  connects through with `jdbc:scalardb-native:postgresql:...`:
 
-- **The driver**, `com.scalar-labs:scalardb-native-jdbc`, which the application connects through with
-  `jdbc:scalardb-native:postgresql:...`. With Maven or Gradle, its POM brings its dependencies,
+  ```kotlin
+  implementation("com.scalar-labs:scalardb-native-jdbc:3.20.0")
+  ```
+
+  ```xml
+  <dependency>
+    <groupId>com.scalar-labs</groupId>
+    <artifactId>scalardb-native-jdbc</artifactId>
+    <version>3.20.0</version>
+  </dependency>
+  ```
+
+  With Maven or Gradle, its POM brings its dependencies,
   JSQLParser 5.4 and slf4j-api. With the jar alone, put those two on the classpath beside it. Either
   way, add your database's own JDBC driver. If your application also uses JSQLParser, directly or
   through a library such as MyBatis-Plus or PageHelper, your build resolves one version for both:
   pin it to 5.4, the version the driver is tested with, or the driver can fail at run time, for
   example with `NoSuchMethodError`.
-- **`snsql`**, the psql-like shell, `scalardb-native-shell-<version>.zip`.
+- **`snsql`**, the psql-like shell, `scalardb-native-shell-<version>.zip` on the
+  [GitHub release](https://github.com/scalar-labs/scalardb-native-jdbc/releases).
 - **`scalardb-native-tools`**, which sets ScalarDB tables up for the driver,
-  `scalardb-native-tools-<version>.zip`.
+  `scalardb-native-tools-<version>.zip` on the same release.
 
-After the release, the driver comes from Maven Central and the two zips from the GitHub release.
+A version not released yet: [Unreleased versions](docs/development-builds.md).
 
 | Java | For |
 | --- | --- |
 | 11 or later | running the driver, `snsql` and `scalardb-native-tools` |
 | 17 or later | the Gradle build of the getting-started example |
-| JDK 25 | building this repository ([development builds](docs/development-builds.md)) |
+| JDK 25 | building this repository ([unreleased versions](docs/development-builds.md)) |
 
 ## Documentation
 
@@ -52,7 +62,7 @@ reference pages are for looking things up.
 | Guides | What it covers |
 | --- | --- |
 | [Getting started](docs/getting-started.md) | from an empty database to a program through the driver, in either of ScalarDB's layouts |
-| [Development builds](docs/development-builds.md) | building the driver, `snsql` and the tools yourself before a release, and using them |
+| [Unreleased versions](docs/development-builds.md) | a snapshot of the driver from the Maven Central snapshot repository, or the driver, `snsql` and the tools built from this repository |
 | [Setting up tables](docs/setting-up-tables.md) | `scalardb-native-tools`: setting ScalarDB tables up for the driver, checking them, adding a table while applications run |
 
 | Reference | What it covers |

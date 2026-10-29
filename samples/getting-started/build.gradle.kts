@@ -1,25 +1,18 @@
-import java.util.Properties
-
 // The warehouse application of docs/getting-started.md. A project of its own, not part of the
 // driver's build: it takes the driver from Maven Central, as an application would.
 plugins {
     application
 }
 
-// The driver's version is this repository's, from its gradle.properties. A -SNAPSHOT version is a
-// development build, taken from the local Maven repository (docs/development-builds.md); a copy of
-// this directory outside the repository takes the release below.
-val repositoryProperties = file("../../gradle.properties")
-val driverVersion =
-    if (repositoryProperties.isFile) {
-        Properties().apply { repositoryProperties.inputStream().use { load(it) } }.getProperty("version")
-    } else {
-        "3.20.0"
-    }
+// The released driver the guide names; -PdriverVersion=<version>-SNAPSHOT takes an unreleased one
+// from the local Maven repository or the Maven Central snapshot repository
+// (docs/development-builds.md). release.yml checks the default against the version it releases.
+val driverVersion = providers.gradleProperty("driverVersion").getOrElse("3.20.0")
 
 repositories {
     if (driverVersion.endsWith("-SNAPSHOT")) {
         mavenLocal()
+        maven("https://central.sonatype.com/repository/maven-snapshots/")
     }
     mavenCentral()
 }

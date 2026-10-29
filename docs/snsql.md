@@ -10,14 +10,11 @@ ScalarDB transactions check. The database's own shell stays right for DDL and fo
 
 ## Installing
 
-Download `scalardb-native-shell-<version>.zip` from the GitHub release, unzip it, and put its `bin`
+Download `scalardb-native-shell-<version>.zip` from the
+[GitHub release](https://github.com/scalar-labs/scalardb-native-jdbc/releases), unzip it, and put its `bin`
 directory on your `PATH`. It needs Java 11 or later. The zip bundles the JDBC drivers of PostgreSQL,
 MariaDB (also used for MySQL), SQL Server and Oracle. To use another one, MySQL Connector/J for
 example, put its jar in the zip's `lib` directory.
-
-Before the release there is no zip to download: build `snsql` yourself
-([Development builds](development-builds.md)). The zip you build is the same, and installs the same
-way.
 
 ## Connecting
 

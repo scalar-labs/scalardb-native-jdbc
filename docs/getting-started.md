@@ -65,29 +65,23 @@ causes.
 
 ## What you need
 
-> **Before the release,** the driver, `snsql` and the tools are not published yet. Build them first
-> ([Development builds](development-builds.md)), then come back here. That page also gives the
-> Schema Loader version to use until ScalarDB 3.20 is released.
-
 - Java 17 or later on your `PATH` or in `JAVA_HOME`, for the example's Gradle build. The driver
   itself needs Java 11 or later.
 - Docker, for the database in this guide. Any PostgreSQL you can create tables in will do.
 - This repository's [`samples/getting-started`](../samples/getting-started) directory. It holds every
   file the guide uses, so you don't copy any from this page.
 - From the [ScalarDB releases](https://github.com/scalar-labs/scalardb/releases), the Schema Loader
-  of the ScalarDB line the driver is certified against, `scalardb-schema-loader-<SCALARDB_VERSION>.jar`
-  ([Compatibility](../README.md#compatibility)), about 170 MB. Download `scalardb-schema-loader`, not
+  `scalardb-schema-loader-3.20.0.jar`, about 170 MB. Download `scalardb-schema-loader`, not
   `scalardb-cluster-schema-loader`, which is for ScalarDB Cluster. Put it in
   `samples/getting-started`.
-- From the ScalarDB Native JDBC GitHub release, `scalardb-native-shell-<VERSION>.zip` (`snsql`) and
-  `scalardb-native-tools-<VERSION>.zip` (`scalardb-native-tools`). Unzip both and put their `bin`
+- From the [ScalarDB Native JDBC releases](https://github.com/scalar-labs/scalardb-native-jdbc/releases),
+  `scalardb-native-shell-3.20.0.zip` (`snsql`) and `scalardb-native-tools-3.20.0.zip`
+  (`scalardb-native-tools`). Unzip both and put their `bin`
   directories on your `PATH`. Both bundle the JDBC drivers of PostgreSQL, MariaDB (also used for
   MySQL), SQL Server and Oracle.
 
-You do not build the driver after the release: the example program gets it from Maven Central as
-`com.scalar-labs:scalardb-native-jdbc`. Before the release, it takes your own build from your local
-Maven repository. It finds the version to use in the repository's `gradle.properties`, so keep
-`samples/getting-started` inside the repository.
+You do not build the driver: the example program gets it from Maven Central as
+`com.scalar-labs:scalardb-native-jdbc:3.20.0`.
 
 Run every command in this guide from `samples/getting-started`:
 
@@ -180,7 +174,7 @@ warehouse database
 Create it, with ScalarDB's coordinator table:
 
 ```sh
-java -jar scalardb-schema-loader-<SCALARDB_VERSION>.jar \
+java -jar scalardb-schema-loader-3.20.0.jar \
   --config scalardb.properties -f schema.json --coordinator
 ```
 
@@ -214,9 +208,9 @@ A table that already holds rows imports the same way. `import-inline.json` descr
 Import the table, and create the coordinator table:
 
 ```sh
-java -jar scalardb-schema-loader-<SCALARDB_VERSION>.jar \
+java -jar scalardb-schema-loader-3.20.0.jar \
   --config scalardb.properties -f import-inline.json --import
-java -jar scalardb-schema-loader-<SCALARDB_VERSION>.jar \
+java -jar scalardb-schema-loader-3.20.0.jar \
   --config scalardb.properties --coordinator
 ```
 
@@ -249,9 +243,9 @@ docker exec -i native-pg psql -U postgres < stock.sql
 Import the table, and create the coordinator table:
 
 ```sh
-java -jar scalardb-schema-loader-<SCALARDB_VERSION>.jar \
+java -jar scalardb-schema-loader-3.20.0.jar \
   --config scalardb.properties -f import-decoupled.json --import
-java -jar scalardb-schema-loader-<SCALARDB_VERSION>.jar \
+java -jar scalardb-schema-loader-3.20.0.jar \
   --config scalardb.properties --coordinator
 ```
 
@@ -403,7 +397,7 @@ API, with it:
 
 ```kotlin
 dependencies {
-    implementation("com.scalar-labs:scalardb-native-jdbc:<VERSION>")
+    implementation("com.scalar-labs:scalardb-native-jdbc:3.20.0")
     runtimeOnly("org.postgresql:postgresql:42.7.14")
     runtimeOnly("org.slf4j:slf4j-simple:1.7.36")
 }
@@ -415,7 +409,7 @@ With Maven, the same dependencies are:
 <dependency>
   <groupId>com.scalar-labs</groupId>
   <artifactId>scalardb-native-jdbc</artifactId>
-  <version><VERSION></version>
+  <version>3.20.0</version>
 </dependency>
 <dependency>
   <groupId>org.postgresql</groupId>

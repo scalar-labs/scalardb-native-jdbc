@@ -82,6 +82,27 @@ jobs:
           shopt -u nocasematch
           echo "Releasing ${version}"
 
+      # The README and the getting-started guide tell users which version to download, and the
+      # guide's example takes that version unless told otherwise; a release that names an older one
+      # would send new users to it. A pre-release names none of its own, so it is not checked
+      - name: Check the README and the getting-started guide name this release
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          missing=0
+          check() {
+            if ! grep -qF -- "$2" "$1"; then
+              echo "::error::$1 does not name ${VERSION}: expected $2 (RELEASING.md, step 3)"
+              missing=1
+            fi
+          }
+          check README.md "scalardb-native-jdbc:${VERSION}\""
+          check docs/getting-started.md "scalardb-native-shell-${VERSION}.zip"
+          check samples/getting-started/build.gradle.kts "getOrElse(\"${VERSION}\")"
+          exit "${missing}"
+
       # The release commit is made on the minor version branch (3.20 for 3.20.x) and never merges
       # back, so the branch is derived from the version. Git answers 1 for "not an ancestor" and
       # 128 when it could not tell; both fail, with different messages

@@ -38,9 +38,9 @@ ScalarDB's to create or import, with `scalar.db.jdbc.isolation_level` as
 
 ## Running it
 
-`scalardb-native-tools` runs the setup. It comes in `scalardb-native-tools-<version>.zip`, with the
-vendor drivers whose licences allow bundling; before the release, build it yourself
-([Development builds](development-builds.md)).
+`scalardb-native-tools` runs the setup. It comes in `scalardb-native-tools-<version>.zip` on the
+[GitHub release](https://github.com/scalar-labs/scalardb-native-jdbc/releases), with the vendor
+drivers whose licences allow bundling.
 
 ```sh
 export SCALARDB_NATIVE_PASSWORD=...   # it never prompts
