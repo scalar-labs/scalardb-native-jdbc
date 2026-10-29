@@ -74,6 +74,32 @@ dependencies {
     "integrationTestImplementation"(libs.hikaricp)
 }
 
+// -Pnativejdbc.<engine>.driverVersion=<version> runs the integration tests with another version of
+// that engine's JDBC driver, everywhere on their classpath, ScalarDB's own use of it included: the
+// vendor-drivers workflow tests the versions the README names this way
+val vendorDrivers =
+    mapOf(
+        "postgresql" to "org.postgresql:postgresql",
+        "mysql" to "com.mysql:mysql-connector-j",
+        "mariadb" to "org.mariadb.jdbc:mariadb-java-client",
+        "sqlserver" to "com.microsoft.sqlserver:mssql-jdbc",
+        "oracle" to "com.oracle.database.jdbc:ojdbc11",
+    )
+val driverVersions =
+    vendorDrivers.mapNotNull { (engine, module) ->
+        providers.gradleProperty("nativejdbc.$engine.driverVersion").orNull?.let { module to it }
+    }.toMap()
+if (driverVersions.isNotEmpty()) {
+    configurations.matching { it.name.startsWith("integrationTest") }.configureEach {
+        resolutionStrategy.eachDependency {
+            driverVersions["${requested.group}:${requested.name}"]?.let {
+                useVersion(it)
+                because("-Pnativejdbc.<engine>.driverVersion")
+            }
+        }
+    }
+}
+
 // The test fixtures are for this build's own tests, not a published artifact.
 // The sources variant exists only once the publishing plugin has added the sources jar.
 afterEvaluate {

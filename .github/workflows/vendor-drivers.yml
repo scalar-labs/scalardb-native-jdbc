@@ -1,0 +1,87 @@
+name: Vendor drivers
+
+# The driver's integration tests with other versions of each engine's JDBC driver than the one CI
+# uses (gradle/libs.versions.toml), for the supported range the README states (todo 327). The
+# application supplies the vendor driver, so the range is what users can rely on. Weekly rather than
+# per pull request, as the isolation tests are: one job per engine and version, each the length of
+# that engine's CI job. ScalarDB's own use of the driver in the tests takes the same version.
+on:
+  schedule:
+    - cron: "0 20 * * 6" # Sunday 05:00 JST
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  driver-version:
+    name: ${{ matrix.engine }} ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      # the runners the repository gets are few, and CI needs some
+      max-parallel: 6
+      matrix:
+        include:
+          # the newest patch of every line from the oldest claimed; CI runs the current ones
+          - { engine: Postgresql, property: postgresql, version: 42.6.2 }
+          - { engine: Postgresql, property: postgresql, version: 42.5.6 }
+          - { engine: Postgresql, property: postgresql, version: 42.4.5 }
+          - { engine: Postgresql, property: postgresql, version: 42.3.10 }
+          - { engine: Postgresql, property: postgresql, version: 42.2.29 }
+          - { engine: Mysql, property: mysql, version: 26.10.0 }
+          - { engine: Mysql, property: mysql, version: 9.7.0 }
+          - { engine: Mysql, property: mysql, version: 8.4.0 }
+          - { engine: Mysql, property: mysql, version: 8.0.33 }
+          - { engine: Mariadb, property: mariadb, version: 4.0.0 }
+          - { engine: Mariadb, property: mariadb, version: 3.5.11 }
+          - { engine: Mariadb, property: mariadb, version: 3.4.5 }
+          - { engine: Mariadb, property: mariadb, version: 3.3.7 }
+          - { engine: Mariadb, property: mariadb, version: 3.2.0 }
+          - { engine: Mariadb, property: mariadb, version: 3.1.4 }
+          - { engine: Mariadb, property: mariadb, version: 3.0.11 }
+          - { engine: Sqlserver, property: sqlserver, version: 13.6.1.jre11 }
+          - { engine: Sqlserver, property: sqlserver, version: 13.4.0.jre11 }
+          - { engine: Sqlserver, property: sqlserver, version: 13.2.1.jre11 }
+          - { engine: Sqlserver, property: sqlserver, version: 12.10.2.jre11 }
+          - { engine: Sqlserver, property: sqlserver, version: 12.8.2.jre11 }
+          - { engine: Sqlserver, property: sqlserver, version: 12.6.5.jre11 }
+          - { engine: Sqlserver, property: sqlserver, version: 12.4.3.jre11 }
+          - { engine: Sqlserver, property: sqlserver, version: 12.2.1.jre11 }
+          - { engine: Sqlserver, property: sqlserver, version: 11.2.3.jre11 }
+          - { engine: Oracle, property: oracle, version: 23.26.0.0.0 }
+          - { engine: Oracle, property: oracle, version: 23.9.0.25.07 }
+          - { engine: Oracle, property: oracle, version: 23.2.0.0 }
+          - { engine: Oracle, property: oracle, version: 21.23.0.0 }
+          - { engine: Oracle, property: oracle, version: 21.1.0.0 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Integration tests
+        run: >-
+          ./gradlew :driver:integrationTest${{ matrix.engine }}
+          -Pnativejdbc.${{ matrix.property }}.driverVersion=${{ matrix.version }}
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-reports-${{ matrix.engine }}-${{ matrix.version }}
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
