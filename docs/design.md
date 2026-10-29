@@ -3009,7 +3009,13 @@ ScalarDB tables, and stays part of that engine's certification.
 
 ## 5. Isolation levels
 
-One setting, the native connection's isolation level, selects everything else.
+One setting, the native connection's isolation level, selects everything else. A connection
+starts at SNAPSHOT, ScalarDB's default level (section 1, 2026-10-29): on this driver it is also the
+cheaper level, since the engine's snapshot spares the per-statement work of 4.2 and 4.3, the opposite
+of ScalarDB, where READ COMMITTED is the cheaper one. READ COMMITTED stays an explicit level for an
+application that wants fresh reads per statement and lock waits on a blind write rather than `40001`;
+nothing maps it onto the snapshot level, since the semantics an application asked for by name are
+kept.
 
 Built: all three levels on PostgreSQL, MySQL, MariaDB and SQL Server, the others' writes and locking
 reads as on PostgreSQL; READ COMMITTED and SNAPSHOT on Oracle, which refuses SERIALIZABLE.

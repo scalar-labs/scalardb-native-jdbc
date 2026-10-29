@@ -3089,3 +3089,25 @@ confirm, the harness takes `V$SEGMENT_STATISTICS` (buffer busy waits and ITL wai
 MOVE` with the indexes rebuilt after the backfill (or a higher PCTFREE on import), which the harness
 can do for the inline cells and the setup's documentation can say for an imported inline table. If
 it holds, the cell's 83 s of stalls in 240 terminal-seconds are its whole gap to 0.9.
+
+### 2026-10-29: the default level becomes SNAPSHOT (the user's decision), 22b68b9 reviewed (the design's note)
+
+The user, after the ninth run's reading, asked whether READ COMMITTED could run on the engine's
+snapshot level, then decided to make SNAPSHOT the connection's default, consistent with ScalarDB,
+keeping READ COMMITTED as an explicit level; the design's advice (this session): on this driver
+SNAPSHOT is also the cheaper level, the opposite of ScalarDB, the Oracle eighth run's vendor paying
+nothing for SERIALIZABLE and the driver 0.70 to 0.84 inline and 0.58 to 0.66 decoupled; true READ
+COMMITTED stays for fresh reads per statement and lock waits on blind writes, and no option maps it
+onto the snapshot level. c7 built it on the user's direct word as 22b68b9 (branch default-snapshot):
+`Router.isolation` starts at `TRANSACTION_REPEATABLE_READ`, `Proxies.connection` sets the vendor
+session through `sessionLevel` (Oracle READ COMMITTED in autocommit and SERIALIZABLE in a
+transaction, SQL Server SNAPSHOT), SQL Server's `ALLOW_SNAPSHOT_ISOLATION` checked at connect and
+the connection refused without it, which the review confirms (the level cannot be set before
+connecting, a weaker level is the substitution section 5 forbids); the suites pinned to READ
+COMMITTED after connect so each test runs at the level it was written for, the default's own tests
+expecting SNAPSHOT. Asked before landing: `DatabaseMetaData.getDefaultTransactionIsolation` answered
+`TRANSACTION_REPEATABLE_READ` on every engine, the refusal's SQLState `08004` as every other
+connect-time refusal's, with the configuration table and section 1's error table following, and one
+sentence in transactions.md on what the default implies, the `40001` retry and the kept snapshot.
+Section 5 opens with the default now. The benchmarks are unaffected, the harness setting its level
+itself; the headline cells become the SNAPSHOT ones.
