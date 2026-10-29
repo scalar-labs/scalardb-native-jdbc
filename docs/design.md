@@ -218,9 +218,12 @@ goes through the primary key.
   database, which fails it with a syntax error.
 - **Connection methods**: `setTransactionIsolation` is forwarded and selects the level of section 5
   (`TRANSACTION_REPEATABLE_READ` is SNAPSHOT; `READ_UNCOMMITTED` is refused; section 5 maps the
-  constants per engine). The driver sets READ COMMITTED at connect, because vendor defaults differ, with
-  Connector/J and MariaDB Connector/J starting at REPEATABLE READ and the others at READ COMMITTED, so
-  the default level is the same on every engine. `setAutoCommit`, `commit` and `rollback` are forwarded
+  constants per engine). The driver sets SNAPSHOT at connect, ScalarDB's default level
+  (`scalar.db.consensus_commit.isolation_level`), because vendor defaults differ, with Connector/J and
+  MariaDB Connector/J starting at REPEATABLE READ and the others at READ COMMITTED, so the default level
+  is the same on every engine and matches ScalarDB's; on SQL Server that needs `ALLOW_SNAPSHOT_ISOLATION`
+  at connect, and on Oracle the session runs at READ COMMITTED while in autocommit, as section 5 has.
+  `setAutoCommit`, `commit` and `rollback` are forwarded
   untouched, because the transaction is the database's own; a write issued in autocommit mode is wrapped
   by the driver in a transaction of its own (4.4). `getMetaData`
   is forwarded, optionally filtered to hide `_data`, `_tx_metadata` and `virtual_tables`. A passthrough
@@ -407,7 +410,7 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   itself runs on. Anything else is refused at `connect`, not guessed at. Certification order: PostgreSQL,
   then MySQL and MariaDB together, then SQL Server, then Oracle. At connect the driver sets the session
   isolation level explicitly, and on SQL Server checks `sys.databases.is_read_committed_snapshot_on` and
-  `snapshot_isolation_state`, refusing the connection without the first and SNAPSHOT without the second.
+  `snapshot_isolation_state`, refusing the connection without either, since it starts at SNAPSHOT.
 - Vendor properties pass through untouched. Driver properties are namespaced and few:
   `scalar.db.native_jdbc.inflight_wait_millis`, the bounded wait of section 6 under READ COMMITTED, 0 to abort at
   once; `scalar.db.native_jdbc.passthrough`, settable **only** through `setClientInfo`, never from the URL or

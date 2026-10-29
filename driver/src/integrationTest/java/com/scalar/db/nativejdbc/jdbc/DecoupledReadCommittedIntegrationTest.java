@@ -450,6 +450,7 @@ class DecoupledReadCommittedIntegrationTest {
   void form1_theLocksFirstStatementHasItsKeysOnly() throws Exception {
     try (Connection v = PG.open()) {
       Router router = new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+      router.setIsolation(Connection.TRANSACTION_READ_COMMITTED);
       for (TableInfo t : List.of(imp, made)) {
         String lock = "SELECT x FROM " + NS + "." + t.table() + " WHERE id = ? FOR UPDATE";
         Writes.LockPlan plan =
@@ -677,6 +678,7 @@ class DecoupledReadCommittedIntegrationTest {
   void todo337_theLocksVersionsReadFromTheMetadataTableAlone() throws Exception {
     try (Connection v = PG.open()) {
       Router router = new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+      router.setIsolation(Connection.TRANSACTION_READ_COMMITTED);
       Writes.LockPlan plan =
           (Writes.LockPlan)
               Objects.requireNonNull(
@@ -730,6 +732,7 @@ class DecoupledReadCommittedIntegrationTest {
   void todo337_thePerRowProbeBehindOneProbeOfTheIndex() throws Exception {
     try (Connection v = PG.open()) {
       Router router = new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+      router.setIsolation(Connection.TRANSACTION_READ_COMMITTED);
       String read = "SELECT COUNT(*) FROM " + NS + ".big WHERE id BETWEEN 100 AND 4000";
       String routed = router.route(v, read).sql;
       String metaTable = "\"" + NS + "\".\"" + big().metadataTable() + "\"";
@@ -793,6 +796,7 @@ class DecoupledReadCommittedIntegrationTest {
               + " (id, tx_id, tx_state, tx_version) SELECT g, 't', 3, 1 FROM generate_series(1,"
               + " 200000) g");
       Router router = new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+      router.setIsolation(Connection.TRANSACTION_READ_COMMITTED);
       List<String> texts = new java.util.ArrayList<>();
       texts.add(router.inFlightCheck(t)); // the coarse check
       texts.add(router.route(v, "SELECT x FROM " + NS + ".big WHERE id BETWEEN 1 AND 10").sql);

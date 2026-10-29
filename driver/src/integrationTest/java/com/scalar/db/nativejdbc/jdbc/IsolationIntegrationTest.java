@@ -12,8 +12,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 /**
- * Every engine starts at READ COMMITTED through the driver, including MySQL and MariaDB, whose
- * drivers start at REPEATABLE READ.
+ * Every engine starts at SNAPSHOT through the driver, ScalarDB's default level, including those
+ * whose drivers start at READ COMMITTED.
  */
 class IsolationIntegrationTest {
 
@@ -23,7 +23,7 @@ class IsolationIntegrationTest {
 
   @ParameterizedTest
   @MethodSource("engines")
-  void aConnection_startsAtReadCommitted(Engines e) throws SQLException {
+  void aConnection_startsAtSnapshot(Engines e) throws SQLException {
     Properties p = new Properties();
     try (Connection direct = e.open()) {
       // MySQL and MariaDB report user@host
@@ -34,7 +34,7 @@ class IsolationIntegrationTest {
     String url = "jdbc:scalardb-native:" + e.url().substring("jdbc:".length());
     try (Connection c = DriverManager.getConnection(url, p)) {
       // the vendor drivers read the level from the server, not from a cached value
-      assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
+      assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
     }
   }
 }

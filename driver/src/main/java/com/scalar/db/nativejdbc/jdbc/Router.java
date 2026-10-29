@@ -566,7 +566,8 @@ final class Router {
   private boolean passthrough;
   // false while nativeSQL decides a route: nothing runs on the connection (todo 127)
   private boolean probes = true;
-  private int isolation = Connection.TRANSACTION_READ_COMMITTED; // set at connect
+  // SNAPSHOT, the driver's default level and ScalarDB's, set on the session at connect
+  private int isolation = Connection.TRANSACTION_REPEATABLE_READ;
   // the application's Connection.setReadOnly, which SQL Server's driver ignores (todo 324)
   private boolean readOnly;
   // the checks for rows in flight the open transaction passed, in its snapshot

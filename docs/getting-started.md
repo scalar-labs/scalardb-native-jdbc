@@ -338,13 +338,11 @@ postgres=> \dt warehouse.*
 In the decoupled layout, `warehouse.stock_tx_metadata` is listed too, marked `internal`: ScalarDB's
 own table, which you don't use.
 
-Run the session at SNAPSHOT, the level of the order service's ScalarDB transactions (step 2). A
-driver connection starts at READ COMMITTED, so set it first. Then add two items and correct both
+The session runs at SNAPSHOT, the level of the order service's ScalarDB transactions (step 2): a
+driver connection starts at SNAPSHOT, ScalarDB's default level. Add two items and correct both
 counts in one transaction, as after a stocktake:
 
 ```text
-postgres=> SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SET
 postgres=> INSERT INTO warehouse.stock (item_id, name, quantity) VALUES (1, 'bolt', 100), (2, 'nut', 50);
 INSERT 2
 postgres=> BEGIN;
@@ -367,8 +365,8 @@ postgres=> \q
 
 Inside a transaction the prompt is `postgres=*>`, as in psql. `SELECT *` returns `item_id`, `name`
 and `quantity` only, in every layout. `BEGIN`, `COMMIT` and
-`ROLLBACK` work as in psql, and `\?` lists the other commands. The session level holds until
-`snsql` exits; each new `snsql` session starts at READ COMMITTED again.
+`ROLLBACK` work as in psql, and `\?` lists the other commands. A level set with `SET SESSION
+CHARACTERISTICS` holds until `snsql` exits; each new `snsql` session starts at SNAPSHOT again.
 
 To run one statement and exit:
 

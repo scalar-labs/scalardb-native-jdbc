@@ -59,19 +59,21 @@ class SqlServerDatabaseIntegrationTest {
   }
 
   @Test
-  void repeatableReadWithoutSnapshotIsolation_isRefused() throws SQLException {
-    try (Connection c =
-        DriverManager.getConnection(
-            appdb.replace("databaseName=appdb", "databaseName=nosi"), props)) {
-      assertThatThrownBy(() -> c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ))
-          .isInstanceOf(SQLException.class)
-          .hasMessageContaining("ALLOW_SNAPSHOT_ISOLATION")
-          .extracting("SQLState")
-          .isEqualTo("55000");
-      assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
-    }
+  void aDatabaseWithoutSnapshotIsolation_isRefusedAtConnect() throws SQLException {
+    // a connection starts at SNAPSHOT, which SQL Server runs only where the database allows it
+    assertThatThrownBy(
+            () -> {
+              try (Connection c =
+                  DriverManager.getConnection(
+                      appdb.replace("databaseName=appdb", "databaseName=nosi"), props)) {
+                c.isValid(1);
+              }
+            })
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("ALLOW_SNAPSHOT_ISOLATION")
+        .extracting("SQLState")
+        .isEqualTo("55000");
     try (Connection c = DriverManager.getConnection(appdb, props)) {
-      c.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
       assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
       try (Statement st = c.createStatement();
           ResultSet rs =

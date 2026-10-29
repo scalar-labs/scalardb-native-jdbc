@@ -16,13 +16,13 @@ whose commit or rollback is not yet applied to the row. [Concepts](concepts.md) 
 **Set the same level in the driver and in ScalarDB** for applications that write the same tables.
 A level that is weaker on one side breaks what the other side's level protects: a driver transaction
 at SNAPSHOT can cause write skew that ScalarDB's SERIALIZABLE was to rule out, and one at READ
-COMMITTED can overwrite a commit that ScalarDB's SNAPSHOT counted on. The defaults differ: a
-driver connection starts at READ COMMITTED, ScalarDB at SNAPSHOT, so set one of them.
+COMMITTED can overwrite a commit that ScalarDB's SNAPSHOT counted on. The defaults are the same: a
+driver connection starts at SNAPSHOT, ScalarDB's default level.
 
 | `setTransactionIsolation` | `scalar.db.consensus_commit.isolation_level` | `scalar.db.jdbc.isolation_level` | Engines |
 | --- | --- | --- | --- |
-| `TRANSACTION_READ_COMMITTED` (the driver's default) | `READ_COMMITTED` | `REPEATABLE_READ` | all five |
-| `TRANSACTION_REPEATABLE_READ` (SNAPSHOT) | `SNAPSHOT` (ScalarDB's default) | `REPEATABLE_READ` | all five |
+| `TRANSACTION_READ_COMMITTED` | `READ_COMMITTED` | `REPEATABLE_READ` | all five |
+| `TRANSACTION_REPEATABLE_READ` (SNAPSHOT, the driver's default) | `SNAPSHOT` (ScalarDB's default) | `REPEATABLE_READ` | all five |
 | `TRANSACTION_SERIALIZABLE` | `SERIALIZABLE` | `SERIALIZABLE`, for the driver, not for ScalarDB | [PostgreSQL](#serializable-on-postgresql) |
 | `TRANSACTION_SERIALIZABLE` | `SERIALIZABLE` | `REPEATABLE_READ`, with a short lock wait | [MySQL and MariaDB](#serializable-on-mysql-and-mariadb), [SQL Server](#serializable-on-sql-server) |
 

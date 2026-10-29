@@ -53,7 +53,9 @@ class RouterTest {
             Duration.ofMinutes(1),
             Clock.systemUTC(),
             true);
-    return new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+    Router router = new Router(Engine.POSTGRESQL, catalog, new Session(Engine.POSTGRESQL));
+    router.setIsolation(Connection.TRANSACTION_READ_COMMITTED); // the level these tests are at
+    return router;
   }
 
   /** A connection to a database without ScalarDB's schema: its catalog tables are missing. */

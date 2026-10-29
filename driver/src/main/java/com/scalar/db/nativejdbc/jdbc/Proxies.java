@@ -77,15 +77,16 @@ public final class Proxies {
       boolean predicateChecks,
       String coordinatorNamespace)
       throws SQLException {
-    // vendor defaults differ (Connector/J and MariaDB start at REPEATABLE READ), so every engine
-    // starts at READ COMMITTED, the driver's default level (design section 1)
-    vendor.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
     Session session = new Session(engine);
     if (engine == Engine.SQLSERVER) {
       session.requireReadCommittedSnapshot(vendor);
+      session.requireSnapshotIsolation(vendor); // the level the connection starts at
     }
-    session.schemas(vendor); // read now, outside any transaction
     Router router = new Router(engine, catalog, session, predicateChecks, coordinatorNamespace);
+    // vendor defaults differ (Connector/J and MariaDB start at REPEATABLE READ), so every engine
+    // starts at SNAPSHOT, the driver's default level and ScalarDB's (design section 1)
+    vendor.setTransactionIsolation(router.sessionLevel(router.isolation(), vendor.getAutoCommit()));
+    session.schemas(vendor); // read now, outside any transaction
     // a URL may open the connection read-only, as pgjdbc's readOnly does
     router.setReadOnly(vendor.isReadOnly());
     // ScalarDbTables, reached with unwrap, is the driver's own interface (design section 1)

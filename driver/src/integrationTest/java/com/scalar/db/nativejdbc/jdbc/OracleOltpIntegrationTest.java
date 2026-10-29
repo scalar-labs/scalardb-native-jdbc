@@ -2392,6 +2392,7 @@ class OracleOltpIntegrationTest {
   void form5LocksTheDataRowAlone() throws Exception {
     try (Connection v = ORA.open()) {
       Router router = new Router(Engine.ORACLE, catalog, new Session(Engine.ORACLE));
+      router.setIsolation(Connection.TRANSACTION_READ_COMMITTED);
       for (String table : List.of("t", "ti")) {
         for (String wait : List.of("", " NOWAIT")) {
           String lock = "SELECT x FROM " + NS + "." + table + " WHERE id = ? FOR UPDATE" + wait;

@@ -244,8 +244,7 @@ class ReadIntegrationTest {
         splitReads(c, made, mid, mx);
         try (Connection vendor = e.open()) {
           groupedReads(c, vendor, made, mid, mx);
-          outerJoinAndSubqueryReads(
-              c, vendor, new Router(engine, catalog, new Session(engine)), made, mid, mx);
+          outerJoinAndSubqueryReads(c, vendor, readCommitted(engine, catalog), made, mid, mx);
         }
         // a trailing line comment ends every copy, not only the first
         assertThat(rows(c, "SELECT " + mx + " FROM " + made + " -- note"))
@@ -279,7 +278,7 @@ class ReadIntegrationTest {
       }
       try (Connection vendor = e.open()) {
         // the reads above ran split, not through the read views
-        Router router = new Router(engine, catalog, new Session(engine));
+        Router router = readCommitted(engine, catalog);
         String join =
             "SELECT m." + mx + " FROM " + made + " m JOIN " + ns + ".imp i ON m." + mid + " = i.id";
         assertThat(router.route(vendor, join).sql)
@@ -425,7 +424,7 @@ class ReadIntegrationTest {
         assertThat(ps.toString().equals(before)).isEqualTo(!perRow);
         try (Connection vendor = e.open()) {
           vendor.setAutoCommit(false); // in a transaction, where anchors are recorded
-          String sql = new Router(engine, catalog, new Session(engine)).route(vendor, byKey).sql;
+          String sql = readCommitted(engine, catalog).route(vendor, byKey).sql;
           vendor.rollback();
           // a key read anchors its row (4b)
           assertThat(sql).contains("scalardb_native_x");
@@ -488,9 +487,7 @@ class ReadIntegrationTest {
       tx.prepare();
       try (Connection vendor = e.open()) {
         String sql =
-            new Router(engine, catalog, new Session(engine))
-                .route(vendor, "SELECT val FROM rk.kc WHERE pid = ?")
-                .sql;
+            readCommitted(engine, catalog).route(vendor, "SELECT val FROM rk.kc WHERE pid = ?").sql;
         assertThat(sql).contains("COALESCE");
       } finally {
         tx.rollback();
@@ -795,6 +792,13 @@ class ReadIntegrationTest {
           .isEqualTo("40001");
       d.rollback();
     }
+  }
+
+  /** A router at READ COMMITTED, the level these reads are written for. */
+  private static Router readCommitted(Engine engine, Catalog catalog) {
+    Router router = new Router(engine, catalog, new Session(engine));
+    router.setIsolation(Connection.TRANSACTION_READ_COMMITTED);
+    return router;
   }
 
   @SuppressFBWarnings(

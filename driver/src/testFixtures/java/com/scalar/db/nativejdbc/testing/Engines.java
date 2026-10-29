@@ -274,7 +274,10 @@ public enum Engines {
     return TransactionFactory.create(p);
   }
 
-  /** Opens a connection through the driver, with a catalog of its own read afresh per lookup. */
+  /**
+   * Opens a connection through the driver at READ COMMITTED, with a catalog of its own read afresh
+   * per lookup.
+   */
   public Connection openDriver() throws SQLException {
     return openDriver(new Properties());
   }
@@ -294,8 +297,12 @@ public enum Engines {
     p.putAll(extra);
     p.setProperty("user", s.username);
     p.setProperty("password", s.password);
-    return DriverManager.getConnection(
-        "jdbc:scalardb-native:" + s.url.substring("jdbc:".length()), p);
+    Connection c =
+        DriverManager.getConnection("jdbc:scalardb-native:" + s.url.substring("jdbc:".length()), p);
+    // the level the suites are written at; a connection starts at SNAPSHOT, which a suite sets
+    // where it means it, and IsolationIntegrationTest checks
+    c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+    return c;
   }
 
   /** The stored spelling of a table name written unquoted in DDL on this engine. */

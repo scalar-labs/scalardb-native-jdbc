@@ -92,7 +92,7 @@ is set per connection, with `setClientInfo` ([SQL support](sql-support.md#passth
 | MySQL | a strict `sql_mode` (`STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES`; the default has the first) | an `INSERT` into a ScalarDB table is refused, `0AN01` |
 | MySQL, MariaDB | `useAffectedRows` false in the vendor driver, its default | connection refused, `08004` |
 | SQL Server | `ALTER DATABASE ... SET READ_COMMITTED_SNAPSHOT ON` | connection refused, `08004` |
-| SQL Server | `ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON`, for `TRANSACTION_REPEATABLE_READ` and `TRANSACTION_SERIALIZABLE` | `setTransactionIsolation` to either fails, `55000` |
+| SQL Server | `ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON`, since a connection starts at SNAPSHOT (`TRANSACTION_REPEATABLE_READ`), and SERIALIZABLE runs at it | connection refused, `55000` |
 | SQL Server | `XACT_ABORT` off for the session, and not among the server's `user options` | connection refused, `08004` |
 | SQL Server | `QUOTED_IDENTIFIER`, `ANSI_NULLS`, `ANSI_PADDING` and `ANSI_WARNINGS` on in every session that writes a ScalarDB table's transaction metadata, ScalarDB's and maintenance scripts' included; the JDBC driver's defaults have them on, `sqlcmd` needs `-I` | the write fails, since the setup's in-flight index is a filtered index |
 

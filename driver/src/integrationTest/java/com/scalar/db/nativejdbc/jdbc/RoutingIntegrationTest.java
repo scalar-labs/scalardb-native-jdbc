@@ -75,8 +75,11 @@ class RoutingIntegrationTest {
     props.setProperty("ApplicationName", "routing-integration-test");
   }
 
+  /** A driver connection at READ COMMITTED, the level these tests are written at. */
   private static Connection connect() throws SQLException {
-    return DriverManager.getConnection(url, props);
+    Connection c = DriverManager.getConnection(url, props);
+    c.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+    return c;
   }
 
   private static void assertRefused(ThrowingCallable call, String sqlState, String message) {
@@ -348,9 +351,9 @@ class RoutingIntegrationTest {
   }
 
   @Test
-  void readUncommitted_isRefused_andTheDefaultIsReadCommitted() throws SQLException {
-    try (Connection c = connect()) {
-      assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
+  void readUncommitted_isRefused_andTheDefaultIsSnapshot() throws SQLException {
+    try (Connection c = DriverManager.getConnection(url, props)) {
+      assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
       assertRefused(
           () -> c.setTransactionIsolation(Connection.TRANSACTION_READ_UNCOMMITTED),
           "0AN01",
@@ -479,6 +482,7 @@ class RoutingIntegrationTest {
     Catalog catalog = new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open);
     Session session = new Session(PG.engine());
     Router router = new Router(PG.engine(), catalog, session);
+    router.setIsolation(Connection.TRANSACTION_READ_COMMITTED);
     String sql = "SELECT x FROM m1.s WHERE id = ?";
     try (Connection vendor = PG.open()) {
       Router.Route first = router.route(vendor, sql);
