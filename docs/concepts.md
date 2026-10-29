@@ -49,9 +49,10 @@ run](setting-up-tables.md#adding-a-table-to-scalardb-while-applications-run)).
 
 A one-time preparation of each ScalarDB table for the driver, by an operator with DDL privileges,
 with `scalardb-native-tools setup` ([Setting up tables](setting-up-tables.md)). It creates the
-table's [in-flight index](#in-flight-index) and [read view](#read-view), and on an imported table
-writes the transaction metadata the import did not. The driver refuses statements on a ScalarDB
-table that is not set up (`55000`).
+table's [in-flight index](#in-flight-index) and [read view](#read-view). With `--backfill` it also
+writes the transaction metadata an imported table lacks, which is optional
+([When to run the backfill](getting-started.md#when-to-run-the-backfill)). The driver refuses
+statements on a ScalarDB table that is not set up (`55000`).
 
 ## In-flight index
 
