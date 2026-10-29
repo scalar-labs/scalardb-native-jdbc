@@ -17,8 +17,8 @@ leaves an all-NULL metadata row that ScalarDB can't prepare again (section 1; le
 2026-10-29).
 
 The backfill itself costs: one transaction over every row and its locks. On an inline table it
-rewrites the application's rows, likely the cause of the migrated rows behind the ninth Oracle run's
-buffer busy waits.
+rewrites the application's rows. (The ninth Oracle run's buffer busy waits, first read as rows that
+rewrite migrated, show in the vendor's own runs too: todo 334's log, 2026-10-29.)
 
 ## Proposed Solution
 

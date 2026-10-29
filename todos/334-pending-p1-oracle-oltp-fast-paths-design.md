@@ -3118,3 +3118,68 @@ and `setTransactionIsolation`'s later one `55000`, both naming `ALLOW_SNAPSHOT_I
 configuration, errors and transactions pages following, the dated note on the benchmark status page;
 the isolation, routing and serializable suites pass per engine. Landing on the user's word, as a
 fast-forward onto main after the rebase.
+
+### 2026-10-29: the one-second stalls are the server's, not the backfill's: the vendor's own runs have them (a correction of the ninth run's reading)
+
+c7's todo 361 (20289be) made the backfill the setup's option, off for inline tables by default,
+with the ninth run's reading above among its reasons: the rows the backfill migrated behind the
+READ COMMITTED inline cell's buffer busy waits. Before restating the pending rerun under that
+default, I counted the same stalls on the vendor's side of the eighth and ninth runs, from each
+run's flight recording (`jfr print --events jdk.SocketRead`, the reads of 990 to 1,100 ms) against
+the run's `buffer busy waits` seconds in `server.txt`:
+
+| run | cell | side, run | one-second reads | buffer busy waits |
+|---|---|---|---|---|
+| ninth | SNAPSHOT inline | vendor a-1 | 38 | 38.7 s (5,220 waits) |
+| ninth | SNAPSHOT inline | vendor a-2 | 0 | 7.5 ms |
+| ninth | SNAPSHOT inline | driver c-1 | 49 | 50.1 s |
+| ninth | SNAPSHOT decoupled | vendor a-1 | 12 | 12.0 s |
+| ninth | READ COMMITTED inline | driver c-1 | 82 | 83.0 s |
+| ninth | READ COMMITTED inline | driver c-2 | 3 | 3.5 s |
+| eighth | SNAPSHOT inline | vendor a-1, a-2 | 5, 14 | 5.0, 14.1 s |
+| eighth | SNAPSHOT decoupled | vendor a-1, a-2 | 7, 23 | 7.1, 23.1 s |
+| eighth | READ COMMITTED inline | driver c-2 | 26 | 27.1 s |
+| both | READ COMMITTED, both layouts | vendor, 8 runs | 0 | under 50 ms each |
+
+The one-second reads equal the buffer busy wait seconds in every run counted, so each stall is
+one buffer busy wait reaching Oracle's one-second timeout, and they occur on the vendor's own
+tables, which no backfill rewrote and no stamp grew: in every vendor run at its matching level for
+the SNAPSHOT cells, Oracle SERIALIZABLE, 5 to 38 a run, and in none of its eight READ COMMITTED
+runs; in the driver's runs at both levels, 0 to 82, the count unrelated to the layout (the READ
+COMMITTED decoupled cell's four driver runs have 3.1 to 4.1 s each, the inline cell's 3.5 to 83).
+The migrated-row reading is withdrawn: the block counts stand, but the stalls do not need them,
+and two identical runs differ by 0 against 38 and 3 against 82. What the holder of the buffer was
+doing during the second is not in the dumps.
+
+The local container (Oracle Free 23.26.3, `cpu_count` 2) has the same waits in
+`V$ACTIVE_SESSION_HISTORY`: 48 buffer busy waits of 1,000 to 1,004 ms on 2026-10-27 08:51 to
+08:55 by its clock, during a warehouse- and district-shaped test (tables `SYSTEM.BBW_WH` and
+`BBW_DI`, one hot block each, file 21 blocks 74465 and 74481, class data block), nine sessions'
+SELECT statements waiting, the blocking session unrecorded in all samples but one; `V$SYSSTAT` has
+no `buffer deadlock` statistic in this release (its `enqueue deadlocks` 47 are the suites'
+ORA-00060 tests). So a hot single-row block under concurrent `SELECT ... FOR UPDATE` reproduces the
+one-second wait on the container, where the pin's holder is plausibly descheduled by the resource
+manager (`resmgr:cpu quantum` is the container's top wait, 2.6 s at most); on AWS (Enterprise
+Edition 23.26.1 on 8 vCPUs, no resource-manager wait in the dumps) the holder's state is the open
+question.
+
+What the harness should take, replacing the segment statistics, chained-row counts and table move
+proposed above: per run and on both sides, the `V$ACTIVE_SESSION_HISTORY` samples with event
+`buffer busy waits` and `time_waited` of 900 ms or more (sample time, session, `sql_id` and its
+text, p1/p2/p3 as file, block and class, `current_obj#`'s object, `blocking_session`) and, for each,
+the blocking session's own sample at that time (its event or CPU and its `sql_id`), which names the
+holder and what held it. The view is populated on Free and on Enterprise Edition; on the latter it
+is the Diagnostics Pack's, licensed separately, which is the user's call; the licence-free form is
+a poller on the database host during the run, `V$SESSION` every 200 ms for sessions in `buffer
+busy waits` beyond 300 ms with the same columns and the blocking session's row. And the run
+summary should print each run's one-second read count from its flight recording beside its
+throughput, since a cell's ratio blends runs of 3 and 82 stalls: the READ COMMITTED inline cell's
+0.63 is 83 s of 240 terminal-seconds in one run and 3.5 in the other. `table fetch continued row`
+from `V$SYSSTAT` after the run is still worth one line, for the inline rows that grow at their
+first write (the before image, design section 1) now that the setup no longer backfills them.
+
+The rerun: the READ COMMITTED inline TPC-C cell with those diagnostics, both sides; under todo
+361's default its inline tables start at the vendor's blocks, so the same run tests the migration
+idea for free. The `ALTER TABLE ... MOVE` remedy is withdrawn; a remedy waits for the holder's
+identity. Design section 3's sentence and todo 361's problem statement are corrected with this
+note.

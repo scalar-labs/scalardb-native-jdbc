@@ -701,8 +701,9 @@ Two things remain. First, ScalarDB's liveness on an imported decoupled table, un
 the defect of section 1. Second, the backfill's own cost:
 
 - It is one transaction over every row, holding their locks (about 25 s for 5M rows on PostgreSQL).
-- On an inline table it rewrites every row of the application's own table (todo 290). On Oracle that
-  likely migrated rows, the ninth run's buffer busy waits in the READ COMMITTED inline cell.
+- On an inline table it rewrites every row of the application's own table (todo 290). (On Oracle
+  the ninth run's buffer busy waits in the READ COMMITTED inline cell were first read as rows it
+  migrated; the vendor's own runs have the same one-second waits, todo 334's log, 2026-10-29.)
 
 So the backfill becomes an option, with a default by layout.
 
