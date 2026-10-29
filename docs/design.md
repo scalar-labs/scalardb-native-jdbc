@@ -2213,21 +2213,24 @@ The blocks write such a key themselves, with the statements the steps run for it
   `stampFromData` statement for the one key, with the key read in step 1:
 
   ```plsql
-  ELSIF l_rows = 1 AND l_meta = 0 THEN
+  IF l_rows = 1 AND (l_meta = 0 OR COALESCE(l_state, 3) = 3) THEN
     UPDATE T t SET <the user's SET items> WHERE (P);        -- step 2, or the user's DELETE
     l_written := SQL%ROWCOUNT;
-    IF l_written = 1 THEN
+    IF l_written = 1 AND l_meta = 1 THEN
+      UPDATE T_meta SET <the stamp> WHERE k = l_m AND <the CAS>;   -- step 3, as today
+      l_stamped := SQL%ROWCOUNT;
+    ELSIF l_written = 1 THEN
       INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (k)) */ INTO T_meta x
              (k, tx_id, tx_state, tx_version, tx_prepared_at, tx_committed_at)
-      VALUES (l_k, ?, 3, 1, ?, ?);                           -- step 3, a version-1 row
+      VALUES (l_k, ?, 3, 1, ?, ?);                           -- step 3 without one, version 1
       l_stamped := SQL%ROWCOUNT;
     END IF;
   END IF;
   ```
 
-  The branch has its own copy of the user's SET and `P` placeholders and of the stamp's three
-  values, bound after the committed branch's, as each nested statement of the block binds its own.
-  The OUT row is unchanged, and the driver decides as the keyed block's table says: `written` 1,
+  The user's DML is shared by both cases, so its placeholders are bound once, as today. The
+  insert's three stamp values are bound after the CAS's, so that each nested statement binds its
+  own. The OUT row is unchanged, and the driver decides as the keyed block's table says: `written` 1,
   `stamped` 1 is the key written; `written` 1, `stamped` 0 is a metadata row inserted by another
   writer since step 1, an abort; `written` 0 is the abort of a committed row not written. The anchor
   check on the row returned, a NULL `tx_id` and version, is the one the steps make. The metadata
@@ -2528,8 +2531,9 @@ vendor's own statement, then on AWS with the rest.
   has a NULL `tx_id` and a version of NULL or 0, which the CAS ignores: its condition is
   `tx_id IS NULL AND COALESCE(tx_state, 3) = 3`, the deemed-committed rule ScalarDB's own prepare uses;
   the CAS writes the full stamp of I5 with version 1. If there is no metadata row, the CAS is an `INSERT`
-  of a version 1 row guarded by the existence of the `T` row; a duplicate key means another writer got
-  there first, so return to step 1. For a DELETE in either
+  of a version 1 row guarded by the existence of the `T` row; a duplicate key, which the insert skips,
+  means another writer gave the row metadata after step 1 read it, and the write aborts ("a row the
+  statement writes was given metadata after it was read"). For a DELETE in either
   case the stamped metadata row is written the same way and **kept** as a tombstone after the `T` row is
   deleted (4.3 step 3); the next INSERT of that key takes it over (4.3, INSERT). These cases arise only on
   imported tables, and only until the backfill of section 1 has completed.
