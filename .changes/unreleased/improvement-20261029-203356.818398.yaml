@@ -1,3 +1,0 @@
-kind: improvement
-body: '[BREAKING] The driver''s properties are `scalar.db.native_jdbc.*` in snake case, as ScalarDB''s are. A key of 3.19.0-alpha.1, `scalardbnative.*` in camel case such as `scalardbnative.catalogTtlMs`, is refused with `08001`, and the message names its new name. See "Upgrading from 3.19.0-alpha.1" in `docs/configuration.md`.'
-time: 2026-10-29T20:33:56.818398+09:00

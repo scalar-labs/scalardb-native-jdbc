@@ -88,15 +88,13 @@ To tell that a connection goes through the driver: its URL starts with `jdbc:sca
 | Driver version | ScalarDB line | Engines |
 | --- | --- | --- |
 | 3.20.x | 3.20.x | PostgreSQL, MySQL, MariaDB, SQL Server, Oracle |
-| 3.19.0-alpha.x | 3.19.x | PostgreSQL |
 
 The driver version mirrors the ScalarDB line it is certified against; certification is per line, and
 the tests run against the line's newest patch.
 
 Tested in 3.20.0 against ScalarDB 3.19.1: PostgreSQL, MySQL, MariaDB and SQL Server at READ
 COMMITTED, SNAPSHOT and SERIALIZABLE, and Oracle at READ COMMITTED and SNAPSHOT. ScalarDB 3.20 writes
-the same transaction metadata columns and states as 3.19. The first preview, 3.19.0-alpha.1, was
-PostgreSQL at READ COMMITTED only.
+the same transaction metadata columns and states as 3.19.
 
 ## Building
 

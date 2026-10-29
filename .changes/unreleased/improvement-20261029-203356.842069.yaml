@@ -1,3 +1,0 @@
-kind: improvement
-body: '[BREAKING] A connection starts at SNAPSHOT, ScalarDB''s default level, where 3.19.0-alpha.1 started it at READ COMMITTED. To keep READ COMMITTED, call `setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED)`, and set ScalarDB to the same level. See `docs/transactions.md`.'
-time: 2026-10-29T20:33:56.842069+09:00

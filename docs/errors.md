@@ -33,7 +33,6 @@ Retrying does not help: the same statement fails the same way.
 | `55000` | A statement on a ScalarDB table whose [read view](concepts.md#read-view) this user cannot read | Grant it: `scalardb-native-tools setup --grant <user>` |
 | `55000` | On SQL Server, `setTransactionIsolation` to REPEATABLE READ or SERIALIZABLE after the database stopped allowing snapshot isolation | `ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON` |
 | `08001` | The URL or a `scalar.db.native_jdbc.` property is malformed, unknown, or not allowed in the URL | Fix the URL or the property ([Configuration](configuration.md)) |
-| `08001` | A key of 3.19.0-alpha.1, `scalardbnative.*` | Use the key the message names ([Upgrading](configuration.md#upgrading-from-3190-alpha1)) |
 | `08001` | No vendor driver for the URL is on the classpath | Add the database's JDBC driver ([Other databases](getting-started.md#other-databases)) |
 | `08004` | The database has no ScalarDB [catalog](concepts.md#catalog) | Connect to the database ScalarDB uses; for a database without ScalarDB, set `scalar.db.native_jdbc.allow_no_catalog` |
 | `08004` | On MySQL and MariaDB, `useAffectedRows` is true | Leave it false, the default ([Database settings](configuration.md#database-settings-the-driver-needs)) |
