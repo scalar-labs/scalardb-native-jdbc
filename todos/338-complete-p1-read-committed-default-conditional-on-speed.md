@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "338"
 tags: [performance, read-committed, isolation, default, postgresql, oracle]
@@ -166,3 +166,5 @@ From the user's question whether SNAPSHOT should be the default like ScalarDB's.
 READ COMMITTED (JDBC applications expect their database's default and seldom retry `40001`); the
 user agreed on the condition above. Rows 2 and 3 need a design session's reading; row 1 needs an
 AWS run.
+
+- 2026-10-29: closed by the user's decision: SNAPSHOT is the default level (7cf5779), so READ COMMITTED's speed no longer decides it. The same-level rule is in docs/transactions.md.

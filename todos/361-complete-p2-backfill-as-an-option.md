@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "361"
 tags: [setup, tools, backfill, imported, decoupled, inline, oracle, mysql]
@@ -57,3 +57,5 @@ Design: docs/design.md section 3, "The backfill as an option".
 - Found while measuring, not in scope: on MySQL a backfilled metadata table's InnoDB statistics
   still say 0 rows right after the setup, and reads scan it (26.8 ms, 300,007 handler reads for a
   point read) until InnoDB recounts it; an `ANALYZE TABLE` after the backfill would fix it.
+
+- 2026-10-29: landed on main as 20289be (the user's word); the MySQL recount after the backfill followed as todo 362 (bd71d2e). Closed.

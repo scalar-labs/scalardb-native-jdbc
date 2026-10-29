@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "336"
 tags: [performance, postgresql, read-committed, decoupled, implementation]
@@ -385,3 +385,5 @@ Run 20261026-2334, decoupled TPC-C, READ COMMITTED, from `faae2ed` (todo 336 wit
 Packets per commit equal the vendor's. The per-statement write-up (and the versions-read item the
 design asked to watch) follows from the AWS session after the night's Oracle run. A `cb16d83`
 cell (todo 337 on top) needs another AWS apply, which the AWS session puts to the user.
+
+- 2026-10-29: closed. The three forms are built (faae2ed) and measured on AWS (0.66 to 0.71 fast, 0.83 to 0.88 slow). What is left of decoupled READ COMMITTED is todo 337's, which the next full PostgreSQL run measures.

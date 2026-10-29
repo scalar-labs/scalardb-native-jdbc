@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "328"
 tags: [performance, writes, postgresql, benchbase]
@@ -106,3 +106,5 @@ session's scratchpad.
       its own.
 - [ ] The locking read at READ COMMITTED on PostgreSQL, still its steps.
 - [ ] MySQL, MariaDB, SQL Server, Oracle.
+
+- 2026-10-29: closed. A write is one round trip on PostgreSQL and Oracle, and packets per commit equal the vendor's on both (the eleventh PostgreSQL run, the Oracle eighth and ninth). The batches, the range read's anchors and READ COMMITTED's locking read were done under todos 329, 334-336. The other engines' round trips move to todo 363.

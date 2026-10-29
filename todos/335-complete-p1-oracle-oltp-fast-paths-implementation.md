@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "335"
 tags: [performance, oracle, oltp, isolation, implementation]
@@ -1094,3 +1094,5 @@ a scanned row nobody moved goes through, a scanned row moved since is 40001; two
 write between, a moved row of the second 40001). A fold broken to drop reads after the first
 lookup fails it. The full suite on PostgreSQL, MySQL, MySQL lower case, MariaDB, SQL Server and
 Oracle passed. The measure is the next AWS run's JFR.
+
+- 2026-10-29: closed. The six forms, the bulk block, the INSERT ALL and the statement first at READ COMMITTED are built and on main; later Oracle work went through todo 334's D items and todos 360-361.

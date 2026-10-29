@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "334"
 tags: [performance, oracle, design, oltp, isolation]
@@ -3183,3 +3183,5 @@ The rerun: the READ COMMITTED inline TPC-C cell with those diagnostics, both sid
 idea for free. The `ALTER TABLE ... MOVE` remedy is withdrawn; a remedy waits for the holder's
 identity. Design section 3's sentence and todo 361's problem statement are corrected with this
 note.
+
+- 2026-10-29: closed. Every Oracle form designed here is built and on main (todo 335, D1-D3, todos 360 and 361). The open proposals move to todo 364; the one-second stalls are read from the next full run's diagnostics (55048da, 7ce0408).

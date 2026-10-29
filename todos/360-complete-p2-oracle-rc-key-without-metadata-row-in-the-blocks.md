@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "360"
 tags: [oracle, decoupled, imported, read-committed, performance, backfill]
@@ -56,3 +56,5 @@ Expected: 3 round trips for each of the four writes.
   full Oracle suite passes but for `ScalarDbNullMetadataIntegrationTest`, which fails the same way
   on main (a ScalarDB-only test building an int key for a BIGINT column). `UnstampedWriteBenchmark`
   at READ COMMITTED: 3 round trips for each write, from 7, 26, 52 and 7; figures in design 4.3.
+
+- 2026-10-29: landed on main as 03a9454 (the user's word). Closed.
