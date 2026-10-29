@@ -14,9 +14,12 @@ on:
   # below is "Release-<tag>", which release.yml's own group must not equal.
   workflow_call:
 
+# A newer push cancels a pull request's run, but never a run on main or a version branch: Oracle's
+# job takes about 20 minutes, and a push inside that window left the commit before it without a
+# result. Runs on a branch queue instead; while one runs, GitHub keeps only the newest waiting.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
