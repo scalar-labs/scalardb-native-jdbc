@@ -1,6 +1,6 @@
 # ScalarDB Native JDBC
 
-**Status: private preview. Not released, no license yet.**
+**Status: private preview. Not released yet.**
 
 ScalarDB Native JDBC lets an application use its database's own SQL and transactions on tables that
 ScalarDB also manages. ScalarDB's transactions on the same tables keep their guarantees.
@@ -97,3 +97,7 @@ first preview, 3.19.0-alpha.1, was PostgreSQL at READ COMMITTED only.
 ## Building
 
 Building the driver and running its tests: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+ScalarDB Native JDBC is licensed under the [Apache License, Version 2.0](LICENSE).

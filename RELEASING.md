@@ -1,9 +1,9 @@
 # Releasing
 
-**During the private preview nothing is published to Maven Central**: there is no license yet, and
-Central rejects a POM without one. Preview builds are attached to GitHub releases, or published to
-GitHub Packages, by the release workflow once one exists. The publishing conventions in `build-logic/`
-are ready for Central when the preview becomes public.
+The driver is published to Maven Central under the Apache License 2.0, and `snsql` and the tools
+are attached to the GitHub release. Until the release workflow exists, nothing has been published
+yet: the publishing conventions in `build-logic/` are ready for Central, and step 3 below is done by
+hand.
 
 ## Versioning
 

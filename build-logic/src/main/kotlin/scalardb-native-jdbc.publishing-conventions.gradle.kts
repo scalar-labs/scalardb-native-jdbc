@@ -6,10 +6,16 @@ plugins {
 // Publishing for the consumable modules. The Vanniktech plugin auto-detects the platform from the
 // applied plugins (`java-library` gets a sources + javadoc jar) and uploads through the Central
 // Portal API. Everything specific to this project lives in this one file.
-//
-// During the private preview there is no license file and no Maven Central target, so the templates'
-// META-INF/LICENSE step and the POM's licenses block are left out. Both are required before the first
-// public release: Central rejects a POM without a license.
+
+// Ship the license inside every published jar (META-INF/LICENSE), so the terms travel with the jar
+// wherever it is copied. The base class rather than the `bundling` Jar an unqualified `Jar` resolves
+// to: the javadoc jar comes from the publishing plugin and extends only the base class.
+tasks.withType<org.gradle.jvm.tasks.Jar>().configureEach {
+    metaInf {
+        from(rootProject.file("LICENSE"))
+    }
+}
+
 mavenPublishing {
     // The artifactId must be set explicitly: `from(components["java"])` defaults it to the Gradle
     // project name, which would publish generically-named artifacts under our group. This mirrors
@@ -42,6 +48,15 @@ mavenPublishing {
         }
         url = "https://github.com/scalar-labs/scalardb-native-jdbc"
         inceptionYear = "2026"
+
+        // Central rejects a POM without a license.
+        licenses {
+            license {
+                name = "The Apache License, Version 2.0"
+                url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+                distribution = "repo"
+            }
+        }
 
         developers {
             developer {

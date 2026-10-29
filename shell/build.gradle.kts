@@ -61,6 +61,8 @@ configurations["integrationTestRuntimeOnly"].extendsFrom(bundledDrivers)
 distributions.main {
     distributionBaseName = "scalardb-native-shell"
     contents {
+        // this product's own licence; the third-party ones are in licenses/ (src/dist)
+        from(rootProject.file("LICENSE"))
         into("lib") { from(bundledDrivers) }
     }
 }
