@@ -130,7 +130,8 @@ class WriteCorpusIntegrationTest {
                   c,
                   t -> scalarDb.contains(t.namespace()),
                   Duration.ofMinutes(2),
-                  List.of()))
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "setup succeeded");
     }
 

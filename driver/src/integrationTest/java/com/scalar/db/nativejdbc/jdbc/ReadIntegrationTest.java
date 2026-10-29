@@ -144,7 +144,8 @@ class ReadIntegrationTest {
         Objects.requireNonNullElse(catalog.lookup(List.of(), rd, imp).virtualTable(), imp);
     try (Connection c = e.open()) {
       List<Setup.Result> results =
-          Setup.run(catalog, c, t -> t.namespace().equals(rd), Duration.ofMinutes(1), List.of());
+          Setup.run(
+              catalog, c, t -> t.namespace().equals(rd), Duration.ofMinutes(1), List.of(), true);
       assertThat(results).allMatch(Setup.Result::succeeded, "succeeded");
     }
     assertSettled(e, catalog, rd, madeTable);
@@ -470,7 +471,8 @@ class ReadIntegrationTest {
     assertThat(kc.keyColumns()).containsExactly("cid", "pid");
     try (Connection c = e.open()) {
       List<Setup.Result> results =
-          Setup.run(catalog, c, t -> t.namespace().equals("rk"), Duration.ofMinutes(1), List.of());
+          Setup.run(
+              catalog, c, t -> t.namespace().equals("rk"), Duration.ofMinutes(1), List.of(), true);
       assertThat(results).allMatch(Setup.Result::succeeded, "succeeded");
     }
     try (TwoPhaseCommitTransactionManager tm = scalarDb.getTwoPhaseCommitTransactionManager()) {
@@ -606,7 +608,12 @@ class ReadIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(sdb), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(sdb),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     TableInfo info = catalog.lookup(List.of(), sdb, q.apply("ty"));
@@ -748,7 +755,12 @@ class ReadIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(sdb), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(sdb),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     String sc = ns + "." + q.apply("sc");
@@ -1132,7 +1144,12 @@ class ReadIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(sdb), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(sdb),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     try (TwoPhaseCommitTransactionManager tm = scalarDb.getTwoPhaseCommitTransactionManager()) {

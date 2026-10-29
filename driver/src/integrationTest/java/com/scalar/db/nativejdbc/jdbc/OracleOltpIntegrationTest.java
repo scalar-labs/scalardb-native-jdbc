@@ -211,7 +211,12 @@ class OracleOltpIntegrationTest {
     try (Connection c = ORA.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(N(NS)), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(N(NS)),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
       // a row the backfill has not reached, as an application writing beside ScalarDB leaves it
       ORA.execute(c, "INSERT INTO " + NS + ".imp VALUES (3, 0)");
@@ -637,7 +642,8 @@ class OracleOltpIntegrationTest {
                   v,
                   t -> t.namespace().equals(N(NS)) && t.table().equals(N("tol")),
                   Duration.ofMinutes(1),
-                  List.of()))
+                  List.of(),
+                  true))
           .hasSize(1)
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
@@ -853,7 +859,8 @@ class OracleOltpIntegrationTest {
                       t.namespace().equals(N(NS))
                           && (t.table().equals(N("tod")) || t.table().equals(N("impw"))),
                   Duration.ofMinutes(1),
-                  List.of()))
+                  List.of(),
+                  true))
           .hasSize(2)
           .allMatch(Setup.Result::succeeded, "succeeded");
       ORA.execute(v, "INSERT INTO " + NS + ".impw VALUES (3, 1, 0)");
@@ -2553,7 +2560,8 @@ class OracleOltpIntegrationTest {
                   v,
                   t -> t.namespace().equals(N(NS)) && t.table().equals(N("tscan")),
                   Duration.ofMinutes(1),
-                  List.of()))
+                  List.of(),
+                  true))
           .hasSize(1)
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
@@ -2640,7 +2648,8 @@ class OracleOltpIntegrationTest {
                   v,
                   t -> t.namespace().equals(N(NS)) && t.table().equals(N("tstate")),
                   Duration.ofMinutes(1),
-                  List.of()))
+                  List.of(),
+                  true))
           .hasSize(1)
           .allMatch(Setup.Result::succeeded, "succeeded");
       // a row of another order in flight, prepared and not committed
@@ -2795,7 +2804,8 @@ class OracleOltpIntegrationTest {
                   v,
                   t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)g(ol|st)[id]"),
                   Duration.ofMinutes(1),
-                  List.of()))
+                  List.of(),
+                  true))
           .hasSize(4)
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
@@ -4145,7 +4155,8 @@ class OracleOltpIntegrationTest {
                   v,
                   t -> t.namespace().equals(N(NS)) && t.table().equals(N("unst")),
                   Duration.ofMinutes(1),
-                  List.of()))
+                  List.of(),
+                  true))
           .hasSize(1)
           .allMatch(Setup.Result::succeeded, "succeeded");
       meta = NS + ".\"" + Objects.requireNonNull(tableInfo("unst").metadataTable()) + "\"";

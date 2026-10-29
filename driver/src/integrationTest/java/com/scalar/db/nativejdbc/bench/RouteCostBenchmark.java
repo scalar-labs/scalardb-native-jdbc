@@ -82,7 +82,12 @@ class RouteCostBenchmark {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(rc), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(rc),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     // the driver's own catalog TTL, not the tests' 0, which reads the catalog on every route

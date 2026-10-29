@@ -47,7 +47,7 @@ class SetupReviewIntegrationTest {
       throws SQLException {
     try (Connection c = engine.open()) {
       Setup.Result r =
-          Setup.run(catalog, c, t -> t.namespace().equals(schema), wait, grantees).get(0);
+          Setup.run(catalog, c, t -> t.namespace().equals(schema), wait, grantees, true).get(0);
       SQLException error = r.error();
       return error == null ? "completed" : "failed " + error.getSQLState();
     }

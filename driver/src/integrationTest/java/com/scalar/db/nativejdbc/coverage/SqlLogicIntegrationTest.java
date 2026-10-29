@@ -161,7 +161,12 @@ class SqlLogicIntegrationTest {
         String ns = e.storedSchema(scalarDb);
         assertThat(
                 Setup.run(
-                    catalog, c, t -> t.namespace().equals(ns), Duration.ofMinutes(5), List.of()))
+                    catalog,
+                    c,
+                    t -> t.namespace().equals(ns),
+                    Duration.ofMinutes(5),
+                    List.of(),
+                    true))
             .allMatch(Setup.Result::succeeded, "setup succeeded");
       }
       int filePassed = 0;

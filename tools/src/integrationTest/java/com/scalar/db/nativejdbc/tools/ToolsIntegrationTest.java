@@ -164,8 +164,8 @@ class ToolsIntegrationTest {
   }
 
   /**
-   * The backfill as an option (design section 3, todo 361): {@code setup --no-backfill} on an
-   * imported decoupled table, then ScalarDB's defect reproduced as {@code
+   * The backfill as an option, off by default (design section 3, todo 361): {@code setup} without
+   * {@code --backfill} on an imported decoupled table, then ScalarDB's defect reproduced as {@code
    * ScalarDbNullMetadataIntegrationTest} does it, which {@code check} counts and fails on and
    * {@code backfill} repairs, ScalarDB's next update then committing; and an inline imported table,
    * which the setup does not backfill by default.
@@ -204,11 +204,12 @@ class ToolsIntegrationTest {
     String impName = ns + "." + imp;
     String inlName = ns + "." + inl;
     try {
-      // the inline table without a flag: not backfilled by default
-      Run inline = tool(e, "setup", "--table", inlName, "--catalog-ttl", "0");
+      // --no-backfill is accepted and changes nothing
+      Run inline = tool(e, "setup", "--table", inlName, "--no-backfill", "--catalog-ttl", "0");
       assertThat(inline.exit).as(inline.all()).isZero();
       assertThat(inline.out).contains(inlName + ": ", "backfill skipped (--backfill runs it)");
-      Run setup = tool(e, "setup", "--table", impName, "--no-backfill", "--catalog-ttl", "0");
+      // without a flag the setup backfills no table, an imported decoupled one included
+      Run setup = tool(e, "setup", "--table", impName, "--catalog-ttl", "0");
       assertThat(setup.exit).as(setup.all()).isZero();
       assertThat(setup.out).contains("backfill skipped (--backfill runs it)");
       try (Connection c = e.open()) {

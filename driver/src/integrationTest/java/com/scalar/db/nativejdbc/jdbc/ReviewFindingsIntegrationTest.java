@@ -122,7 +122,7 @@ class ReviewFindingsIntegrationTest {
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     try (Connection c = e.open()) {
-      Setup.run(catalog, c, i -> i.namespace().equals(rv), Duration.ofMinutes(1), List.of());
+      Setup.run(catalog, c, i -> i.namespace().equals(rv), Duration.ofMinutes(1), List.of(), true);
     }
     SoftAssertions soft = new SoftAssertions();
 
@@ -490,7 +490,12 @@ class ReviewFindingsIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(N("ix")), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(N("ix")),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     String schema = e.storedSchema("ix");

@@ -207,7 +207,8 @@ class RegressIntegrationTest {
                   c,
                   t -> t.namespace().equals(scalarDb),
                   Duration.ofMinutes(5),
-                  List.of()))
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "setup succeeded");
     }
 

@@ -113,7 +113,12 @@ class CorpusIntegrationTest {
       List<String> scalarDb = List.of(e.storedSchema(set + "d"), e.storedSchema(set + "i"));
       List<Setup.Result> results =
           Setup.run(
-              catalog, c, t -> scalarDb.contains(t.namespace()), Duration.ofMinutes(2), List.of());
+              catalog,
+              c,
+              t -> scalarDb.contains(t.namespace()),
+              Duration.ofMinutes(2),
+              List.of(),
+              true);
       assertThat(results).allMatch(Setup.Result::succeeded, "setup succeeded");
     }
 

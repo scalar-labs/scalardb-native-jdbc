@@ -63,7 +63,8 @@ class RoutingIntegrationTest {
           c,
           t -> t.namespace().equals("m1"),
           Duration.ofMinutes(1),
-          List.of());
+          List.of(),
+          true);
     }
     url = "jdbc:scalardb-native:" + PG.url().substring("jdbc:".length());
     props = new Properties();

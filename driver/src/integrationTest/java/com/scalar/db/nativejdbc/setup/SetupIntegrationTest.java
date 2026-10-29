@@ -599,7 +599,7 @@ class SetupIntegrationTest {
       throws SQLException {
     try (Connection c = e.open()) {
       return Setup.run(
-          catalog, c, t -> t.namespace().equals(schema), Duration.ofMinutes(1), List.of());
+          catalog, c, t -> t.namespace().equals(schema), Duration.ofMinutes(1), List.of(), true);
     }
   }
 
@@ -652,7 +652,7 @@ class SetupIntegrationTest {
       throws SQLException {
     String su = e.storedSchema("su");
     try (Connection c = e.open()) {
-      return Setup.run(catalog, c, t -> t.namespace().equals(su), wait, List.of());
+      return Setup.run(catalog, c, t -> t.namespace().equals(su), wait, List.of(), true);
     }
   }
 

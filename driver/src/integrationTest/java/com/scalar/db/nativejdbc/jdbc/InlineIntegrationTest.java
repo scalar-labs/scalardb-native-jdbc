@@ -184,7 +184,12 @@ class InlineIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(ns), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(ns),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
       // rows another client writes after the setup, their metadata NULL; on SQL Server from a
       // session without QUOTED_IDENTIFIER, which a filtered index would refuse (todo 289)
@@ -284,7 +289,12 @@ class InlineIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(ns), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(ns),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     ExecutorService pool = Executors.newSingleThreadExecutor();

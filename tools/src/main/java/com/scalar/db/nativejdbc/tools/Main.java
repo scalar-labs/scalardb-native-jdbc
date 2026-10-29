@@ -130,8 +130,8 @@ public final class Main implements Callable<Integer> {
       names = "--backfill",
       negatable = true,
       description =
-          "setup: backfill every imported or inline table it sets up, or none with --no-backfill"
-              + " (default: imported decoupled tables only)")
+          "setup: also backfill every imported or inline table it sets up (default: none; the"
+              + " backfill command repairs the rows check reports)")
   private @Nullable Boolean backfill;
 
   @Option(

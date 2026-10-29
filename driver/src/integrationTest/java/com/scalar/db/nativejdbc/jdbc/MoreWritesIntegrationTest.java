@@ -265,7 +265,12 @@ class MoreWritesIntegrationTest {
     try (Connection c = e.open()) {
       List<Setup.Result> set =
           Setup.run(
-              catalog, c, t -> t.namespace().equals(N("wb")), Duration.ofMinutes(1), List.of());
+              catalog,
+              c,
+              t -> t.namespace().equals(N("wb")),
+              Duration.ofMinutes(1),
+              List.of(),
+              true);
       // the review of 8c1 (253): a datetime key, which ScalarDB's metadata does not equal
       assertThat(set)
           .filteredOn(r -> r.toString().startsWith("wb.dt:"))

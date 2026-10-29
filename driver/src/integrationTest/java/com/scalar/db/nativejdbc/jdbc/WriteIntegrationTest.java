@@ -124,7 +124,12 @@ class WriteIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(N("wr")), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(N("wr")),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     TableInfo imp = catalog.lookup(List.of(), N("wr"), N("imp"));
@@ -452,7 +457,8 @@ class WriteIntegrationTest {
                   c,
                   t -> t.namespace().equals(N("rsd")) || t.namespace().equals(N("rf")),
                   Duration.ofMinutes(1),
-                  List.of()))
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     TableInfo imp = catalog.lookup(List.of(), N("rf"), N("imp"));
@@ -690,7 +696,12 @@ class WriteIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(N("an")), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(N("an")),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     TableInfo imp = catalog.lookup(List.of(), N("an"), N("imp"));
@@ -889,7 +900,8 @@ class WriteIntegrationTest {
                     c,
                     t -> t.namespace().equals(N("aj")),
                     Duration.ofMinutes(1),
-                    List.of()))
+                    List.of(),
+                    true))
             .allMatch(Setup.Result::succeeded, "succeeded");
       }
       TableInfo pInfo = catalog.lookup(List.of(), N("aj"), N("p"));
@@ -1080,7 +1092,12 @@ class WriteIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, t -> t.namespace().equals(N("af")), Duration.ofMinutes(1), List.of()))
+                  catalog,
+                  c,
+                  t -> t.namespace().equals(N("af")),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     String sdb =
@@ -1240,7 +1257,8 @@ class WriteIntegrationTest {
                   c,
                   t -> t.namespace().equals(N("ryw")),
                   Duration.ofMinutes(1),
-                  List.of()))
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     // every level the driver runs on the engine (README, "Isolation levels"): Oracle refuses

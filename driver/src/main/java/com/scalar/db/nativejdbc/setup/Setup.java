@@ -26,14 +26,14 @@ import org.jspecify.annotations.Nullable;
 /**
  * Sets up decoupled ScalarDB tables for the driver (design section 3), and takes the setup down
  * again. Per table, in this order: the in-flight index on the metadata table, built without
- * blocking writes where the engine can; the backfill of section 1 where it runs (by default on an
- * imported decoupled table only, "The backfill as an option", todo 361); last the read view {@code
- * rc_T}, and a grant of SELECT on it to each application user. Every step is create-if-absent or
- * re-runnable, so running the setup again changes nothing. It needs DDL privileges and is run by an
- * operator, never at connect; the driver checks at catalog load that the index and the view exist,
- * and other drivers see a new setup after their catalog TTL. The view existing says nothing about
- * the backfill, which {@link #backfill(Catalog, Connection, Predicate, Duration)} also runs alone.
- * The backfill writes every row of the table and belongs in a quiet window (design section 1).
+ * blocking writes where the engine can; the backfill of section 1 where it is asked for (off by
+ * default, "The backfill as an option", todo 361); last the read view {@code rc_T}, and a grant of
+ * SELECT on it to each application user. Every step is create-if-absent or re-runnable, so running
+ * the setup again changes nothing. It needs DDL privileges and is run by an operator, never at
+ * connect; the driver checks at catalog load that the index and the view exist, and other drivers
+ * see a new setup after their catalog TTL. The view existing says nothing about the backfill, which
+ * {@link #backfill(Catalog, Connection, Predicate, Duration)} also runs alone. The backfill writes
+ * every row of the table and belongs in a quiet window (design section 1).
  */
 @SuppressFBWarnings(
     value = {
@@ -141,7 +141,7 @@ public final class Setup {
   private final Engine engine;
   private final Connection connection;
   private final Duration backfillWait;
-  // --backfill or --no-backfill, null for the default by layout
+  // --backfill (true) or --no-backfill (false); null for the default, which backfills nothing
   private final @Nullable Boolean backfill;
   private final List<String> grantees;
   private final String txId;
@@ -182,8 +182,8 @@ public final class Setup {
   }
 
   /**
-   * Sets up the chosen decoupled tables of the catalog, the backfill by default by layout. A table
-   * that fails does not stop the others.
+   * Sets up the chosen decoupled tables of the catalog, without the backfill. A table that fails
+   * does not stop the others.
    *
    * @param catalog the catalog of the database, read afresh first
    * @param connection a connection to the same database, in autocommit, with DDL privileges
@@ -213,8 +213,8 @@ public final class Setup {
    * @param which the tables to set up
    * @param backfillWait how long to wait per table for in-flight rows the backfill must outlast
    * @param grantees as for {@link #run(Catalog, Connection, Predicate, Duration, List)}
-   * @param backfill whether to backfill each imported or inline table; null for the default, an
-   *     imported decoupled table only (design section 3, todo 361)
+   * @param backfill whether to backfill each imported or inline table; null for the default, none
+   *     (design section 3, todo 361)
    * @return one result per table
    * @throws SQLException if the connection is not in autocommit or the catalogs cannot be read
    */
@@ -408,7 +408,7 @@ public final class Setup {
         throw new SQLNonTransientException(
             "the table is not set up: run setup, which backfills it too with --backfill", "55000");
       }
-      if (!backfills(t)) {
+      if (t.layout() != Layout.DECOUPLED_IMPORTED) {
         done(
             actions,
             t.layout() == Layout.INLINE
@@ -431,16 +431,16 @@ public final class Setup {
   }
 
   /**
-   * Whether the backfill runs on this table: on an imported decoupled or an inline table, as {@code
-   * --backfill} or {@code --no-backfill} says, else on an imported decoupled table only, while
-   * ScalarDB's defect of section 1 stands. A table ScalarDB created decoupled has every metadata
-   * row.
+   * Whether the setup backfills this table: an imported decoupled or an inline table with {@code
+   * --backfill}, and no table otherwise. The driver needs no backfill; ScalarDB's stuck rows of
+   * section 1 are repaired by {@link #backfill(Catalog, Connection, Predicate, Duration)}, which
+   * {@code check} points to. A table ScalarDB created decoupled has every metadata row.
    */
   private boolean backfills(TableInfo t) {
     if (t.layout() != Layout.DECOUPLED_IMPORTED && t.layout() != Layout.INLINE) {
       return false;
     }
-    return backfill != null ? backfill : t.layout() == Layout.DECOUPLED_IMPORTED;
+    return Boolean.TRUE.equals(backfill);
   }
 
   private List<TableInfo> tables(Catalog catalog, Predicate<TableInfo> which) throws SQLException {

@@ -17,7 +17,7 @@ setup](concepts.md#the-setup) once. For each ScalarDB table, in either of Scalar
 
 It also:
 
-- by default on an imported decoupled table, writes the transaction metadata ScalarDB has not, the
+- with `--backfill`, on an imported table, writes the transaction metadata ScalarDB has not, the
   backfill ([`backfill`](#backfill));
 - on PostgreSQL, MySQL and Oracle, gathers or sets the statistics of the transaction metadata, so
   that the database plans the driver's in-flight checks through the index. On Oracle it locks the
@@ -62,9 +62,9 @@ repeated.
   a run may drop a read view and create it again, which drops its grants. It does so for a view an
   earlier version made in another column order, and on PostgreSQL for one that reads a `SMALLINT`
   column as `INTEGER`.
-- `--backfill` backfills every imported or inline table the run sets up, and `--no-backfill` none.
-  Without either, it backfills an imported decoupled table and no other ([`backfill`](#backfill)).
-  A table it does not backfill says `backfill skipped (--backfill runs it)`.
+- `--backfill` backfills every imported or inline table the run sets up. Without it the setup
+  backfills none ([`backfill`](#backfill)); `--no-backfill` is accepted and changes nothing. A table
+  it does not backfill says `backfill skipped (--backfill runs it)`.
 - `--backfill-wait` is how long the backfill waits for rows ScalarDB has in flight, in seconds per
   table (60).
 - `--dry-run` prints the statements instead of running them.
@@ -99,12 +99,12 @@ sets the metadata table's statistics again, and on MySQL it runs `ANALYZE TABLE`
 does after a backfill. `--dry-run` prints the statements and
 the number of rows it would write.
 
-The driver doesn't need the backfill. ScalarDB does, on an imported decoupled table: a ScalarDB
+The driver doesn't need the backfill. ScalarDB can, on an imported decoupled table: a ScalarDB
 transaction that rolls back over a row without metadata leaves the row with NULL metadata, and
 every later ScalarDB update of the row fails with `DB-CORE-20013`. Run it:
 
-- on an imported decoupled table that ScalarDB transactions also write, which the setup does by
-  default;
+- on an imported decoupled table that ScalarDB transactions also write, while your ScalarDB version
+  has the defect: `setup --backfill` up front, or `backfill` at any time;
 - after `DB-CORE-20013` on a row of an imported table, or when `check` reports rows with NULL
   metadata;
 - not on an inline table, where it is never needed. `backfill` leaves an inline table alone;

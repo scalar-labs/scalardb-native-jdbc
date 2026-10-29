@@ -125,7 +125,8 @@ class DecoupledReadCommittedIntegrationTest {
     catalog = new Catalog(Engine.POSTGRESQL, Catalog.DEFAULT_METADATA_SCHEMA, PG::open);
     try (Connection c = PG.open()) {
       List<Setup.Result> set =
-          Setup.run(catalog, c, t -> t.namespace().equals(NS), Duration.ofMinutes(1), List.of());
+          Setup.run(
+              catalog, c, t -> t.namespace().equals(NS), Duration.ofMinutes(1), List.of(), true);
       assertThat(set).allMatch(Setup.Result::succeeded, "succeeded");
     }
     imp = catalog.lookup(List.of(), NS, "imp");
@@ -860,7 +861,8 @@ class DecoupledReadCommittedIntegrationTest {
               + " (id, tx_id, tx_state, tx_version) SELECT g, 'seed', 3, 1 FROM"
               + " generate_series(1, 1000000) g");
       assertThat(
-              Setup.run(catalog, v, x -> x.table().equals("mil"), Duration.ofMinutes(1), List.of()))
+              Setup.run(
+                  catalog, v, x -> x.table().equals("mil"), Duration.ofMinutes(1), List.of(), true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     String sql = "SELECT x FROM " + NS + ".mil WHERE id > ? AND id < ?";

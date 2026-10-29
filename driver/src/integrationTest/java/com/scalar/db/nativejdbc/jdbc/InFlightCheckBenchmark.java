@@ -148,7 +148,12 @@ class InFlightCheckBenchmark {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  catalog, c, i -> i.namespace().equals(ns), Duration.ofMinutes(10), List.of()))
+                  catalog,
+                  c,
+                  i -> i.namespace().equals(ns),
+                  Duration.ofMinutes(10),
+                  List.of(),
+                  true))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
     TableInfo o = catalog.lookup(List.of(), ns, e.storedTable("o"));

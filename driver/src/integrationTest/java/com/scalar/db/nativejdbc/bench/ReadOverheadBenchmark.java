@@ -1372,7 +1372,8 @@ class ReadOverheadBenchmark {
       }
       long started = System.nanoTime();
       List<Setup.Result> results =
-          Setup.run(catalog, c, i -> i.namespace().equals(ns), Duration.ofMinutes(30), List.of());
+          Setup.run(
+              catalog, c, i -> i.namespace().equals(ns), Duration.ofMinutes(30), List.of(), true);
       System.out.printf(
           Locale.ROOT,
           "BENCH %s | setup with %d rows in flight | %.0f ms%n",
