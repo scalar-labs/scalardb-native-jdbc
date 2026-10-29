@@ -41,16 +41,18 @@ class ScalarDbNullMetadataIntegrationTest {
   @MethodSource("engines")
   void rolledBackUntouchedRow_canNeverBePreparedAgain(Engines e) throws Exception {
     Engine engine = e.engine();
-    String ns = e.storedSchema("nm");
+    // a new namespace each run: ScalarDB's catalog outlives the schema a run drops
+    String name = "nm" + System.currentTimeMillis() % 1_000_000;
+    String ns = e.storedSchema(name);
     String id = e.storedColumn("id");
     String x = e.storedColumn("x");
     try (Connection c = e.open()) {
       e.execute(
           c,
-          e.createSchema("nm"),
-          "CREATE TABLE nm.imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
-          "INSERT INTO nm.imp VALUES (1, 'a')",
-          "INSERT INTO nm.imp VALUES (2, 'b')");
+          e.createSchema(name),
+          "CREATE TABLE " + name + ".imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
+          "INSERT INTO " + name + ".imp VALUES (1, 'a')",
+          "INSERT INTO " + name + ".imp VALUES (2, 'b')");
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
@@ -81,8 +83,8 @@ class ScalarDbNullMetadataIntegrationTest {
       // 1. prepare an update of row 1, which has no metadata row, then roll it back
       try (TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager()) {
         TwoPhaseCommitTransaction t1 = tpc.begin();
-        t1.get(get(ns, table, id, 1));
-        t1.update(update(ns, table, id, x, 1, "t1"));
+        t1.get(get(ns, table, key(engine, id, 1)));
+        t1.update(update(ns, table, x, key(engine, id, 1), "t1"));
         t1.prepare();
         assertThat(rows(c, "SELECT COUNT(*) FROM " + meta))
             .as("the prepare's metadata row")
@@ -94,7 +96,7 @@ class ScalarDbNullMetadataIntegrationTest {
       List<String> left = rows(c, metaRow);
       assertThat(left).as("the metadata row after the rollback").hasSize(1);
       assertThat(left.get(0)).as("tx_id, tx_state, tx_version").startsWith("null/null/");
-      assertThat(rows(c, "SELECT x FROM nm.imp WHERE id = 1"))
+      assertThat(rows(c, "SELECT x FROM " + name + ".imp WHERE id = 1"))
           .as("the data restored")
           .containsExactly("a");
 
@@ -102,19 +104,21 @@ class ScalarDbNullMetadataIntegrationTest {
         // 3. every later update of row 1 through ScalarDB fails
         List<String> failures = new ArrayList<>();
         for (int attempt = 1; attempt <= 3; attempt++) {
-          failures.add(updateOutcome(tm, ns, table, id, x, 1, "t2-" + attempt));
+          failures.add(updateOutcome(tm, ns, table, x, key(engine, id, 1), "t2-" + attempt));
         }
         System.out.println("ScalarDB updates of row 1 after the rollback: " + failures);
         assertThat(failures).as("each retry").allMatch(f -> !f.equals("committed"));
-        assertThat(rows(c, "SELECT x FROM nm.imp WHERE id = 1")).containsExactly("a");
+        assertThat(rows(c, "SELECT x FROM " + name + ".imp WHERE id = 1")).containsExactly("a");
 
         // control: row 2, never touched, updates fine
-        assertThat(updateOutcome(tm, ns, table, id, x, 2, "t3")).isEqualTo("committed");
+        assertThat(updateOutcome(tm, ns, table, x, key(engine, id, 2), "t3"))
+            .isEqualTo("committed");
 
         // 4. removing the all-NULL metadata row by hand makes row 1 writable again
         e.execute(c, "DELETE FROM " + meta + " WHERE " + engine.quote(id) + " = 1");
-        assertThat(updateOutcome(tm, ns, table, id, x, 1, "t4")).isEqualTo("committed");
-        assertThat(rows(c, "SELECT x FROM nm.imp WHERE id = 1")).containsExactly("t4");
+        assertThat(updateOutcome(tm, ns, table, x, key(engine, id, 1), "t4"))
+            .isEqualTo("committed");
+        assertThat(rows(c, "SELECT x FROM " + name + ".imp WHERE id = 1")).containsExactly("t4");
       }
     } finally {
       try (Connection c = e.open()) {
@@ -124,18 +128,12 @@ class ScalarDbNullMetadataIntegrationTest {
   }
 
   private static String updateOutcome(
-      DistributedTransactionManager tm,
-      String ns,
-      String table,
-      String id,
-      String x,
-      int key,
-      String value) {
+      DistributedTransactionManager tm, String ns, String table, String x, Key key, String value) {
     DistributedTransaction tx = null;
     try {
       tx = tm.begin();
-      tx.get(get(ns, table, id, key));
-      tx.update(update(ns, table, id, x, key, value));
+      tx.get(get(ns, table, key));
+      tx.update(update(ns, table, x, key, value));
       tx.commit();
       return "committed";
     } catch (TransactionException ex) {
@@ -150,16 +148,20 @@ class ScalarDbNullMetadataIntegrationTest {
     }
   }
 
-  private static Get get(String ns, String table, String id, int key) {
-    return Get.newBuilder().namespace(ns).table(table).partitionKey(Key.ofInt(id, key)).build();
+  /** The row's key: an imported integer column is BIGINT to ScalarDB on Oracle (NUMBER). */
+  private static Key key(Engine engine, String id, int value) {
+    return engine == Engine.ORACLE ? Key.ofBigInt(id, value) : Key.ofInt(id, value);
   }
 
-  private static Update update(
-      String ns, String table, String id, String x, int key, String value) {
+  private static Get get(String ns, String table, Key key) {
+    return Get.newBuilder().namespace(ns).table(table).partitionKey(key).build();
+  }
+
+  private static Update update(String ns, String table, String x, Key key, String value) {
     return Update.newBuilder()
         .namespace(ns)
         .table(table)
-        .partitionKey(Key.ofInt(id, key))
+        .partitionKey(key)
         .textValue(x, value)
         .build();
   }
