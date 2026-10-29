@@ -521,6 +521,17 @@ public final class Setup {
         createKeyIndex(t, keyIndex, key);
         done(actions, "created key index " + keyIndex + " in the data table's key order");
       }
+      if (engine == Engine.ORACLE) {
+        Set<String> physical = new LinkedHashSet<>(List.of(t.dataTable()));
+        if (t.metadataTable() != null) {
+          physical.add(t.metadataTable());
+        }
+        for (String table : physical) {
+          if (createSegment(ns, table)) {
+            done(actions, "created the segment of " + table);
+          }
+        }
+      }
       // an inline table imported into ScalarDB holds its rows with NULL metadata, as an imported
       // decoupled one does without metadata rows; one ScalarDB created has none, and costs a count
       if (backfills(t)) {
@@ -830,6 +841,31 @@ public final class Setup {
       from = at + 1;
     }
     return out.append(sql.substring(from)).toString();
+  }
+
+  /**
+   * On Oracle, creates the segment of a table that has none yet. Oracle defers a new table's
+   * segment to its first insert, and in a SERIALIZABLE transaction, which is how the driver runs
+   * SNAPSHOT, that insert fails with ORA-08177: the first transactional insert into a table just
+   * set up would fail, and its metadata table's after it. ALLOCATE EXTENT reserves one extent and
+   * reads no rows. A table that has a segment is left alone, since each run would add an extent.
+   *
+   * @return whether the segment was created
+   */
+  private boolean createSegment(String schema, String table) throws SQLException {
+    try (PreparedStatement ps =
+        connection.prepareStatement(
+            "SELECT segment_created FROM all_tables WHERE owner = ? AND table_name = ?")) {
+      ps.setString(1, schema);
+      ps.setString(2, table);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next() || !"NO".equals(rs.getString(1))) {
+          return false;
+        }
+      }
+    }
+    execute("ALTER TABLE " + name(schema, table) + " ALLOCATE EXTENT");
+    return true;
   }
 
   private String name(String schema, String object) {

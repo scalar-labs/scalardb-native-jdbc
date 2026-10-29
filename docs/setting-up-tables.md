@@ -23,6 +23,10 @@ It also:
   that the database plans the driver's in-flight checks through the index. On Oracle it locks the
   statistics of a decoupled table's `<table>_tx_metadata`, so that the nightly job does not replace
   them;
+- on Oracle, creates the storage segment of a table and of its `<table>_tx_metadata` that have none
+  yet, as a table that has never held a row does not: Oracle creates it at the first insert, and in
+  a transaction at SNAPSHOT that insert fails with `40001` (ORA-08177). `ALTER TABLE ... ALLOCATE
+  EXTENT` reserves the space and reads no rows; a table that has a segment is left alone;
 - grants SELECT on the read views to the users given with `--grant`.
 
 The setup is re-runnable, and is run again after a table is added. The tables themselves are

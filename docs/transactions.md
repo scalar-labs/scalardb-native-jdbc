@@ -267,6 +267,11 @@ READ, which locks and keeps no snapshot, refuses statements on ScalarDB tables w
 - `TRANSACTION_REPEATABLE_READ` runs at Oracle's SERIALIZABLE, which is snapshot isolation, in a
   transaction. In autocommit it runs at READ COMMITTED, where each statement's snapshot is its own.
 - ORA-08177 and ORA-08176 come as `40001` and leave the transaction rollback-only.
+- A table that has never held a row has no storage segment yet, and Oracle fails the first insert
+  into it in a SERIALIZABLE transaction with ORA-08177, once: the retry finds the segment. The
+  setup creates the segments of the ScalarDB tables it sets up ([What the setup does](setting-up-tables.md#what-the-setup-does)).
+  For an ordinary table the application writes in transactions, create it with `SEGMENT CREATION
+  IMMEDIATE`, or run `ALTER TABLE ... ALLOCATE EXTENT` on it once while it is empty.
 - A level set in SQL through passthrough is not followed: the driver sets the connection's level
   again.
 
