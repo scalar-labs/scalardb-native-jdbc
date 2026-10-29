@@ -2,8 +2,9 @@ name: Release
 
 # Cut a release by tagging a commit on its minor version branch that already carries the release
 # version in gradle.properties and its release notes in .changes/ (RELEASING.md). workflow_dispatch
-# re-runs a release whose tag exists, such as one that failed after Central accepted the upload: pick
-# the tag as the ref.
+# re-runs a release whose tag exists and whose upload failed: pick the tag as the ref. Once Central
+# has accepted the upload, use "Re-run failed jobs" on that run instead, since a new run uploads a
+# second deployment of the same version.
 on:
   push:
     tags:
@@ -42,12 +43,13 @@ jobs:
           exit 1
 
       # full history, so that the reachability check below has the branch to walk; pinned to the
-      # commit the run was triggered for, which is the one publish-maven builds
+      # commit the run was triggered for, which is the one publish-maven builds. The credentials stay,
+      # unlike in the other jobs: the check fetches from origin, which a private repository refuses
+      # without them, and this job's token can only read
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-          persist-credentials: false
 
       - name: Check the tag against gradle.properties
         id: version
@@ -70,13 +72,45 @@ jobs:
             echo "::error::tag ${tag} does not match gradle.properties version ${version} (expected v${version})"
             exit 1
           fi
+          shopt -s nocasematch
           case "${version}" in
             *-SNAPSHOT)
               echo "::error::refusing to release a SNAPSHOT version (${version})"
               exit 1
               ;;
           esac
+          shopt -u nocasematch
           echo "Releasing ${version}"
+
+      # The version names the ScalarDB line the driver is certified against (RELEASING.md,
+      # "Versioning"), so the tests must run on that line: a v3.20.* tag needs scalardb = "3.20.*" in
+      # the version catalog, or the release notes claim a certification that never ran. The 0.0 line
+      # is the rehearsal's (RELEASING.md, "Before the first release"), which no ScalarDB line matches
+      - name: Check the tests run on the version's ScalarDB line
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          line="${VERSION%%-*}"
+          line="${line%.*}"
+          if [ "${line}" = "0.0" ]; then
+            echo "::notice::${VERSION} is on the rehearsal line 0.0; the ScalarDB line is not checked"
+            exit 0
+          fi
+          scalardb=$(sed -n 's/^scalardb = "\([^"]*\)"$/\1/p' gradle/libs.versions.toml)
+          if [ -z "${scalardb}" ]; then
+            echo "::error::no scalardb version found in gradle/libs.versions.toml"
+            exit 1
+          fi
+          case "${scalardb}" in
+            "${line}".*) echo "The tests run on ScalarDB ${scalardb}, on the ${line} line" ;;
+            *)
+              echo "::error::${VERSION} is certified against ScalarDB ${line}, but the tests run on" \
+                "ScalarDB ${scalardb}; set scalardb in gradle/libs.versions.toml to the line's newest" \
+                "patch and certify it (RELEASING.md)"
+              exit 1
+              ;;
+          esac
 
       # The release commit is made on the minor version branch (3.20 for 3.20.x) and never merges
       # back, so the branch is derived from the version. Git answers 1 for "not an ancestor" and

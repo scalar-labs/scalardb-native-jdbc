@@ -1,7 +1,7 @@
 name: Set up changie
 description: >-
   Puts changie (https://changie.dev) on the PATH for linux/amd64, verified against the checksum
-  pinned here. Shared by changelog.yml and release.yml.
+  pinned here. Used by changelog.yml.
 
 # Downloaded rather than taken from a marketplace action, so the binary is checked against a digest
 # this repository pins. Dependabot does not see a version written here: to bump it, take the new
