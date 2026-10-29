@@ -21,7 +21,7 @@ class NativeJdbcDriverTest {
 
   @Test
   void majorAndMinorVersion_areTheBuildVersionsLine() {
-    // 3.20.0-beta.1 is certified against ScalarDB 3.20: the version's line is the driver's
+    // 3.20.x names ScalarDB's 3.20 line: the version's line is the driver's
     String version = System.getProperty("nativejdbc.version");
     Assumptions.assumeTrue(version != null, "run outside Gradle");
     NativeJdbcDriver driver = new NativeJdbcDriver();

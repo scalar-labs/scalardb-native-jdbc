@@ -124,8 +124,8 @@ jobs:
       # them is a mistake to stop while nothing is out yet: by the time github-release runs, the
       # Central deployment has already gone.
       #
-      # Unlike Saga and the PostgreSQL frontend, a pre-release is batched like any release: the betas
-      # are versions on Central that users depend on, so each has notes of its own rather than a
+      # Unlike Saga and the PostgreSQL frontend, a pre-release is batched like any release: a
+      # pre-release is a version on Central that users may depend on, so it has notes of its own rather than a
       # preview of the next. Entries still pending fail the tag too. They are in the tagged tree, so
       # they ship in this release, and leaving them would credit them to the next one; RELEASING.md
       # says how to fold them in.

@@ -1,9 +1,9 @@
 [versions]
 # The ScalarDB line the driver is certified against, at its newest patch. The driver has no runtime
 # dependency on ScalarDB; this is the version its tests run real transactions with
-# (docs/design.md, "Version and compatibility"). 3.20.0-beta.1 is certified against the 3.20 line:
-# until ScalarDB 3.20 is published the tests run on 3.19, and the release waits for the 3.20 run
-# (RELEASING.md).
+# (docs/design.md, "Version and compatibility"). 3.20.0 is tested on 3.19.1: ScalarDB 3.20.0
+# removed the two-phase commit API the tests hold rows prepared with (RELEASING.md, "Certifying a
+# line").
 scalardb = "3.19.1"
 jsqlparser = "5.4"
 # Kept at ScalarDB's version, since the driver is loaded next to ScalarDB in the tests

@@ -18,9 +18,9 @@ slf4j-api; the vendor driver is the application's own.
 
 ## Versioning
 
-The driver version mirrors the ScalarDB line it is certified against: `3.20.0-beta.1`,
-`3.20.0-beta.2`, and so on, where the major and minor say "certified against ScalarDB 3.20.x" and the
-rest is the driver's own numbering. Certification is per ScalarDB line, not per patch: patch releases
+The driver version mirrors the ScalarDB line it is certified against: `3.20.0`, `3.20.1`, and so
+on, where the major and minor say "certified against ScalarDB 3.20.x" and the patch is the driver's
+own numbering. Certification is per ScalarDB line, not per patch: patch releases
 do not change the storage format or the protocol, so the tests run against the newest patch of the
 line. A new ScalarDB minor or major gets its own certification run and its own row in the README's
 compatibility table.
@@ -57,8 +57,16 @@ workflow files drift between lines. Delete the copy when the line reaches end of
 Set `scalardb` in `gradle/libs.versions.toml` to the newest patch of the line and run the full check
 on all five engines (`./gradlew check`; CONTRIBUTING.md for the engine flags), and the
 [Isolation](.github/workflows/isolation.yml) workflow on the branch. A release is cut only from a
-commit that passed both. 3.20.0-beta.1 waits for this run against ScalarDB 3.20; until 3.20 is
-published the tests run on 3.19.
+commit that passed both.
+
+**3.20.0 is the exception: its tests run on ScalarDB 3.19.1.** ScalarDB 3.20.0 removed the
+application-level two-phase commit API (`TwoPhaseCommitTransaction` and its manager) that the
+integration tests use to hold a ScalarDB transaction prepared, which is how they put rows in flight;
+3.20's `GlobalTransactionManager` prepares only inside `commit()`. The transaction metadata columns
+and states are the same in both (`Attribute` and `TransactionState` are identical in the 3.19.1 and
+3.20.0 jars), so the README and the release notes say "tested against ScalarDB 3.19.1", not
+certified against 3.20. Moving the tests to 3.20 is open; until it is done, a 3.20.x release keeps
+this exception and says so in its notes.
 
 `release.yml` runs the whole of [CI](.github/workflows/ci.yml) again on the tagged commit, all six
 engine configurations included, before it uploads anything. It does not run the isolation tests,
@@ -133,13 +141,13 @@ check also refuses a direct push.
 combine those that describe one change and reword them to read as a whole.
 
 Unlike Saga and the PostgreSQL frontend, **every tag is batched, a pre-release included**. Their
-pre-releases are rehearsals that preview the next release's notes; the betas here are versions on
-Central that users depend on, so each has notes of its own, and `3.20.0` lists what changed since the
-last beta.
+pre-releases are rehearsals that preview the next release's notes; a pre-release here, such as
+`3.21.0-rc.1`, is a version on Central that users may depend on, so it has notes of its own, and the
+release after it lists what changed since.
 
-- **The first release of a line**, `3.20.0-beta.1`, batches on `main`, before the branch is cut, so
+- **The first release of a line**, `3.20.0`, batches on `main`, before the branch is cut, so
   that the cut takes the batch along and `main` starts the next line with nothing pending.
-- **Every later release of the line**, `3.20.0-beta.2`, `3.20.0`, `3.20.1`, batches on its release
+- **Every later release of the line**, `3.20.1`, `3.20.2`, batches on its release
   branch, in the commit that sets the version. It collects only what was cherry-picked. `main` keeps
   its own copies of those entries, so the next line's first release lists those fixes too, which is
   right for anyone upgrading from the previous line.
@@ -177,27 +185,27 @@ git tag -a v<version> -m "ScalarDB Native JDBC <version>" && git push origin v<v
 
 `release.yml` runs on a `v<major>.<minor>.<patch>` tag, with or without a pre-release suffix. It
 refuses a tag that does not match `gradle.properties`, a `-SNAPSHOT` version, a commit that is not on
-the tag's minor version branch (`3.20` for `v3.20.0-beta.1`), and release notes that are missing or incomplete (see [When releasing](#when-releasing)). It then runs CI on the tagged commit, uploads the
+the tag's minor version branch (`3.20` for `v3.20.0`), and release notes that are missing or incomplete (see [When releasing](#when-releasing)). It then runs CI on the tagged commit, uploads the
 driver to the Central Portal for someone to release, and creates the GitHub release with the notes
 and the two zips. A pre-release is marked as one and never takes the *Latest* badge.
 
 ### Steps
 
-For `3.20.0-beta.1`:
+For `3.20.0`:
 
 1. Certify the line, above.
-2. Batch the notes: `changie batch v3.20.0-beta.1`, edit `.changes/v3.20.0-beta.1.md` into release
+2. Batch the notes: `changie batch v3.20.0`, edit `.changes/v3.20.0.md` into release
    notes, `changie merge`. For the first release of a line this is on `main`, then bump `main` and cut
    `3.20` as in [Cutting a branch](#cutting-a-branch). For a later release it is on `3.20`, in the
    next step's commit.
-3. On `3.20`, make the release commit: `version=3.20.0-beta.1` in `gradle.properties`. Check that
-   `.changes/v3.20.0-beta.1.md` carries today's date, which is the date `changie batch` ran; correct
+3. On `3.20`, make the release commit: `version=3.20.0` in `gradle.properties`. Check that
+   `.changes/v3.20.0.md` carries today's date, which is the date `changie batch` ran; correct
    it and run `changie merge` if not. Push it and wait for CI.
 4. Tag that commit and push the tag:
 
    ```bash
-   git tag -a v3.20.0-beta.1 -m "ScalarDB Native JDBC 3.20.0-beta.1"
-   git push origin v3.20.0-beta.1
+   git tag -a v3.20.0 -m "ScalarDB Native JDBC 3.20.0"
+   git push origin v3.20.0
    ```
 
 5. When `release.yml` has finished, open the deployment on the
@@ -207,7 +215,7 @@ For `3.20.0-beta.1`:
    `repo1.maven.org`. The GitHub release exists already, so do not leave a validated deployment
    unpublished. To abandon a release instead, select **Drop**, then delete the GitHub release and the
    tag.
-6. On `3.20`, bump `version` to `3.20.0-beta.2-SNAPSHOT` and push, so that later snapshots from the
+6. On `3.20`, bump `version` to `3.20.1-SNAPSHOT` and push, so that later snapshots from the
    branch do not reuse the released version.
 
 To re-run a release whose tag exists, for example after the upload failed, run `release.yml` by

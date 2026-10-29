@@ -14,7 +14,7 @@ val driverVersion =
     if (repositoryProperties.isFile) {
         Properties().apply { repositoryProperties.inputStream().use { load(it) } }.getProperty("version")
     } else {
-        "3.20.0-beta.1"
+        "3.20.0"
     }
 
 repositories {

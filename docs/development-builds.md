@@ -28,7 +28,7 @@ Gradle's notice about deprecated features are expected. It gives:
 | `snsql` | `shell/build/install/scalardb-native-shell/bin/snsql` |
 | `scalardb-native-tools` | `tools/build/install/scalardb-native-tools/bin/scalardb-native-tools` |
 
-The version is the one in `gradle.properties`, such as `3.20.0-beta.1-SNAPSHOT`.
+The version is the one in `gradle.properties`, such as `3.20.0-SNAPSHOT`.
 
 `~/.m2` and Gradle's cache, `~/.gradle`, are shared by every checkout on your machine: building
 another checkout of this repository replaces the driver in `~/.m2` with that checkout's.
@@ -72,7 +72,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.scalar-labs:scalardb-native-jdbc:3.20.0-beta.1-SNAPSHOT")
+    implementation("com.scalar-labs:scalardb-native-jdbc:3.20.0-SNAPSHOT")
 }
 ```
 
@@ -82,7 +82,7 @@ With Maven, the local repository is always read, so the dependency alone is enou
 <dependency>
   <groupId>com.scalar-labs</groupId>
   <artifactId>scalardb-native-jdbc</artifactId>
-  <version>3.20.0-beta.1-SNAPSHOT</version>
+  <version>3.20.0-SNAPSHOT</version>
 </dependency>
 ```
 
@@ -104,7 +104,7 @@ restarts.
 Every build carries the same version, so give the commit you built. Include:
 
 - the output of `snsql --version`, which names the commit, such as
-  `snsql 3.20.0-beta.1-SNAPSHOT (commit 1a2b3c4)`. A commit ending in `-dirty` was built with
+  `snsql 3.20.0-SNAPSHOT (commit 1a2b3c4)`. A commit ending in `-dirty` was built with
   uncommitted changes. The driver's jar names it too, as `Build-Commit` in its manifest;
 - the database and its version, and the layout, inline or decoupled;
 - the statement, and the full error with its SQLState ([Errors](errors.md)).
