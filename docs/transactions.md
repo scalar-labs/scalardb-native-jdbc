@@ -20,7 +20,8 @@ COMMITTED can overwrite a commit that ScalarDB's SNAPSHOT counted on. The defaul
 driver connection starts at SNAPSHOT, ScalarDB's default level. At SNAPSHOT a transaction that writes
 a row another transaction changed since its snapshot fails with `40001` and is retried, and a long
 transaction keeps its snapshot; READ COMMITTED gives fresh reads per statement and lock waits on such
-writes instead, at the per-statement cost of the driver's READ COMMITTED forms.
+writes instead, at the per-statement cost of the driver's READ COMMITTED forms ([Why READ
+COMMITTED costs more in the driver](#why-read-committed-costs-more-in-the-driver)).
 
 | `setTransactionIsolation` | `scalar.db.consensus_commit.isolation_level` | `scalar.db.jdbc.isolation_level` | Engines |
 | --- | --- | --- | --- |
@@ -37,6 +38,77 @@ ScalarDB needs at least `REPEATABLE_READ` there to create or import a table the 
 - `TRANSACTION_SERIALIZABLE` is refused on Oracle with `0AN01` ([No SERIALIZABLE on
   Oracle](#no-serializable-on-oracle)).
 - `TRANSACTION_READ_UNCOMMITTED` is refused with `0AN01`.
+
+### Choosing a level
+
+| Use | For | What it costs |
+| --- | --- | --- |
+| SNAPSHOT, the default | Most transactions, read-write and read-only | A transaction fails with `40001` when it reaches a row in flight, or writes a row another transaction changed since its snapshot; retry it |
+| SERIALIZABLE | Transactions whose correctness rests on rows they read but don't write (write skew) | More `40001` failures than SNAPSHOT; ScalarDB must run at `SERIALIZABLE` too; not on Oracle |
+| READ COMMITTED, read-only | Reads that must not fail on tables ScalarDB is writing: lookups, listings, dashboards | Each statement sees what is committed when it runs, so two statements can disagree, a total and its details for example |
+| READ COMMITTED, read-write | Writes that compute from the row they write, in one statement, on rows many transactions update: `SET qty = qty - 1`, `SET balance = balance + ?` | ScalarDB must run at `READ_COMMITTED` too; a write computed from other rows read in earlier statements can combine values that were never true together |
+
+**SNAPSHOT** gives every statement of a transaction the same point in time. A ScalarDB transaction's
+in-flight rows are part of that point, and the transaction cannot tell what they will become, so a
+statement that reaches one fails. A write of a row another transaction committed after the snapshot
+fails too, as in the database's own snapshot isolation.
+
+**READ COMMITTED reads never fail on in-flight rows.** They return the row's last committed value,
+which ScalarDB keeps as the row's before image. This is the main reason to use the level. A
+transaction that only reads cannot break what ScalarDB's level protects, so a read-only transaction
+can run at READ COMMITTED even when ScalarDB and the driver's other transactions run at SNAPSHOT.
+Declare it [read-only](#read-only-transactions).
+
+**READ COMMITTED writes apply to the latest committed row.** For example, take a balance of 100. A
+transaction runs `UPDATE account SET balance = balance - 30 WHERE id = 1` after another transaction
+has committed a deposit of 50 to the same account:
+
+- at SNAPSHOT, the update fails with `40001`, because the row changed after the transaction's
+  snapshot;
+- at READ COMMITTED, the update applies to the latest value: 150 − 30 = 120.
+
+A write that carries a value the transaction read earlier still fails if the row has changed since,
+because it would lose the other transaction's update: read a balance of 100, then `SET balance = 70`,
+fails with `40001`. This holds for rows read with a SELECT of their own table; [Conflicts and
+retries](#conflicts-and-retries) lists the reads that are not checked. What READ COMMITTED does not protect is a write computed from *other* rows read
+in separate statements. Each statement sees its own moment, so a transaction can read row A before a
+ScalarDB transaction commits and row B after, and write a value computed from an old A and a new B.
+Use SNAPSHOT for such a transaction.
+
+At READ COMMITTED, a write that reaches a row in flight fails with `40001` by default, as at
+SNAPSHOT. With [`scalar.db.native_jdbc.inflight_wait_millis`](configuration.md) set, it waits for
+the row to settle instead.
+
+### Why READ COMMITTED costs more in the driver
+
+In the database alone, READ COMMITTED is the cheapest level: the database keeps old row versions
+and hands each statement the latest committed one. ScalarDB's in-flight rows are different. A
+ScalarDB transaction writes its new values into the row at prepare and keeps the old values in the
+row's [transaction metadata](concepts.md#transaction-metadata). To the database that row is
+committed, so it cannot hand the driver the old values; the driver has to find them itself.
+
+- **Reads.** At SNAPSHOT, the driver only checks whether the statement reaches a row in flight, and
+  fails if it does: usually one look at the [in-flight index](concepts.md#in-flight-index), and
+  then your statement as written. At READ COMMITTED it must return the old values of a row in
+  flight instead of failing, so it reads committed rows from the table and in-flight rows' old
+  values from the metadata. It rewrites the statement into copies joined by `UNION ALL`, one for
+  each combination of committed and in-flight tables: two copies for one table, four for a join of
+  two. Where a quick check shows nothing in flight in the statement's key range, it runs the
+  statement as written instead. When nothing is in flight, the extra copies find no rows, but the
+  database still parses, plans and starts them.
+- **Writes.** A SNAPSHOT transaction's view never changes, so once the driver finds a table with no
+  row in flight, it remembers this until the transaction ends: every later read and write of that
+  table runs as your statement as written, with the transaction metadata the write needs. A READ
+  COMMITTED transaction sees a new moment at every statement, so the driver cannot remember
+  anything. Each write reads and checks the metadata of the rows it writes, in the same statement
+  as the write.
+
+Both costs remain when no ScalarDB transaction is running, because the driver can only know that
+by checking. Measured locally on a decoupled table, an UPDATE by key took about 20% longer at READ
+COMMITTED than at SNAPSHOT on PostgreSQL, and about 50% longer on Oracle. In the TPC-C runs on AWS
+([PostgreSQL](benchmarks/benchbase-postgresql-aws.md), [Oracle](benchmarks/benchbase-oracle-aws.md)),
+SNAPSHOT committed 4% to 17% more transactions than READ COMMITTED, in both layouts. Choose READ COMMITTED
+for its behaviour, reads that never fail, and not for speed.
 
 ### Setting the level
 
