@@ -89,6 +89,13 @@ val driverVersions =
     vendorDrivers.mapNotNull { (engine, module) ->
         providers.gradleProperty("nativejdbc.$engine.driverVersion").orNull?.let { module to it }
     }.toMap()
+// -Pnativejdbc.excludeTests=<pattern> leaves out a test the vendor driver version under test fails
+// for a known reason of its own, so that the rest still guard it (the vendor-drivers workflow)
+providers.gradleProperty("nativejdbc.excludeTests").orNull?.let { pattern ->
+    tasks.withType<Test>().matching { it.name.startsWith("integrationTest") }.configureEach {
+        filter.excludeTestsMatching(pattern)
+    }
+}
 if (driverVersions.isNotEmpty()) {
     configurations.matching { it.name.startsWith("integrationTest") }.configureEach {
         resolutionStrategy.eachDependency {

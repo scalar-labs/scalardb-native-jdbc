@@ -110,18 +110,23 @@ COMMITTED, SNAPSHOT and SERIALIZABLE, and Oracle at READ COMMITTED and SNAPSHOT.
 the same transaction metadata columns and states as 3.19.
 
 The application supplies its database's JDBC driver. 3.20.0 is tested with the servers and JDBC
-drivers below; use these driver versions where you can:
+driver versions below, the newest patch of each line in the range; use a version in the range:
 
-| Database | Server | JDBC driver |
-| --- | --- | --- |
-| PostgreSQL | 16 | pgjdbc (`org.postgresql:postgresql`) 42.7.14 |
-| MySQL | 8.4, also with `lower_case_table_names=1` | MySQL Connector/J (`com.mysql:mysql-connector-j`) 26.7.0 |
-| MariaDB | 11.4 | MariaDB Connector/J (`org.mariadb.jdbc:mariadb-java-client`) 3.5.10 |
-| SQL Server | 2022 | mssql-jdbc (`com.microsoft.sqlserver:mssql-jdbc`) 13.6.0.jre11 |
-| Oracle | Oracle Database Free 23 | ojdbc11 (`com.oracle.database.jdbc:ojdbc11`) 23.26.3.0.0 |
+| Database | Server | JDBC driver | Versions |
+| --- | --- | --- | --- |
+| PostgreSQL | 16 | pgjdbc (`org.postgresql:postgresql`) | 42.2 to 42.7 |
+| MySQL | 8.4, also with `lower_case_table_names=1` | MySQL Connector/J (`com.mysql:mysql-connector-j`) | 8.0.33, 8.4, 9.7 and 26.x |
+| MariaDB | 11.4 | MariaDB Connector/J (`org.mariadb.jdbc:mariadb-java-client`) | 3.3, and 3.5 to 4.0 |
+| SQL Server | 2022 | mssql-jdbc (`com.microsoft.sqlserver:mssql-jdbc`), `.jre11` | 11.2 to 13.6 |
+| Oracle | Oracle Database Free 23 | ojdbc11 (`com.oracle.database.jdbc:ojdbc11`) | 21.1 to 21.23, and 23.9 to 23.26 |
 
-`snsql` and `scalardb-native-tools` bundle pgjdbc, MariaDB Connector/J, which they use for MySQL too,
-mssql-jdbc and ojdbc11 at these versions; not MySQL Connector/J.
+- pgjdbc before 42.7 fails `Connection.abort()` on Java 24 or later with a `SecurityException`, as
+  it does without the driver: use 42.7 there.
+- MariaDB Connector/J 3.4 fails one of the tests of writes that conflict with a transaction, and is
+  not in the range.
+
+`snsql` and `scalardb-native-tools` bundle pgjdbc 42.7.14, MariaDB Connector/J 3.5.10, which they
+use for MySQL too, mssql-jdbc 13.6.0.jre11 and ojdbc11 23.26.3.0.0; not MySQL Connector/J.
 
 ## Building
 

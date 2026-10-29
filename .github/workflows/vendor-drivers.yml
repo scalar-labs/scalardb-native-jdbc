@@ -28,23 +28,24 @@ jobs:
       max-parallel: 6
       matrix:
         include:
-          # the newest patch of every line from the oldest claimed; CI runs the current ones
-          - { engine: Postgresql, property: postgresql, version: 42.6.2 }
-          - { engine: Postgresql, property: postgresql, version: 42.5.6 }
-          - { engine: Postgresql, property: postgresql, version: 42.4.5 }
-          - { engine: Postgresql, property: postgresql, version: 42.3.10 }
-          - { engine: Postgresql, property: postgresql, version: 42.2.29 }
+          # The newest patch of every line in the range the README states, and ojdbc11 23.4 to 23.8,
+          # not yet in it; CI runs the current ones. Out of the range: MariaDB Connector/J 3.0 and 3.1
+          # (many failures), 3.2.0 (getGeneratedKeys after a batch throws) and 3.4 (one write
+          # conflict test), and ojdbc11 23.2 (Oracle's cursor and parse counts). pgjdbc before 42.7
+          # fails Connection.abort() on Java 24 or later with a SecurityException, as it does without
+          # the driver: the one test that calls it is left out for those versions.
+          - { engine: Postgresql, property: postgresql, version: 42.6.2, exclude: '*InterleavingIntegrationTest' }
+          - { engine: Postgresql, property: postgresql, version: 42.5.6, exclude: '*InterleavingIntegrationTest' }
+          - { engine: Postgresql, property: postgresql, version: 42.4.5, exclude: '*InterleavingIntegrationTest' }
+          - { engine: Postgresql, property: postgresql, version: 42.3.10, exclude: '*InterleavingIntegrationTest' }
+          - { engine: Postgresql, property: postgresql, version: 42.2.29, exclude: '*InterleavingIntegrationTest' }
           - { engine: Mysql, property: mysql, version: 26.10.0 }
           - { engine: Mysql, property: mysql, version: 9.7.0 }
           - { engine: Mysql, property: mysql, version: 8.4.0 }
           - { engine: Mysql, property: mysql, version: 8.0.33 }
           - { engine: Mariadb, property: mariadb, version: 4.0.0 }
           - { engine: Mariadb, property: mariadb, version: 3.5.11 }
-          - { engine: Mariadb, property: mariadb, version: 3.4.5 }
           - { engine: Mariadb, property: mariadb, version: 3.3.7 }
-          - { engine: Mariadb, property: mariadb, version: 3.2.0 }
-          - { engine: Mariadb, property: mariadb, version: 3.1.4 }
-          - { engine: Mariadb, property: mariadb, version: 3.0.11 }
           - { engine: Sqlserver, property: sqlserver, version: 13.6.1.jre11 }
           - { engine: Sqlserver, property: sqlserver, version: 13.4.0.jre11 }
           - { engine: Sqlserver, property: sqlserver, version: 13.2.1.jre11 }
@@ -56,7 +57,11 @@ jobs:
           - { engine: Sqlserver, property: sqlserver, version: 11.2.3.jre11 }
           - { engine: Oracle, property: oracle, version: 23.26.0.0.0 }
           - { engine: Oracle, property: oracle, version: 23.9.0.25.07 }
-          - { engine: Oracle, property: oracle, version: 23.2.0.0 }
+          - { engine: Oracle, property: oracle, version: 23.8.0.25.04 }
+          - { engine: Oracle, property: oracle, version: 23.7.0.25.01 }
+          - { engine: Oracle, property: oracle, version: 23.6.0.24.10 }
+          - { engine: Oracle, property: oracle, version: 23.5.0.24.07 }
+          - { engine: Oracle, property: oracle, version: 23.4.0.24.05 }
           - { engine: Oracle, property: oracle, version: 21.23.0.0 }
           - { engine: Oracle, property: oracle, version: 21.1.0.0 }
     steps:
@@ -72,9 +77,12 @@ jobs:
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
       - name: Integration tests
+        env:
+          EXCLUDE: ${{ matrix.exclude }}
         run: >-
           ./gradlew :driver:integrationTest${{ matrix.engine }}
           -Pnativejdbc.${{ matrix.property }}.driverVersion=${{ matrix.version }}
+          ${EXCLUDE:+"-Pnativejdbc.excludeTests=$EXCLUDE"}
 
       - name: Upload test reports
         if: failure()
