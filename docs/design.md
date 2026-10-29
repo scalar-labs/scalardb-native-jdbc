@@ -1809,7 +1809,7 @@ What the driver does with the row:
 | the row | the driver |
 |---|---|
 | `rows` 0 | nothing written; the count is 0, as the vendor's statement finds no row; no abort (a tombstone's metadata row, 4.5, is not looked at) |
-| `rows` 1, `meta` 0 (an imported table before its backfill) | nothing written; the steps one by one, which write the version-1 metadata row (4.4) and then the DML |
+| `rows` 1, `meta` 0 (an imported table before its backfill) | the DML and the version-1 metadata row of 4.4 in the block (todo 360, "A key without a metadata row in the blocks" below): `written` 1, `stamped` 1 is the key written; `written` 1, `stamped` 0 an abort, "a row the statement writes was given metadata after it was read"; `written` 0 the abort of a committed row not written |
 | `tx_state` 1 or 2 | nothing written; at READ COMMITTED with `scalar.db.native_jdbc.inflight_wait_millis` set, the bounded sleep of section 6 and the block again, which reads the row afresh; otherwise, and at SNAPSHOT always, abort `40001` |
 | `tx_state` neither 1, 2, 3 nor NULL | nothing written, count 0, no committed image, as the fused statement counts it on PostgreSQL |
 | the version read is not the one the transaction read for the key (`Anchors.unchanged` false, READ COMMITTED) | abort `40001`, whatever else the row says; a write left applied is undone with the rollback |
@@ -2009,7 +2009,7 @@ with their metadata rows, each key with whether it has a metadata row, its versi
 in the inline layout the two arms `fusedKeyedInline` reads on PostgreSQL, the committed rows with
 their versions and the rows in flight whose before image matches, with a state of 1. A key in
 flight closes the gate, nothing is written, and the driver waits or aborts as for the keyed block;
-a key without a metadata row closes it too, and the steps stamp it; at SNAPSHOT the after-image
+a key without a metadata row is written with the others and given its metadata row (todo 360); at SNAPSHOT the after-image
 check runs before any write, as the fused statement's CTE does, and closes it. Past the gate the
 DML runs once per key by `FORALL`, the user's statement with its predicate and the key, each
 execution the step's own statement, with `SQL%BULK_ROWCOUNT(i)` telling which keys it wrote. For a
@@ -2129,7 +2129,7 @@ many keys were skipped, and the abort code. What the driver does with it:
 | `after` 1 (SNAPSHOT), decided first | nothing written; abort `40001`, "a row the statement writes is being written by a ScalarDB transaction": a row in flight that only its after image matches is `found` 0 with `after` 1, and aborts as the fused statement's CTE does on PostgreSQL |
 | `found` 0 | nothing matched: count 0, as the vendor's statement finds no row; no abort |
 | `held` above 0 | nothing written; at READ COMMITTED with `scalar.db.native_jdbc.inflight_wait_millis` set, the bounded sleep of section 6 and the block again, which reads the keys afresh; otherwise, and at SNAPSHOT always, abort `40001` |
-| `missing` above 0 | nothing written; the steps one by one, which write the version-1 metadata rows (4.4) and then each key |
+| `missing` above 0 | not a gate (todo 360, "A key without a metadata row in the blocks" below): such keys are written with the others and given their version-1 metadata rows (4.4) in the block, counted in `stamped`; the rows below decide |
 | `abort` 1, 2, 3, 4 or 5 | abort `40001`: a key the DML skipped was deleted since it was read, went in flight, is still at its version (an image in flight showed), still matches the inline DELETE's predicate at another version, or matched several rows; the rows written before it stay until the rollback |
 | `stamped` below `written` | abort `40001`, "a row the statement writes changed after it was read": a metadata row moved, went in flight or lost its metadata between the read and the CAS, or an inline row moved under the lock and still matched (its version -1) |
 | `stamped` equal to `written` | count `written`, `anchors.wrote(tx_id)` when above 0; `skipped` keys stopped matching and count for nothing, as `applySteps` counts |
@@ -2191,6 +2191,117 @@ is: Delivery's `order_line` write beside the vendor's UPDATE by the same prefix,
 counted, locally then on AWS. The collections hold every key the predicate matches, in the
 session's memory, as the steps hold them in the driver's; a write over a large share of a table
 costs that much either way, and the block keeps no row cap, as the steps keep none.
+
+**A key without a metadata row in the blocks (todo 360, 2026-10-29).** On an imported decoupled
+table, a key the backfill has not reached has no metadata row. The keyed block and the block over
+the predicate's keys hand such a key to the steps one by one, and a batch's entry that the merged
+form leaves at 0 runs its single form, the statement first and then the block. Measured on the
+container with `UnstampedWriteBenchmark` (79feec7), Oracle at READ COMMITTED, the median write and
+commit with a metadata row against without one: an UPDATE by key 1,734 against 4,014 µs, 2 round
+trips against 7; a DELETE by key 1,050 against 2,814, 2 against 7; an UPDATE of a 10-key range
+1,528 against 12,565, 2 against 26; a batch of 10 UPDATEs by key 1,423 against 25,046, 2 against
+52. SNAPSHOT is within 1.0–1.1x (the range 1.7x, the server creating ten rows, still 2 round
+trips), and PostgreSQL's statements create the row themselves at both levels. The cost is paid
+once per row: its first write gives it a metadata row, and every later write takes the fast form.
+It matters while the backfill has not run, which becomes the usual case if the backfill is made
+optional.
+
+The blocks write such a key themselves, with the statements the steps run for it, in one call:
+
+- *The keyed block.* Under `l_rows = 1 AND l_meta = 0`, the block runs step 2, the user's DML, and
+  under `l_written = 1` the stamp of a key without a metadata row (4.4), the steps' own
+  `stampFromData` statement for the one key, with the key read in step 1:
+
+  ```plsql
+  ELSIF l_rows = 1 AND l_meta = 0 THEN
+    UPDATE T t SET <the user's SET items> WHERE (P);        -- step 2, or the user's DELETE
+    l_written := SQL%ROWCOUNT;
+    IF l_written = 1 THEN
+      INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (k)) */ INTO T_meta x
+             (k, tx_id, tx_state, tx_version, tx_prepared_at, tx_committed_at)
+      VALUES (l_k, ?, 3, 1, ?, ?);                           -- step 3, a version-1 row
+      l_stamped := SQL%ROWCOUNT;
+    END IF;
+  END IF;
+  ```
+
+  The branch has its own copy of the user's SET and `P` placeholders and of the stamp's three
+  values, bound after the committed branch's, as each nested statement of the block binds its own.
+  The OUT row is unchanged, and the driver decides as the keyed block's table says: `written` 1,
+  `stamped` 1 is the key written; `written` 1, `stamped` 0 is a metadata row inserted by another
+  writer since step 1, an abort; `written` 0 is the abort of a committed row not written. The anchor
+  check on the row returned, a NULL `tx_id` and version, is the one the steps make. The metadata
+  row is inserted with the key `l_k` as the data row holds it, which is what `stampFromData` copies
+  from the data row (a `CHAR(n)` key padded), so the step needs no guard on the data row: the DML
+  holds its lock.
+- *The block over the predicate's keys.* `missing` no longer closes the gate. The `FORALL` of step 2
+  writes those keys with the others, and step 3 runs in two parts over the keys written: the CAS,
+  `FORALL i IN VALUES OF l_do` as today, over the keys that have a metadata row; and the insert above,
+  `FORALL i IN VALUES OF l_new` with `VALUES (l_k(i), l_i, 3, 1, l_p, l_c)`, over the keys without
+  one. `l_stamped` is the sum of the two `SQL%ROWCOUNT`s. Step 2's zero-row rule is unchanged: a key
+  without a metadata row that the DML skipped and that still has none is "still at its version", an
+  abort; one that gained a metadata row since step 1 moved, and is skipped. The statement first over
+  the predicate is unchanged: a CAS short of its DML still rolls back to the savepoint and runs this
+  block, which now writes the key.
+- *A batch's entries.* The merged form at READ COMMITTED is unchanged. Its entries counted 0 go to
+  the keyed block straight, without the statement first again, which they have just missed: up to 16
+  consecutive such entries as one block of entries, in entry order, as the single form's miss would
+  reach the block one entry at a time. The block of entries no longer stops at a key without a
+  metadata row, since the keyed block's outcome for it is final.
+
+Why it is exact. A DELETE's tombstone is also inserted after the DML, where the steps insert it
+first (they read the key from the data row before deleting it, and the block already has it in
+`l_k`). Otherwise the statements and their order are the steps' own. Nothing the driver decides
+between the steps is lost:
+
+- The anchor check runs on the row returned, after the writes, as for every outcome of the block.
+  An abort marks the transaction rollback-only and the rollback undoes them.
+- A key without a metadata row cannot be in flight, since a ScalarDB prepare gives it one, so there
+  is no wait to make.
+
+A ScalarDB transaction preparing the key meets the block as it meets the steps:
+
+- A metadata row committed by its prepare makes the insert skip the key, `stamped` 0, an abort.
+- One not yet committed makes the insert wait, and then skip.
+- Its data write waits on the DML's lock. If it holds the metadata row's insert, the two
+  transactions deadlock, as they can in the steps in one order or the other. Oracle breaks the
+  deadlock with ORA-00060 on one side, and the block's own error is mapped as today.
+
+What changes on the other paths: nothing that runs. The statement first, keyed and over the
+predicate, the merged form, SNAPSHOT's forms, the inline layout and PostgreSQL keep their texts. A
+key with a metadata row takes the committed branch of the blocks as today. The two blocks' texts
+grow by the branch, which runs only for a key without a metadata row.
+
+Not taken:
+
+- The statement first accepting a missing metadata row, the DML's `EXISTS` as "absent or committed"
+  and a guarded insert after it, which would bring a write by key to 2 round trips. It changes the
+  statement every write by key at READ COMMITTED runs, to save one round trip on a cost paid once
+  per row, and it needs its own argument against a concurrent prepare.
+- The statement first over the predicate inserting for its short CAS before rolling back, 2 round
+  trips for the range, for the same reason.
+
+Expected on the container, `UnstampedWriteBenchmark` on Oracle at READ COMMITTED: 3 round trips
+for an UPDATE or a DELETE by key (the statement first, the block, the commit), 3 for the range (the
+statement first, the block, the commit) and 3 for the batch of 10 (the merged form, one block of
+entries, the commit), from 7, 26 and 52. The times should fall near the stamped write's plus one
+round trip.
+
+What must keep holding: the keyed block's, the predicate block's and the batches' tests above, the
+imported-table cases among them (`MoreWritesIntegrationTest.batches`' tombstone taken over in a
+batch). To add, on Oracle on an imported decoupled table, at READ COMMITTED and at SNAPSHOT where the
+block runs:
+
+- An UPDATE and a DELETE by key of a row without a metadata row: one block, the version-1 row (the
+  tombstone for the DELETE), executions counted.
+- The same key read first and written after a ScalarDB transaction committed it (its metadata row
+  created since the read): an abort.
+- The same without the read: written, at the version ScalarDB left.
+- A second connection holding an uncommitted metadata row of the key while the block runs, then
+  committing it: the insert waits and skips it, an abort.
+- A predicate over five keys with and five without a metadata row, all counted, five rows created.
+- A batch of ten such entries, every count 1, three round trips.
+- `UnstampedWriteBenchmark` again, with its figures in this paragraph.
 
 **An INSERT on Oracle, one block (todo 334).** An INSERT of one row by `VALUES`, without a
 `RETURNING` of its own (refused on Oracle anyway), at both levels. In the inline layout it is no
@@ -2558,7 +2669,7 @@ vendor's own statement, then on AWS with the rest.
   number, each entry's placeholders its own binds and its stamp its own, its `tx_id` the entry's
   as on PostgreSQL, so that each entry sees the ones before it, as a batch's statements do. The
   block stops at the first entry whose outcome is not final by its own rules:
-  for the keyed write a row in flight, a key without a metadata row, a committed row not written,
+  for the keyed write a row in flight, a committed row not written,
   a stamp short, several rows matched; for the write beyond the key a key in flight, missing or
   an after image matched, an abort code, a stamp short; for the INSERT a stamp short. A key
   without a row (count 0), a predicate matching nothing, a state that is no committed image
