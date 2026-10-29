@@ -17,7 +17,10 @@ whose commit or rollback is not yet applied to the row. [Concepts](concepts.md) 
 A level that is weaker on one side breaks what the other side's level protects: a driver transaction
 at SNAPSHOT can cause write skew that ScalarDB's SERIALIZABLE was to rule out, and one at READ
 COMMITTED can overwrite a commit that ScalarDB's SNAPSHOT counted on. The defaults are the same: a
-driver connection starts at SNAPSHOT, ScalarDB's default level.
+driver connection starts at SNAPSHOT, ScalarDB's default level. At SNAPSHOT a transaction that writes
+a row another transaction changed since its snapshot fails with `40001` and is retried, and a long
+transaction keeps its snapshot; READ COMMITTED gives fresh reads per statement and lock waits on such
+writes instead, at the per-statement cost of the driver's READ COMMITTED forms.
 
 | `setTransactionIsolation` | `scalar.db.consensus_commit.isolation_level` | `scalar.db.jdbc.isolation_level` | Engines |
 | --- | --- | --- | --- |
@@ -147,7 +150,8 @@ the next transaction alone, and `SET GLOBAL` are not followed, and the driver cl
 ### REPEATABLE READ on SQL Server
 
 `TRANSACTION_REPEATABLE_READ` runs at SQL Server's SNAPSHOT level, which the database must allow
-(`ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON`, else `55000`).
+(`ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON`), and since a connection starts at SNAPSHOT
+a database without it is refused at connect with `08004`.
 
 - Its update conflict, error 3960, comes as `40001`, even when it arrives with a row rather than at
   the execute.

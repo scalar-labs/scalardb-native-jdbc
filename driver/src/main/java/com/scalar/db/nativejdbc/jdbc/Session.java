@@ -130,26 +130,31 @@ final class Session {
   }
 
   /**
-   * On SQL Server, as SNAPSHOT is set: the database must allow snapshot isolation, or the first
-   * statement fails (design 5).
+   * On SQL Server, at connect, where a connection starts at SNAPSHOT, and as SNAPSHOT is set: the
+   * database must allow snapshot isolation, or the first statement fails (design 5).
    *
-   * @throws SQLException 55000 if it does not
+   * @param vendor the vendor connection
+   * @param atConnect whether the connection is being opened, refused then as the other settings the
+   *     driver needs are
+   * @throws SQLException 08004 at connect, 55000 otherwise, if it does not
    */
-  void requireSnapshotIsolation(Connection vendor) throws SQLException {
+  void requireSnapshotIsolation(Connection vendor, boolean atConnect) throws SQLException {
     try (Statement st = vendor.createStatement();
         ResultSet rs =
             st.executeQuery(
                 "SELECT name, snapshot_isolation_state FROM sys.databases"
                     + " WHERE database_id = DB_ID()")) {
       if (rs.next() && rs.getInt(2) != 1) {
-        throw new SQLNonTransientException(
+        String message =
             "database "
                 + rs.getString(1)
-                + " does not allow snapshot isolation, which REPEATABLE READ runs at on SQL"
-                + " Server: ALTER DATABASE "
+                + " has ALLOW_SNAPSHOT_ISOLATION off, which SNAPSHOT, the level a connection"
+                + " starts at, and REPEATABLE READ run at on SQL Server: ALTER DATABASE "
                 + rs.getString(1)
-                + " SET ALLOW_SNAPSHOT_ISOLATION ON",
-            "55000");
+                + " SET ALLOW_SNAPSHOT_ISOLATION ON";
+        throw atConnect
+            ? new SQLNonTransientConnectionException(message, "08004")
+            : new SQLNonTransientException(message, "55000");
       }
     }
   }

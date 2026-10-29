@@ -454,7 +454,7 @@ jdbc:scalardb-native:oracle:thin:@host:1521/db              ->  ojdbc,          
   | `55000` | `SQLNonTransientException` | a statement names a ScalarDB table the setup of section 3 has not been run for; not `08004`, since it is raised per statement and an `08` state makes a pool discard a working connection | run the setup |
   | `42000` | `SQLSyntaxErrorException` | a name a statement must not use: `T_data`, `T_tx_metadata`, `T_scalardb`, a synonym; the message names the table to use | rewrite the statement |
   | `42501` | `SQLSyntaxErrorException` | ScalarDB's catalog exists but this user cannot read it | grant SELECT on the catalog tables |
-  | `08004` | `SQLNonTransientConnectionException` | refused at connect: no ScalarDB catalog (unless allowed), SQL Server without `READ_COMMITTED_SNAPSHOT`, `useAffectedRows` on MySQL or MariaDB | fix the configuration or run the setup |
+  | `08004` | `SQLNonTransientConnectionException` | refused at connect: no ScalarDB catalog (unless allowed), SQL Server without `READ_COMMITTED_SNAPSHOT` or `ALLOW_SNAPSHOT_ISOLATION`, `useAffectedRows` on MySQL or MariaDB | fix the configuration or run the setup |
   | `08001` | `SQLException` | a malformed URL or driver property, a missing vendor driver | fix the URL or the class path |
 
   A refusal uses `0AN01`, an implementation-defined subclass of the standard's feature-not-supported
@@ -3038,7 +3038,7 @@ only: these engines' `SET SESSION TRANSACTION` applies to the next one (todo 219
 
 SNAPSHOT on SQL Server, as built (milestone 8c2): `TRANSACTION_REPEATABLE_READ` sets the vendor
 connection to SNAPSHOT (4096), refused with `55000` where the database does not allow snapshot
-isolation, and `getTransactionIsolation` reports it back as REPEATABLE READ. SQL Server's own
+isolation (since a connection starts at SNAPSHOT, such a database is refused at connect, `08004`), and `getTransactionIsolation` reports it back as REPEATABLE READ. SQL Server's own
 first-committer-wins does the rest of what MySQL needs the driver for: an `UPDATE` or an `UPDLOCK`
 read of a row changed since the snapshot fails with error 3960, which ends the transaction and which
 the driver reports as `40001`. A shared-lock hint (`HOLDLOCK`, `REPEATABLEREAD`) reads the rows

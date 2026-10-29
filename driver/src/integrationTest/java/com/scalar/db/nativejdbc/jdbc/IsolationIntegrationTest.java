@@ -35,6 +35,8 @@ class IsolationIntegrationTest {
     try (Connection c = DriverManager.getConnection(url, p)) {
       // the vendor drivers read the level from the server, not from a cached value
       assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
+      assertThat(c.getMetaData().getDefaultTransactionIsolation())
+          .isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
     }
   }
 }

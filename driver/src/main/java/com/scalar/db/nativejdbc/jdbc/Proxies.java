@@ -80,7 +80,7 @@ public final class Proxies {
     Session session = new Session(engine);
     if (engine == Engine.SQLSERVER) {
       session.requireReadCommittedSnapshot(vendor);
-      session.requireSnapshotIsolation(vendor); // the level the connection starts at
+      session.requireSnapshotIsolation(vendor, true); // the level the connection starts at
     }
     Router router = new Router(engine, catalog, session, predicateChecks, coordinatorNamespace);
     // vendor defaults differ (Connector/J and MariaDB start at REPEATABLE READ), so every engine
@@ -440,7 +440,7 @@ public final class Proxies {
             }
             int vendorLevel = router.sessionLevel(level, vendor.getAutoCommit());
             if (vendorLevel == Router.SQLSERVER_SNAPSHOT) {
-              session.requireSnapshotIsolation(vendor);
+              session.requireSnapshotIsolation(vendor, false);
             }
             if (!vendor.getAutoCommit()) {
               // nothing of the application's ran, but the driver's own lookups, of index columns
@@ -2606,6 +2606,11 @@ public final class Proxies {
     @SuppressWarnings("ReferenceEquality")
     @Override
     @Nullable Object handle(Object proxy, Method method, @Nullable Object[] args) throws Throwable {
+      if (target instanceof DatabaseMetaData
+          && method.getName().equals("getDefaultTransactionIsolation")) {
+        // the driver's own, SNAPSHOT on every engine, not the vendor's (design section 1)
+        return Connection.TRANSACTION_REPEATABLE_READ;
+      }
       switch (method.getName()) {
         case "getConnection":
           return connection;

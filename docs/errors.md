@@ -31,13 +31,14 @@ Retrying does not help: the same statement fails the same way.
 | --- | --- | --- |
 | `55000` | A statement on a ScalarDB table [the setup](concepts.md#the-setup) has not been run for | Run `scalardb-native-tools setup` ([Setting up tables](setting-up-tables.md)) |
 | `55000` | A statement on a ScalarDB table whose [read view](concepts.md#read-view) this user cannot read | Grant it: `scalardb-native-tools setup --grant <user>` |
-| `55000` | On SQL Server, `setTransactionIsolation` to REPEATABLE READ or SERIALIZABLE on a database that does not allow snapshot isolation | `ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON` |
+| `55000` | On SQL Server, `setTransactionIsolation` to REPEATABLE READ or SERIALIZABLE after the database stopped allowing snapshot isolation | `ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON` |
 | `08001` | The URL or a `scalar.db.native_jdbc.` property is malformed, unknown, or not allowed in the URL | Fix the URL or the property ([Configuration](configuration.md)) |
 | `08001` | A key of 3.19.0-alpha.1, `scalardbnative.*` | Use the key the message names ([Upgrading](configuration.md#upgrading-from-3190-alpha1)) |
 | `08001` | No vendor driver for the URL is on the classpath | Add the database's JDBC driver ([Other databases](getting-started.md#other-databases)) |
 | `08004` | The database has no ScalarDB [catalog](concepts.md#catalog) | Connect to the database ScalarDB uses; for a database without ScalarDB, set `scalar.db.native_jdbc.allow_no_catalog` |
 | `08004` | On MySQL and MariaDB, `useAffectedRows` is true | Leave it false, the default ([Database settings](configuration.md#database-settings-the-driver-needs)) |
 | `08004` | On SQL Server, `READ_COMMITTED_SNAPSHOT` is off | `ALTER DATABASE ... SET READ_COMMITTED_SNAPSHOT ON` |
+| `08004` | On SQL Server, `ALLOW_SNAPSHOT_ISOLATION` is off; a connection starts at SNAPSHOT | `ALTER DATABASE ... SET ALLOW_SNAPSHOT_ISOLATION ON` |
 | `08004` | On SQL Server, `XACT_ABORT` is on | Turn it off, for the session and in the server's `user options` |
 | `42501` | ScalarDB's metadata schema exists but this user cannot read its catalog tables | Grant the user SELECT on `scalardb.metadata`, and on `scalardb.virtual_tables` when the database has decoupled tables ([Database users](configuration.md#database-users)) |
 | `42501` | ScalarDB's metadata schema exists but ScalarDB has not created its catalog tables yet | Create a ScalarDB table first |

@@ -1,5 +1,8 @@
 # OLTP overhead: where it stands (2026-10-26, evening)
 
+**Note, 2026-10-29.** A driver connection starts at SNAPSHOT since 2026-10-29; this page's "default
+level" wording, READ COMMITTED, is that of the day it was written.
+
 **Update, 2026-10-26 (evening).** A transaction at SNAPSHOT or SERIALIZABLE on PostgreSQL now
 remembers each table it found to have no row in flight in its snapshot, and runs the vendor's own
 statements on such a table: reads and locking reads as written, writes as written with the stamp,

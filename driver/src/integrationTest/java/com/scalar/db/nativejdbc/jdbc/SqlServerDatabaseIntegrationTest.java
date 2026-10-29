@@ -8,6 +8,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLNonTransientConnectionException;
 import java.sql.Statement;
 import java.util.Properties;
 import org.junit.jupiter.api.Assumptions;
@@ -70,9 +71,10 @@ class SqlServerDatabaseIntegrationTest {
               }
             })
         .isInstanceOf(SQLException.class)
+        .isInstanceOf(SQLNonTransientConnectionException.class)
         .hasMessageContaining("ALLOW_SNAPSHOT_ISOLATION")
         .extracting("SQLState")
-        .isEqualTo("55000");
+        .isEqualTo("08004");
     try (Connection c = DriverManager.getConnection(appdb, props)) {
       assertThat(c.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_REPEATABLE_READ);
       try (Statement st = c.createStatement();
