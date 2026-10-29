@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "362"
 tags: [mysql, mariadb, setup, backfill, decoupled, imported, statistics, performance]
@@ -46,3 +46,5 @@ command. The failure comes back as a row, as for the histogram. Add a sentence t
   298,700 (was 0), a point read 1.6 ms and 7 handler reads (was 26.8 ms and 300,007), an UPDATE by
   key 3.9 ms (was 119). MariaDB: its statistics also say 0 rows, but its plans don't suffer (a
   point read 0.85 ms on the backfilled table, 1.02 on the other), so no fix there.
+
+- 2026-10-29: landed on main as bd71d2e (the user's word). Closed.
