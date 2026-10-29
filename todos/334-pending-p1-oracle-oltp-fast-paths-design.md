@@ -3040,3 +3040,52 @@ statement is created, so `cancel()` reaches it while it runs, beside `runningWri
 clears it through `closeGated`; `SqlAst.aggregatesToOneRow` is gone. Unit tests, spotbugsMain and
 the Oracle form, PredicateCheck, Read and Write integration tests pass. Mergeable; landing as
 before; the last of D1 to D3, after which the full run starts.
+
+### 2026-10-29: the Oracle ninth run read: D2 and D3 on target at p50, D1 bought little, and the READ COMMITTED inline cell's one-second stalls found
+
+Run 20261028-2259-ora (f5c4628), 6e's write-up "Ninth run" (43e0573). At p50 against the vendor:
+Delivery at READ COMMITTED +91% decoupled and +64% inline (from +142 and +92, D3); StockLevel +19 to
++31% in the four cells (from +53 to +62 at READ COMMITTED, D2 on target); OrderStatus at SNAPSHOT
++32 and +36% (from +71 and +75), which 6e traces to D2's gated oorder read rather than D1. The p95
+figures 6e first quoted are the fallbacks' and the stalls' (below). StockLevel's split read now runs
+on about 10% of calls (1.2 ms, 1.05 ms of CPU), when a NewOrder of the warehouse is in flight,
+stock's gate being the warehouse's; the gated statement itself costs 790 to 930 µs and 255 to 330 µs
+of CPU against the vendor's 650 to 720 and 195 to 220 on about the same gets, the gates inside
+`MAX()` being evaluated per row of the join's 600 (the scalar subquery cache's lookup per row). On
+the container (`ora/os12.jsh`, a 200-row aggregate) the gates outside the statement, around it as a
+derived table, cost 124 µs and 63 of CPU against 139 and 76 inside `MAX()`, the vendor's 115 and 55:
+a refinement for one-row aggregates worth about 50 µs on StockLevel, low priority.
+
+D1 is built as designed (the text carries `order_line."scalardb_native_v2" IN (1, 2)`) but the
+SNAPSHOT inline order_line read stays at 27.7 gets and 175 µs: D4's plan shows each UNION ALL branch
+carrying its own gate, an INLIST ITERATOR of two probes into the in-flight index, four levels deep
+at 9.6M rows, so the gates alone are about 16 of the 27.7 and the two PK range reads the rest; the
+per-row probes the container showed for the old text were not what AWS planned for it. What would
+cut it: one gate per statement rather than per branch, and the gate's `tx_state IN (1, 2)` spelled
+`BETWEEN 1 AND 2`, one index descent instead of two (on the container the two spellings cost the
+same 8 gets, the index being shallow; the gain is the depth's). A one-arm inline read, each row's
+image chosen by its state in CASE expressions, read 5.1 gets but 78 µs of CPU against the two-arm
+form's 9.3 and 21 on the container, so it is not proposed.
+
+The READ COMMITTED inline cell, 0.63 against the eighth run's 0.70 with every p50 lower: its driver
+run's top wait is `buffer busy waits`, 2,242 waits and 83.0 s, against 4.0 s in the eighth run's
+same cell and none in the vendor's run (`log file sync` 5.9 s, `enq: TX - row lock contention` one
+wait, so not row locks); the flight recording shows 83 socket reads of exactly 1,000 ms on three of
+the four terminals (none on the fourth), the benchmark's per-window maxima are 1,000 ms in nearly
+every window for NewOrder and Payment and never for Delivery, OrderStatus or StockLevel, and the
+eighth run had the same stalls in 4 windows of one run and 22 of the other, the vendor's maxima
+being 12 to 37 ms. A buffer busy wait of exactly a second is Oracle's timeout on one, the sign of a
+buffer deadlock, two sessions each pinning a block the other wants; the tables' block counts point
+at the cause: the inline tables with their stamp columns are 2 to 6 times the vendor's in blocks
+(ORDER_LINE 163,196 against 83,537, OORDER 14,177 against 4,780, NEW_ORDER 4,024 against 622,
+DISTRICT 13 against 5), and the setup's backfill grows every row after the import, which in full
+blocks migrates rows, so that a later UPDATE of a migrated row pins two blocks, and two writers on
+two such rows can pin them in opposite orders. NewOrder and Payment, the writers of district,
+warehouse, oorder, new_order and order_line, are the ones stalling. Not D2's or D3's: those
+transactions' texts did not change between the runs, and the stall count varies run to run. To
+confirm, the harness takes `V$SEGMENT_STATISTICS` (buffer busy waits and ITL waits per object),
+`V$SYSSTAT`'s `buffer deadlock`, `table fetch continued row` and `leaf node splits`, and `ANALYZE
+... LIST CHAINED ROWS` counts of the inline tables after the setup; to remedy, `ALTER TABLE ...
+MOVE` with the indexes rebuilt after the backfill (or a higher PCTFREE on import), which the harness
+can do for the inline cells and the setup's documentation can say for an imported inline table. If
+it holds, the cell's 83 s of stalls in 240 terminal-seconds are its whole gap to 0.9.
