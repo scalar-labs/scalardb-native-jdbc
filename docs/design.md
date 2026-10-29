@@ -122,7 +122,7 @@ anywhere, because the driver never reads it.
   committed, and so does the driver: every state 3 test in this document is `COALESCE(tx_state, 3) = 3`,
   the first arm of `rc_T` is a left outer join (section 3), and 4.4 defines the CAS for a NULL or missing metadata row and
   the tombstone a DELETE of such a row must leave.
-  Run a backfill before the driver is enabled: a sentinel `tx_id`, version 1, state 3 and non-null
+  The backfill, an option of the setup (section 3, "The backfill as an option"): a sentinel `tx_id`, version 1, state 3 and non-null
   timestamps for every row whose `tx_id` is NULL or whose metadata row is missing, repeated until no such
   row remains and no in-flight row has a NULL `before_tx_id`. After that the NULL case cannot recur, since
   every later before image carries a real `tx_id`; the driver's NULL handling covers the window before
@@ -163,7 +163,7 @@ almost for free: the protocol is identical, and every two-table concern in this 
 | Write by key | DML on `T`, then CAS on `T_meta`, data-then-metadata order | one statement: the user's SET list plus the stamp of I5, the anchor in the WHERE; DELETE is the conditional delete itself |
 | Lock order, insert order on imported tables | an argument to make | gone; one row lock |
 | Tombstones, orphans (4.5) | required; "no metadata row" is ambiguous | gone; the deemed-committed condition is `WHERE pk AND tx_id IS NULL` on the row, and a deleted row fails it by itself |
-| Backfill | required for correctness and for ScalarDB's liveness | wanted only to end the NULL-rule window: the all-NULL liveness defect of section 1 does not exist here, since the deemed-committed condition is a row-level test; the driver's NULL anchor is a plain `tx_id IS NULL` on the row |
+| Backfill | not for the driver's correctness (section 7, item 8); for ScalarDB's liveness until ScalarDB fixes the defect of section 1, so on by default (section 3) | off by default (section 3), wanted only to end the NULL-rule window: the all-NULL liveness defect of section 1 does not exist here, since the deemed-committed condition is a row-level test; the driver's NULL anchor is a plain `tx_id IS NULL` on the row |
 | Locking clause through an outer-join view | rewritten onto the base tables | no join, no issue; the covering-index caveat of 4.2 also largely disappears, because the locking re-read fetches `tx_id` and `tx_version` from the row, which forces the clustered record to be locked, unless those columns are added to a secondary index |
 | Coarse SERIALIZABLE path, stuck-row check, in-flight index | on `T_data` and `T_meta` | on `T` |
 | ScalarDB facts | identical | identical: same composers, conditions, before-image nulling, validation |
@@ -180,7 +180,7 @@ data table joined by key to a metadata table runs unchanged on it, a self-join t
 one-table forms above are left for later, measured. What differs: an INSERT stamps the rows it
 inserted where they stand; a DELETE is the anchored delete of the row, its predicate read again over
 the key when it misses a row a writer changed; the setup backfills an imported table's NULL metadata
-and, on SQL Server, builds an unfiltered in-flight index on the application's own table. An INSERT
+only when asked (section 3, "The backfill as an option") and, on SQL Server, builds an unfiltered in-flight index on the application's own table. An INSERT
 without a column list gets the data table's first columns, as many as a row has values, when they
 are all the user's (ScalarDB adds its metadata columns after them), and is refused otherwise; so is
 any statement naming a metadata column, in a SET value, a RETURNING item or the generated keys asked; `SELECT *`, `RETURNING *` and
@@ -650,7 +650,7 @@ maintained on inserts and deletes only since a stamp changes no key column; tear
 an in-flight index found in another column order counts as not set up for the setup and its check,
 which rebuild it, while the catalog, which routes a table by its index's existence, keeps it set up,
 since the old order serves every read, only slower, and a table set up before this rule would
-otherwise refuse reads until its setup ran again; on an imported table the backfill, which stamps
+otherwise refuse reads until its setup ran again; on an imported decoupled table, unless turned off, the backfill (below), which stamps
 `tx_id = 'scalardb-native-backfill'`; then the view, with `CREATE OR REPLACE` (`CREATE OR ALTER` on
 SQL Server); then, on Oracle and MySQL, a histogram on the metadata table's `tx_state`, without
 which both estimate `tx_state IN (1, 2)` as most of the table and scan it (Oracle 22x, MySQL 12-69x
@@ -678,8 +678,8 @@ deemed-committed row, which carry `before_tx_id` NULL and `before_tx_version` 0,
 in-flight insert.
 
 A table is set up when its index exists and is usable (an invalid index a failed concurrent build left
-does not count) and its view exists with exactly the table's columns, in order. Because the view comes
-last, it also says that the backfill completed. Names compare exactly, except where the database
+does not count) and its view exists with exactly the table's columns, in order. The view comes last,
+but it no longer says that the backfill completed, since the backfill is an option (below). Names compare exactly, except where the database
 compares table names without regard to case. The setup does not replace a view of the same name whose
 columns differ, since it did not create it. Other drivers see a new setup after their catalog TTL,
 and until then take a table imported or created since their load for a plain one: so after setting
@@ -687,6 +687,91 @@ up a table for the first time, the command waits out the applications' catalog T
 60 seconds) before it says ScalarDB transactions may write it, and with `--no-wait` prints from when
 instead, as it does when interrupted; `--json` reports the new tables and that instant without waiting
 (todo 298).
+
+**The backfill as an option (todo 361, 2026-10-29).** The driver's correctness does not depend on
+the backfill: the NULL rules and the DELETE tombstone of 4.5 cover a row without metadata (section 7,
+item 8). Neither does its speed, once todo 360 is in:
+
+- PostgreSQL's write statements create a missing metadata row themselves, at every level.
+- Oracle's SNAPSHOT forms stamp it in the same round trips.
+- Oracle's READ COMMITTED blocks write it in one call, about one round trip more than a row with
+  metadata, once per row (`UnstampedWriteBenchmark`, 4.3).
+
+Two things remain. First, ScalarDB's liveness on an imported decoupled table, until ScalarDB fixes
+the defect of section 1. Second, the backfill's own cost:
+
+- It is one transaction over every row, holding their locks (about 25 s for 5M rows on PostgreSQL).
+- On an inline table it rewrites every row of the application's own table (todo 290). On Oracle that
+  likely migrated rows, the ninth run's buffer busy waits in the READ COMMITTED inline cell.
+
+So the backfill becomes an option, with a default by layout.
+
+- *`setup`.* An imported decoupled table is backfilled by default, while ScalarDB's defect stands.
+  An inline table, imported or created, is not: the defect does not exist in that layout (the
+  deemed-committed condition is a row-level test), and its NULL metadata is only the NULL rules'
+  window. `--backfill` and `--no-backfill` override the default for every table the command acts
+  on. A created decoupled table needs none: every row has its metadata row. The setup's output says
+  "backfill skipped (`--backfill` runs it)" for a table it did not backfill.
+- *`backfill`.* A new command, `scalardb-native-tools backfill URL [--table NAMESPACE.TABLE]...
+  [--backfill-wait SECONDS]`, runs the backfill alone on tables that are set up, with the same
+  statements, wait and retries as the setup's. It needs DML on the metadata table and no DDL, and
+  can be run at any time and repeated. It also repairs the rows ScalarDB's defect left: the all-NULL
+  metadata row gets the sentinel stamp, after which ScalarDB's prepare condition is `tx_id =
+  'scalardb-native-backfill'`, which is not converted to an insert, and the row is writable through
+  ScalarDB again. On Oracle, after it fills a decoupled table's metadata table, it sets that table's
+  statistics as the setup sets them after a backfill.
+- *`check`.* Per imported decoupled table, the count of metadata rows with `tx_state` NULL. Only
+  ScalarDB's rollback over a row that had no metadata row writes one (the backfill and the driver
+  write 3, ScalarDB's prepare 1 and commit 3), so each is a row ScalarDB cannot write. A count
+  above 0 fails the check (exit 1), with the advice to run `backfill`. The count is served by the
+  in-flight index, whose first column is `tx_state`, except on SQL Server, where the index is
+  filtered to states 1 and 2 and the count scans the metadata table.
+- *The statistics of a metadata table not backfilled.* Oracle's fixed statistics are gathered from
+  the metadata table and then locked. Without a backfill that table is empty or nearly, so its row
+  count of 0 and its key columns without statistics would stay locked while the table grows to the
+  data table's size, and every plan joining it would assume an empty table. Where the setup does
+  not backfill a decoupled table on Oracle, it sets the statistics as if it had:
+  - the rows and blocks from the data table's gathered statistics (`DBMS_STATS.GET_TABLE_STATS` of
+    `T`, `SET_TABLE_STATS` on `T_meta`);
+  - each key column's distinct count and bounds the same way (`GET_COLUMN_STATS`,
+    `SET_COLUMN_STATS`);
+  - then the `tx_state` histogram as today, over those rows, and the lock.
+
+  MySQL's histogram on `tx_state` is gathered once, by the setup, and on an empty table it records
+  nothing; PostgreSQL's autoanalyze and SQL Server's automatic updates follow the table as it grows.
+  To be measured on the container before the Oracle and MySQL parts are taken, on a 300,000-row
+  imported decoupled table set up without a backfill: the plans and gets of the split read, the
+  statement first, the blocks and the in-flight probe, with none, 10% and all of its rows written,
+  against the same table backfilled. If MySQL's plans suffer, the setup sets its histogram from the
+  data table's row count, as Oracle's.
+
+Nothing changes at run time. A table is set up as before, when its index and view exist, but the
+view no longer says the backfill completed; nothing reads that meaning, only comments say it
+(`SetupObjects.isSetUp`, `Setup`).
+
+When ScalarDB fixes the defect, `ScalarDbNullMetadataIntegrationTest` fails on the ScalarDB version
+the build tests against. The decoupled default then flips to off in the next release, and the docs
+name the first ScalarDB version with the fix. The tool cannot detect the applications' ScalarDB
+version, so the docs carry the rule. Run the backfill:
+
+- on an imported decoupled table that ScalarDB also writes, on a ScalarDB version without the fix
+  (the default until then);
+- after DB-CORE-20013 on a row of an imported table, which `backfill` repairs;
+- not on an inline table, where it is never needed.
+
+What must keep holding: the setup's tests, which backfill by default on imported decoupled tables.
+To add:
+
+- `setup --no-backfill` on an imported decoupled table: reads and writes through the driver of rows
+  without a metadata row, on every engine, at every level, by key, by predicate and in batches.
+- The ScalarDB defect reproduced as `ScalarDbNullMetadataIntegrationTest` does it: `check` counts
+  the row and exits 1; `backfill` stamps it, and ScalarDB's next update of the row commits.
+- `setup` on an inline imported table without `--backfill`: no row written.
+- On Oracle, the metadata table's locked statistics after `setup --no-backfill` equal the data
+  table's row count (`DBA_TAB_STATISTICS`).
+
+The benchmark harness keeps the backfill for its decoupled cells. The inline cells run without it
+from then on, which is also -89's pending READ COMMITTED inline rerun without the backfill.
 
 Taking the setup down drops the view and the index. On PostgreSQL the view depends on its tables, so
 ScalarDB's `dropTable` and `dropNamespace` need the teardown first; ScalarDB itself refuses the other
@@ -3598,9 +3683,9 @@ retries.
 8. A NULL `tx_state` is state 3 everywhere. A ScalarDB rollback over a row without metadata restores
    all-NULL metadata, which the earlier `tx_state = 3` predicates and the 4.4 CAS could neither read nor
    write; `rc_T` became a left outer join and the imported-table locking read locks the data table side
-   only. The backfill stays required, for ScalarDB's own liveness (section 1) and to end the window in
-   which the NULL rules apply; with the DELETE tombstone of 4.5 the driver's correctness does not depend
-   on it.
+   only. The backfill is an option of the setup (section 3), on by default on an imported decoupled
+   table for ScalarDB's own liveness (section 1) while ScalarDB's defect stands; with the DELETE
+   tombstone of 4.5 the driver's correctness does not depend on it.
 9. A user locking clause under READ COMMITTED is pushed into the first arm only, so the driver never pins
    an in-flight row while ScalarDB needs to settle it.
 10. Locking clauses never go through a view with an outer join; the driver rewrites them onto the base
