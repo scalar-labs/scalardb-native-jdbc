@@ -104,10 +104,10 @@ committed, so it cannot hand the driver the old values; the driver has to find t
   as the write.
 
 Both costs remain when no ScalarDB transaction is running, because the driver can only know that
-by checking. Measured locally on a decoupled table, an UPDATE by key took about 20% longer at READ
-COMMITTED than at SNAPSHOT on PostgreSQL, and about 50% longer on Oracle. In the TPC-C runs on AWS
-([PostgreSQL](benchmarks/benchbase-postgresql-aws.md), [Oracle](benchmarks/benchbase-oracle-aws.md)),
-SNAPSHOT committed 4% to 17% more transactions than READ COMMITTED, in both layouts. Choose READ COMMITTED
+by checking. A write costs noticeably more at READ COMMITTED than at SNAPSHOT, and TPC-C commits
+fewer transactions at READ COMMITTED on both PostgreSQL and Oracle, in both layouts; the benchmark
+pages have the figures ([PostgreSQL](benchmarks/benchbase-postgresql-aws.md),
+[Oracle](benchmarks/benchbase-oracle-aws.md)). Choose READ COMMITTED
 for its behaviour, reads that never fail, and not for speed.
 
 ### Setting the level
