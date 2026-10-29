@@ -1,17 +1,25 @@
 package com.scalar.db.nativejdbc.tools;
 
+import static com.scalar.db.nativejdbc.testing.Rows.rows;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.scalar.db.api.DistributedTransaction;
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.api.DistributedTransactionManager;
+import com.scalar.db.api.Get;
 import com.scalar.db.api.Insert;
 import com.scalar.db.api.TableMetadata;
 import com.scalar.db.api.TwoPhaseCommitTransaction;
 import com.scalar.db.api.TwoPhaseCommitTransactionManager;
+import com.scalar.db.api.Update;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
+import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.testing.Engines;
+import com.scalar.db.service.TransactionFactory;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -153,6 +161,141 @@ class ToolsIntegrationTest {
     assertThat(badTtl.exit).as(badTtl.all()).isEqualTo(Main.EXIT_ERROR);
     assertThat(badTtl.err).contains("--catalog-ttl is between 0 and 3600");
     assertThat(tool(e, "check", "--table", "tl.t").out).contains("tl.t: not set up");
+  }
+
+  /**
+   * The backfill as an option (design section 3, todo 361): {@code setup --no-backfill} on an
+   * imported decoupled table, then ScalarDB's defect reproduced as {@code
+   * ScalarDbNullMetadataIntegrationTest} does it, which {@code check} counts and fails on and
+   * {@code backfill} repairs, ScalarDB's next update then committing; and an inline imported table,
+   * which the setup does not backfill by default.
+   */
+  @ParameterizedTest
+  @MethodSource("engines")
+  void theBackfillIsAnOption_andRepairsWhatScalarDbLeft(Engines e) throws Exception {
+    Engine engine = e.engine();
+    // a new namespace each run: ScalarDB's catalog outlives the schema a run drops
+    String name = "tb" + System.currentTimeMillis() % 1_000_000;
+    String ns = e.storedSchema(name);
+    String imp = e.storedTable("imp");
+    String inl = e.storedTable("inl");
+    String id = e.storedColumn("id");
+    String x = e.storedColumn("x");
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          e.createSchema(name),
+          "CREATE TABLE " + name + ".imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
+          "INSERT INTO " + name + ".imp VALUES (1, 'a')",
+          "INSERT INTO " + name + ".imp VALUES (2, 'b')",
+          "CREATE TABLE " + name + ".inl (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
+          "INSERT INTO " + name + ".inl VALUES (1, 'a')");
+      if (!c.getAutoCommit()) {
+        c.commit();
+      }
+    }
+    try (DistributedTransactionAdmin admin = e.admin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace(ns, true);
+      admin.importTable(ns, imp, Map.of("transaction-metadata-decoupling", "true"), Map.of());
+      admin.importTable(ns, inl, Map.of(), Map.of());
+    }
+    String meta = engine.quote(ns) + "." + engine.quote(imp + "_tx_metadata");
+    String impName = ns + "." + imp;
+    String inlName = ns + "." + inl;
+    try {
+      // the inline table without a flag: not backfilled by default
+      Run inline = tool(e, "setup", "--table", inlName, "--catalog-ttl", "0");
+      assertThat(inline.exit).as(inline.all()).isZero();
+      assertThat(inline.out).contains(inlName + ": ", "backfill skipped (--backfill runs it)");
+      Run setup = tool(e, "setup", "--table", impName, "--no-backfill", "--catalog-ttl", "0");
+      assertThat(setup.exit).as(setup.all()).isZero();
+      assertThat(setup.out).contains("backfill skipped (--backfill runs it)");
+      try (Connection c = e.open()) {
+        assertThat(rows(c, "SELECT COUNT(*) FROM " + meta)).containsExactly("0");
+      }
+      Run check = tool(e, "check", "--table", impName);
+      assertThat(check.exit).as(check.all()).isZero();
+
+      // ScalarDB's rollback over row 1, which has no metadata row, leaves one all NULL
+      Key one = engine == Engine.ORACLE ? Key.ofBigInt(id, 1) : Key.ofInt(id, 1);
+      String virtual = imp + "_scalardb";
+      TransactionFactory scalarDb = e.scalarDb();
+      try (TwoPhaseCommitTransactionManager tpc = scalarDb.getTwoPhaseCommitTransactionManager()) {
+        TwoPhaseCommitTransaction t1 = tpc.begin();
+        t1.get(Get.newBuilder().namespace(ns).table(virtual).partitionKey(one).build());
+        t1.update(
+            Update.newBuilder()
+                .namespace(ns)
+                .table(virtual)
+                .partitionKey(one)
+                .textValue(x, "t1")
+                .build());
+        t1.prepare();
+        t1.rollback();
+      }
+      check = tool(e, "check", "--table", impName);
+      assertThat(check.exit).as(check.all()).isEqualTo(Main.EXIT_FOUND);
+      assertThat(check.out)
+          .contains(
+              impName
+                  + ": set up, no rows stuck, 1 rows with NULL metadata, which ScalarDB cannot"
+                  + " write again: run backfill");
+      Run json = tool(e, "check", "--json", "--table", impName);
+      assertThat(json.out).contains("\"nullMetadata\":1");
+
+      // the dry run says how many, and changes nothing
+      Run plan = tool(e, "backfill", "--dry-run", "--table", impName);
+      assertThat(plan.exit).as(plan.all()).isZero();
+      assertThat(plan.out).contains("-- the backfill: 2 rows to stamp now");
+      assertThat(tool(e, "check", "--table", impName).exit).isEqualTo(Main.EXIT_FOUND);
+
+      Run backfill = tool(e, "backfill", "--table", impName, "--table", inlName);
+      assertThat(backfill.exit).as(backfill.all()).isZero();
+      assertThat(backfill.out)
+          .contains(impName + ": backfilled 2 rows")
+          .contains("not backfilled: an inline table needs none (setup --backfill runs it)");
+      check = tool(e, "check", "--table", impName);
+      assertThat(check.exit).as(check.all()).isZero();
+      try (Connection c = e.open()) {
+        assertThat(
+                rows(
+                    c,
+                    "SELECT COUNT(*) FROM " + meta + " WHERE " + engine.quote("tx_state") + " = 3"))
+            .containsExactly("2");
+      }
+      // ScalarDB writes the row again
+      try (DistributedTransactionManager tm = scalarDb.getTransactionManager()) {
+        DistributedTransaction tx = tm.begin();
+        tx.get(Get.newBuilder().namespace(ns).table(virtual).partitionKey(one).build());
+        tx.update(
+            Update.newBuilder()
+                .namespace(ns)
+                .table(virtual)
+                .partitionKey(one)
+                .textValue(x, "t2")
+                .build());
+        tx.commit();
+      }
+      try (Connection c = e.open()) {
+        assertThat(rows(c, "SELECT x FROM " + name + ".imp WHERE id = 1")).containsExactly("t2");
+        // the inline table's row: its metadata as the import left it, NULL
+        assertThat(
+                rows(
+                    c,
+                    "SELECT COUNT(*) FROM "
+                        + name
+                        + ".inl WHERE "
+                        + engine.quote("tx_id")
+                        + " IS NULL"))
+            .containsExactly("1");
+      }
+      assertThat(tool(e, "teardown", "--table", impName, "--table", inlName).exit).isZero();
+    } finally {
+      try (Connection c = e.open()) {
+        e.dropSchemas(c, ns);
+      }
+    }
   }
 
   private static String[] concat(String[] a, String... b) {

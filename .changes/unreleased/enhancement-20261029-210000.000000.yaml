@@ -1,0 +1,3 @@
+kind: enhancement
+body: 'The backfill is an option of `setup`: by default it backfills imported decoupled tables only, and `--backfill` or `--no-backfill` overrides that. A new `backfill` command runs it alone and repairs the rows ScalarDB leaves with NULL metadata, which `check` now reports.'
+time: 2026-10-29T21:00:00.000000+09:00

@@ -719,7 +719,9 @@ So the backfill becomes an option, with a default by layout.
   metadata row gets the sentinel stamp, after which ScalarDB's prepare condition is `tx_id =
   'scalardb-native-backfill'`, which is not converted to an insert, and the row is writable through
   ScalarDB again. On Oracle, after it fills a decoupled table's metadata table, it sets that table's
-  statistics as the setup sets them after a backfill.
+  statistics as the setup sets them after a backfill. It acts on imported decoupled tables only: a
+  run without `--table` must not rewrite every inline application table, and `setup --backfill`
+  stays the way to backfill an inline one.
 - *`check`.* Per imported decoupled table, the count of metadata rows with `tx_state` NULL. Only
   ScalarDB's rollback over a row that had no metadata row writes one (the backfill and the driver
   write 3, ScalarDB's prepare 1 and commit 3), so each is a row ScalarDB cannot write. A count
@@ -732,18 +734,33 @@ So the backfill becomes an option, with a default by layout.
   data table's size, and every plan joining it would assume an empty table. Where the setup does
   not backfill a decoupled table on Oracle, it sets the statistics as if it had:
   - the rows and blocks from the data table's gathered statistics (`DBMS_STATS.GET_TABLE_STATS` of
-    `T`, `SET_TABLE_STATS` on `T_meta`);
+    `T`, `SET_TABLE_STATS` on `T_meta`), or its `COUNT(*)` where it has none, and only where the
+    data table holds more rows than the metadata table;
   - each key column's distinct count and bounds the same way (`GET_COLUMN_STATS`,
     `SET_COLUMN_STATS`);
   - then the `tx_state` histogram as today, over those rows, and the lock.
 
   MySQL's histogram on `tx_state` is gathered once, by the setup, and on an empty table it records
   nothing; PostgreSQL's autoanalyze and SQL Server's automatic updates follow the table as it grows.
-  To be measured on the container before the Oracle and MySQL parts are taken, on a 300,000-row
-  imported decoupled table set up without a backfill: the plans and gets of the split read, the
-  statement first, the blocks and the in-flight probe, with none, 10% and all of its rows written,
-  against the same table backfilled. If MySQL's plans suffer, the setup sets its histogram from the
-  data table's row count, as Oracle's.
+  Measured on the container (`BackfillPlansBenchmark`, 2026-10-29): two 300,000-row imported
+  decoupled tables, one backfilled and one not, each written through the driver until none, 10%
+  and all of its rows have metadata. Then the same reads and writes at READ COMMITTED and SNAPSHOT
+  on both.
+  - On Oracle without the statistics part, the metadata table's statistics stayed locked at
+    `NUM_ROWS` 0 while the driver's writes filled it to 300,000 rows. The predicate block's key
+    read of 1,000 keys took 3,730 ms and 549,847 gets a call, against 4.8 ms and 710 for 10 keys
+    while the table was nearly empty. Its plan probes the in-flight index by an `INDEX FULL SCAN` per
+    data row, cheap only for an empty table. At 10% written, an UPDATE of ten keys took 13.7 against
+    1.2 ms (1,533 against 80 gets).
+  - With the statistics part, the same key read takes 1.2 ms and 11 gets a call. Every operation
+    is within 0.6–1.6x of the backfilled table in each phase; the excess left is the first write
+    of a key without metadata (todo 360).
+  - MySQL's plans don't suffer: the table not backfilled reads and writes within 0.8–1.4x of the
+    backfilled one from 10% written on, with the same handler reads, its empty histogram
+    notwithstanding. So MySQL keeps the setup's histogram as it is. The backfilled table is the one
+    that suffers on MySQL, until InnoDB recounts it: right after the setup its persistent statistics
+    still say 0 rows, and a point read scans the metadata table, 26.8 ms and 300,007 handler reads
+    against 1.2 ms and 7.
 
 Nothing changes at run time. A table is set up as before, when its index and view exist, but the
 view no longer says the backfill completed; nothing reads that meaning, only comments say it

@@ -26,13 +26,14 @@ import org.jspecify.annotations.Nullable;
 /**
  * Sets up decoupled ScalarDB tables for the driver (design section 3), and takes the setup down
  * again. Per table, in this order: the in-flight index on the metadata table, built without
- * blocking writes where the engine can; on an imported table the backfill of section 1; last the
- * read view {@code rc_T}, so that the view existing also says the backfill completed, and a grant
- * of SELECT on it to each application user. Every step is create-if-absent or re-runnable, so
- * running the setup again changes nothing. It needs DDL privileges and is run by an operator, never
- * at connect; the driver checks at catalog load that the index and the view exist, and other
- * drivers see a new setup after their catalog TTL. The backfill writes every row of an imported
- * table and belongs in a quiet window (design section 1).
+ * blocking writes where the engine can; the backfill of section 1 where it runs (by default on an
+ * imported decoupled table only, "The backfill as an option", todo 361); last the read view {@code
+ * rc_T}, and a grant of SELECT on it to each application user. Every step is create-if-absent or
+ * re-runnable, so running the setup again changes nothing. It needs DDL privileges and is run by an
+ * operator, never at connect; the driver checks at catalog load that the index and the view exist,
+ * and other drivers see a new setup after their catalog TTL. The view existing says nothing about
+ * the backfill, which {@link #backfill(Catalog, Connection, Predicate, Duration)} also runs alone.
+ * The backfill writes every row of the table and belongs in a quiet window (design section 1).
  */
 @SuppressFBWarnings(
     value = {
@@ -140,6 +141,8 @@ public final class Setup {
   private final Engine engine;
   private final Connection connection;
   private final Duration backfillWait;
+  // --backfill or --no-backfill, null for the default by layout
+  private final @Nullable Boolean backfill;
   private final List<String> grantees;
   private final String txId;
   private final String txState;
@@ -151,12 +154,14 @@ public final class Setup {
       Engine engine,
       Connection connection,
       Duration backfillWait,
+      @Nullable Boolean backfill,
       List<String> grantees,
       boolean dryRun) {
     this.planned = dryRun ? new ArrayList<>() : null;
     this.engine = engine;
     this.connection = connection;
     this.backfillWait = backfillWait;
+    this.backfill = backfill;
     this.grantees = List.copyOf(grantees);
     this.txId = engine.quote("tx_id");
     this.txState = engine.quote("tx_state");
@@ -177,8 +182,8 @@ public final class Setup {
   }
 
   /**
-   * Sets up the chosen decoupled tables of the catalog. A table that fails does not stop the
-   * others.
+   * Sets up the chosen decoupled tables of the catalog, the backfill by default by layout. A table
+   * that fails does not stop the others.
    *
    * @param catalog the catalog of the database, read afresh first
    * @param connection a connection to the same database, in autocommit, with DDL privileges
@@ -196,7 +201,32 @@ public final class Setup {
       Duration backfillWait,
       List<String> grantees)
       throws SQLException {
-    Setup setup = new Setup(catalog.engine(), connection, backfillWait, grantees, false);
+    return run(catalog, connection, which, backfillWait, grantees, null);
+  }
+
+  /**
+   * Sets up the chosen decoupled tables of the catalog. A table that fails does not stop the
+   * others.
+   *
+   * @param catalog the catalog of the database, read afresh first
+   * @param connection a connection to the same database, in autocommit, with DDL privileges
+   * @param which the tables to set up
+   * @param backfillWait how long to wait per table for in-flight rows the backfill must outlast
+   * @param grantees as for {@link #run(Catalog, Connection, Predicate, Duration, List)}
+   * @param backfill whether to backfill each imported or inline table; null for the default, an
+   *     imported decoupled table only (design section 3, todo 361)
+   * @return one result per table
+   * @throws SQLException if the connection is not in autocommit or the catalogs cannot be read
+   */
+  public static List<Result> run(
+      Catalog catalog,
+      Connection connection,
+      Predicate<TableInfo> which,
+      Duration backfillWait,
+      List<String> grantees,
+      @Nullable Boolean backfill)
+      throws SQLException {
+    Setup setup = new Setup(catalog.engine(), connection, backfillWait, backfill, grantees, false);
     List<TableInfo> tables = setup.tables(catalog, which);
     SetupObjects found = setup.list(tables);
     List<Result> results = new ArrayList<>();
@@ -245,7 +275,29 @@ public final class Setup {
   public static List<Result> plan(
       Catalog catalog, Connection connection, Predicate<TableInfo> which, List<String> grantees)
       throws SQLException {
-    Setup setup = new Setup(catalog.engine(), connection, DEFAULT_BACKFILL_WAIT, grantees, true);
+    return plan(catalog, connection, which, grantees, null);
+  }
+
+  /**
+   * A dry run of {@link #run(Catalog, Connection, Predicate, Duration, List, Boolean)}.
+   *
+   * @param catalog the catalog of the database, read afresh first
+   * @param connection a connection to the same database, in autocommit
+   * @param which the tables to set up
+   * @param grantees as for {@link #run(Catalog, Connection, Predicate, Duration, List)}
+   * @param backfill as for {@link #run(Catalog, Connection, Predicate, Duration, List, Boolean)}
+   * @return one result per table
+   * @throws SQLException if the connection is not in autocommit or the catalogs cannot be read
+   */
+  public static List<Result> plan(
+      Catalog catalog,
+      Connection connection,
+      Predicate<TableInfo> which,
+      List<String> grantees,
+      @Nullable Boolean backfill)
+      throws SQLException {
+    Setup setup =
+        new Setup(catalog.engine(), connection, DEFAULT_BACKFILL_WAIT, backfill, grantees, true);
     List<TableInfo> tables = setup.tables(catalog, which);
     SetupObjects found = setup.list(tables);
     List<Result> results = new ArrayList<>();
@@ -273,7 +325,8 @@ public final class Setup {
   private static List<Result> teardown(
       Catalog catalog, Connection connection, Predicate<TableInfo> which, boolean dryRun)
       throws SQLException {
-    Setup setup = new Setup(catalog.engine(), connection, DEFAULT_BACKFILL_WAIT, List.of(), dryRun);
+    Setup setup =
+        new Setup(catalog.engine(), connection, DEFAULT_BACKFILL_WAIT, null, List.of(), dryRun);
     List<TableInfo> tables = setup.tables(catalog, which);
     SetupObjects found = setup.list(tables);
     List<Result> results = new ArrayList<>();
@@ -285,6 +338,106 @@ public final class Setup {
       catalog.invalidate();
     }
     return results;
+  }
+
+  /**
+   * The backfill alone on the chosen imported decoupled tables that are set up (design section 3,
+   * "The backfill as an option", todo 361), with the setup's statements, wait and retries: DML on
+   * the metadata table, no DDL, at any time and repeatable. An inline table, which never needs it,
+   * is left to {@code setup --backfill}. It also repairs a row ScalarDB's rollback over a row
+   * without metadata left with NULL metadata (section 1), giving it the sentinel stamp. On Oracle a
+   * decoupled table's metadata table then gets the setup's fixed statistics again.
+   *
+   * @param catalog the catalog of the database, read afresh first
+   * @param connection a connection to the same database, in autocommit
+   * @param which the tables to backfill
+   * @param backfillWait how long to wait per table for in-flight rows the backfill must outlast
+   * @return one result per table
+   * @throws SQLException if the connection is not in autocommit or the catalogs cannot be read
+   */
+  public static List<Result> backfill(
+      Catalog catalog, Connection connection, Predicate<TableInfo> which, Duration backfillWait)
+      throws SQLException {
+    return backfill(catalog, connection, which, backfillWait, false);
+  }
+
+  /**
+   * A dry run of {@link #backfill(Catalog, Connection, Predicate, Duration)}: the statements, and
+   * the number of rows it would stamp now.
+   *
+   * @param catalog the catalog of the database, read afresh first
+   * @param connection a connection to the same database, in autocommit
+   * @param which the tables to backfill
+   * @return one result per table
+   * @throws SQLException if the connection is not in autocommit or the catalogs cannot be read
+   */
+  public static List<Result> planBackfill(
+      Catalog catalog, Connection connection, Predicate<TableInfo> which) throws SQLException {
+    return backfill(catalog, connection, which, DEFAULT_BACKFILL_WAIT, true);
+  }
+
+  private static List<Result> backfill(
+      Catalog catalog,
+      Connection connection,
+      Predicate<TableInfo> which,
+      Duration backfillWait,
+      boolean dryRun)
+      throws SQLException {
+    Setup setup = new Setup(catalog.engine(), connection, backfillWait, null, List.of(), dryRun);
+    List<TableInfo> tables = setup.tables(catalog, which);
+    List<Result> results = new ArrayList<>();
+    int isolation = connection.getTransactionIsolation();
+    connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+    try {
+      for (TableInfo t : tables) {
+        results.add(setup.fill(t));
+      }
+    } finally {
+      connection.setTransactionIsolation(isolation);
+    }
+    return results;
+  }
+
+  private Result fill(TableInfo t) {
+    String name = t.namespace() + "." + t.table();
+    List<String> actions = planned != null ? planned : new ArrayList<>();
+    actions.clear();
+    long stamped = 0;
+    try {
+      if (!t.isSetUp()) {
+        throw new SQLNonTransientException(
+            "the table is not set up: run setup, which backfills it too with --backfill", "55000");
+      }
+      if (!backfills(t)) {
+        done(
+            actions,
+            t.layout() == Layout.INLINE
+                ? "not backfilled: an inline table needs none (setup --backfill runs it)"
+                : "no backfill needed: ScalarDB created every row's metadata");
+        return new Result(name, actions, 0, null, false);
+      }
+      stamped = backfill(t);
+      done(actions, "backfilled " + stamped + " rows");
+      if (engine == Engine.ORACLE && t.layout() != Layout.INLINE && gatherHistogram(t, false)) {
+        done(actions, "set and locked fixed statistics on " + metadataTable(t) + ".tx_state");
+      }
+      return new Result(name, actions, stamped, null, false);
+    } catch (SQLException e) {
+      return new Result(name, actions, stamped, e, false);
+    }
+  }
+
+  /**
+   * Whether the backfill runs on this table: on an imported decoupled or an inline table, as {@code
+   * --backfill} or {@code --no-backfill} says, else on an imported decoupled table only, while
+   * ScalarDB's defect of section 1 stands. A table ScalarDB created decoupled has every metadata
+   * row.
+   */
+  private boolean backfills(TableInfo t) {
+    if (t.layout() != Layout.DECOUPLED_IMPORTED && t.layout() != Layout.INLINE) {
+      return false;
+    }
+    return backfill != null ? backfill : t.layout() == Layout.DECOUPLED_IMPORTED;
   }
 
   private List<TableInfo> tables(Catalog catalog, Predicate<TableInfo> which) throws SQLException {
@@ -367,9 +520,11 @@ public final class Setup {
       }
       // an inline table imported into ScalarDB holds its rows with NULL metadata, as an imported
       // decoupled one does without metadata rows; one ScalarDB created has none, and costs a count
-      if (t.layout() == Layout.DECOUPLED_IMPORTED || t.layout() == Layout.INLINE) {
+      if (backfills(t)) {
         stamped = backfill(t);
         done(actions, "backfilled " + stamped + " rows");
+      } else if (t.layout() == Layout.DECOUPLED_IMPORTED || t.layout() == Layout.INLINE) {
+        done(actions, "backfill skipped (--backfill runs it)");
       }
       if (reorders) {
         execute("DROP VIEW " + name(ns, view)); // CREATE OR REPLACE cannot reorder columns
@@ -377,7 +532,11 @@ public final class Setup {
       replaceView(t, view, found.hasView(ns, view) && !reorders);
       created = planned == null && !found.hasView(ns, view);
       done(actions, (found.hasView(ns, view) ? "replaced" : "created") + " read view " + view);
-      if (gatherHistogram(t)) {
+      // a metadata table not backfilled is empty or nearly: on Oracle its locked statistics are
+      // set as if it held a row per data row (todo 361)
+      boolean asIfBackfilled =
+          engine == Engine.ORACLE && t.layout() == Layout.DECOUPLED_IMPORTED && !backfills(t);
+      if (gatherHistogram(t, asIfBackfilled)) {
         done(
             actions,
             engine == Engine.POSTGRESQL
@@ -386,7 +545,13 @@ public final class Setup {
                     ? "gathered a histogram on " + meta + ".tx_state"
                     : t.layout() == Layout.INLINE
                         ? "set fixed statistics on " + meta + ".tx_state"
-                        : "set and locked fixed statistics on " + meta + ".tx_state");
+                        : asIfBackfilled
+                            ? "set and locked fixed statistics on "
+                                + meta
+                                + ".tx_state, with "
+                                + t.dataTable()
+                                + "'s row count and key statistics"
+                            : "set and locked fixed statistics on " + meta + ".tx_state");
       }
       for (String g : grantees) {
         execute("GRANT SELECT ON " + name(ns, view) + " TO " + grantee(g));
@@ -486,6 +651,61 @@ public final class Setup {
           + " END;";
 
   /**
+   * {@link #ORACLE_FIXED_STATISTICS} for a decoupled metadata table the setup did not backfill
+   * (design section 3, todo 361), set as if it had been: where the data table holds more rows than
+   * the metadata table, the data table's rows and blocks from its statistics (its count where it
+   * has none), and each key column's statistics copied from the data table's (a distinct count of
+   * the rows where it has none), before the {@code tx_state} histogram over those rows and the
+   * lock. Locked at the few rows an empty table has, every plan joining it would take it as empty:
+   * a scan of the in-flight index per data row, 3.7 s and 550,000 gets a 1,000-key read on the
+   * container.
+   */
+  private String oracleStatistics(TableInfo t, boolean asIfBackfilled) {
+    if (!asIfBackfilled) {
+      return ORACLE_FIXED_STATISTICS;
+    }
+    String d = oracleLiteral('"' + t.dataTable() + '"');
+    StringBuilder keys = new StringBuilder();
+    for (String k : t.keyColumns()) {
+      String c = oracleLiteral(engine.quote(k));
+      keys.append(" BEGIN DBMS_STATS.GET_COLUMN_STATS(o, ")
+          .append(d)
+          .append(", ")
+          .append(c)
+          .append(", distcnt => kd, density => ky, nullcnt => kn, srec => kr, avgclen => ka);")
+          .append(" DBMS_STATS.SET_COLUMN_STATS(ownname => o, tabname => t, colname => ")
+          .append(c)
+          .append(", distcnt => kd, density => ky, nullcnt => kn, srec => kr, avgclen => ka,")
+          .append(" force => TRUE); EXCEPTION WHEN OTHERS THEN")
+          .append(" DBMS_STATS.SET_COLUMN_STATS(ownname => o, tabname => t, colname => ")
+          .append(c)
+          .append(", distcnt => n, density => 1 / n, nullcnt => 0, force => TRUE); END;");
+    }
+    String read = " DBMS_STATS.GET_TABLE_STATS(o, t, numrows => n, numblks => b, avgrlen => l);";
+    return ORACLE_FIXED_STATISTICS
+        .replace(
+            " r DBMS_STATS.STATREC;",
+            " r DBMS_STATS.STATREC; dn NUMBER; db NUMBER; dl NUMBER; kd NUMBER; ky NUMBER;"
+                + " kn NUMBER; ka NUMBER; kr DBMS_STATS.STATREC;")
+        .replace(
+            read,
+            read
+                + " BEGIN DBMS_STATS.GET_TABLE_STATS(o, "
+                + d
+                + ", numrows => dn, numblks => db, avgrlen => dl); EXCEPTION WHEN OTHERS THEN"
+                + " dn := NULL; END; IF dn IS NULL THEN EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM '"
+                + " || o || '.' || "
+                + d
+                + " INTO dn; db := GREATEST(1, CEIL(dn / 100)); dl := 0; END IF;"
+                + " IF dn > n THEN n := dn; b := GREATEST(b, db);"
+                + " DBMS_STATS.SET_TABLE_STATS(ownname => o, tabname => t, numrows => n,"
+                + " numblks => b, avgrlen => CASE WHEN l > 0 THEN l ELSE GREATEST(dl, 1) END,"
+                + " force => TRUE);"
+                + keys
+                + " END IF;");
+  }
+
+  /**
    * On Oracle and MySQL, a histogram on the metadata table's {@code tx_state}: without one both
    * estimate {@code tx_state IN (1, 2)} as most of the table and scan it where the split read
    * probes the in-flight index (design section 3). On Oracle a fixed one assuming {@link
@@ -496,9 +716,10 @@ public final class Setup {
    * ANALYZE} of the metadata table the backfill has just filled: until autoanalyze reaches it the
    * planner estimates {@code tx_state IN (1, 2)} by defaults (todo 337).
    *
+   * @param asIfBackfilled on Oracle, set the statistics as {@link #oracleStatistics} says
    * @return whether one was set or gathered
    */
-  private boolean gatherHistogram(TableInfo t) throws SQLException {
+  private boolean gatherHistogram(TableInfo t, boolean asIfBackfilled) throws SQLException {
     if (engine == Engine.POSTGRESQL) {
       execute("ANALYZE " + name(t.namespace(), metadataTable(t)));
       return true;
@@ -507,7 +728,7 @@ public final class Setup {
       planned.add(
           engine == Engine.ORACLE
               ? bound(
-                  ORACLE_FIXED_STATISTICS,
+                  oracleStatistics(t, asIfBackfilled),
                   oracleLiteral('"' + t.namespace() + '"'),
                   oracleLiteral('"' + metadataTable(t) + '"'),
                   oracleLiteral(txState),
@@ -522,7 +743,8 @@ public final class Setup {
     }
     switch (engine) {
       case ORACLE:
-        try (PreparedStatement ps = connection.prepareStatement(ORACLE_FIXED_STATISTICS)) {
+        try (PreparedStatement ps =
+            connection.prepareStatement(oracleStatistics(t, asIfBackfilled))) {
           ps.setString(1, '"' + t.namespace() + '"');
           ps.setString(2, '"' + metadataTable(t) + '"');
           ps.setString(3, txState);

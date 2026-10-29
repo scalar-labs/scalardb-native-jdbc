@@ -270,8 +270,9 @@ for DDL and for ordinary tables.
 
 Before the driver serves a ScalarDB table, run [the setup](concepts.md#the-setup) once, as a user
 that can run DDL. It creates the table's [in-flight index](concepts.md#in-flight-index) and
-[read view](concepts.md#read-view), which the driver needs to read the table safely, and on an
-imported table writes the transaction metadata the import did not. It is safe to run again, and you
+[read view](concepts.md#read-view), which the driver needs to read the table safely, and on a
+decoupled table you imported (C) writes the transaction metadata the import did not, the backfill.
+It is safe to run again, and you
 run it again whenever a table is added to ScalarDB. The tools read the password from
 `SCALARDB_NATIVE_PASSWORD`, and `snsql`, in step 4, from `SNSQL_PASSWORD`, since the setup is often
 run as a different user from the application's.
@@ -282,14 +283,29 @@ scalardb-native-tools setup jdbc:scalardb-native:postgresql://localhost:5432/pos
 ```
 
 ```text
-warehouse.stock: created in-flight index stock_inflight, backfilled 0 rows, created read view rc_stock, analyzed stock
+warehouse.stock: created in-flight index stock_inflight, backfill skipped (--backfill runs it), created read view rc_stock, analyzed stock
 
 New ScalarDB table: warehouse.stock.
 ScalarDB transactions may write warehouse.stock from <date> <time>, or after every application using the driver on this database has restarted.
 ```
 
-In the decoupled layout (C), the line ends `analyzed stock_tx_metadata`, the table where ScalarDB
-keeps the metadata.
+In the decoupled layout (C), the line says `backfilled 0 rows` instead of `backfill skipped`, and
+ends `analyzed stock_tx_metadata`, the table where ScalarDB keeps the metadata.
+
+The driver doesn't need the backfill: it reads a row without transaction metadata as committed, and
+gives the row its metadata when it first writes it. ScalarDB does, on an imported decoupled table,
+because of a ScalarDB defect: a ScalarDB transaction that rolls back over such a row leaves it with
+metadata ScalarDB cannot write again (`DB-CORE-20013` on its next update of the row). So the setup
+backfills an imported decoupled table by default, and no inline table. `--backfill` and
+`--no-backfill` override that for every table the run sets up. Run the backfill:
+
+- on an imported decoupled table that ScalarDB transactions also write, as the setup does by
+  default;
+- after `DB-CORE-20013` on a row of an imported table, or when `check` reports rows with NULL
+  metadata: `scalardb-native-tools backfill` repairs those rows, and can be run at any time;
+- not on an inline table, where it is never needed.
+
+See [Setting up tables](setting-up-tables.md#backfill).
 
 `<date> <time>` is 60 seconds after the run. Without `--no-wait`, the setup waits until then before
 it returns. The wait is for

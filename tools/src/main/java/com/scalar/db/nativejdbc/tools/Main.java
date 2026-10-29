@@ -38,16 +38,17 @@ import picocli.CommandLine.Parameters;
 
 /**
  * {@code scalardb-native-tools}: the setup each ScalarDB table needs before the driver serves it,
- * its check, and its teardown (docs/design.md, section 3). It connects through the vendor driver,
- * with DDL privileges for setup and teardown, and never prompts. Exit 0 when all is well, 1 when
- * {@code check} finds something missing or rows stuck, 2 on an error.
+ * its check, its backfill alone, and its teardown (docs/design.md, section 3). It connects through
+ * the vendor driver, with DDL privileges for setup and teardown, and never prompts. Exit 0 when all
+ * is well, 1 when {@code check} finds something missing or rows stuck, 2 on an error.
  */
 @Command(
     name = "scalardb-native-tools",
     sortOptions = false,
     versionProvider = Main.Version.class,
     description = {
-      "Sets up ScalarDB tables for ScalarDB Native JDBC, checks them, or takes the setup down.",
+      "Sets up ScalarDB tables for ScalarDB Native JDBC, checks them, backfills them, or takes the"
+          + " setup down.",
       "The password comes from SCALARDB_NATIVE_PASSWORD, or --property password=...; it never"
           + " prompts.",
       "After setting up a newly added table, setup waits out the applications' catalog TTL"
@@ -58,8 +59,9 @@ import picocli.CommandLine.Parameters;
     exitCodeListHeading = "Exit codes:%n",
     exitCodeList = {
       "0:all is well",
-      "1:check found a table not set up, rows stuck, a database setting to fix, or an object that"
-          + " reaches a ScalarDB table around the driver",
+      "1:check found a table not set up, rows stuck, rows with NULL metadata (run backfill), a"
+          + " database setting to fix, or an object that reaches a ScalarDB table around the"
+          + " driver",
       "2:an error"
     })
 public final class Main implements Callable<Integer> {
@@ -75,10 +77,14 @@ public final class Main implements Callable<Integer> {
   enum Action {
     setup,
     check,
+    backfill,
     teardown
   }
 
-  @Parameters(index = "0", paramLabel = "ACTION", description = "setup, check or teardown")
+  @Parameters(
+      index = "0",
+      paramLabel = "ACTION",
+      description = "setup, check, backfill or teardown")
   private @Nullable Action action;
 
   @Parameters(
@@ -109,7 +115,9 @@ public final class Main implements Callable<Integer> {
       description = "a table to act on; may be repeated (default: every ScalarDB table)")
   private List<String> tables = new ArrayList<>();
 
-  @Option(names = "--dry-run", description = "print the statements setup or teardown would run")
+  @Option(
+      names = "--dry-run",
+      description = "print the statements setup, backfill or teardown would run")
   private boolean dryRun;
 
   @Option(
@@ -119,9 +127,18 @@ public final class Main implements Callable<Integer> {
   private List<String> grantees = new ArrayList<>();
 
   @Option(
+      names = "--backfill",
+      negatable = true,
+      description =
+          "setup: backfill every imported or inline table it sets up, or none with --no-backfill"
+              + " (default: imported decoupled tables only)")
+  private @Nullable Boolean backfill;
+
+  @Option(
       names = "--backfill-wait",
       paramLabel = "SECONDS",
-      description = "setup: how long to wait per table for rows in flight (default: 60)")
+      description =
+          "setup and backfill: how long to wait per table for rows in flight (default: 60)")
   private long backfillWait = 60;
 
   @Option(
@@ -257,12 +274,20 @@ public final class Main implements Callable<Integer> {
           exit =
               changes(
                   dryRun
-                      ? Setup.plan(catalog, c, which, grantees)
-                      : Setup.run(catalog, c, which, Duration.ofSeconds(backfillWait), grantees));
+                      ? Setup.plan(catalog, c, which, grantees, backfill)
+                      : Setup.run(
+                          catalog, c, which, Duration.ofSeconds(backfillWait), grantees, backfill));
           // objects that reach a ScalarDB table around the driver (todo 323): warned, not refused
           for (String o : Check.objects(catalog, c)) {
             err.println("warning: " + o);
           }
+          break;
+        case backfill:
+          exit =
+              changes(
+                  dryRun
+                      ? Setup.planBackfill(catalog, c, which)
+                      : Setup.backfill(catalog, c, which, Duration.ofSeconds(backfillWait)));
           break;
         case teardown:
           exit =
@@ -419,7 +444,7 @@ public final class Main implements Callable<Integer> {
     boolean found = !database.isEmpty();
     boolean failed = false;
     for (Check.Result r : results) {
-      found |= !r.setUp() || r.stuck() > 0;
+      found |= !r.setUp() || r.stuck() > 0 || r.nullMetadata() > 0;
       failed |= r.error() != null;
     }
     if (json) {
@@ -436,6 +461,8 @@ public final class Main implements Callable<Integer> {
                 + r.stuck()
                 + ",\"oldestSeconds\":"
                 + (oldest == null ? "null" : oldest.toSeconds())
+                + ",\"nullMetadata\":"
+                + r.nullMetadata()
                 + ",\"error\":"
                 + (e == null ? "null" : Json.string(e.getMessage()))
                 + "}");

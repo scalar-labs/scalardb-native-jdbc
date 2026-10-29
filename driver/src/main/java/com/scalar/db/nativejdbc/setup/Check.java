@@ -1,6 +1,7 @@
 package com.scalar.db.nativejdbc.setup;
 
 import com.scalar.db.nativejdbc.catalog.Catalog;
+import com.scalar.db.nativejdbc.catalog.Layout;
 import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.sql.SqlWords;
@@ -41,6 +42,7 @@ public final class Check {
     private final boolean setUp;
     private final long stuck;
     private final @Nullable Duration oldest;
+    private final long nullMetadata;
     private final @Nullable SQLException error;
 
     Result(
@@ -48,11 +50,13 @@ public final class Check {
         boolean setUp,
         long stuck,
         @Nullable Duration oldest,
+        long nullMetadata,
         @Nullable SQLException error) {
       this.table = table;
       this.setUp = setUp;
       this.stuck = stuck;
       this.oldest = oldest;
+      this.nullMetadata = nullMetadata;
       this.error = error;
     }
 
@@ -94,6 +98,18 @@ public final class Check {
     }
 
     /**
+     * Returns the number of metadata rows with a NULL {@code tx_state} on an imported decoupled
+     * table: only ScalarDB's rollback over a row that had no metadata row writes one, and ScalarDB
+     * cannot write such a row again until {@code backfill} stamps it (design section 1 and 3, todo
+     * 361). Always 0 in another layout.
+     *
+     * @return the number of such rows
+     */
+    public long nullMetadata() {
+      return nullMetadata;
+    }
+
+    /**
      * Returns the error that stopped the check of this table, if any.
      *
      * @return the error, or null
@@ -104,12 +120,13 @@ public final class Check {
     }
 
     /**
-     * Returns whether the table is set up, has no stuck rows, and was checked.
+     * Returns whether the table is set up, has no stuck rows nor rows with NULL metadata, and was
+     * checked.
      *
      * @return whether all is well
      */
     public boolean ok() {
-      return setUp && stuck == 0 && error == null;
+      return setUp && stuck == 0 && nullMetadata == 0 && error == null;
     }
 
     @Override
@@ -126,7 +143,12 @@ public final class Check {
                   + stuck
                   + " rows prepared past the lifetime, the oldest "
                   + Objects.requireNonNull(oldest).toSeconds()
-                  + " s ago");
+                  + " s ago")
+          + (nullMetadata == 0
+              ? ""
+              : ", "
+                  + nullMetadata
+                  + " rows with NULL metadata, which ScalarDB cannot write again: run backfill");
     }
   }
 
@@ -192,7 +214,8 @@ public final class Check {
    * Checks the chosen decoupled tables of the catalog: whether each is set up, and its rows in
    * flight since longer ago than {@code lifetime}, counted through the in-flight index. ScalarDB
    * settles such a row when one of its reads meets it; until then the driver shows its before image
-   * and waits on it.
+   * and waits on it. On an imported decoupled table, also its metadata rows with a NULL {@code
+   * tx_state}, which ScalarDB's defect leaves and {@code backfill} repairs (todo 361).
    *
    * @param catalog the catalog of the database, read afresh first
    * @param connection a connection to the same database
@@ -233,6 +256,21 @@ public final class Check {
           rs.next();
           long stuck = rs.getLong(1);
           long min = rs.getLong(2);
+          long nullMetadata = 0;
+          if (t.layout() == Layout.DECOUPLED_IMPORTED) {
+            // the in-flight index's first column, except SQL Server's filtered one: a scan there
+            try (Statement st = connection.createStatement();
+                ResultSet n =
+                    st.executeQuery(
+                        "SELECT COUNT(*) FROM "
+                            + meta
+                            + " WHERE "
+                            + engine.quote("tx_state")
+                            + " IS NULL")) {
+              n.next();
+              nullMetadata = n.getLong(1);
+            }
+          }
           out.add(
               new Result(
                   name,
@@ -244,10 +282,11 @@ public final class Check {
                           Objects.requireNonNull(t.metadataTable(), "metadata table")),
                   stuck,
                   stuck == 0 ? null : Duration.ofMillis(now - min),
+                  nullMetadata,
                   null));
         }
       } catch (SQLException e) {
-        out.add(new Result(name, t.isSetUp(), 0, null, e));
+        out.add(new Result(name, t.isSetUp(), 0, null, 0, e));
       }
     }
     return out;

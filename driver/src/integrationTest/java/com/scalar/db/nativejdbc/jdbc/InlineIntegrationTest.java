@@ -74,8 +74,10 @@ class InlineIntegrationTest {
     }
     Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     try (Connection c = e.open()) {
+      // an inline table is backfilled only when asked, --backfill (todo 361)
       List<Setup.Result> results =
-          Setup.run(catalog, c, t -> t.namespace().equals(ns), Duration.ofMinutes(1), List.of());
+          Setup.run(
+              catalog, c, t -> t.namespace().equals(ns), Duration.ofMinutes(1), List.of(), true);
       assertThat(results).hasSize(1).allMatch(Setup.Result::succeeded, "succeeded");
       assertThat(results.get(0).rowsStamped()).isEqualTo(2);
       assertThat(rows(c, nullTxId)).containsExactly("0");

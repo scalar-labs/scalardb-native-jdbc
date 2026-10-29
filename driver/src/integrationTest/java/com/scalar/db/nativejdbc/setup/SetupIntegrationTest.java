@@ -227,6 +227,194 @@ class SetupIntegrationTest {
   }
 
   /**
+   * The backfill as an option (design section 3, todo 361): an imported decoupled table set up
+   * without it, its rows without a metadata row read and written through the driver at every level
+   * (SERIALIZABLE where the engine has it, not Oracle), by key, by predicate and in a batch; each
+   * key written gets its metadata row, a DELETE's a tombstone, and the rows not written have none.
+   */
+  @ParameterizedTest
+  @MethodSource("engines")
+  @SuppressFBWarnings(
+      value = {
+        "SQL_INJECTION_JDBC",
+        "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE",
+        "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"
+      },
+      justification = "statements written in the test, its own names and integers")
+  void withoutTheBackfill_rowsWithoutMetadataAreReadAndWrittenThroughTheDriver(Engines e)
+      throws Exception {
+    Engine engine = e.engine();
+    // a new namespace each run: ScalarDB's catalog outlives the schema a run drops
+    String name = "nb" + System.currentTimeMillis() % 1_000_000;
+    String ns = e.storedSchema(name);
+    try (Connection c = e.open()) {
+      e.execute(
+          c,
+          e.createSchema(name),
+          "CREATE TABLE "
+              + name
+              + ".imp (id "
+              + e.intType()
+              + " PRIMARY KEY, x "
+              + e.intType()
+              + ")",
+          "INSERT INTO " + name + ".imp SELECT g, 0 FROM " + e.series(1, 30));
+      if (!c.getAutoCommit()) {
+        c.commit();
+      }
+    }
+    try (DistributedTransactionAdmin admin = e.admin()) {
+      admin.createCoordinatorTables(true);
+      admin.createNamespace(ns, true);
+      admin.importTable(ns, e.storedTable("imp"), DECOUPLED, Map.of());
+    }
+    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    String table = name + ".imp";
+    try {
+      List<Setup.Result> results;
+      try (Connection c = e.open()) {
+        results =
+            Setup.run(
+                catalog, c, t -> t.namespace().equals(ns), Duration.ofMinutes(1), List.of(), false);
+      }
+      assertThat(results).hasSize(1).allMatch(Setup.Result::succeeded, "succeeded");
+      assertThat(results.get(0).actions()).contains("backfill skipped (--backfill runs it)");
+      assertThat(results.get(0).rowsStamped()).isZero();
+      TableInfo imp = catalog.lookup(List.of(), ns, e.storedTable("imp"));
+      String meta = name(engine, ns, Objects.requireNonNull(imp.metadataTable()));
+      String id = engine.quote(imp.keyColumns().get(0));
+      try (Connection c = e.open()) {
+        assertThat(rows(c, "SELECT COUNT(*) FROM " + meta)).containsExactly("0");
+        if (engine == Engine.ORACLE) {
+          // locked as if backfilled: the data table's row count, not the empty table's 0
+          assertThat(
+                  rows(
+                      c,
+                      "SELECT num_rows || ' ' || stattype_locked FROM all_tab_statistics WHERE"
+                          + " owner = '"
+                          + ns
+                          + "' AND table_name = '"
+                          + imp.metadataTable()
+                          + "'"))
+              .containsExactly("30 ALL");
+          assertThat(
+                  rows(
+                      c,
+                      "SELECT num_distinct FROM all_tab_col_statistics WHERE owner = '"
+                          + ns
+                          + "' AND table_name = '"
+                          + imp.metadataTable()
+                          + "' AND column_name = '"
+                          + imp.keyColumns().get(0)
+                          + "'"))
+              .containsExactly("30");
+        }
+      }
+      List<Integer> levels =
+          new java.util.ArrayList<>(
+              List.of(
+                  Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ));
+      if (engine != Engine.ORACLE) {
+        levels.add(Connection.TRANSACTION_SERIALIZABLE);
+      }
+      Properties ttl = new Properties();
+      ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59361");
+      try (Connection d = e.openDriver(ttl);
+          Connection v = e.open()) {
+        for (int l = 0; l < levels.size(); l++) {
+          int b = 1 + 10 * l; // the level's ten keys, none with a metadata row
+          String at = "level " + levels.get(l);
+          d.setTransactionIsolation(levels.get(l));
+          d.setAutoCommit(false);
+          assertThat(rows(d, "SELECT x FROM " + table + " WHERE id = " + b))
+              .as(at)
+              .containsExactly("0");
+          assertThat(
+                  rows(
+                      d,
+                      "SELECT COUNT(*) FROM "
+                          + table
+                          + " WHERE id BETWEEN "
+                          + b
+                          + " AND "
+                          + (b + 9)))
+              .as(at)
+              .containsExactly("10");
+          try (Statement st = d.createStatement()) {
+            assertThat(st.executeUpdate("UPDATE " + table + " SET x = 1 WHERE id = " + b))
+                .as(at)
+                .isEqualTo(1);
+            assertThat(
+                    st.executeUpdate(
+                        "UPDATE "
+                            + table
+                            + " SET x = 2 WHERE id BETWEEN "
+                            + (b + 1)
+                            + " AND "
+                            + (b + 3)))
+                .as(at)
+                .isEqualTo(3);
+          }
+          try (java.sql.PreparedStatement ps =
+              d.prepareStatement("UPDATE " + table + " SET x = 3 WHERE id = ?")) {
+            for (int k = b + 4; k <= b + 6; k++) {
+              ps.setInt(1, k);
+              ps.addBatch();
+            }
+            assertThat(ps.executeBatch()).as(at).containsExactly(1, 1, 1);
+          }
+          try (Statement st = d.createStatement()) {
+            assertThat(st.executeUpdate("DELETE FROM " + table + " WHERE id = " + (b + 7)))
+                .as(at)
+                .isEqualTo(1);
+          }
+          // its own writes, read back in the transaction
+          assertThat(
+                  rows(
+                      d,
+                      "SELECT SUM(x) FROM " + table + " WHERE id BETWEEN " + b + " AND " + (b + 9)))
+              .as(at)
+              .containsExactly("16");
+          d.commit();
+          d.setAutoCommit(true);
+          assertThat(
+                  rows(
+                      v,
+                      "SELECT COUNT(*) FROM "
+                          + meta
+                          + " WHERE "
+                          + id
+                          + " BETWEEN "
+                          + b
+                          + " AND "
+                          + (b + 9)
+                          + " AND "
+                          + engine.quote("tx_state")
+                          + " = 3"))
+              .as(at + ": the keys written, the DELETE's tombstone among them")
+              .containsExactly("8");
+          assertThat(
+                  rows(
+                      v,
+                      "SELECT COUNT(*) FROM "
+                          + table
+                          + " WHERE id BETWEEN "
+                          + b
+                          + " AND "
+                          + (b + 9)))
+              .as(at)
+              .containsExactly("9");
+        }
+      }
+    } finally {
+      try (Connection c = e.open()) {
+        Setup.teardown(catalog, c, t -> t.namespace().equals(ns));
+        e.dropSchemas(c, ns);
+      }
+    }
+  }
+
+  /**
    * Oracle: whether the table's statistics are locked, the histogram type of {@code tx_state}, and
    * its endpoints as value:cumulative rows.
    */

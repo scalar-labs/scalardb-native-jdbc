@@ -121,8 +121,8 @@ public final class SetupObjects {
 
   /**
    * Returns whether a table is set up: its in-flight index exists and its read view exists with
-   * exactly the table's columns, in order. The view is created last, so it also marks a backfill
-   * that completed.
+   * exactly the table's columns, in order. The view is created last, after the backfill where one
+   * runs; whether it ran, the view does not say (design section 3, todo 361).
    *
    * @param schema the table's schema
    * @param table the name statements use for the table

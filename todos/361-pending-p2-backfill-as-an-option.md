@@ -35,15 +35,25 @@ Design: docs/design.md section 3, "The backfill as an option".
 
 ## Acceptance Criteria
 
-- [ ] The container measurement of plans with and without the backfill (Oracle, MySQL), before
+- [x] The container measurement of plans with and without the backfill (Oracle, MySQL), before
       the statistics part is built.
-- [ ] `setup` defaults and flags, its output line for a table not backfilled.
-- [ ] The `backfill` command.
-- [ ] `check`'s count and exit code.
-- [ ] Oracle's statistics as if backfilled (MySQL's if the measurement says so).
-- [ ] The tests listed in the design paragraph.
-- [ ] getting-started.md: the setup's flags, and when to run the backfill.
+- [x] `setup` defaults and flags, its output line for a table not backfilled.
+- [x] The `backfill` command.
+- [x] `check`'s count and exit code.
+- [x] Oracle's statistics as if backfilled (MySQL's not needed, the measurement says).
+- [x] The tests listed in the design paragraph.
+- [x] getting-started.md: the setup's flags, and when to run the backfill.
 
 ## Work Log
 
 - 2026-10-29: designed, at the user's request, in parallel with todo 360.
+- 2026-10-29: measured (`BackfillPlansBenchmark`, figures in design section 3): on Oracle the
+  metadata table's statistics locked at 0 rows made the predicate block's 1,000-key read 3,730 ms
+  and 549,847 gets (an INDEX FULL SCAN of the in-flight index per data row); with the statistics
+  set as if backfilled, 1.2 ms and 11. MySQL's plans don't suffer; its histogram stays. Built on
+  branch backfill-option (c7): setup's default by layout and `--backfill` / `--no-backfill`, the
+  `backfill` command (imported decoupled tables only, 6e's call), check's NULL-metadata count, the
+  Oracle statistics, the tests, getting-started.md and setting-up-tables.md.
+- Found while measuring, not in scope: on MySQL a backfilled metadata table's InnoDB statistics
+  still say 0 rows right after the setup, and reads scan it (26.8 ms, 300,007 handler reads for a
+  point read) until InnoDB recounts it; an `ANALYZE TABLE` after the backfill would fix it.

@@ -17,7 +17,8 @@ setup](concepts.md#the-setup) once. For each ScalarDB table, in either of Scalar
 
 It also:
 
-- on an imported table, writes the transaction metadata ScalarDB has not;
+- by default on an imported decoupled table, writes the transaction metadata ScalarDB has not, the
+  backfill ([`backfill`](#backfill));
 - on PostgreSQL, MySQL and Oracle, gathers or sets the statistics of the transaction metadata, so
   that the database plans the driver's in-flight checks through the index. On Oracle it locks the
   statistics of a decoupled table's `<table>_tx_metadata`, so that the nightly job does not replace
@@ -42,7 +43,7 @@ bin/scalardb-native-tools check jdbc:scalardb-native:postgresql://host:5432/db -
 
 It takes the application's URL or the vendor's. It exits with 0 when all is well, 1 when `check`
 finds something to fix, and 2 on an error; `--json` prints the outcome as JSON. The same is available
-in Java as `Setup.run`, `Setup.plan`, `Setup.teardown` and `Check` in the driver's
+in Java as `Setup.run`, `Setup.plan`, `Setup.backfill`, `Setup.teardown` and `Check` in the driver's
 `com.scalar.db.nativejdbc.setup` package; their Javadoc has the details.
 
 The commands act on every ScalarDB table, or on those named with `--table ns.t`, which may be
@@ -57,6 +58,11 @@ repeated.
   a run may drop a read view and create it again, which drops its grants. It does so for a view an
   earlier version made in another column order, and on PostgreSQL for one that reads a `SMALLINT`
   column as `INTEGER`.
+- `--backfill` backfills every imported or inline table the run sets up, and `--no-backfill` none.
+  Without either, it backfills an imported decoupled table and no other ([`backfill`](#backfill)).
+  A table it does not backfill says `backfill skipped (--backfill runs it)`.
+- `--backfill-wait` is how long the backfill waits for rows ScalarDB has in flight, in seconds per
+  table (60).
 - `--dry-run` prints the statements instead of running them.
 - After setting up a table for the first time, it waits out the applications' [catalog](concepts.md#catalog) TTL,
   `--catalog-ttl` seconds (60), and then says ScalarDB transactions may write it. `--no-wait` prints
@@ -71,11 +77,39 @@ Read-only. It reports, and exits with 1 for any of them:
 - each table that is not set up;
 - the rows ScalarDB left prepared longer ago than `--lifetime` seconds (15). The driver cannot settle
   them; a ScalarDB read of the rows, or ScalarDB's recovery, settles them;
+- on an imported decoupled table, the rows with NULL metadata, which ScalarDB cannot write again
+  until [`backfill`](#backfill) repairs them;
 - the database's own objects that reach a ScalarDB table around the driver: a view, trigger,
   procedure or function that names it, a trigger on it, and a foreign key on it with a cascading
   action ([Objects over ScalarDB tables](sql-support.md#objects-over-scalardb-tables)). It matches
   names by their words, so an object that names a plain table of the same name in another schema
   counts too.
+
+### `backfill`
+
+Writes the transaction metadata of an imported decoupled table's rows that have none, and repairs
+the rows ScalarDB left with NULL metadata, on tables that are set up. It runs only DML on the
+metadata table, so it needs no DDL privileges, and it can run at any time and be repeated. It waits
+for rows ScalarDB has in flight, up to `--backfill-wait` seconds per table (60). On Oracle it then
+sets the metadata table's statistics again, as the setup does. `--dry-run` prints the statements and
+the number of rows it would write.
+
+The driver doesn't need the backfill. ScalarDB does, on an imported decoupled table: a ScalarDB
+transaction that rolls back over a row without metadata leaves the row with NULL metadata, and
+every later ScalarDB update of the row fails with `DB-CORE-20013`. Run it:
+
+- on an imported decoupled table that ScalarDB transactions also write, which the setup does by
+  default;
+- after `DB-CORE-20013` on a row of an imported table, or when `check` reports rows with NULL
+  metadata;
+- not on an inline table, where it is never needed. `backfill` leaves an inline table alone;
+  `setup --backfill` backfills one.
+
+On a large table it is one transaction over the rows it writes, so run it in a quiet window.
+
+```sh
+bin/scalardb-native-tools backfill jdbc:scalardb-native:postgresql://host:5432/db -U admin --table warehouse.stock
+```
 
 ### `teardown`
 
