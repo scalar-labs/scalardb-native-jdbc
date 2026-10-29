@@ -369,6 +369,7 @@ class BenchBaseBenchmark {
     OracleStats.@Nullable Counters oracleStart =
         stats(e) && oracle ? OracleStats.start(e, ns) : null;
     Sampler sampler = stats(e) && !oracle ? new Sampler(e) : null;
+    OracleWaits waits = stats(e) && oracle ? new OracleWaits(e, dir.resolve("waits.txt")) : null;
     Path histograms = dir.resolve("histograms.json");
     // the counters read again as BenchBase starts its terminals: its startup reads the tables'
     // index information, which on Oracle gathers their statistics (getIndexInfo), and that is not
@@ -417,6 +418,10 @@ class BenchBaseBenchmark {
     } finally {
       if (sampler != null) {
         sampler.close();
+      }
+      if (waits != null) {
+        waits.close();
+        waits.write(e);
       }
     }
     Server server =
@@ -1046,6 +1051,180 @@ class BenchBaseBenchmark {
           busyUs < 0 ? -1 : Math.max(0, busyUs / 1000.0 - dbCpuMs),
           roundTrip[0],
           roundTrip[1]);
+    }
+  }
+
+  /**
+   * On Oracle, over a run's execute phase, every 500 ms on a connection of its own: each session in
+   * a buffer busy wait of more than 300 ms, with the session {@code V$SESSION} names as its
+   * blocker, and with every other active session at that sample, since Oracle often names none for
+   * this wait. A one-second wait stays past the threshold for 700 ms, so each is sampled at least
+   * once; the wait's {@code SEQ#} groups its samples. At the end, each waited-on block's segment
+   * ({@code DBA_EXTENTS} by file and block) and each sampled statement's text. Licence-free: {@code
+   * V$SESSION}, not the Diagnostics Pack's session history (todo 334's log, 2026-10-29). Written to
+   * the run's {@code waits.txt}.
+   */
+  static final class OracleWaits implements AutoCloseable {
+
+    private static final String WAITERS =
+        "SELECT w.sid, w.seq#, w.wait_time_micro, w.sql_id, w.p1, w.p2, w.p3, w.row_wait_obj#,"
+            + " w.blocking_session, w.blocking_session_status,"
+            + " b.state, b.event, b.sql_id, b.wait_time_micro"
+            + " FROM v$session w LEFT JOIN v$session b ON b.sid = w.blocking_session"
+            + " WHERE w.event = 'buffer busy waits' AND w.state = 'WAITING'"
+            + " AND w.wait_time_micro > 300000";
+
+    private static final String ACTIVE =
+        "SELECT sid, state, event, wait_time_micro, sql_id, p1, p2, p3 FROM v$session"
+            + " WHERE type = 'USER' AND status = 'ACTIVE'"
+            + " AND (state <> 'WAITING' OR wait_class <> 'Idle')"
+            + " AND sid <> SYS_CONTEXT('USERENV', 'SID')";
+
+    private final Thread thread;
+    private volatile boolean stop;
+    private final Path to;
+    private final StringBuilder lines = new StringBuilder();
+    private final Map<String, String> blocks = new TreeMap<>();
+    private final Map<String, String> sqlIds = new TreeMap<>();
+    private int samples;
+    private int hits;
+    private @Nullable String failure;
+
+    OracleWaits(Engines e, Path to) {
+      this.to = to;
+      thread = new Thread(() -> run(e), "oracle-waits");
+      thread.setDaemon(true);
+      thread.start();
+    }
+
+    private void run(Engines e) {
+      try (Connection c = e.open();
+          Statement st = c.createStatement()) {
+        while (!stop) {
+          long at = System.currentTimeMillis();
+          StringBuilder found = new StringBuilder();
+          try (ResultSet rs = st.executeQuery(WAITERS)) {
+            while (rs.next()) {
+              found.append(
+                  String.join(
+                      "\t",
+                      "wait",
+                      String.valueOf(at),
+                      rs.getString(1),
+                      rs.getString(2),
+                      String.valueOf(rs.getLong(3) / 1000),
+                      String.valueOf(rs.getString(4)),
+                      rs.getString(5),
+                      rs.getString(6),
+                      rs.getString(7),
+                      rs.getString(8),
+                      String.valueOf(rs.getString(9)),
+                      String.valueOf(rs.getString(10)),
+                      String.valueOf(rs.getString(11)),
+                      String.valueOf(rs.getString(12)),
+                      String.valueOf(rs.getString(13)),
+                      rs.getString(14) == null ? "null" : String.valueOf(rs.getLong(14) / 1000)));
+              found.append('\n');
+              blocks.putIfAbsent(rs.getString(5) + "\t" + rs.getString(6), "");
+              sqlIds.putIfAbsent(String.valueOf(rs.getString(4)), "");
+              sqlIds.putIfAbsent(String.valueOf(rs.getString(13)), "");
+            }
+          }
+          if (found.length() > 0) {
+            try (ResultSet rs = st.executeQuery(ACTIVE)) {
+              while (rs.next()) {
+                found.append(
+                    String.join(
+                        "\t",
+                        "  active",
+                        String.valueOf(at),
+                        rs.getString(1),
+                        rs.getString(2),
+                        rs.getString(3),
+                        String.valueOf(rs.getLong(4) / 1000),
+                        String.valueOf(rs.getString(5)),
+                        rs.getString(6),
+                        rs.getString(7),
+                        rs.getString(8)));
+                found.append('\n');
+                sqlIds.putIfAbsent(String.valueOf(rs.getString(5)), "");
+              }
+            }
+          }
+          synchronized (this) {
+            samples++;
+            if (found.length() > 0) {
+              hits++;
+              lines.append(found);
+            }
+          }
+          Thread.sleep(500);
+        }
+      } catch (SQLException | InterruptedException | RuntimeException ex) {
+        synchronized (this) {
+          failure = String.valueOf(ex);
+        }
+      }
+    }
+
+    @Override
+    public void close() throws InterruptedException {
+      stop = true;
+      thread.join(10_000);
+    }
+
+    /** Writes waits.txt: the samples, then the blocks' segments and the statements' texts. */
+    synchronized void write(Engines e) throws IOException {
+      StringBuilder out =
+          new StringBuilder("samples\t")
+              .append(samples)
+              .append("\nsamples with a wait\t")
+              .append(hits)
+              .append('\n');
+      if (failure != null) {
+        out.append("sampler failed: ").append(failure).append('\n');
+      }
+      out.append(
+              "\nwait\tat ms\tsid\tseq#\twaited ms\tsql_id\tfile\tblock\tclass\trow_wait_obj#"
+                  + "\tblocking sid\tblocking status\tblocker state\tblocker event\tblocker sql_id"
+                  + "\tblocker waited ms\n"
+                  + "  active\tat ms\tsid\tstate\tevent\twaited ms\tsql_id\tp1\tp2\tp3\n")
+          .append(lines);
+      try (Connection c = e.open();
+          PreparedStatement seg =
+              c.prepareStatement(
+                  "SELECT owner || '.' || segment_name || NVL2(partition_name, ':' || partition_name,"
+                      + " '') || ' (' || segment_type || ')' FROM dba_extents"
+                      + " WHERE file_id = ? AND ? BETWEEN block_id AND block_id + blocks - 1");
+          PreparedStatement text =
+              c.prepareStatement(
+                  "SELECT MAX(SUBSTR(sql_text, 1, 300)) FROM v$sql WHERE sql_id = ?")) {
+        out.append("\nfile\tblock\tsegment\n");
+        for (String fb : blocks.keySet()) {
+          String[] k = fb.split("\t", -1);
+          seg.setLong(1, Long.parseLong(k[0]));
+          seg.setLong(2, Long.parseLong(k[1]));
+          try (ResultSet rs = seg.executeQuery()) {
+            out.append(fb).append('\t').append(rs.next() ? rs.getString(1) : "?").append('\n');
+          }
+        }
+        out.append("\nsql_id\ttext\n");
+        for (String id : sqlIds.keySet()) {
+          if (id.equals("null")) {
+            continue;
+          }
+          text.setString(1, id);
+          try (ResultSet rs = text.executeQuery()) {
+            out.append(id)
+                .append('\t')
+                .append(rs.next() ? String.valueOf(rs.getString(1)).replaceAll("\\s+", " ") : "?")
+                .append('\n');
+          }
+        }
+      } catch (SQLException ex) {
+        out.append("segments and texts not read: ").append(ex).append('\n');
+      }
+      Files.writeString(to, out);
     }
   }
 
