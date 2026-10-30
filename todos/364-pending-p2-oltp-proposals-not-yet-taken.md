@@ -212,4 +212,5 @@ todo 334's log and the design sections named.
   the setup test asserts every metadata row carries the constant and that it is a UUID's length;
   design.md names the new value in section 3's setup paragraph and the backfill bullet (lines
   added, no paragraph rewrapped, 38 fences); a changie entry. One nit, not blocking: the backfill
-  bullet's replaced line runs to 113 characters. Lands on the user's word, as the others.
+  bullet's replaced line runs to 113 characters; c7 took it, the branch's head now db7f450 (the
+  line broken, nothing else, 38 fences). Lands on the user's word, as the others.
