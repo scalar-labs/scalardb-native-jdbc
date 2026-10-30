@@ -104,18 +104,12 @@ class SetupIntegrationTest {
           .isTrue();
     }
     try (Connection c = e.open()) {
-      assertThat(
-              rows(
-                  c,
-                  "SELECT "
-                      + id
-                      + " FROM "
-                      + meta
-                      + " WHERE "
-                      + engine.quote("tx_id")
-                      + " IS NULL"))
-          .isEmpty();
-      assertThat(rows(c, "SELECT " + id + " FROM " + meta)).hasSize(3);
+      // every row stamped, with a tx_id as long as a transaction's, so its first write keeps the
+      // row's length (todo 364)
+      assertThat(rows(c, "SELECT " + engine.quote("tx_id") + " FROM " + meta))
+          .hasSize(3)
+          .containsOnly(Setup.BACKFILL_TX_ID);
+      assertThat(Setup.BACKFILL_TX_ID).hasSameSizeAs(java.util.UUID.randomUUID().toString());
       assertThat(rows(c, "SELECT " + x + " FROM " + view + " ORDER BY " + id))
           .containsExactly("a", "b", "c");
       TableInfo konly = catalog.lookup(List.of(), su, e.storedTable("konly"));

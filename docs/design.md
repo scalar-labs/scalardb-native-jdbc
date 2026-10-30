@@ -652,7 +652,10 @@ another column order, or on Oracle in the plain form (below), counts as not set 
 its check, which rebuild it, while the catalog, which routes a table by its index's existence, keeps
 it set up, since the old order serves every read, only slower, and a table set up before this rule
 would otherwise refuse reads until its setup ran again; with `--backfill`, the backfill of an
-imported table (below), which stamps `tx_id = 'scalardb-native-backfill'`; then the view, with
+imported table (below), which stamps `tx_id = 'scalardb-native-backfill-placeholder'`, 36
+characters as a transaction's UUID, so the row's first write keeps its length and Oracle does not
+migrate it (todo 364; rows stamped `'scalardb-native-backfill'` before work beside them, since
+nothing matches on the value); then the view, with
 `CREATE OR REPLACE` (`CREATE OR ALTER` on SQL Server); then, on Oracle and MySQL, a histogram on the
 metadata table's `tx_state`, without which both estimate `tx_state IN (1, 2)` as most of the table
 and scan it (Oracle 22x, MySQL 12-69x on the split read); on PostgreSQL an `ANALYZE` of the metadata
@@ -721,7 +724,7 @@ So the backfill becomes an option, off by default.
   statements, wait and retries as the setup's. It needs DML on the metadata table and no DDL, and
   can be run at any time and repeated. It also repairs the rows ScalarDB's defect left: the all-NULL
   metadata row gets the sentinel stamp, after which ScalarDB's prepare condition is `tx_id =
-  'scalardb-native-backfill'`, which is not converted to an insert, and the row is writable through
+  'scalardb-native-backfill-placeholder'`, which is not converted to an insert, and the row is writable through
   ScalarDB again. On Oracle, after it fills a decoupled table's metadata table, it sets that table's
   statistics as the setup sets them after a backfill. It acts on imported decoupled tables only: a
   run without `--table` must not rewrite every inline application table, and `setup --backfill`
