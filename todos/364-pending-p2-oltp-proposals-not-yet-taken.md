@@ -157,3 +157,13 @@ todo 334's log and the design sections named.
   and the index, and the check's column-order rule reading `ALL_IND_EXPRESSIONS` for the key order; a
   table whose in-flight index is the plain one counts as set up but not rebuilt until asked, as the
   key-order rule treats an older order. Sent to 6e for the user 2026-10-30.
+- 2026-10-30 (Fable): the backfilled metadata row's growth reproduced on the container (scratchpad
+  `ora/growth.jsh`, `growth36.jsh`): two metadata tables of 1,000,000 rows at state 3, version 1,
+  one stamped with the backfill's 24-character `tx_id`, the other with a 36-character one; then the
+  first real write of the first 200,000 rows (a 36-character `tx_id`, the version and both stamps
+  changed) and 50,000 key reads of written rows. With the 24-character sentinel the table grew from
+  7,168 to 7,808 blocks, the reads fetched 11,996 continued rows (one in four written rows migrated)
+  at 4.24 gets a read against 4.00 on unwritten rows, and the first write cost 5.03 gets and 501 B of
+  redo; with the 36-character one the table stayed at 9,216 blocks (12 bytes a row larger at rest),
+  the reads fetched 465 continued rows at 4.01 gets, and the first write cost 4.09 gets and 392 B.
+  So the backfill stamping a 36-character `tx_id` removes the growth; sent to 6e for the user.
