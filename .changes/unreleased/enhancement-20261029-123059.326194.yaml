@@ -1,3 +1,0 @@
-kind: enhancement
-body: '`scalardb-native-tools`, shipped as `scalardb-native-tools-<version>.zip` on the GitHub release, runs the one-time setup the driver needs on ScalarDB tables, checks it, undoes it, and adds a table to it while applications run. With `--backfill` the setup also writes the transaction metadata of imported tables, which is off by default; `backfill` runs it alone and repairs the rows ScalarDB leaves with NULL metadata, which `check` reports. See `docs/setting-up-tables.md`.'
-time: 2026-10-29T12:30:59.326194+09:00

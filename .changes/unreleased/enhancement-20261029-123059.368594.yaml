@@ -1,3 +1,0 @@
-kind: enhancement
-body: Every error the driver raises carries an SQLState, listed with its cause and what to do about it in `docs/errors.md`.
-time: 2026-10-29T12:30:59.368594+09:00

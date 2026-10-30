@@ -1,3 +1,0 @@
-kind: enhancement
-body: PostgreSQL, MySQL, MariaDB and SQL Server are supported at READ COMMITTED, SNAPSHOT and SERIALIZABLE, and Oracle at READ COMMITTED and SNAPSHOT, tested against ScalarDB 3.19.1; ScalarDB 3.20 writes the same transaction metadata columns and states as 3.19. A connection starts at SNAPSHOT, ScalarDB's default. Both of ScalarDB's layouts are served, inline and decoupled transaction metadata, and an application names a table the same way in either. See `docs/transactions.md` and `docs/sql-support.md`.
-time: 2026-10-29T12:30:59.304861+09:00
