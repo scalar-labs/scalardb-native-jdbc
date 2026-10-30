@@ -34,9 +34,9 @@ public final class NativeJdbcDriver implements Driver {
   /**
    * The ScalarDB line this driver is certified against, as the driver version's major and minor.
    */
-  private static final int MAJOR_VERSION = 3;
+  private static final int MAJOR_VERSION = 4;
 
-  private static final int MINOR_VERSION = 20;
+  private static final int MINOR_VERSION = 0;
 
   /**
    * The client-info key that sends statements verbatim, set with {@code

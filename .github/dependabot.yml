@@ -26,3 +26,14 @@ updates:
       actions:
         patterns:
           - "*"
+  # The release branches' workflow updates, one entry per maintained line (RELEASING.md, "Cutting a
+  # branch"); Dependabot reads this file from the default branch only
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: "3.20"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

@@ -481,7 +481,7 @@ exists (`forbidWildcardImports`, doclint with its `missing` group) and by review
 scalardb-native-jdbc/
   settings.gradle.kts           rootProject.name; pluginManagement { includeBuild("build-logic") }; include driver, shell, tools, samples
   build.gradle.kts              no source; a repositories block that exists for Dependabot only
-  gradle.properties             version=3.20.0-SNAPSHOT; org.gradle.parallel, caching, configuration-cache
+  gradle.properties             version=4.0.0-SNAPSHOT; org.gradle.parallel, caching, configuration-cache
   gradle/libs.versions.toml     every version, including those used only as strings, so Dependabot can bump them
   .java-version                 25.0
   build-logic/src/main/kotlin/  scalardb-native-jdbc.{base,java,java11,publishing,license-report}-conventions
