@@ -520,8 +520,12 @@ class SetupIntegrationTest {
       assertThat(up.get(0).actions()).doesNotContain(keyIndexCreated);
     }
     try (Connection c = e.open()) {
-      assertThat(indexColumns(engine, c, sk, meta, t.inflightIndex(engine)))
+      assertThat(inflightColumns(engine, c, sk, meta, t.inflightIndex(engine)))
           .containsExactlyElementsOf(inflight);
+      if (engine == Engine.ORACLE) {
+        assertThat(oracleIndexType(c, sk, t.inflightIndex(engine)))
+            .isEqualTo("FUNCTION-BASED NORMAL");
+      }
       assertThat(indexColumns(engine, c, sk, meta, t.keyIndex(engine)))
           .isEqualTo(byName ? List.of(b, a) : List.of());
       assertThat(Check.tables(catalog, c, x -> x.namespace().equals(sk), Check.DEFAULT_LIFETIME))
@@ -547,6 +551,39 @@ class SetupIntegrationTest {
       String on = name(engine, sk, meta);
       String state = engine.quote("tx_state");
       String old = engine.quote(a) + ", " + engine.quote(b);
+      if (engine == Engine.ORACLE) {
+        // the function-based form in the catalog's order: another column order
+        String other = "";
+        for (String k : List.of("tx_state", a, b)) {
+          String q = engine.quote(k);
+          other +=
+              (other.isEmpty() ? "" : ", ")
+                  + "CASE "
+                  + state
+                  + " WHEN 1 THEN "
+                  + q
+                  + " WHEN 2 THEN "
+                  + q
+                  + " END";
+        }
+        e.execute(
+            c, "DROP INDEX " + index, "CREATE INDEX " + index + " ON " + on + " (" + other + ")");
+        assertThat(Check.tables(catalog, c, x -> x.namespace().equals(sk), Check.DEFAULT_LIFETIME))
+            .as("a function-based in-flight index in the old order")
+            .singleElement()
+            .satisfies(
+                r -> {
+                  assertThat(r.setUp()).isFalse();
+                  assertThat(r.reason()).isEqualTo(KeyOrder.OTHER_ORDER);
+                });
+        assertThat(setup(e, catalog, sk).get(0).actions())
+            .contains(
+                "rebuilt in-flight index "
+                    + t.inflightIndex(engine)
+                    + " in the data table's key order");
+        // the plain form of a setup before todo 364, in the data table's order
+        old = engine.quote(b) + ", " + engine.quote(a);
+      }
       e.execute(
           c,
           engine == Engine.ORACLE || engine == Engine.POSTGRESQL
@@ -564,8 +601,23 @@ class SetupIntegrationTest {
                   + " IN (1, 2)"
               : "CREATE INDEX " + index + " ON " + on + " (" + state + ", " + old + ")");
       assertThat(Check.tables(catalog, c, x -> x.namespace().equals(sk), Check.DEFAULT_LIFETIME))
-          .as("an in-flight index in the old order")
-          .noneMatch(Check.Result::setUp);
+          .as("an in-flight index in the old order, on Oracle the plain form")
+          .singleElement()
+          .satisfies(
+              r -> {
+                assertThat(r.setUp()).isFalse();
+                assertThat(r.reason())
+                    .isEqualTo(
+                        engine == Engine.ORACLE ? KeyOrder.PLAIN_FORM : KeyOrder.OTHER_ORDER);
+                assertThat(r.toString()).contains("not set up (" + r.reason() + ")");
+              });
+      if (engine == Engine.ORACLE) {
+        // the catalog keeps routing it, spelled for the plain form
+        catalog.invalidate();
+        TableInfo plain = catalog.lookup(List.of(), sk, e.storedTable("ord"));
+        assertThat(plain.isSetUp()).isTrue();
+        assertThat(plain.inflightExpressions()).isFalse();
+      }
     }
     List<Setup.Result> rebuilt = setup(e, catalog, sk);
     assertThat(rebuilt).allMatch(Setup.Result::succeeded, "succeeded");
@@ -573,10 +625,22 @@ class SetupIntegrationTest {
         .contains(
             "rebuilt in-flight index "
                 + t.inflightIndex(engine)
-                + " in the data table's key order");
+                + (engine == Engine.ORACLE
+                    ? " in the function-based form"
+                    : " in the data table's key order"));
+    assertThat(setup(e, catalog, sk).get(0).actions())
+        .as("the second run")
+        .noneMatch(x -> x.contains("index"));
+    catalog.invalidate();
+    assertThat(catalog.lookup(List.of(), sk, e.storedTable("ord")).inflightExpressions())
+        .isEqualTo(engine == Engine.ORACLE);
     try (Connection c = e.open()) {
-      assertThat(indexColumns(engine, c, sk, meta, t.inflightIndex(engine)))
+      assertThat(inflightColumns(engine, c, sk, meta, t.inflightIndex(engine)))
           .containsExactlyElementsOf(inflight);
+      if (engine == Engine.ORACLE) {
+        assertThat(oracleIndexType(c, sk, t.inflightIndex(engine)))
+            .isEqualTo("FUNCTION-BASED NORMAL");
+      }
       assertThat(Check.tables(catalog, c, x -> x.namespace().equals(sk), Check.DEFAULT_LIFETIME))
           .allMatch(Check.Result::setUp, "set up");
       List<Setup.Result> down = Setup.teardown(catalog, c, x -> x.namespace().equals(sk));
@@ -584,7 +648,7 @@ class SetupIntegrationTest {
       if (byName) {
         assertThat(down.get(0).actions()).contains("dropped key index " + t.keyIndex(engine));
       }
-      assertThat(indexColumns(engine, c, sk, meta, t.inflightIndex(engine))).isEmpty();
+      assertThat(inflightColumns(engine, c, sk, meta, t.inflightIndex(engine))).isEmpty();
       assertThat(indexColumns(engine, c, sk, meta, t.keyIndex(engine))).isEmpty();
     }
   }
@@ -608,6 +672,31 @@ class SetupIntegrationTest {
       }
     }
     return List.copyOf(out.values());
+  }
+
+  /**
+   * The in-flight index's columns in order, as the setup reads them: on Oracle each expression as
+   * the column it reads (todo 364); empty where it is absent.
+   */
+  private static List<String> inflightColumns(
+      Engine engine, Connection c, String schema, String table, String index) throws SQLException {
+    List<String> found = KeyOrder.inflightIndexColumns(c, engine, schema, table, index);
+    return found == null ? List.of() : found;
+  }
+
+  /** ALL_INDEXES.INDEX_TYPE of an Oracle index. */
+  private static String oracleIndexType(Connection c, String schema, String index)
+      throws SQLException {
+    try (java.sql.PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT INDEX_TYPE FROM ALL_INDEXES WHERE TABLE_OWNER = ? AND INDEX_NAME = ?")) {
+      ps.setString(1, schema);
+      ps.setString(2, index);
+      try (ResultSet rs = ps.executeQuery()) {
+        assertThat(rs.next()).as(index).isTrue();
+        return rs.getString(1);
+      }
+    }
   }
 
   /** An index's columns in order, through the vendor's getIndexInfo; empty where it is absent. */

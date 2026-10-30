@@ -312,7 +312,10 @@ class OracleOltpIntegrationTest {
       String key = "SELECT x FROM " + NS + ".t WHERE id = 1";
       String routed = d.nativeSQL(key);
       // the state column, hinted twice, and no version lookups
-      assertThat(routed).contains(hint + " 1 FROM").contains(hint + " \"scalardb_native_meta\".");
+      // the key set's keys as the function-based in-flight index holds them (todo 364)
+      assertThat(routed)
+          .contains(hint + " 1 FROM")
+          .contains(hint + " CASE \"scalardb_native_meta\".");
       assertThat(routed).doesNotContain("\"scalardb_native_meta\".\"tx_version\"");
       // Oracle's hint report: each hint resolved and used, the probes an index range scan
       String plan = plan(v, routed);
@@ -2517,6 +2520,152 @@ class OracleOltpIntegrationTest {
     return of < 0 ? "(none)" : sql.substring(of + 15).split(" ")[0];
   }
 
+  /**
+   * Todo 364: the setup builds Oracle's in-flight index function-based, NULL on a committed row,
+   * and the driver spells every text on the in-flight states on its expressions, which alone the
+   * optimizer matches to it (design section 3, 4.2). With a row of each table in flight, reads,
+   * locking reads, keyed and beyond-the-key writes, a batch and an insert at SNAPSHOT and READ
+   * COMMITTED: every text they sent that names the expressions reads the in-flight index, and none
+   * scans the decoupled table's metadata table.
+   */
+  @Test
+  void todo364_everyInFlightTextReadsTheFunctionBasedIndex() throws Exception {
+    // tables of its own, an inline and a decoupled one, so that no other form's rows are touched
+    List<String> tables = List.of("fbd", "fbi");
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      for (String table : tables) {
+        admin.createTable(
+            N(NS),
+            N(table),
+            TableMetadata.newBuilder()
+                .addColumn(N("id"), intType())
+                .addColumn(N("x"), DataType.TEXT)
+                .addColumn(N("v"), intType())
+                .addPartitionKey(N("id"))
+                .build(),
+            table.equals("fbd") ? DECOUPLED : Map.of());
+      }
+    }
+    try (DistributedTransactionManager tm = factory.getTransactionManager()) {
+      DistributedTransaction tx = tm.begin();
+      for (int id = 1; id <= 20; id++) {
+        for (String table : tables) {
+          tx.insert(
+              Insert.newBuilder()
+                  .namespace(N(NS))
+                  .table(N(table))
+                  .partitionKey(id(id))
+                  .textValue(N("x"), "a")
+                  .bigIntValue(N("v"), 0)
+                  .build());
+        }
+      }
+      tx.commit();
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)fb[di]"),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
+          .hasSize(2)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    List<String> indexes = new ArrayList<>();
+    for (String table : tables) {
+      TableInfo info = tableInfo(table);
+      assertThat(info.inflightExpressions()).as(table).isTrue();
+      indexes.add(info.inflightIndex(Engine.ORACLE));
+    }
+    String meta = Objects.requireNonNull(tableInfo("fbd").metadataTable());
+    try (Connection v = ORA.open()) {
+      ORA.execute(v, "ALTER SYSTEM FLUSH SHARED_POOL");
+    }
+    // a catalog of its own, read after the tables were created (the driver shares one per TTL)
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59364");
+    try (Connection d = ORA.openDriver(ttl);
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      for (String table : tables) {
+        String n = NS + "." + table;
+        // a row in flight: the gates close, and the split forms run
+        TwoPhaseCommitTransaction held = prepared(tpc, table, 20, "h");
+        try {
+          for (int level :
+              new int[] {
+                Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_READ_COMMITTED
+              }) {
+            d.setTransactionIsolation(level);
+            d.setAutoCommit(false);
+            int fresh = 1000 + level;
+            for (String sql :
+                List.of(
+                    "SELECT x FROM " + n + " WHERE id = 5",
+                    "SELECT COUNT(*) FROM " + n + " WHERE v >= 0",
+                    "SELECT id, x FROM " + n + " WHERE id BETWEEN 10 AND 12",
+                    "SELECT x FROM " + n + " WHERE id = 13 FOR UPDATE",
+                    "UPDATE " + n + " SET v = v WHERE id = 14",
+                    "INSERT INTO " + n + " (id, x, v) VALUES (" + fresh + ", 'n', 0)",
+                    "DELETE FROM " + n + " WHERE id = " + fresh,
+                    "UPDATE " + n + " SET v = v WHERE x = 'none'")) {
+              try (Statement st = d.createStatement()) {
+                st.execute(sql);
+              } catch (SQLTransactionRollbackException e) {
+                // at SNAPSHOT a write beyond the key over the row in flight: its texts ran
+                d.rollback();
+              }
+            }
+            try (PreparedStatement ps =
+                d.prepareStatement("UPDATE " + n + " SET v = ? WHERE id = ?")) {
+              for (int id : new int[] {15, 16}) {
+                ps.setInt(1, 0);
+                ps.setInt(2, id);
+                ps.addBatch();
+              }
+              ps.executeBatch();
+            }
+            d.commit();
+          }
+        } finally {
+          d.rollback();
+          d.setAutoCommit(true);
+          held.rollback();
+        }
+      }
+    }
+    Map<String, List<String>> plans = new java.util.TreeMap<>();
+    try (Connection v = ORA.open();
+        PreparedStatement ps =
+            v.prepareStatement(
+                "SELECT s.sql_id || '/' || s.child_number, s.sql_fulltext, p.operation || ' ' ||"
+                    + " p.options || ' ' || p.object_name FROM v$sql s JOIN v$sql_plan p ON"
+                    + " p.sql_id = s.sql_id AND p.child_number = s.child_number WHERE"
+                    + " s.command_type IN (2, 3, 6, 7, 189) AND UPPER(s.sql_fulltext) LIKE"
+                    + " '%\"TX_STATE\" WHEN 1 THEN%' AND s.sql_text NOT LIKE '%v$sql%'"
+                    + " ORDER BY 1, p.id")) {
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          plans
+              .computeIfAbsent(rs.getString(1) + " " + rs.getString(2), k -> new ArrayList<>())
+              .add(rs.getString(3));
+        }
+      }
+    }
+    log("todo 364: " + plans.size() + " texts on the in-flight expressions");
+    assertThat(plans).as("texts spelled on the expressions").hasSizeGreaterThan(5);
+    plans.forEach(
+        (text, steps) -> {
+          assertThat(steps)
+              .as(text)
+              .anyMatch(x -> indexes.stream().anyMatch(i -> x.endsWith(" " + i)))
+              .noneMatch(x -> x.equals("TABLE ACCESS FULL " + meta));
+        });
+  }
+
   private static TableInfo tableInfo(String table) throws SQLException {
     return catalog.scalarDbTables().stream()
         .filter(t -> t.namespace().equals(N(NS)) && t.table().equals(N(table)))
@@ -2704,11 +2853,13 @@ class OracleOltpIntegrationTest {
               + String.format("%.1f", perRead)
               + " gets a read, the plan\n"
               + plan);
-      // each copy's gate alone reads the in-flight index, no probe per row: about 11 gets, where
-      // the key set's probes cost about 30 and the vendor's read 6
+      // each copy's gate reads the in-flight index, no probe per row, and the in-flight copy its
+      // rows by the key through the function-based index (todo 364): about 8 gets, where the key
+      // set's probes cost about 30 and the vendor's read 6
       assertThat(gets[1]).isGreaterThanOrEqualTo(300);
       assertThat(perRead).isLessThan(15);
-      assertThat(plan.toString().lines().filter(l -> l.contains("| TSTATE_INFLIGHT "))).hasSize(2);
+      assertThat(plan.toString().lines().filter(l -> l.contains("| TSTATE_INFLIGHT "))).hasSize(3);
+      assertThat(plan.toString()).containsPattern("\"M\"\\.\"SYS_NC\\d+\\$\"=1200");
       // the column itself: 1 for the row in flight, NULL for a committed row; 0 for a clear table
       String one =
           d.nativeSQL("SELECT x FROM " + NS + ".tstate WHERE w = 1 AND o = 5000 AND n = 0");

@@ -23,6 +23,7 @@ public final class TableInfo {
   private final List<String> booleanColumns;
   private final Map<String, String> beforeTypes;
   private final boolean setUp;
+  private final boolean inflightExpressions;
 
   TableInfo(
       String namespace,
@@ -68,6 +69,40 @@ public final class TableInfo {
       List<String> booleanColumns,
       Map<String, String> beforeTypes,
       boolean setUp) {
+    this(
+        namespace,
+        table,
+        layout,
+        dataTable,
+        metadataTable,
+        virtualTable,
+        partitionKey,
+        clusteringKey,
+        dataColumns,
+        indexedColumns,
+        floatColumns,
+        booleanColumns,
+        beforeTypes,
+        setUp,
+        false);
+  }
+
+  TableInfo(
+      String namespace,
+      String table,
+      Layout layout,
+      String dataTable,
+      @Nullable String metadataTable,
+      @Nullable String virtualTable,
+      List<String> partitionKey,
+      List<String> clusteringKey,
+      List<String> dataColumns,
+      List<String> indexedColumns,
+      List<String> floatColumns,
+      List<String> booleanColumns,
+      Map<String, String> beforeTypes,
+      boolean setUp,
+      boolean inflightExpressions) {
     this.namespace = namespace;
     this.table = table;
     this.layout = layout;
@@ -82,6 +117,7 @@ public final class TableInfo {
     this.booleanColumns = List.copyOf(booleanColumns);
     this.beforeTypes = Map.copyOf(beforeTypes);
     this.setUp = setUp;
+    this.inflightExpressions = inflightExpressions;
   }
 
   /**
@@ -94,6 +130,56 @@ public final class TableInfo {
    */
   public boolean isSetUp() {
     return setUp;
+  }
+
+  /**
+   * Returns whether the table's in-flight index is Oracle's function-based form, over expressions
+   * NULL on a committed row, as seen when the catalog was loaded: its in-flight texts are then
+   * spelled on those expressions, which alone the optimizer matches to the index (design section 3
+   * and 4.2, todo 364). False for the plain form, which keeps the texts as written.
+   *
+   * @return whether the in-flight index is function-based
+   */
+  public boolean inflightExpressions() {
+    return inflightExpressions;
+  }
+
+  /**
+   * Returns the condition that a metadata row is in flight, {@code tx_state IN (1, 2)}, spelled as
+   * the in-flight index holds it: on its function-based form, {@code CASE tx_state WHEN 1 THEN
+   * tx_state WHEN 2 THEN tx_state END IN (1, 2)}.
+   *
+   * @param engine the engine
+   * @param alias the metadata table's alias, or empty for none
+   * @return the condition
+   */
+  public String inflight(Engine engine, String alias) {
+    return inflightColumn(engine, alias, "tx_state") + " IN (1, 2)";
+  }
+
+  /**
+   * Returns a key column of a row the text holds in flight, as the in-flight index holds it: on its
+   * function-based form, {@code CASE tx_state WHEN 1 THEN k WHEN 2 THEN k END}, equal to the column
+   * on such a row; otherwise the column. A key join that reads the metadata row's other columns
+   * keeps the column, the row being read anyway.
+   *
+   * @param engine the engine
+   * @param alias the metadata table's alias, or empty for none
+   * @param column the key column
+   * @return the expression
+   */
+  public String inflightKey(Engine engine, String alias, String column) {
+    return inflightColumn(engine, alias, column);
+  }
+
+  private String inflightColumn(Engine engine, String alias, String column) {
+    String q = alias.isEmpty() ? "" : alias + ".";
+    String c = q + engine.quote(column);
+    if (!inflightExpressions) {
+      return c;
+    }
+    String s = q + engine.quote("tx_state");
+    return "CASE " + s + " WHEN 1 THEN " + c + " WHEN 2 THEN " + c + " END";
   }
 
   /**

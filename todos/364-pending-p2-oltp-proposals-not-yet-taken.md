@@ -215,6 +215,31 @@ todo 334's log and the design sections named.
   bullet's replaced line runs to 113 characters; c7 took it, the branch's head now db7f450 (the
   line broken, nothing else, 38 fences). Lands on the user's word, as the others.
 
+
+- 2026-10-31 (c7, item 1 built on branch `oracle-fbi-inflight`): the catalog reads
+  `ALL_INDEXES.INDEX_TYPE` in the listing it reads already and carries the form on `TableInfo`
+  (`inflightExpressions`, with `inflight(engine, alias)` and `inflightKey(engine, alias, column)`;
+  `Writes.Names` wraps them). Spelled for the form: the split read's keyed `NOT EXISTS` and its
+  `DISTINCT` set, the in-flight copies (condition, and the key in their select list, so a key
+  conjunct the optimizer pushes into the copy matches the index), the after images, the SNAPSHOT
+  state column's probe and key set, D2's range gate (a `KeyRange` spelling for its conjuncts), the
+  batch block's gate, the clear gate, the coarse check, the insert's in-flight key count. The setup
+  builds the expressions, moves a plain index (`rebuilt in-flight index X in the function-based
+  form`), spells the view's second arm and the backfill's two in-flight counts (hinted), and sets
+  the hidden columns' and the index's statistics in the same block. `KeyOrder` reads Oracle's index
+  from `ALL_IND_COLUMNS` joined to `ALL_IND_EXPRESSIONS`; `check` gives the reason (`in-flight index
+  in the plain form` / `in another column order`), also as `reason` in `--json`. On the container
+  every Oracle suite text that names the expressions (29) reads the in-flight index, none scans the
+  decoupled metadata table; the inline 10-row read at SNAPSHOT with a row in flight elsewhere went
+  from about 11 to 8.3 gets, its in-flight arm now reaching the rows by the key through the index.
+  Found: one ScalarDB test prepare of 501 inserts at SERIALIZABLE right after a few small
+  transactions fails with ORA-08177 every time on the function-based index (10/10 against 0/10
+  plain, in plain SQL, scratchpad `s8177*.sql`): it splits the index's single, nearly empty leaf
+  that those transactions changed; a retry gets through (third attempt). In a steady stream of 200
+  prepares and commits on 2,000 rows the function-based index raised no more than the plain one:
+  updates of 1, 10 and 50 rows 0, 0, 0 against 0, 0, 1; inserts of 1, 10 and 50 rows 0, 4, 10
+  against 1, 6, 16. The test retries its prepare as ScalarDB's conflicts are retried.
+
 - 2026-10-31 (review of c7's a9412f8 on `oracle-fbi-inflight`, from `git show`): mergeable. Checked
   against section 3's paragraph, 4.2's rule, 4.4's contract and the hand-off's site list: the
   catalog's `INDEX_TYPE` column and `SetupObjects.inflightExpressions`, carried on `TableInfo` and

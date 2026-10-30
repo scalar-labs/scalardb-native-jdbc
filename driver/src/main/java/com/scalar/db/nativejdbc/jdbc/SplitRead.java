@@ -433,24 +433,26 @@ final class SplitRead {
         sql.append("NOT EXISTS (SELECT 1 FROM ")
             .append(meta(engine, t))
             .append(check == Check.SEEK ? " q WITH (FORCESEEK) WHERE " : " q WHERE ")
-            .append(keyJoin(engine, t, "q"))
-            .append(" AND q.")
-            .append(txState)
-            .append(" IN (1, 2))");
+            .append(inflightKeyJoin(engine, t, "q"))
+            .append(" AND ")
+            .append(t.inflight(engine, "q"))
+            .append(")");
         break;
       case DISTINCT_SET:
         {
           List<String> keys = new ArrayList<>();
           for (String k : t.keyColumns()) {
-            keys.add("q." + engine.quote(k));
+            String key = t.inflightKey(engine, "q", k);
+            String q = engine.quote(k);
+            keys.add(key.equals("q." + q) ? key : key + " AS " + q);
           }
           sql.append(" LEFT JOIN (SELECT DISTINCT ")
               .append(String.join(", ", keys))
               .append(" FROM ")
               .append(meta(engine, t))
-              .append(" q WHERE q.")
-              .append(txState)
-              .append(" IN (1, 2)) f ON ")
+              .append(" q WHERE ")
+              .append(t.inflight(engine, "q"))
+              .append(") f ON ")
               .append(keyJoin(engine, t, "f"))
               .append(" WHERE f.")
               .append(engine.quote(t.keyColumns().get(0)))
@@ -549,7 +551,14 @@ final class SplitRead {
     List<String> keys = t.keyColumns();
     for (String c : read) {
       String q = engine.quote(c);
-      String key = keys.contains(c) ? t.metadataKey(engine, "m", c) : null;
+      // on a function-based in-flight index the key as the index holds it, so that a key conjunct
+      // the optimizer pushes into the copy matches the index (todo 364)
+      String key =
+          !keys.contains(c)
+              ? null
+              : t.inflightExpressions()
+                  ? t.inflightKey(engine, "m", c)
+                  : t.metadataKey(engine, "m", c);
       cols.add(
           key == null
               ? t.beforeImage(engine, "m", c) + " AS " + q
@@ -563,9 +572,9 @@ final class SplitRead {
         + meta(engine, t)
         + " m"
         + tableHint(engine, t, hinted)
-        + " WHERE m."
-        + engine.quote("tx_state")
-        + " IN (1, 2) AND (m."
+        + " WHERE "
+        + t.inflight(engine, "m")
+        + " AND (m."
         + engine.quote("before_tx_id")
         + " IS NOT NULL OR m."
         + engine.quote("before_tx_version")
@@ -591,10 +600,10 @@ final class SplitRead {
         + " m"
         + tableHint(engine, t, hinted)
         + " ON "
-        + keyJoin(engine, t, "m")
-        + " WHERE m."
-        + engine.quote("tx_state")
-        + " IN (1, 2))";
+        + inflightKeyJoin(engine, t, "m")
+        + " WHERE "
+        + t.inflight(engine, "m")
+        + ")";
   }
 
   private static String tableHint(Engine engine, TableInfo t, boolean hinted) {
@@ -617,6 +626,18 @@ final class SplitRead {
     return engine.quote(t.namespace())
         + "."
         + engine.quote(Objects.requireNonNull(t.metadataTable(), "metadata table"));
+  }
+
+  /**
+   * The key join of a metadata row read only under the in-flight condition, its key spelled as the
+   * in-flight index holds it (design 4.2, todo 364).
+   */
+  private static String inflightKeyJoin(Engine engine, TableInfo t, String alias) {
+    List<String> on = new ArrayList<>();
+    for (String k : t.keyColumns()) {
+      on.add(t.inflightKey(engine, alias, k) + " = t." + engine.quote(k));
+    }
+    return String.join(" AND ", on);
   }
 
   private static String keyJoin(Engine engine, TableInfo t, String alias) {
