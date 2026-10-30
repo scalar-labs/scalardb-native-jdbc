@@ -942,7 +942,19 @@ range gate on the key expression a range scan of both columns; the index 768 blo
 allocated and none used. Expected at AWS: the inline NewOrder about 95 gets fewer of its 300 against
 the vendor's 210, its redo a commit from 17.2 KB toward 12 against 7.7, the READ COMMITTED inline
 TPC-C cell from 0.71 and the SNAPSHOT one from 0.83 toward 0.8 and 0.9, the decoupled cells by their
-gates; the forms as built are measured on the container first, as the forms of 4.2 were.
+gates; the forms as built are measured on the container first, as the forms of 4.2 were. Built by c7
+(a9412f8, 2026-10-31): the in-flight copies list their key as the expression too, so that a key
+conjunct the optimizer pushes into a copy matches the index, the inline SNAPSHOT 10-row read's
+in-flight arm reaching its rows by the key through it, 8.3 gets a read from about 11. Under Oracle's
+SERIALIZABLE the index's few entries are one hot leaf block, as the plain index's in-flight entries,
+`(1, k)` and `(2, k)` at its left edge, are already: a SERIALIZABLE prepare of 501 rows into the
+function-based index's leaf, emptied by a few small transactions just before, fails with ORA-08177
+where the plain index's does not (10 of 10 against 0 of 10, retriable, ScalarDB retries it as a
+conflict, c7's finding), and under 16 concurrent SERIALIZABLE sessions each preparing and committing
+10 disjoint rows about half the prepares fail on either form (53% plain, 52% function-based, 0.4%
+with no in-flight index, `INITRANS 50` changing nothing, 4 sessions the same): a property of any
+in-flight index on Oracle, which ScalarDB's storage connections meet where they run Oracle's
+SERIALIZABLE and the driver's own writes, which touch no in-flight entry, do not (todo 366).
 
 ---
 
@@ -1115,9 +1127,10 @@ union as a derived table.
   such text, and every other Oracle text that names the in-flight states, spells the condition as
   the index's expressions, `CASE m.tx_state WHEN 1 THEN m.tx_state WHEN 2 THEN m.tx_state END IN (1,
   2)`, and a key column it compares or lists under that condition as the key's expression, `CASE
-  m.tx_state WHEN 1 THEN m.k WHEN 2 THEN m.k END`: the in-flight copies' key conjuncts, the state
-  column's key set, the range gate's conjuncts and the keyed probes, which the index then serves
-  without the row (todo 364, 2026-10-31); a key join that reads the metadata row's other columns
+  m.tx_state WHEN 1 THEN m.k WHEN 2 THEN m.k END`: the in-flight copies' key, which they list as the
+  expression so that a key conjunct pushed into a copy matches the index, the state column's key
+  set, the range gate's conjuncts and the keyed probes, which the index then serves without the row
+  (todo 364, 2026-10-31); a key join that reads the metadata row's other columns
   keeps the plain key, the row being read anyway. The optimizer matches the index on the expression
   alone, and the plain spelling against it scans the table (section 3), so the Oracle texts of 4.2,
   4.3 and 4.4, written in the plain spelling, read with this rule on such a table, and a table with

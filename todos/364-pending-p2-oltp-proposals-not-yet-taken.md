@@ -214,3 +214,42 @@ todo 334's log and the design sections named.
   added, no paragraph rewrapped, 38 fences); a changie entry. One nit, not blocking: the backfill
   bullet's replaced line runs to 113 characters; c7 took it, the branch's head now db7f450 (the
   line broken, nothing else, 38 fences). Lands on the user's word, as the others.
+
+- 2026-10-31 (review of c7's a9412f8 on `oracle-fbi-inflight`, from `git show`): mergeable. Checked
+  against section 3's paragraph, 4.2's rule, 4.4's contract and the hand-off's site list: the
+  catalog's `INDEX_TYPE` column and `SetupObjects.inflightExpressions`, carried on `TableInfo` and
+  spelled by `inflight`/`inflightKey` (`Writes.Names` wrapping them); every Oracle in-flight text
+  spelled for the form: the split read's keyed `NOT EXISTS` and `DISTINCT` set (the key aliased back
+  to its name), the in-flight copies (the condition, and their key listed as the expression, so that
+  a conjunct the optimizer pushes into the copy matches the index: the inline SNAPSHOT 10-row read
+  8.3 gets from about 11, form 1's probe count 3), the after images' join, the SNAPSHOT state
+  column's probe and key set, D2's range gate through `KeyRange`'s spelling function, the batch
+  block's gate, the clear gate, the coarse check, the D3 insert's in-flight count (its data-side
+  read-back plain, as it must be); the key joins that read other metadata columns and the
+  `COALESCE` row filters untouched. The setup: `createIndex` with every column an expression
+  (`ONLINE`, the ORA-00439 fallback); the move on `KeyOrder.inflightMismatch` = `PLAIN_FORM` with
+  its own message; the view's second arm spelled (the view is replaced on every run, so the move
+  re-spells it); the backfill's two counts aliased and hinted; the statistics loop over
+  `ALL_IND_COLUMNS` with `EXISTS` in `ALL_IND_EXPRESSIONS`, spliced before the lock so the
+  as-if-backfilled `n` applies, the index's statistics only where an expression column was found.
+  `KeyOrder.oracleExpressions` reads `ALL_IND_COLUMNS` left-joined to `ALL_IND_EXPRESSIONS` (the
+  `LONG` read in order), parses Oracle's stored form and requires it to name `tx_state`; any plain
+  column is `PLAIN_FORM`. `check`'s reason in `toString` and `--json`, its stuck count aliased,
+  hinted and spelled; teardown by name unchanged; `setting-up-tables.md`, `concepts.md`, the
+  changie entry. Noted, no change asked: `--plan` on a table still in the plain form counts the
+  backfill's remaining rows with the expression spelling and the hint against the plain index, an
+  index full scan, harmless. Design: 4.2's rule gains the copies' select-list spelling and section
+  3 the ORA-08177 facts below (this note's commit); c7 rebases onto it and lands on the user's word.
+  c7's ORA-08177 finding checked under concurrency on the container (scratchpad `ora/ser8177.jsh`,
+  `ser8177b.jsh`, 300,000-row TI_P plain and TI_F function-based, 16 sessions at SERIALIZABLE each
+  200 prepare/commit pairs of 10 disjoint rows): prepares failing with ORA-08177, plain 53%,
+  function-based 52% (updates); inserts of new rows 60% against 66%; the commits 20–23% either way;
+  with the in-flight index dropped 0.4% and 1.6%; `INITRANS 50` on either index no change (57%,
+  56%); 4 sessions 52% and 55%. So the hot leaf is any in-flight index's on Oracle, the plain
+  index's `(1, k)`/`(2, k)` entries at its left edge as much as the function-based index's whole
+  content; the function-based form adds only the sequential empty-leaf split c7 found, retriable.
+  Who meets it: ScalarDB's storage connections where they run Oracle's SERIALIZABLE, which ScalarDB
+  requires for a virtual table there (`RdbEngineOracle.getMinimumIsolationLevelForConsistentVirtualTableRead`
+  = 8) and which raised c7's error; not the driver's own transactions, whose writes touch no
+  in-flight entry (a row's state stays 3). Pre-existing, not this commit's; filed as todo 366 for
+  the user.
