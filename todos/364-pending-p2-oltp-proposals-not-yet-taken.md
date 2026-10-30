@@ -253,3 +253,9 @@ todo 334's log and the design sections named.
   = 8) and which raised c7's error; not the driver's own transactions, whose writes touch no
   in-flight entry (a row's state stays 3). Pre-existing, not this commit's; filed as todo 366 for
   the user.
+
+- 2026-10-31 (the branch heads after c7's rebase onto 7f49c7e, checked from git): `oracle-fbi-inflight`
+  is 59bfa82, a9412f8's patch with only this log's entries merged (nothing changed in `driver/`,
+  `tools/`, `.changes` or the two user docs, `range-diff`); `backfill-tx-id-36` is db934cd and a69a35b,
+  patch-identical to d39b722 and db7f450; 38 fences at both heads, `merge-tree` finds no conflict
+  between them. Both verdicts stand at these heads; the user's word names them.
