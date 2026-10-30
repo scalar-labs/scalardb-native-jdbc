@@ -46,8 +46,13 @@ import org.jspecify.annotations.Nullable;
             + " Engine.quote, which doubles an embedded closing quote; values are bound")
 public final class Setup {
 
-  /** The {@code tx_id} the backfill writes on a row ScalarDB deems committed. */
-  static final String BACKFILL_TX_ID = "scalardb-native-backfill";
+  /**
+   * The {@code tx_id} the backfill writes on a row ScalarDB deems committed: 36 characters, as long
+   * as the UUID a transaction writes, so a row's first write does not lengthen it and Oracle does
+   * not migrate it (todo 364). Nothing matches on the value; rows stamped with the earlier
+   * 24-character {@code scalardb-native-backfill} work beside these.
+   */
+  static final String BACKFILL_TX_ID = "scalardb-native-backfill-placeholder";
 
   /** Oracle's error code for a statement the user lacks the privilege for, ORA-01031. */
   private static final int ORA_INSUFFICIENT_PRIVILEGES = 1031;

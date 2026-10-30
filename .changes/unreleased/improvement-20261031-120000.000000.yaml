@@ -1,0 +1,3 @@
+kind: improvement
+body: 'The backfill stamps a 36-character placeholder `tx_id`, as long as a transaction''s, so a backfilled row keeps its length at its first write and Oracle no longer migrates it. Rows backfilled with the earlier value keep working.'
+time: 2026-10-31T12:00:00.000000+09:00
