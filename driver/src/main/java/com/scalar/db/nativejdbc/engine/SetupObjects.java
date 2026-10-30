@@ -21,6 +21,7 @@ public final class SetupObjects {
   private final Map<String, List<String>> viewColumns = new HashMap<>();
   private final Map<String, List<String>> tableColumns = new HashMap<>();
   private final Set<String> indexes = new HashSet<>();
+  private final Set<String> expressionIndexes = new HashSet<>();
   private final Map<String, Map<String, String>> beforeTypes = new HashMap<>();
 
   SetupObjects(Engine engine, boolean caseInsensitive) {
@@ -95,8 +96,11 @@ public final class SetupObjects {
     return a.equals(b);
   }
 
-  void addIndex(String schema, String table, String index) {
+  void addIndex(String schema, String table, String index, boolean expressions) {
     indexes.add(key(schema, table, index));
+    if (expressions) {
+      expressionIndexes.add(key(schema, table, index));
+    }
   }
 
   void addBeforeType(String schema, String table, String column, String type) {
@@ -180,6 +184,20 @@ public final class SetupObjects {
    */
   public boolean hasIndex(String schema, String table, String index) {
     return indexes.contains(key(schema, table, index));
+  }
+
+  /**
+   * Returns whether a table's in-flight index is Oracle's function-based form, whose columns are
+   * expressions NULL on a committed row, so that the driver spells its in-flight texts on them
+   * (design section 3, todo 364); false for the plain form and on every other engine.
+   *
+   * @param schema the table's schema
+   * @param table the name statements use for the table
+   * @param metadataTable the table's transaction metadata table
+   * @return whether the index is function-based
+   */
+  public boolean inflightExpressions(String schema, String table, String metadataTable) {
+    return expressionIndexes.contains(key(schema, metadataTable, engine.inflightIndexName(table)));
   }
 
   private String key(String... parts) {

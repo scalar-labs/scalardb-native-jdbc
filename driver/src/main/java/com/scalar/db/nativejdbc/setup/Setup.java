@@ -517,12 +517,21 @@ public final class Setup {
       if (!found.hasIndex(ns, meta, index)) {
         createIndex(t, index, key);
         done(actions, "created in-flight index " + index);
-      } else if (!KeyOrder.inflightInOrder(connection, engine, t, meta, key)) {
-        if (engine != Engine.POSTGRESQL) {
-          execute(dropIndex(t, index)); // PostgreSQL's build drops the old one itself
+      } else {
+        String mismatch = KeyOrder.inflightMismatch(connection, engine, t, meta, key);
+        if (mismatch != null) {
+          if (engine != Engine.POSTGRESQL) {
+            execute(dropIndex(t, index)); // PostgreSQL's build drops the old one itself
+          }
+          createIndex(t, index, key);
+          done(
+              actions,
+              "rebuilt in-flight index "
+                  + index
+                  + (mismatch.equals(KeyOrder.PLAIN_FORM)
+                      ? " in the function-based form"
+                      : " in the data table's key order"));
         }
-        createIndex(t, index, key);
-        done(actions, "rebuilt in-flight index " + index + " in the data table's key order");
       }
       if (t.layout() != Layout.INLINE
           && !KeyOrder.keyIndexInPlace(connection, engine, t, meta, key)) {
@@ -674,6 +683,44 @@ public final class Setup {
           + " END;";
 
   /**
+   * {@link #ORACLE_FIXED_STATISTICS} with the same assumption of {@code f} rows in flight set on
+   * the function-based in-flight index (design section 3, todo 364): its hidden columns, named in
+   * the dictionary, the state's two values in a frequency histogram of {@code f / 2} each and each
+   * key's {@code f} distinct values, the other rows NULL; and the index, {@code f} entries over a
+   * leaf block per 200 and one level. Without them the optimizer takes the expressions as every
+   * row's. Nothing where the index has no expressions.
+   */
+  private String withInflightIndexStatistics(TableInfo t) {
+    String index = t.inflightIndex(engine);
+    String hidden =
+        " FOR x IN (SELECT c.COLUMN_NAME, c.COLUMN_POSITION FROM ALL_IND_COLUMNS c"
+            + " WHERE c.TABLE_OWNER = TRIM(BOTH '\"' FROM o) AND c.TABLE_NAME = TRIM(BOTH '\"'"
+            + " FROM t) AND c.INDEX_NAME = "
+            + oracleLiteral(index)
+            + " AND EXISTS (SELECT 1 FROM ALL_IND_EXPRESSIONS e WHERE e.INDEX_OWNER ="
+            + " c.INDEX_OWNER AND e.INDEX_NAME = c.INDEX_NAME AND e.COLUMN_POSITION ="
+            + " c.COLUMN_POSITION)) LOOP IF x.COLUMN_POSITION = 1 THEN s.epc := 2;"
+            + " s.bkvals := DBMS_STATS.NUMARRAY(GREATEST(1, CEIL(f / 2)), GREATEST(1, FLOOR(f /"
+            + " 2))); DBMS_STATS.PREPARE_COLUMN_VALUES(s, DBMS_STATS.NUMARRAY(1, 2));"
+            + " DBMS_STATS.SET_COLUMN_STATS(ownname => o, tabname => t, colname => '\"' ||"
+            + " x.COLUMN_NAME || '\"', distcnt => 2, density => 0.5, nullcnt => GREATEST(0, n -"
+            + " f), srec => s, avgclen => 2, force => TRUE); ELSE"
+            + " DBMS_STATS.SET_COLUMN_STATS(ownname => o, tabname => t, colname => '\"' ||"
+            + " x.COLUMN_NAME || '\"', distcnt => f, density => 1 / f, nullcnt => GREATEST(0, n"
+            + " - f), force => TRUE); END IF; hx := 1; END LOOP; IF hx = 1 THEN"
+            + " DBMS_STATS.SET_INDEX_STATS(ownname => o, indname => "
+            + oracleLiteral('"' + index + '"')
+            + ", numrows => f, numlblks => GREATEST(1, CEIL(f / 200)), numdist => f, indlevel =>"
+            + " 1, force => TRUE); END IF;";
+    String lock = " IF ? = 1 THEN DBMS_STATS.LOCK_TABLE_STATS(o, t); END IF;";
+    return ORACLE_FIXED_STATISTICS
+        .replace(
+            " r DBMS_STATS.STATREC;",
+            " r DBMS_STATS.STATREC; s DBMS_STATS.STATREC; hx NUMBER := 0;")
+        .replace(lock, hidden + lock);
+  }
+
+  /**
    * {@link #ORACLE_FIXED_STATISTICS} for a decoupled metadata table the setup did not backfill
    * (design section 3, todo 361), set as if it had been: where the data table holds more rows than
    * the metadata table, the data table's rows and blocks from its statistics (its count where it
@@ -684,8 +731,9 @@ public final class Setup {
    * container.
    */
   private String oracleStatistics(TableInfo t, boolean asIfBackfilled) {
+    String fixed = withInflightIndexStatistics(t);
     if (!asIfBackfilled) {
-      return ORACLE_FIXED_STATISTICS;
+      return fixed;
     }
     String d = oracleLiteral('"' + t.dataTable() + '"');
     StringBuilder keys = new StringBuilder();
@@ -705,7 +753,7 @@ public final class Setup {
           .append(", distcnt => n, density => 1 / n, nullcnt => 0, force => TRUE); END;");
     }
     String read = " DBMS_STATS.GET_TABLE_STATS(o, t, numrows => n, numblks => b, avgrlen => l);";
-    return ORACLE_FIXED_STATISTICS
+    return fixed
         .replace(
             " r DBMS_STATS.STATREC;",
             " r DBMS_STATS.STATREC; dn NUMBER; db NUMBER; dl NUMBER; kd NUMBER; ky NUMBER;"
@@ -954,7 +1002,7 @@ public final class Setup {
     return String.format(
         "%s AS SELECT %s FROM %s t LEFT JOIN %s m ON %s WHERE COALESCE(m.%s, 3) = 3"
             + " UNION ALL SELECT %s FROM %s t JOIN %s m ON %s"
-            + " WHERE m.%s IN (1, 2) AND (m.%s IS NOT NULL OR m.%s IS NOT NULL)",
+            + " WHERE %s IN (1, 2) AND (m.%s IS NOT NULL OR m.%s IS NOT NULL)",
         createView(name(t.namespace(), view)),
         String.join(", ", committed),
         data,
@@ -965,7 +1013,7 @@ public final class Setup {
         data,
         meta,
         keyJoin(t),
-        txState,
+        inflightState("m."),
         engine.quote("before_tx_id"),
         engine.quote("before_tx_version"));
   }
@@ -1104,9 +1152,16 @@ public final class Setup {
                 engine.quote(index), on, txState, keys));
         return;
       case ORACLE:
+        // function-based: every column an expression NULL on a committed row, so that the index
+        // holds the rows in flight alone, Oracle's partial index (design section 3, todo 364)
+        List<String> columns = new ArrayList<>(List.of(inflightExpression("", txState)));
+        for (String k : key) {
+          columns.add(inflightExpression("", engine.quote(k)));
+        }
         String ddl =
             String.format(
-                "CREATE INDEX %s ON %s (%s, %s)", name(t.namespace(), index), on, txState, keys);
+                "CREATE INDEX %s ON %s (%s)",
+                name(t.namespace(), index), on, String.join(", ", columns));
         try {
           execute(ddl + " ONLINE");
         } catch (SQLException e) {
@@ -1118,6 +1173,34 @@ public final class Setup {
         return;
     }
     throw new AssertionError(engine);
+  }
+
+  /**
+   * On Oracle the hint to the in-flight index of a probe whose metadata table is read as {@code q}:
+   * the fixed statistics assume 10,000 rows in flight (design 4.2 on Oracle, todo 364).
+   */
+  private String inflightHint(TableInfo t) {
+    return engine == Engine.ORACLE
+        ? "/*+ INDEX(q " + engine.quote(t.inflightIndex(engine)) + ") */ "
+        : "";
+  }
+
+  /**
+   * The state as the in-flight index the setup builds holds it, {@code prefix} its qualifier: on
+   * Oracle the function-based index's expression, which alone the optimizer matches to it (design
+   * section 3, todo 364).
+   */
+  private String inflightState(String prefix) {
+    return engine == Engine.ORACLE ? inflightExpression(prefix, txState) : prefix + txState;
+  }
+
+  /**
+   * A column of Oracle's function-based in-flight index, as Oracle stores the expression, its names
+   * qualified by {@code prefix}.
+   */
+  private String inflightExpression(String prefix, String column) {
+    String c = prefix + column;
+    return "CASE " + prefix + txState + " WHEN 1 THEN " + c + " WHEN 2 THEN " + c + " END";
   }
 
   /**
@@ -1238,20 +1321,25 @@ public final class Setup {
     String remaining =
         String.format(
             "SELECT (SELECT COUNT(*)%s) + (SELECT COUNT(*) FROM %s WHERE %s IS NULL)"
-                + " + (SELECT COUNT(*) FROM %s WHERE %s IN (1, 2) AND %s IS NULL AND %s IS NOT"
-                + " NULL)%s",
+                + " + (SELECT %sCOUNT(*) FROM %s q WHERE %s IN (1, 2) AND q.%s IS NULL"
+                + " AND q.%s IS NOT NULL)%s",
             missing,
             meta,
             txId,
+            inflightHint(t),
             meta,
-            txState,
+            inflightState("q."),
             engine.quote("before_tx_id"),
             engine.quote("before_tx_version"),
             engine == Engine.ORACLE ? " FROM dual" : "");
     String inFlight =
         String.format(
-            "SELECT COUNT(*) FROM %s WHERE %s IN (1, 2) AND %s IS NULL AND %s IS NOT NULL",
-            meta, txState, engine.quote("before_tx_id"), engine.quote("before_tx_version"));
+            "SELECT %sCOUNT(*) FROM %s q WHERE %s IN (1, 2) AND q.%s IS NULL AND q.%s IS NOT NULL",
+            inflightHint(t),
+            meta,
+            inflightState("q."),
+            engine.quote("before_tx_id"),
+            engine.quote("before_tx_version"));
     if (planned != null) {
       long rows = count(remaining);
       planned.add("-- the backfill: " + rows + " rows to stamp now, until none is left");

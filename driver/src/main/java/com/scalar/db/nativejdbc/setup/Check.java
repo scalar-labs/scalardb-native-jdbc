@@ -40,6 +40,7 @@ public final class Check {
   public static final class Result {
     private final String table;
     private final boolean setUp;
+    private final @Nullable String reason;
     private final long stuck;
     private final @Nullable Duration oldest;
     private final long nullMetadata;
@@ -48,12 +49,14 @@ public final class Check {
     Result(
         String table,
         boolean setUp,
+        @Nullable String reason,
         long stuck,
         @Nullable Duration oldest,
         long nullMetadata,
         @Nullable SQLException error) {
       this.table = table;
       this.setUp = setUp;
+      this.reason = reason;
       this.stuck = stuck;
       this.oldest = oldest;
       this.nullMetadata = nullMetadata;
@@ -77,6 +80,17 @@ public final class Check {
      */
     public boolean setUp() {
       return setUp;
+    }
+
+    /**
+     * Returns why a table whose setup objects exist is not set up: its in-flight index in another
+     * column order, or on Oracle in the plain form (todo 364), or its key index missing; null for a
+     * table set up, or one the setup has not been run for.
+     *
+     * @return the reason, or null
+     */
+    public @Nullable String reason() {
+      return reason;
     }
 
     /**
@@ -137,6 +151,7 @@ public final class Check {
       return table
           + ": "
           + (setUp ? "set up" : "not set up")
+          + (reason == null ? "" : " (" + reason + ")")
           + (stuck == 0
               ? ", no rows stuck"
               : ", "
@@ -240,15 +255,21 @@ public final class Check {
               + "."
               + engine.quote(Objects.requireNonNull(t.metadataTable(), "metadata table"));
       long now = System.currentTimeMillis();
+      // on Oracle hinted to the in-flight index and spelled as it holds the state: told 10,000
+      // rows are in flight, the optimizer would scan the table (design 4.4, todo 364)
       try (PreparedStatement ps =
           connection.prepareStatement(
-              "SELECT COUNT(*), MIN("
+              "SELECT "
+                  + (engine == Engine.ORACLE
+                      ? "/*+ INDEX(q " + engine.quote(t.inflightIndex(engine)) + ") */ "
+                      : "")
+                  + "COUNT(*), MIN(q."
                   + engine.quote("tx_prepared_at")
                   + ") FROM "
                   + meta
-                  + " WHERE "
-                  + engine.quote("tx_state")
-                  + " IN (1, 2) AND "
+                  + " q WHERE "
+                  + t.inflight(engine, "q")
+                  + " AND q."
                   + engine.quote("tx_prepared_at")
                   + " < ?")) {
         ps.setLong(1, now - lifetime.toMillis());
@@ -271,22 +292,26 @@ public final class Check {
               nullMetadata = n.getLong(1);
             }
           }
+          String reason =
+              t.isSetUp()
+                  ? KeyOrder.mismatch(
+                      connection,
+                      engine,
+                      t,
+                      Objects.requireNonNull(t.metadataTable(), "metadata table"))
+                  : null;
           out.add(
               new Result(
                   name,
-                  t.isSetUp()
-                      && KeyOrder.inOrder(
-                          connection,
-                          engine,
-                          t,
-                          Objects.requireNonNull(t.metadataTable(), "metadata table")),
+                  t.isSetUp() && reason == null,
+                  reason,
                   stuck,
                   stuck == 0 ? null : Duration.ofMillis(now - min),
                   nullMetadata,
                   null));
         }
       } catch (SQLException e) {
-        out.add(new Result(name, t.isSetUp(), 0, null, 0, e));
+        out.add(new Result(name, t.isSetUp(), null, 0, null, 0, e));
       }
     }
     return out;

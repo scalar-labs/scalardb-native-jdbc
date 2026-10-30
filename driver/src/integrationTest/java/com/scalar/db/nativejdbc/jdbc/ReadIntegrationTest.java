@@ -404,17 +404,31 @@ class ReadIntegrationTest {
       ps.setInt(1, 2);
       assertThat(rows(ps)).containsExactly("b2");
       String before = ps.toString();
-      TwoPhaseCommitTransaction tx = tm.begin();
-      for (int i = 0; i <= Router.PER_ROW_ABOVE; i++) {
-        tx.insert(
-            Insert.newBuilder()
-                .namespace(rd)
-                .table("made")
-                .partitionKey(Key.ofInt("id", 1000 + i))
-                .textValue("x", "n")
-                .build());
+      // retried as ScalarDB's conflicts are: on Oracle, a SERIALIZABLE prepare of this many rows
+      // splits the function-based in-flight index's one leaf, nearly empty after the churn above,
+      // and can fail with ORA-08177 a time or two (todo 364)
+      TwoPhaseCommitTransaction tx = null;
+      for (int attempt = 1; tx == null; attempt++) {
+        TwoPhaseCommitTransaction t = tm.begin();
+        for (int i = 0; i <= Router.PER_ROW_ABOVE; i++) {
+          t.insert(
+              Insert.newBuilder()
+                  .namespace(rd)
+                  .table("made")
+                  .partitionKey(Key.ofInt("id", 1000 + i))
+                  .textValue("x", "n")
+                  .build());
+        }
+        try {
+          t.prepare();
+          tx = t;
+        } catch (com.scalar.db.exception.transaction.PreparationConflictException conflict) {
+          t.rollback();
+          if (attempt == 5) {
+            throw conflict;
+          }
+        }
       }
-      tx.prepare();
       try {
         Thread.sleep(1100);
         assertThat(rows(ps)).containsExactly("b2");

@@ -2538,6 +2538,8 @@ public final class SqlAst {
     // the columns of the statement's other tables, lowercased, which an unqualified column of a
     // join is not one of to be the reference's; null where they are not all known
     final @Nullable Set<String> elsewhere;
+    // the text a repeated conjunct names a key column by; null for the alias's column
+    final java.util.function.@Nullable Function<String, String> spelling;
 
     /**
      * Creates the split.
@@ -2568,11 +2570,33 @@ public final class SqlAst {
         String alias,
         List<String> keyColumns,
         @Nullable Set<String> elsewhere) {
+      this(before, after, alias, keyColumns, elsewhere, null);
+    }
+
+    /**
+     * Creates a gate column's texts whose conjuncts name each key column by {@code spelling}: on
+     * Oracle's function-based in-flight index, the expression the index holds (todo 364).
+     *
+     * @param before the text up to the conjuncts
+     * @param after the rest of its text
+     * @param alias the alias the conjuncts' column is read as
+     * @param keyColumns the reference's key columns, as the table stores them
+     * @param elsewhere as for {@link #KeyRange(String, String, String, List, Set)}
+     * @param spelling the text for a key column, as stored; {@code null} for the alias's column
+     */
+    public KeyRange(
+        String before,
+        String after,
+        String alias,
+        List<String> keyColumns,
+        @Nullable Set<String> elsewhere,
+        java.util.function.@Nullable Function<String, String> spelling) {
       this.before = before;
       this.after = after;
       this.alias = alias;
       this.keyColumns = List.copyOf(keyColumns);
       this.elsewhere = elsewhere == null ? null : Set.copyOf(elsewhere);
+      this.spelling = spelling;
     }
   }
 
@@ -3119,7 +3143,9 @@ public final class SqlAst {
         continue;
       }
       Edits other = new Edits(new IdentityHashMap<>(), new IdentityHashMap<>());
-      other.from.put(columnFirst, k.alias + "." + engine.quote(key));
+      other.from.put(
+          columnFirst,
+          k.spelling != null ? k.spelling.apply(key) : k.alias + "." + engine.quote(key));
       other.to.put(columnFirst, columnLast);
       out.add(new Run(first, last, other));
     }

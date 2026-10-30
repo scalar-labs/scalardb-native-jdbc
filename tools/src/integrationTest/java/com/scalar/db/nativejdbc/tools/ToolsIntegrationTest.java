@@ -113,7 +113,7 @@ class ToolsIntegrationTest {
         assertThat(check.exit).as(check.all()).isEqualTo(Main.EXIT_FOUND);
         assertThat(check.out)
             .containsPattern(
-                "\"table\":\"tl.u\",\"setUp\":true,\"stuck\":1,\"oldestSeconds\":[1-9]");
+                "\"table\":\"tl.u\",\"setUp\":true,\"reason\":null,\"stuck\":1,\"oldestSeconds\":[1-9]");
         // not past the default lifetime yet
         assertThat(tool(e, "check", "--table", "tl.u").exit).isZero();
       } finally {

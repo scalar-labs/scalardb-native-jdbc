@@ -5,12 +5,15 @@ import com.scalar.db.nativejdbc.catalog.TableInfo;
 import com.scalar.db.nativejdbc.engine.Engine;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -75,24 +78,126 @@ final class KeyOrder {
     return out;
   }
 
+  /** What {@link #inflightMismatch} reports of an Oracle in-flight index in the plain form. */
+  static final String PLAIN_FORM = "in-flight index in the plain form";
+
+  /** What it reports of an index over other columns or in another order. */
+  static final String OTHER_ORDER = "in-flight index in another column order";
+
   /**
-   * Whether the table's setup indexes follow the data table's key order: the in-flight index, where
-   * there is one, built over it, and the metadata table reaching its rows by it. A setup before
-   * todo 334's (C) built the in-flight index in the catalog's order; {@code check} reports such a
-   * table as not set up, and the setup rebuilds it.
+   * Why the table's setup indexes are not as the setup builds them, or null where they are: the
+   * in-flight index, where there is one, built over the data table's key order, in the
+   * function-based form on Oracle, and the metadata table reaching its rows by that order. A setup
+   * before todo 334's (C) built the in-flight index in the catalog's order, and one before todo 364
+   * Oracle's in the plain form; {@code check} reports such a table as not set up, and the setup
+   * rebuilds it.
    */
-  static boolean inOrder(Connection c, Engine engine, TableInfo t, String meta)
+  static @Nullable String mismatch(Connection c, Engine engine, TableInfo t, String meta)
       throws SQLException {
     List<String> key = primaryKey(c, engine, t.namespace(), t.dataTable(), t.keyColumns());
-    return inflightInOrder(c, engine, t, meta, key)
-        && (t.layout() == Layout.INLINE || keyIndexInPlace(c, engine, t, meta, key));
+    String inflight = inflightMismatch(c, engine, t, meta, key);
+    if (inflight != null) {
+      return inflight;
+    }
+    return t.layout() == Layout.INLINE || keyIndexInPlace(c, engine, t, meta, key)
+        ? null
+        : "key index not in the data table's key order";
   }
 
-  /** Whether the in-flight index, where there is one, has the columns the setup builds over key. */
-  static boolean inflightInOrder(
+  /**
+   * Why the in-flight index, where there is one, is not the one the setup builds over key, or null
+   * where it is: {@link #PLAIN_FORM} for Oracle's plain {@code (tx_state, key)} index, {@link
+   * #OTHER_ORDER} for other columns or another order.
+   */
+  static @Nullable String inflightMismatch(
       Connection c, Engine engine, TableInfo t, String meta, List<String> key) throws SQLException {
-    List<String> found = indexColumns(c, engine, t.namespace(), meta, t.inflightIndex(engine));
-    return found == null || same(engine, found, inflightColumns(engine, t, key));
+    String index = t.inflightIndex(engine);
+    if (engine == Engine.ORACLE) {
+      Expressions found = oracleExpressions(c, t.namespace(), meta, index);
+      if (found == null) {
+        return null;
+      }
+      if (found.plain) {
+        return PLAIN_FORM;
+      }
+      return same(engine, found.columns, inflightColumns(engine, t, key)) ? null : OTHER_ORDER;
+    }
+    List<String> found = indexColumns(c, engine, t.namespace(), meta, index);
+    return found == null || same(engine, found, inflightColumns(engine, t, key))
+        ? null
+        : OTHER_ORDER;
+  }
+
+  /**
+   * The in-flight index's columns in order, or null where the table has no index of that name: on
+   * Oracle each expression as the column it reads in flight and a plain column as itself.
+   */
+  static @Nullable List<String> inflightIndexColumns(
+      Connection c, Engine engine, String schema, String table, String index) throws SQLException {
+    if (engine != Engine.ORACLE) {
+      return indexColumns(c, engine, schema, table, index);
+    }
+    Expressions found = oracleExpressions(c, schema, table, index);
+    return found == null ? null : found.columns;
+  }
+
+  /** An Oracle index's columns, each expression as the column it reads in flight. */
+  private static final class Expressions {
+    final List<String> columns;
+    // a column of the index is a plain column, not an expression
+    final boolean plain;
+
+    Expressions(List<String> columns, boolean plain) {
+      this.columns = columns;
+      this.plain = plain;
+    }
+  }
+
+  // the in-flight index's expression as Oracle stores it in ALL_IND_EXPRESSIONS, each name quoted
+  private static final Pattern IN_FLIGHT =
+      Pattern.compile(
+          "CASE \"((?:[^\"]|\"\")+)\" WHEN 1 THEN \"((?:[^\"]|\"\")+)\""
+              + " WHEN 2 THEN \"((?:[^\"]|\"\")+)\" END");
+
+  /**
+   * An Oracle index's columns in order, or null where the table has no index of that name: each
+   * expression {@code CASE tx_state WHEN 1 THEN c WHEN 2 THEN c END} as {@code c}, anything else as
+   * an empty name that matches no column; {@code getIndexInfo} lists an expression by its hidden
+   * column's name, {@code SYS_NCnnnnn$} (todo 364).
+   */
+  private static @Nullable Expressions oracleExpressions(
+      Connection c, String schema, String table, String index) throws SQLException {
+    Map<Integer, String> byPosition = new TreeMap<>();
+    boolean plain = false;
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT c.COLUMN_POSITION, e.COLUMN_EXPRESSION, c.COLUMN_NAME FROM ALL_IND_COLUMNS c"
+                + " LEFT JOIN ALL_IND_EXPRESSIONS e ON e.INDEX_OWNER = c.INDEX_OWNER"
+                + " AND e.INDEX_NAME = c.INDEX_NAME AND e.COLUMN_POSITION = c.COLUMN_POSITION"
+                + " WHERE c.TABLE_OWNER = ? AND c.TABLE_NAME = ? AND c.INDEX_NAME = ?")) {
+      ps.setString(1, schema);
+      ps.setString(2, table);
+      ps.setString(3, index);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          int position = rs.getInt(1);
+          String expression = rs.getString(2); // a LONG, read before the next column
+          String column = rs.getString(3);
+          if (expression == null) {
+            plain = true;
+            byPosition.put(position, column == null ? "" : column);
+            continue;
+          }
+          Matcher m = IN_FLIGHT.matcher(expression.strip());
+          byPosition.put(
+              position,
+              m.matches() && m.group(1).equals("tx_state") && m.group(2).equals(m.group(3))
+                  ? m.group(2).replace("\"\"", "\"")
+                  : "");
+        }
+      }
+    }
+    return byPosition.isEmpty() ? null : new Expressions(List.copyOf(byPosition.values()), plain);
   }
 
   /**

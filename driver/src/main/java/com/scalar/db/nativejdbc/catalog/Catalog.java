@@ -1036,7 +1036,8 @@ public final class Catalog implements AutoCloseable {
             columns.floats,
             columns.booleans,
             setupObjects.beforeTypes(q.schema(), unqualified(v.left)),
-            setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
+            setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns),
+            setupObjects.inflightExpressions(q.schema(), q.table(), meta));
       }
       v = byLeft.get(k);
       if (v != null) {
@@ -1064,7 +1065,8 @@ public final class Catalog implements AutoCloseable {
             columns.floats,
             columns.booleans,
             setupObjects.beforeTypes(q.schema(), unqualified(v.left)),
-            setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns));
+            setupObjects.isSetUp(q.schema(), q.table(), meta, columns.dataColumns),
+            setupObjects.inflightExpressions(q.schema(), q.table(), meta));
       }
       v = byRight.get(k);
       if (v != null) {
@@ -1095,7 +1097,8 @@ public final class Catalog implements AutoCloseable {
             columns.floats,
             columns.booleans,
             setupObjects.beforeTypes(q.schema(), q.table()),
-            setupObjects.isSetUp(q.schema(), q.table(), q.table(), columns.dataColumns));
+            setupObjects.isSetUp(q.schema(), q.table(), q.table(), columns.dataColumns),
+            setupObjects.inflightExpressions(q.schema(), q.table(), q.table()));
       }
       return plain(q);
     }

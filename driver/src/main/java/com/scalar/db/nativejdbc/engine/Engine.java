@@ -286,7 +286,11 @@ public enum Engine {
       bind(ps, s, i);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          out.addIndex(rs.getString(1), rs.getString(2), rs.getString(3));
+          out.addIndex(
+              rs.getString(1),
+              rs.getString(2),
+              rs.getString(3),
+              this == ORACLE && "FUNCTION-BASED NORMAL".equals(rs.getString(4)));
         }
       }
     }
@@ -548,7 +552,8 @@ public enum Engine {
             + n
             + ")";
       case ORACLE:
-        return "SELECT TABLE_OWNER, TABLE_NAME, INDEX_NAME FROM ALL_INDEXES"
+        // the type tells the function-based in-flight index from the plain one (todo 364)
+        return "SELECT TABLE_OWNER, TABLE_NAME, INDEX_NAME, INDEX_TYPE FROM ALL_INDEXES"
             + " WHERE STATUS = 'VALID' AND TABLE_OWNER IN ("
             + s
             + ") AND INDEX_NAME IN ("

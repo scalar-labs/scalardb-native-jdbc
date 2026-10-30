@@ -1252,9 +1252,9 @@ final class Router {
         List<String> inFlight = new ArrayList<>();
         for (String k : n.keyColumns) {
           keys.add(n.key(x, k));
-          inFlight.add(m + "." + engine.quote(k));
+          inFlight.add(n.inflightKey(m, k));
         }
-        String held = m + "." + engine.quote("tx_state") + " IN (1, 2)";
+        String held = n.inflight(m);
         // with own, an inline table's on Oracle, the row's own state, which its copy carries:
         // the key set is planned as two probes of the in-flight index per row once the first
         // branch found a row in flight (todo 334, D1)
@@ -2075,14 +2075,12 @@ final class Router {
                   + " "
                   + m
                   + " WHERE "
-                  + m
-                  + "."
-                  + engine.quote("tx_state")
-                  + " IN (1, 2)",
+                  + n.inflight(m),
               "))",
               m,
               t.keyColumns(),
-              elsewhere));
+              elsewhere,
+              t.inflightExpressions() ? k -> n.inflightKey(m, k) : null));
       checks.add(inFlightCheck(t));
     }
     SqlAst.SplitText text =

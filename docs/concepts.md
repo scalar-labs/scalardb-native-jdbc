@@ -57,7 +57,9 @@ statements on a ScalarDB table that is not set up (`55000`).
 ## In-flight index
 
 An index the setup creates on each ScalarDB table, `<table>_inflight`, through which the driver
-finds the table's [in-flight](#in-flight) rows quickly.
+finds the table's [in-flight](#in-flight) rows quickly. It holds those rows alone where the database
+can: a partial index on PostgreSQL, a filtered one on SQL Server, and on Oracle a function-based
+index whose columns are NULL on a committed row. MySQL and MariaDB index every row.
 
 ## Read view
 
