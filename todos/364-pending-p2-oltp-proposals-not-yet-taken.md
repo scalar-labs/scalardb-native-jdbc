@@ -168,39 +168,39 @@ todo 334's log and the design sections named.
   the reads fetched 465 continued rows at 4.01 gets, and the first write cost 4.09 gets and 392 B.
   So the backfill stamping a 36-character `tx_id` removes the growth; sent to 6e for the user.
 - 2026-10-31 (item 1, Fable): the user took the function-based in-flight index ("yes, have 89 design
-  it", via 6e; performance only, Oracle only; the 36-character sentinel is still undecided and
-  stays separate). Designed in section 3 (the paragraph "Oracle's in-flight index is
-  function-based", after the Indexes paragraph; the setup paragraph's three sentences; the engine
-  table's Oracle cell) and 4.2 (the spelling rule in the Oracle paragraph, after the `INDEX` hint
-  sentence) and 4.4 (the stuck-row contract). Verified on the container first (scratchpad
-  `ora/dict.jsh`, `dict2.jsh`, outputs `dict.txt`, `dict2.txt`): `ALL_INDEXES.INDEX_TYPE` is
-  `FUNCTION-BASED NORMAL` against `NORMAL`; `ALL_IND_COLUMNS` and ojdbc's `getIndexInfo` name the
-  columns `SYS_NC00022$`, `SYS_NC00023$`, so today's key-order check would count the index as in
-  another order and the setup would rebuild it every run; `ALL_IND_EXPRESSIONS` stores `CASE
-  "TX_STATE" WHEN 1 THEN "K" WHEN 2 THEN "K" END` whether the DDL spells the simple or the searched
-  CASE, and a predicate in either spelling takes the index (access predicates on the hidden
-  columns); the plain spelling against it is a full scan of the table, 3,068 gets and 11 ms at
-  300,000 rows with nothing in flight, hint or not, and the expression against the plain index an
-  index full scan; the gather `FOR ALL COLUMNS SIZE REPEAT` covers the hidden columns (a frequency
-  histogram on the state expression), `DBMS_STATS.SET_COLUMN_STATS` takes a hidden column by its
-  quoted name and `SET_INDEX_STATS` the index, and an unlocked regather replaces both, as it does
-  `tx_state`'s today; the hidden columns are absent from `getColumns` and `SELECT *`; a composite
-  key's expressions take each column's type (VARCHAR2, TIMESTAMP(3), NUMBER); the move, `DROP
-  INDEX` and `CREATE INDEX ... ONLINE` in the function-based form, 0.13 + 0.60 s on 300,000 rows;
-  the keyed probe and a range gate on the key expression are index range scans on both columns (4
-  gets with 10,000 in flight), the state column's key set with the key expression in its select
-  list is served from the index alone and joined to the primary key, and `check`'s stuck count and
-  the backfill's in-flight count hinted cost 4,394 gets with 10,000 rows in flight (the rows read
-  for their filter), 1 with none; unhinted, the stuck count scans the table (the statistics say
-  10,000). Design choices: the catalog carries the index's form and the driver spells a table's
-  in-flight texts for it, so a table with the plain index keeps today's texts until its setup runs
-  again (no flag day; the alternative, the expression spelling everywhere, would scan every table
-  not yet rebuilt); the setup replaces a plain index as it rebuilds one in another order, and
-  `check` reports the plain form as not set up with the reason, as the key order is reported; the
-  `INDEX` and `NO_INDEX_SS` hints stay; the fixed statistics keep `tx_state`'s histogram and add
-  the hidden columns' and the index's; both layouts and both levels through the same spellings
-  (the index is on whichever table holds the state). Open beside it: item 2's `BETWEEN 1 AND 2`
-  would be one token in the same spelling helper (on the function-based index it is a single range
-  scan where `IN (1, 2)` is an `INLIST ITERATOR` of two, 2 gets either way at 10,000 in flight);
-  not taken here, the user's call. Handed to c7 to build on a branch; reviewed from `git show`;
-  lands on the user's word; 6e plans the AWS proof run after.
+  it", via 6e; performance only, Oracle only; the 36-character sentinel, item 2's proposal, taken
+  the same day on 6e's record ("yes to all four") and built by c7 on its own branch, reviewed
+  separately). Designed in section 3 (the paragraph "Oracle's in-flight index is function-based",
+  after the Indexes paragraph; the setup paragraph's three sentences; the engine table's Oracle
+  cell) and 4.2 (the spelling rule in the Oracle paragraph, after the `INDEX` hint sentence) and 4.4
+  (the stuck-row contract). Verified on the container first (scratchpad `ora/dict.jsh`, `dict2.jsh`,
+  outputs `dict.txt`, `dict2.txt`): `ALL_INDEXES.INDEX_TYPE` is `FUNCTION-BASED NORMAL` against
+  `NORMAL`; `ALL_IND_COLUMNS` and ojdbc's `getIndexInfo` name the columns `SYS_NC00022$`,
+  `SYS_NC00023$`, so today's key-order check would count the index as in another order and the setup
+  would rebuild it every run; `ALL_IND_EXPRESSIONS` stores `CASE "TX_STATE" WHEN 1 THEN "K" WHEN 2
+  THEN "K" END` whether the DDL spells the simple or the searched CASE, and a predicate in either
+  spelling takes the index (access predicates on the hidden columns); the plain spelling against it
+  is a full scan of the table, 3,068 gets and 11 ms at 300,000 rows with nothing in flight, hint or
+  not, and the expression against the plain index an index full scan; the gather `FOR ALL COLUMNS
+  SIZE REPEAT` covers the hidden columns (a frequency histogram on the state expression),
+  `DBMS_STATS.SET_COLUMN_STATS` takes a hidden column by its quoted name and `SET_INDEX_STATS` the
+  index, and an unlocked regather replaces both, as it does `tx_state`'s today; the hidden columns
+  are absent from `getColumns` and `SELECT *`; a composite key's expressions take each column's type
+  (VARCHAR2, TIMESTAMP(3), NUMBER); the move, `DROP INDEX` and `CREATE INDEX ... ONLINE` in the
+  function-based form, 0.13 + 0.60 s on 300,000 rows; the keyed probe and a range gate on the key
+  expression are index range scans on both columns (4 gets with 10,000 in flight), the state
+  column's key set with the key expression in its select list is served from the index alone and
+  joined to the primary key, and `check`'s stuck count and the backfill's in-flight count hinted
+  cost 4,394 gets with 10,000 rows in flight (the rows read for their filter), 1 with none;
+  unhinted, the stuck count scans the table (the statistics say 10,000). Design choices: the catalog
+  carries the index's form and the driver spells a table's in-flight texts for it, so a table with
+  the plain index keeps today's texts until its setup runs again (no flag day; the alternative, the
+  expression spelling everywhere, would scan every table not yet rebuilt); the setup replaces a
+  plain index as it rebuilds one in another order, and `check` reports the plain form as not set up
+  with the reason, as the key order is reported; the `INDEX` and `NO_INDEX_SS` hints stay; the fixed
+  statistics keep `tx_state`'s histogram and add the hidden columns' and the index's; both layouts
+  and both levels through the same spellings (the index is on whichever table holds the state). Open
+  beside it: item 2's `BETWEEN 1 AND 2` would be one token in the same spelling helper (on the
+  function-based index it is a single range scan where `IN (1, 2)` is an `INLIST ITERATOR` of two, 2
+  gets either way at 10,000 in flight); not taken here, the user's call. Handed to c7 to build on a
+  branch; reviewed from `git show`; lands on the user's word; 6e plans the AWS proof run after.
