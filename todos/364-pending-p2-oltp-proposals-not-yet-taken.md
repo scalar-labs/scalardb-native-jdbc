@@ -204,3 +204,12 @@ todo 334's log and the design sections named.
   function-based index it is a single range scan where `IN (1, 2)` is an `INLIST ITERATOR` of two, 2
   gets either way at 10,000 in flight); not taken here, the user's call. Handed to c7 to build on a
   branch; reviewed from `git show`; lands on the user's word; 6e plans the AWS proof run after.
+- 2026-10-31 (item 2's proposal, the 36-character backfill tx_id, Fable's review): c7's d39b722 on
+  backfill-tx-id-36 (one commit on 12afca4) reviewed from `git show`, mergeable. The constant
+  `scalardb-native-backfill-placeholder` is 36 characters (counted), bound only at the backfill's
+  stamp; nothing in the driver, the setup, check or the tests matches on the value or its length,
+  so rows stamped with the 24-character value work beside the new ones and nothing accepts both;
+  the setup test asserts every metadata row carries the constant and that it is a UUID's length;
+  design.md names the new value in section 3's setup paragraph and the backfill bullet (lines
+  added, no paragraph rewrapped, 38 fences); a changie entry. One nit, not blocking: the backfill
+  bullet's replaced line runs to 113 characters. Lands on the user's word, as the others.
