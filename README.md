@@ -54,7 +54,7 @@ A version not released yet: [Unreleased versions](docs/development-builds.md).
 | Java | For |
 | --- | --- |
 | 11 or later | running the driver, `snsql` and `scalardb-native-tools` |
-| 17 or later | the Gradle build of the getting-started example |
+| 17 or later | Gradle 9, which builds the getting-started example; the example itself runs on Java 11 |
 | JDK 25 | building this repository ([unreleased versions](docs/development-builds.md)) |
 
 ## Documentation

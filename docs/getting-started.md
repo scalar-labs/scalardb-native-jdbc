@@ -65,8 +65,8 @@ causes.
 
 ## What you need
 
-- Java 17 or later on your `PATH` or in `JAVA_HOME`, for the example's Gradle build. The driver
-  itself needs Java 11 or later.
+- Java 17 or later on your `PATH` or in `JAVA_HOME`, which Gradle 9 needs to build the example.
+  The example and the driver themselves run on Java 11 or later.
 - Docker, for the database in this guide. Any PostgreSQL you can create tables in will do.
 - This repository's [`samples/getting-started`](../samples/getting-started) directory. It holds every
   file the guide uses, so you don't copy any from this page.
