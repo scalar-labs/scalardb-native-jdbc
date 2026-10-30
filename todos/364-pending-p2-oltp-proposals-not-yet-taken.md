@@ -119,3 +119,41 @@ todo 334's log and the design sections named.
     at the first write and migrate under the application's PCTFREE; the setup cannot resize existing
     rows without `ALTER TABLE ... MOVE`, so either an option that rebuilds the table with a larger
     PCTFREE on request, or a documented note.
+- 2026-10-30 (Fable): the function-based in-flight index measured on the container (scratchpad
+  `ora/fbi.jsh`, output `fbi.txt`): two copies of the 300,000-row inline scratch table without
+  metadata, `TI_P` with the plain index `(TX_STATE, K)` and `TI_F` with `(CASE WHEN TX_STATE IN (1,
+  2) THEN TX_STATE END, CASE WHEN TX_STATE IN (1, 2) THEN K END)`, statistics gathered, 5,000
+  executions a form after 200 of warm-up, gets and CPU from `V$MYSTAT`. The optimizer matches the
+  predicates spelled on the expressions to the index's hidden columns (`SYS_NC00022$ = 1 OR ... = 2`
+  in the access predicate), under the same `INDEX` hint; the stored expression reads `CASE
+  "TX_STATE" WHEN 1 THEN "TX_STATE" WHEN 2 THEN "TX_STATE" END`.
+
+  | form, none in flight | plain gets | function-based gets |
+  |---|---|---|
+  | split read, two arms (READ COMMITTED inline) | 9.00 | 4.00 |
+  | gate probe alone | 6.00 | 1.00 |
+  | gated key read (SNAPSHOT inline) | 9.00 | 4.00 |
+  | first write of a row, NULL to 3 | 11.76 (1,133 B redo) | 5.57 (569 B) |
+  | second write, 3 to 3 | 5.41 (494 B) | 5.41 (494 B) |
+  | insert at state 3 | 6.28 (1,011 B, 22 µs CPU) | 3.17 (674 B, 10 µs) |
+  | delete | 8.15 (832 B) | 5.12 (600 B) |
+  | split read / gate / gated read, 100 in flight | 9.00 / 3.00 / 6.01 | 5.00 / 1.00 / 4.01 |
+  | split read / gate / gated read, 10,000 in flight | 9.05 / 3.00 / 6.01 | 7.05 / 2.00 / 5.01 |
+
+  The plain index is 768 blocks (blevel 2, 710 leaf blocks) for 300,000 rows, the function-based one
+  48 blocks allocated and 0 leaf blocks while nothing is in flight. Against the tenth run's
+  per-statement gets on the inline cells, the saving a NewOrder is about 95 gets at steady state
+  (ten item reads at 5 each, the customer and warehouse reads, thirteen inserts at 3 each) and about
+  160 in the first-write transition (the ten stock rows' entry moves at 6 each), of about 300 against
+  the vendor's 210; at SNAPSHOT the gates' two probes a statement fall from 8 gets on a 4-level index
+  to 2. The redo of a first write halves and an insert's falls by a third, which bears on the inline
+  cell's 17.2 KB of redo a commit against the vendor's 7.7. The decoupled layout gains the gates and
+  its metadata inserts only, its backfilled rows already at state 3. To design if the user takes it:
+  the index's two expressions per key column on Oracle (hidden virtual columns, no storage, absent
+  from `ALL_TAB_COLUMNS` and `getColumns`); every in-flight predicate spelled on the expression (the
+  split read's in-flight arm with the key conjuncts likewise, the gates, the coarse SERIALIZABLE
+  check, the setup's and `check`'s stuck-row counts, the backfill's remaining count); the `INDEX` and
+  `NO_INDEX_SS` hints unchanged; the setup's assumed-in-flight statistics moved to the hidden column
+  and the index, and the check's column-order rule reading `ALL_IND_EXPRESSIONS` for the key order; a
+  table whose in-flight index is the plain one counts as set up but not rebuilt until asked, as the
+  key-order rule treats an older order. Sent to 6e for the user 2026-10-30.
