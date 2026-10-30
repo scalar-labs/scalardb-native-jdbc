@@ -118,7 +118,7 @@ driver versions below, the newest patch of each line in the range; use a version
 | MySQL | 8.4, also with `lower_case_table_names=1` | MySQL Connector/J (`com.mysql:mysql-connector-j`) | 8.0.33, 8.4, 9.7 and 26.x |
 | MariaDB | 11.4 | MariaDB Connector/J (`org.mariadb.jdbc:mariadb-java-client`) | 3.3, and 3.5 to 4.0 |
 | SQL Server | 2022 | mssql-jdbc (`com.microsoft.sqlserver:mssql-jdbc`), `.jre11` | 11.2 to 13.6 |
-| Oracle | Oracle Database Free 23 | ojdbc11 (`com.oracle.database.jdbc:ojdbc11`) | 21.1 to 21.23, and 23.9 to 23.26 |
+| Oracle | Oracle AI Database 26ai Free (23.26) | ojdbc11 (`com.oracle.database.jdbc:ojdbc11`) | 21.1 to 21.23, and 23.4 to 23.26 |
 
 - pgjdbc before 42.7 fails `Connection.abort()` on Java 24 or later with a `SecurityException`, as
   it does without the driver: use 42.7 there.
