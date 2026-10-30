@@ -724,7 +724,8 @@ So the backfill becomes an option, off by default.
   statements, wait and retries as the setup's. It needs DML on the metadata table and no DDL, and
   can be run at any time and repeated. It also repairs the rows ScalarDB's defect left: the all-NULL
   metadata row gets the sentinel stamp, after which ScalarDB's prepare condition is `tx_id =
-  'scalardb-native-backfill-placeholder'`, which is not converted to an insert, and the row is writable through
+  'scalardb-native-backfill-placeholder'`, which is not converted to an insert, and the row is
+  writable through
   ScalarDB again. On Oracle, after it fills a decoupled table's metadata table, it sets that table's
   statistics as the setup sets them after a backfill. It acts on imported decoupled tables only: a
   run without `--table` must not rewrite every inline application table, and `setup --backfill`
