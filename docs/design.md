@@ -327,7 +327,7 @@ goes through the primary key.
   | Read lock at SERIALIZABLE (4.2) | none: SSI, with ScalarDB's storage connections at SERIALIZABLE (section 5) | a separate locking re-read of the first arm's predicate, LEFT JOINed to `T_meta` by primary key, `LOCK IN SHARE MODE` (as built, the metadata rows locked again by primary key under `FOR SHARE` on MySQL, section 5); the engine's SERIALIZABLE level is not used | the same separate re-read `WITH (HOLDLOCK)`; the engine's SERIALIZABLE level is not used | SERIALIZABLE is refused (section 5) |
   | Insert that may collide | `INSERT ... ON CONFLICT DO NOTHING`, check the row count | catch error 1062; the transaction survives. Not `INSERT IGNORE` for the user's statement, which also downgrades data errors such as a NOT NULL violation to warnings; the driver's own metadata rows use it (4.3) | catch 2627 or 2601; the transaction survives with `XACT_ABORT` off, which the driver requires | catch ORA-00001; statement-level rollback keeps the transaction |
   | Update count | rows matched | `useAffectedRows=false`, the default on both drivers; the value the vendor driver reports for the URL and the connect properties (`getPropertyInfo`, its own spellings and precedence) must not be true, or the connection is refused with `08004` | rows matched | rows matched |
-  | In-flight index | partial index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` | filtered index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` |
+  | In-flight index | partial index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` | filtered index `WHERE tx_state IN (1, 2)` | function-based index, `CASE tx_state WHEN 1 THEN <col> WHEN 2 THEN <col> END` per column, NULL on a committed row (section 3) |
   | Retryable errors | SQLSTATE `40001`, `40P01` | SQLSTATE `40001` (error 1213), error 1205 (SQLSTATE `HY000`) | 1205 deadlock victim (`40001`), 3960 snapshot update conflict, 1222 if `LOCK_TIMEOUT` is set | ORA-08177 cannot serialize, ORA-00060 deadlock, ORA-08176; ScalarDB maps the same three |
   | Duplicate key | `23505` | error 1062 | 2627, 2601 | ORA-00001 |
   | Coarse SERIALIZABLE path (4.2) | none: the coarse check, then the statement, as under SNAPSHOT; SSI covers the statement | the coarse check as a locking read of the in-flight index, `LOCK IN SHARE MODE`, whose gap lock blocks every prepare on the table until commit; the user's statement then runs on the data tables with `LOCK IN SHARE MODE` on every SELECT of it (as built, section 5) | the same `WITH (HOLDLOCK)` | SERIALIZABLE is refused |
@@ -635,47 +635,49 @@ as `"made"`); a name beyond the engine's identifier limit is refused rather than
 table, in order: the index, built without blocking writes where the engine can (`CREATE INDEX
 CONCURRENTLY` on PostgreSQL, `ALGORITHM=INPLACE, LOCK=NONE` on MySQL and MariaDB, `ONLINE` on SQL
 Server editions that have online builds and on Oracle where the edition allows); its columns are
-`tx_state` first and then the key columns in the data table's primary key order, read from the
-engine's constraint (`DatabaseMetaData.getPrimaryKeys` by `KEY_SEQ`), not from the catalog:
-ScalarDB's import adds an imported composite key's columns in `getPrimaryKeys`' result order, which
-Oracle's, MySQL's and MariaDB's drivers sort by column name as the JDBC specification says, while
-PostgreSQL's and SQL Server's return it by `KEY_SEQ` and the metadata key keeps the data order
-there, so on the first three the metadata table's primary key is (OL_D_ID, OL_NUMBER, OL_O_ID,
-OL_W_ID) for BenchBase's `order_line (OL_W_ID, OL_D_ID, OL_O_ID, OL_NUMBER)`, and a predicate on a
-prefix of the data key, Delivery's and StockLevel's (W, D, O), reaches the metadata rows only by
-index skip scans, 112 gets for a ten-row read on Oracle (todo 334's log, 2026-10-28). Where the
-metadata table's primary key order differs from the data table's, the setup also builds an index on
-the metadata table over the key columns in the data order, `T_key`, named and folded as the others,
-maintained on inserts and deletes only since a stamp changes no key column; teardown drops it, and
-an in-flight index found in another column order counts as not set up for the setup and its check,
-which rebuild it, while the catalog, which routes a table by its index's existence, keeps it set up,
-since the old order serves every read, only slower, and a table set up before this rule would
-otherwise refuse reads until its setup ran again; with `--backfill`, the backfill of an imported table (below), which stamps
-`tx_id = 'scalardb-native-backfill'`; then the view, with `CREATE OR REPLACE` (`CREATE OR ALTER` on
-SQL Server); then, on Oracle and MySQL, a histogram on the metadata table's `tx_state`, without
-which both estimate `tx_state IN (1, 2)` as most of the table and scan it (Oracle 22x, MySQL 12-69x
-on the split read); on PostgreSQL an `ANALYZE` of the metadata table the backfill has just filled,
-since until autoanalyze reaches it, about a minute, the planner estimates `tx_state IN (1, 2)` by
-defaults, under which a probe of the whole in-flight index spelled without its order is a sequential
-scan of the table (4.2, todo 337: 13 ms a probe on 200,000 rows against 0.05 through the index). On
-MySQL it is gathered (`ANALYZE TABLE ... UPDATE HISTOGRAM ON tx_state`), and MySQL never regathers
-it by itself. On Oracle it is set, not gathered: a frequency histogram assuming 10,000 rows in
-flight (at most half the table), with the table's statistics then locked so that the nightly job
-does not replace it; one gathered while nothing is in flight cost up to 1654x when a burst followed
-(todo 094). The same gather takes every column's basic statistics first (`FOR ALL COLUMNS SIZE
-REPEAT`, which keeps an inline table's own histograms): a key column without them makes every hard
-parse of a keyed statement sample the table through the in-flight index, 0.3 s a text at 3.2M rows
-(todo 334). An inline table's statistics are the application's, so they are set there but not
-locked. Teardown unlocks the others and deletes the histogram on both. On SQL Server the metadata
-table's statistics are left to the automatic updates: refreshed while ScalarDB writes, they estimate
-a few rows in flight, and a plan compiled then would scan the in-flight index once per row of a
-read, through the ghost records its churn leaves; the plans a read compiles while rows are in flight
-seek the index by a hint instead (the split read below). Keeping the statistics as the setup took
-them (`NORECOMPUTE`) did no better beside that hint, and twice in four runs left the in-flight check
-a plan 30-40x slower (`docs/benchmarks/inflight-check.md`). Last a grant of `SELECT` on the view to
-each application user given. The backfill waits only for rows ScalarDB has in flight over a
-deemed-committed row, which carry `before_tx_id` NULL and `before_tx_version` 0, never for an
-in-flight insert.
+`tx_state` first and then the key columns in the data table's primary key order, on Oracle each as
+the expression of the function-based form below, read from the engine's constraint
+(`DatabaseMetaData.getPrimaryKeys` by `KEY_SEQ`), not from the catalog: ScalarDB's import adds an
+imported composite key's columns in `getPrimaryKeys`' result order, which Oracle's, MySQL's and
+MariaDB's drivers sort by column name as the JDBC specification says, while PostgreSQL's and SQL
+Server's return it by `KEY_SEQ` and the metadata key keeps the data order there, so on the first
+three the metadata table's primary key is (OL_D_ID, OL_NUMBER, OL_O_ID, OL_W_ID) for BenchBase's
+`order_line (OL_W_ID, OL_D_ID, OL_O_ID, OL_NUMBER)`, and a predicate on a prefix of the data key,
+Delivery's and StockLevel's (W, D, O), reaches the metadata rows only by index skip scans, 112 gets
+for a ten-row read on Oracle (todo 334's log, 2026-10-28). Where the metadata table's primary key
+order differs from the data table's, the setup also builds an index on the metadata table over the
+key columns in the data order, `T_key`, named and folded as the others, maintained on inserts and
+deletes only since a stamp changes no key column; teardown drops it, and an in-flight index found in
+another column order, or on Oracle in the plain form (below), counts as not set up for the setup and
+its check, which rebuild it, while the catalog, which routes a table by its index's existence, keeps
+it set up, since the old order serves every read, only slower, and a table set up before this rule
+would otherwise refuse reads until its setup ran again; with `--backfill`, the backfill of an
+imported table (below), which stamps `tx_id = 'scalardb-native-backfill'`; then the view, with
+`CREATE OR REPLACE` (`CREATE OR ALTER` on SQL Server); then, on Oracle and MySQL, a histogram on the
+metadata table's `tx_state`, without which both estimate `tx_state IN (1, 2)` as most of the table
+and scan it (Oracle 22x, MySQL 12-69x on the split read); on PostgreSQL an `ANALYZE` of the metadata
+table the backfill has just filled, since until autoanalyze reaches it, about a minute, the planner
+estimates `tx_state IN (1, 2)` by defaults, under which a probe of the whole in-flight index spelled
+without its order is a sequential scan of the table (4.2, todo 337: 13 ms a probe on 200,000 rows
+against 0.05 through the index). On MySQL it is gathered (`ANALYZE TABLE ... UPDATE HISTOGRAM ON
+tx_state`), and MySQL never regathers it by itself. On Oracle it is set, not gathered: a frequency
+histogram assuming 10,000 rows in flight (at most half the table), the same assumption on the
+function-based index's hidden columns and on the index (below), with the table's statistics then
+locked so that the nightly job does not replace it; one gathered while nothing is in flight cost up
+to 1654x when a burst followed (todo 094). The same gather takes every column's basic statistics
+first (`FOR ALL COLUMNS SIZE REPEAT`, which keeps an inline table's own histograms): a key column
+without them makes every hard parse of a keyed statement sample the table through the in-flight
+index, 0.3 s a text at 3.2M rows (todo 334). An inline table's statistics are the application's, so
+they are set there but not locked. Teardown unlocks the others and deletes the histogram on both. On
+SQL Server the metadata table's statistics are left to the automatic updates: refreshed while
+ScalarDB writes, they estimate a few rows in flight, and a plan compiled then would scan the
+in-flight index once per row of a read, through the ghost records its churn leaves; the plans a read
+compiles while rows are in flight seek the index by a hint instead (the split read below). Keeping
+the statistics as the setup took them (`NORECOMPUTE`) did no better beside that hint, and twice in
+four runs left the in-flight check a plan 30-40x slower (`docs/benchmarks/inflight-check.md`). Last
+a grant of `SELECT` on the view to each application user given. The backfill waits only for rows
+ScalarDB has in flight over a deemed-committed row, which carry `before_tx_id` NULL and
+`before_tx_version` 0, never for an in-flight insert.
 
 A table is set up when its index exists and is usable (an invalid index a failed concurrent build left
 does not count) and its view exists with exactly the table's columns, in order. The view comes last,
@@ -856,29 +858,91 @@ shows a NULL `tx_state` there and counts as committed (fact 2). Neither `rc_T` n
 locking clause on PostgreSQL, because both have an outer join; the driver rewrites locking reads onto the
 base tables (4.2, locking clauses).
 
-**Indexes.** The reads of 4.2 are a UNION ALL of two arms. The first arm uses the user's own index on
-`T(x)`. The second arm needs only one index per table over the in-flight rows: on PostgreSQL a partial
-index, `CREATE INDEX ON T_meta (<pk>) WHERE tx_state IN (1, 2)`, and a filtered index of the same shape on SQL
-Server; on MySQL, MariaDB and Oracle, which have no partial indexes, a plain index on `(tx_state, <pk>)`. With few rows in flight, scanning them all and filtering `P_before`
+**Indexes.** The reads of 4.2 are a UNION ALL of two arms. The first arm uses the user's own index
+on `T(x)`. The second arm needs only one index per table over the in-flight rows: on PostgreSQL a
+partial index, `CREATE INDEX ON T_meta (<pk>) WHERE tx_state IN (1, 2)`, and a filtered index of the
+same shape on SQL Server; on MySQL and MariaDB, which have no partial indexes, a plain index on
+`(tx_state, <pk>)`; on Oracle a function-based index over expressions that are NULL on a committed
+row, its partial index (below). With few rows in flight, scanning them all and filtering `P_before`
 in SQL is cheap for any predicate. The cost grows with the in-flight count, though (at 10k rows in
-flight, 3-6x on PostgreSQL and Oracle, up to 365x on SQL Server, which scans the metadata table), unless
-an index on the before image serves `P_before`. ScalarDB already creates one: a `before_x` index
-whenever `x` is one of its secondary indexes, unless eventually consistent index reads are enabled.
-Since `before_*` is NULL on every row not in flight, its plain index holds what a filtered one would,
-and with it the selective reads return to their cost at 100 rows in flight
+flight, 3-6x on PostgreSQL and Oracle, up to 365x on SQL Server, which scans the metadata table),
+unless an index on the before image serves `P_before`. ScalarDB already creates one: a `before_x`
+index whenever `x` is one of its secondary indexes, unless eventually consistent index reads are
+enabled. Since `before_*` is NULL on every row not in flight, its plain index holds what a filtered
+one would, and with it the selective reads return to their cost at 100 rows in flight
 (docs/benchmarks/read-overhead.md). The driver creates no `before_*` index. The setup reports each
 index of the data table that has no `before_*` counterpart (a multi-column index, or one created
 outside ScalarDB, as on imported tables), and tables without before-image indexes because eventually
 consistent index reads are on, with the DDL to add each; it creates them only on an explicit option,
 and then owns and drops them (todo 102). Primary-key access needs none: the key bounds the metadata
-lookup.
-Not on `tx_state`: ScalarDB's own before-index lookups carry no state predicate, so a `tx_state` partial
-index would be unusable for them. The OR form across the join,
-`x = ? OR before_x = ?`, cannot use either index on PostgreSQL or MySQL, because neither pushes a
-cross-table OR into both scans and neither rewrites it to a UNION; on a single table they would (BitmapOr,
-index merge). ScalarDB splits its own scans this way for indexed columns only: `requiresBeforeIndexCheck`
-runs a second lookup on the before image index; for other columns it uses the OR form `P OR P_before`
+lookup. Not on `tx_state`: ScalarDB's own before-index lookups carry no state predicate, so a
+`tx_state` partial index would be unusable for them. The OR form across the join, `x = ? OR before_x
+= ?`, cannot use either index on PostgreSQL or MySQL, because neither pushes a cross-table OR into
+both scans and neither rewrites it to a UNION; on a single table they would (BitmapOr, index merge).
+ScalarDB splits its own scans this way for indexed columns only: `requiresBeforeIndexCheck` runs a
+second lookup on the before image index; for other columns it uses the OR form `P OR P_before`
 (`convertConjunctions`).
+
+**Oracle's in-flight index is function-based** (todo 364, 2026-10-31). A plain index on `(tx_state,
+<pk>)` holds an entry for every row, since Oracle leaves a row out of an index only when every
+indexed column is NULL and the key never is: 768 blocks and two levels under the root at 300,000
+rows, three or four at TPC-C scale 32, as large as the primary key's. Every insert and delete
+maintains it, the first write of a row moves its entry from `(NULL, k)` to `(3, k)`, and every probe
+of it, the states being two values, is an `INLIST ITERATOR` of two range scans down a tall index: in
+the tenth run's inline cells an item read cost 7 gets against the vendor's 3 and a customer read 10
+against 4, the SNAPSHOT gates 8 of a gated statement's gets, about 95 gets a NewOrder at steady
+state and 160 while its rows take their first write, and half a first write's redo (todo 364's log,
+2026-10-30). So on Oracle the setup builds the index over expressions that are NULL on a committed
+row, one per column, `CREATE INDEX T_inflight ON T_meta (CASE tx_state WHEN 1 THEN tx_state WHEN 2
+THEN tx_state END, CASE tx_state WHEN 1 THEN k WHEN 2 THEN k END, ...)` in the key order above, and
+Oracle, which stores no entry whose columns are all NULL, keeps the entries of the rows in flight
+alone: its partial index. Every column is an expression, since one plain key column beside them
+would give every row an entry again; the spelling is the one Oracle stores (`ALL_IND_EXPRESSIONS`:
+`CASE "TX_STATE" WHEN 1 THEN "K" WHEN 2 THEN "K" END`), to which it also reduces `CASE WHEN tx_state
+IN (1, 2) THEN k END`. The expressions are hidden virtual columns of the table, `SYS_NCnnnnn$`,
+without storage and absent from `ALL_TAB_COLUMNS`, `getColumns` and `SELECT *`, so ScalarDB and the
+application see the table as before, and they go with the index. The optimizer matches a predicate
+to the index only when it is spelled on the expression: against this index a plain `tx_state IN (1,
+2)` is a full scan of the table, 3,068 gets and 11 ms at 300,000 rows with nothing in flight, the
+`INDEX` hint notwithstanding, as the expression against the plain index is a full scan of that
+index. So every Oracle text that names the in-flight states spells them as the index's expressions
+(4.2's rule), and the catalog says which form a table has, `ALL_INDEXES.INDEX_TYPE`, `FUNCTION-BASED
+NORMAL` or `NORMAL`, one column more in the listing it reads already, and the driver builds a
+table's in-flight texts for its form: a table with the plain index keeps today's texts and today's
+cost until its setup runs again. The setup, on a table whose index is the plain one, drops it and
+creates the function-based one under the same name, as it rebuilds an index in another column order
+(`ONLINE` where the edition allows, 0.7 s for 300,000 rows on the container, one pass over the
+table), then the view, whose second arm is spelled on the expressions, then the statistics; until
+the driver's next catalog load (`catalog_ttl_millis`, 60 s) a running driver's probes are spelled
+for the old form and scan the table, so the setup runs with the application stopped, or that minute
+of scans is accepted. Teardown drops the index of either form by name, and the hidden columns with
+it. An older driver spells the plain form and scans a table with this index, and an older setup,
+which reads the index's columns through `getIndexInfo` as the hidden names, counts it as in another
+order and rebuilds the plain one: a downgrade is that setup run. `check` reads the index's columns
+from `ALL_IND_EXPRESSIONS` joined to `ALL_IND_COLUMNS` by position, the expression at position 1
+naming `tx_state` alone and each later one `tx_state` and one key column, in the data table's key
+order, and reports a table whose index is the plain form, or names other columns or another order,
+as not set up with the reason, as it reports the key order; the catalog keeps routing it and the
+setup rebuilds it. The gather of `FOR ALL COLUMNS SIZE REPEAT` covers the hidden columns, and the
+fixed statistics assume the same 10,000 rows in flight on them, their names read from
+`ALL_IND_COLUMNS` in the block: the state expression's column two distinct values in a frequency
+histogram of 5,000 each and the other rows NULL, each key expression's column 10,000 distinct values
+and the other rows NULL, the index 10,000 rows and distinct keys over 50 leaf blocks and one level;
+the histogram on `tx_state` itself stays, the `COALESCE` forms filtering on it; locked and unlocked
+as today, and the hidden columns' statistics go with the index. The inline layout's index is on the
+table itself, the decoupled layout's on the metadata table, the same DDL and spellings at both
+levels; the decoupled layout, whose backfilled rows are at state 3 already, gains the gates and its
+metadata inserts and deletes. Measured on the container (300,000 rows, the scratchpad's
+`ora/fbi.jsh`, `dict.jsh` and `dict2.jsh`): the split read's two arms 9.00 gets to 4.00, the gate
+probe 6.00 to 1.00, the gated key read 9.00 to 4.00, a row's first write 11.76 to 5.57 with 1,133 B
+of redo to 569, a second write 5.41 either way, an insert 6.28 to 3.17 (1,011 B to 674), a delete
+8.15 to 5.12; with 10,000 rows in flight the three reads 9.05, 3.00 and 6.01 to 7.05, 2.00 and 5.01;
+the state column's key set with the key expression in its select list served from the index alone, a
+range gate on the key expression a range scan of both columns; the index 768 blocks against 48
+allocated and none used. Expected at AWS: the inline NewOrder about 95 gets fewer of its 300 against
+the vendor's 210, its redo a commit from 17.2 KB toward 12 against 7.7, the READ COMMITTED inline
+TPC-C cell from 0.71 and the SNAPSHOT one from 0.83 toward 0.8 and 0.9, the decoupled cells by their
+gates; the forms as built are measured on the container first, as the forms of 4.2 were.
 
 ---
 
@@ -1047,7 +1111,18 @@ union as a derived table.
   uncommitted and under review, and whose gathered form estimated `IN (1, 2)` at one row and then
   took nested loops over 10,000 (`read-overhead.md`, "Statistics, open transactions and paging").
   With the hint the probe is an index range scan that stops at its first row, and the set is read
-  once per statement. Third, the boundary: the forms of todo 334 change no copy's shape beyond the
+  once per statement. On a table whose in-flight index is the function-based one of section 3, every
+  such text, and every other Oracle text that names the in-flight states, spells the condition as
+  the index's expressions, `CASE m.tx_state WHEN 1 THEN m.tx_state WHEN 2 THEN m.tx_state END IN (1,
+  2)`, and a key column it compares or lists under that condition as the key's expression, `CASE
+  m.tx_state WHEN 1 THEN m.k WHEN 2 THEN m.k END`: the in-flight copies' key conjuncts, the state
+  column's key set, the range gate's conjuncts and the keyed probes, which the index then serves
+  without the row (todo 364, 2026-10-31); a key join that reads the metadata row's other columns
+  keeps the plain key, the row being read anyway. The optimizer matches the index on the expression
+  alone, and the plain spelling against it scans the table (section 3), so the Oracle texts of 4.2,
+  4.3 and 4.4, written in the plain spelling, read with this rule on such a table, and a table with
+  the plain index keeps them as written. Third, the boundary: the forms of todo 334 change no copy's
+  shape beyond the
   two above, and the paging route of todo 296 (`VIEW_CASE` for key-ordered pages, decoupled
   tables), the whole-table aggregates (CORR), the deep OFFSET of todo 117, the in-flight pairs
   (built) and todo 094's decision stay with the session measuring Oracle's reads
@@ -2962,44 +3037,46 @@ vendor's own statement, then on AWS with the rest.
   What must keep holding on Oracle: `MoreWritesIntegrationTest.batches` (20 entries, entries that
   see the ones before, a tombstone taken over in a batch, a duplicate as the 19th entry in a
   transaction, which the replay reports with 18 counts); `batches` on the inline tables. To add: a
-  block of 16 entries stopping at an entry in flight at READ COMMITTED with the wait set, the
-  batch completing after the row settles with every count 1; the same at SNAPSHOT, `40001` with the
-  counts before it; a prepared INSERT batch on an inline table through `executeBatch` with a
-  duplicate in the middle, the vendor's counts before it and the classification; the gated inline
-  UPDATE batch with the table not clear, every count 0, the coarse check and the blocks. Measured:
-  NewOrder's stock updates (ten keyed entries) and `order_line` inserts (ten entries) against the
-  vendor's `executeBatch`, round trips counted; the inline INSERT batch should match the vendor's
-  by construction, and the block of entries is read against the merged form once that exists.
-  Built (todo 335): the block of entries for the keyed write and the decoupled INSERT, the
-  vendor's batching for the inline INSERT; deferred: the block of entries over the write beyond
-  the key, the gated inline statement through `executeBatch` at SNAPSHOT, the merged form, and
-  the one-round-trip autocommit of a raising block.
-- **Predicate shapes for the two-arm read.** `P` must reference one table, be deterministic (it is
-  evaluated twice through `NOT COALESCE(P, false)` or its CASE form), and contain no subquery over `T`. `LIKE`, `IN`,
-  ranges and `IS NULL` rewrite by column substitution, as ScalarDB's `convertConjunctionToBeforeImage`
-  does; `c IS NULL` also matches in-flight inserts in the second arm, a harmless extra abort under
-  SNAPSHOT and SERIALIZABLE.
-- **Composite keys.** `k = :k` everywhere means all key columns; the anchor map is keyed by all of them.
-- **Timestamps** in the metadata are epoch milliseconds, as ScalarDB writes them.
-- **Stuck-row check contract.** Scan `T_meta WHERE tx_state IN (1, 2) AND tx_prepared_at < now_ms -
-  15000`, served by the in-flight index, read-only and in autocommit, and report per table the count and
-  the oldest age. It never settles a row: whether a prepared row's transaction committed is known only to
-  the coordinator, and the driver depends on neither the coordinator nor ScalarDB's runtime (section 6).
-- **Catalog cache.** ScalarDB's catalog is loaded whole and trusted for `scalar.db.native_jdbc.catalog_ttl_millis`;
-  each resolved name is trusted for the same time and cached with its classification, in a bounded LRU.
-  No lock is held across a round trip: while one thread reloads, the others are served the previous
-  catalog, and a stale resolution is served while the catalog connection is busy. The catalog
-  connection is retried once after a connection failure. **The operator contract:** a table imported or
-  created after the load is plain until the TTL expires or the catalog is refreshed; a miss cannot
-  trigger a refresh, since every plain table misses. So import first, then refresh through the JDBC
-  surface or wait for the TTL, before native writers touch the table; the setup command waits it out
-  for a table it sets up for the first time (section 3, todo 298). A check of ScalarDB's catalog per
-  plain name before passing it through, cached briefly, was weighed and left out: its window is
-  shorter but not zero, and its query runs every interval while plain tables are used. ScalarDB refuses schema changes on
-  decoupled tables, but index creation and drop are not guarded, so changes come from registering,
-  importing or dropping a table and from index DDL. `virtual_tables` and ScalarDB's table metadata live
-  in ScalarDB's metadata schema, `scalardb` by default, given by the `scalar.db.native_jdbc.metadata_schema`
-  property.
+  block of 16 entries stopping at an entry in flight at READ COMMITTED with the wait set, the batch
+  completing after the row settles with every count 1; the same at SNAPSHOT, `40001` with the counts
+  before it; a prepared INSERT batch on an inline table through `executeBatch` with a duplicate in
+  the middle, the vendor's counts before it and the classification; the gated inline UPDATE batch
+  with the table not clear, every count 0, the coarse check and the blocks. Measured: NewOrder's
+  stock updates (ten keyed entries) and `order_line` inserts (ten entries) against the vendor's
+  `executeBatch`, round trips counted; the inline INSERT batch should match the vendor's by
+  construction, and the block of entries is read against the merged form once that exists. Built
+  (todo 335): the block of entries for the keyed write and the decoupled INSERT, the vendor's
+  batching for the inline INSERT; deferred: the block of entries over the write beyond the key, the
+  gated inline statement through `executeBatch` at SNAPSHOT, the merged form, and the one-round-trip
+  autocommit of a raising block. - **Predicate shapes for the two-arm read.** `P` must reference one
+  table, be deterministic (it is evaluated twice through `NOT COALESCE(P, false)` or its CASE form),
+  and contain no subquery over `T`. `LIKE`, `IN`, ranges and `IS NULL` rewrite by column
+  substitution, as ScalarDB's `convertConjunctionToBeforeImage` does; `c IS NULL` also matches
+  in-flight inserts in the second arm, a harmless extra abort under SNAPSHOT and SERIALIZABLE. -
+  **Composite keys.** `k = :k` everywhere means all key columns; the anchor map is keyed by all of
+  them. - **Timestamps** in the metadata are epoch milliseconds, as ScalarDB writes them. -
+  **Stuck-row check contract.** Scan `T_meta WHERE tx_state IN (1, 2) AND tx_prepared_at < now_ms -
+  15000`, served by the in-flight index, on Oracle with the `INDEX` hint and the expressions of
+  section 3's function-based index (todo 364), without which the optimizer, told 10,000 rows are in
+  flight, scans the table; read-only and in autocommit, and report per table the count and the
+  oldest age. It never settles a row: whether a prepared row's transaction committed is known only
+  to the coordinator, and the driver depends on neither the coordinator nor ScalarDB's runtime
+  (section 6). - **Catalog cache.** ScalarDB's catalog is loaded whole and trusted for
+  `scalar.db.native_jdbc.catalog_ttl_millis`; each resolved name is trusted for the same time and
+  cached with its classification, in a bounded LRU. No lock is held across a round trip: while one
+  thread reloads, the others are served the previous catalog, and a stale resolution is served while
+  the catalog connection is busy. The catalog connection is retried once after a connection failure.
+  **The operator contract:** a table imported or created after the load is plain until the TTL
+  expires or the catalog is refreshed; a miss cannot trigger a refresh, since every plain table
+  misses. So import first, then refresh through the JDBC surface or wait for the TTL, before native
+  writers touch the table; the setup command waits it out for a table it sets up for the first time
+  (section 3, todo 298). A check of ScalarDB's catalog per plain name before passing it through,
+  cached briefly, was weighed and left out: its window is shorter but not zero, and its query runs
+  every interval while plain tables are used. ScalarDB refuses schema changes on decoupled tables,
+  but index creation and drop are not guarded, so changes come from registering, importing or
+  dropping a table and from index DDL. `virtual_tables` and ScalarDB's table metadata live in
+  ScalarDB's metadata schema, `scalardb` by default, given by the
+  `scalar.db.native_jdbc.metadata_schema` property.
 
 ### 4.5 Tombstones: why a DELETE of a metadata-less row keeps a metadata row
 
