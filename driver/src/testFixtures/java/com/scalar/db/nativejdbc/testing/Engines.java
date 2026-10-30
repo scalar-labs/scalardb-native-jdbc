@@ -37,18 +37,22 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * READ_COMMITTED_SNAPSHOT} and {@code ALLOW_SNAPSHOT_ISOLATION} on; on Oracle, SYSDBA has set
  * {@code "_disable_last_successful_login_time"} (see {@code ORACLE}), or SERIALIZABLE tests fail
  * now and then.
+ *
+ * <p>{@code -Dnativejdbc.<engine>.image} starts another image of the same database, such as {@code
+ * postgres:18}, for the server versions the weekly run tests
+ * (.github/workflows/vendor-drivers.yml).
  */
 public enum Engines {
   POSTGRESQL(Engine.POSTGRESQL) {
     @Override
     JdbcDatabaseContainer<?> create() {
-      return new PostgreSQLContainer("postgres:16");
+      return new PostgreSQLContainer(image("postgres:16"));
     }
   },
   MYSQL(Engine.MYSQL) {
     @Override
     JdbcDatabaseContainer<?> create() {
-      return new MySQLContainer("mysql:8.4").withUsername("root").withPassword("test");
+      return new MySQLContainer(image("mysql:8.4")).withUsername("root").withPassword("test");
     }
   },
   /**
@@ -59,7 +63,7 @@ public enum Engines {
   MYSQL_LOWER_CASE(Engine.MYSQL) {
     @Override
     JdbcDatabaseContainer<?> create() {
-      return new MySQLContainer("mysql:8.4")
+      return new MySQLContainer(image("mysql:8.4"))
           .withUsername("root")
           .withPassword("test")
           .withCommand("--lower-case-table-names=1");
@@ -73,13 +77,14 @@ public enum Engines {
   MARIADB(Engine.MARIADB) {
     @Override
     JdbcDatabaseContainer<?> create() {
-      return new MariaDBContainer("mariadb:11.4").withUsername("root").withPassword("test");
+      return new MariaDBContainer(image("mariadb:11.4")).withUsername("root").withPassword("test");
     }
   },
   SQLSERVER(Engine.SQLSERVER) {
     @Override
     JdbcDatabaseContainer<?> create() {
-      return new MSSQLServerContainer("mcr.microsoft.com/mssql/server:2022-latest").acceptLicense();
+      return new MSSQLServerContainer(image("mcr.microsoft.com/mssql/server:2022-latest"))
+          .acceptLicense();
     }
 
     @Override
@@ -101,7 +106,7 @@ public enum Engines {
     @Override
     JdbcDatabaseContainer<?> create() {
       // about a minute alone, several when the other engines start beside it
-      return new OracleContainer("gvenzl/oracle-free:23-slim-faststart")
+      return new OracleContainer(image("gvenzl/oracle-free:23-slim-faststart"))
           .withStartupTimeout(Duration.ofMinutes(10));
     }
 
@@ -155,6 +160,11 @@ public enum Engines {
   }
 
   abstract JdbcDatabaseContainer<?> create();
+
+  /** The image CI tests, or the one {@code -Dnativejdbc.<engine>.image} names. */
+  String image(String tested) {
+    return System.getProperty("nativejdbc." + name().toLowerCase(Locale.ROOT) + ".image", tested);
+  }
 
   String url(JdbcDatabaseContainer<?> c) throws SQLException {
     return c.getJdbcUrl();
