@@ -581,3 +581,83 @@ SNAPSHOT inline's TPC-C transactions are +6% to +12% and its YCSB operations +4%
   of CPU: waits on the district blocks, Oracle SERIALIZABLE's hot-block cost.
 - **At +250 µs**, SNAPSHOT inline is within 8% on every workload, and every cell's YCSB A, C and F
   is 0.90–0.97.
+
+## Tenth run: the backfill off on inline tables, the stall count and the wait poller (2026-10-30)
+
+Run `20261029-2333-ora` from `bench-env/plans/overnight-oracle.json` on main `bfa20aa`. Since the
+ninth run's `f5c4628`, main has:
+- the SNAPSHOT default (`7cf5779`);
+- the backfill as an option (`20289be`, then off by default on every table in `536fe1e`). The harness
+  backfills decoupled tables and not inline ones (`f0cdf0a`), so an inline table's rows now grow by
+  their metadata at their first write inside the measured minute, where the ninth run's were
+  backfilled before it;
+- the setup creating a table's storage segment where there is none (`5f0046b`, `bfa20aa`);
+- three diagnostics in the harness:
+  - each repetition's count of one-second socket reads (JFR `jdk.SocketRead` of 990–1,100 ms,
+    `55048da`);
+  - a `V$SESSION` poller that keeps every 500 ms sample with a buffer busy wait above 300 ms and
+    writes `waits.txt` (`dca1880`);
+  - `table fetch continued row` in `server.txt`.
+
+The same matrix as the ninth run: TPC-C scale 32 and YCSB A, C, E, F at 1M rows, READ COMMITTED and
+SNAPSHOT, both layouts, fast and +250 µs, 60 s a run, REPS 2, 4 terminals. All 8 cells passed in
+5 h 17 min.
+
+Throughput, (c)/(a) (ninth run in brackets):
+
+| cell | TPC-C | A | C | E | F |
+|---|---|---|---|---|---|
+| RC decoupled, fast | 0.59 (0.61) | 0.79 (0.75) | 0.85 (0.85) | 0.74 (0.73) | 0.79 (0.78) |
+| RC inline, fast | 0.71 (0.63) | 0.87 (0.90) | 0.85 (0.85) | 0.87 (0.84) | 0.88 (0.87) |
+| SNAPSHOT decoupled, fast | 0.67 (0.67) | 0.75 (0.75) | 0.84 (0.84) | **0.92** (0.92) | 0.79 (0.77) |
+| SNAPSHOT inline, fast | 0.83 (0.82) | 0.88 (0.89) | 0.86 (0.86) | 0.87 (0.87) | 0.88 (0.90) |
+| RC decoupled, +250 µs | 0.83 (0.82) | **0.92** (0.92) | **0.94** (0.94) | 0.83 (0.82) | **0.91** (0.91) |
+| RC inline, +250 µs | 0.88 (0.87) | **0.95** (0.96) | **0.95** (0.95) | **0.91** (0.87) | **0.96** (0.97) |
+| SNAPSHOT decoupled, +250 µs | 0.85 (0.87) | **0.91** (0.90) | **0.96** (0.96) | **0.94** (0.93) | **0.91** (0.92) |
+| SNAPSHOT inline, +250 µs | **0.94** (0.94) | **0.95** (0.95) | **0.96** (0.96) | **0.93** (0.92) | **0.96** (0.96) |
+
+One-second socket reads in TPC-C, per repetition, (a) and then (c). YCSB had none in any cell:
+
+| cell | fast | +250 µs |
+|---|---|---|
+| RC decoupled | 0, 0 / 1, 4 | 0, 0 / 1, 0 |
+| RC inline | 0, 0 / 2, 1 | 0, 0 / 2, 0 |
+| SNAPSHOT decoupled | 8, 24 / 0, 30 | 2, 8 / 4, 6 |
+| SNAPSHOT inline | 30, 13 / 9, 21 | 0, 0 / 0, 0 |
+
+p50 overhead against the vendor, fast network (ninth run in brackets):
+
+| | Delivery | NewOrder | OrderStatus | Payment | StockLevel | scan | insert |
+|---|---|---|---|---|---|---|---|
+| RC decoupled | +94% (+91) | +57% (+53) | +67% (+61) | +60% (+58) | +20% (+19) | +34% (+37) | +19% (+31) |
+| RC inline | **+91%** (+64) | +28% (+23) | +29% (+39) | +29% (+25) | +19% (+31) | +14% (+19) | +10% (+10) |
+| SNAPSHOT decoupled | +73% (+76) | +44% (+44) | +32% (+32) | +51% (+53) | +13% (+23) | +9% (+8) | +19% (+20) |
+| SNAPSHOT inline | **+48%** (+23) | +19% (+12) | +36% (+36) | +23% (+20) | +19% (+24) | +15% (+14) | +17% (+9) |
+
+At +250 µs, SNAPSHOT inline's TPC-C transactions are +6% to +11% and its YCSB operations +4% to +8%.
+
+- **The one-second stalls are the server's, on both drivers.** The poller's distinct waits equal the
+  harness's count in 31 of the 32 TPC-C runs (the other: 1 against 2). Every waiter is on a WAREHOUSE
+  or DISTRICT data block, or its decoupled `_tx_metadata` block, in Payment's reads of the warehouse
+  and district rows. The vendor's own texts wait in its SERIALIZABLE runs, as the driver's do at both
+  levels. No waiter has a blocking session, and the longest is 999 ms: the waiter sleeps Oracle's
+  timeout and wakes to a free buffer. A stall costs one terminal-second of 240 a repetition. The
+  SNAPSHOT decoupled driver ran 1,115.7/s in the repetition with no stalls and 1,034.8/s in the one
+  with 30.
+- **RC inline TPC-C is 0.71** against the ninth run's 0.63, which had about 80 stalls; this run had 3.
+- **The first write on an inline table** now happens in the measured minute. That puts Delivery at
+  +91% (+64%) at READ COMMITTED and +48% (+23%) at SNAPSHOT. `table fetch continued row` per 60 s
+  run is 138,000–175,000 for the driver on inline TPC-C fast (48,000–66,000 slow), against the
+  vendor's 2,000–2,700 and the decoupled driver's 1,500–2,200: the rows grow by their metadata and
+  migrate under PCTFREE 10. Ten-row stock UPDATE: 71.2 gets, against 53.5 on the ninth run's
+  backfilled tables and the vendor's 40.2. Delivery's order_line UPDATE: 70.3, 46.5 and 13.9. An
+  application's imported inline table pays this once a row.
+- **The backfilled decoupled metadata rows grow too.** YCSB A and F decoupled count 86,000 and
+  53,000 continued rows. The backfill stamps a 24-character `tx_id` where a transaction writes 36,
+  and on the container a 36-character placeholder removes the migration (todo 364, proposal 2).
+- **The in-flight index is the inline layout's largest remaining excess.** It holds an entry for
+  every row, so every INSERT and DELETE maintains it: new_order's INSERT is 7.6 gets against the
+  vendor's 4.4, oorder's 10.5 against 7.3. Every first write moves an entry, and every gate probes it
+  twice. On the container, a function-based index holding only the rows in flight takes the gate
+  probe from 6 gets to 1, a first write from 11.8 to 5.6 and an insert from 6.3 to 3.2 (todo 364,
+  proposal 1, being designed).

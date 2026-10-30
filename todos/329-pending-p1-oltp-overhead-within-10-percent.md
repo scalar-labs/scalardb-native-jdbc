@@ -16,26 +16,36 @@ through the vendor URL (run (a)): point read, range read, update and delete by k
 read, read-modify-write, JDBC batches, and the joins and aggregates of TPC-C. After todo 328 a write
 is one round trip on PostgreSQL, but YCSB is at 0.76x and TPC-C at 0.58x.
 
-## Status, 2026-10-29
+## Status, 2026-10-31
 
 Not met; the target stays. The default level is SNAPSHOT since 7cf5779, so SNAPSHOT's cells are the
-ones a new user meets. Latest AWS figures, TPC-C (c)/(a), fast network / +250 µs per round trip:
+ones a new user meets. Latest AWS figures, the full run from `bfa20aa`, TPC-C (c)/(a), fast network /
++250 µs per round trip:
 
 | engine, run | RC decoupled | RC inline | SNAPSHOT decoupled | SNAPSHOT inline |
 |---|---|---|---|---|
-| PostgreSQL, fourteenth (`20261029-0022-pg`) | 0.70 / 0.87 | 0.76 / 0.89 | 0.80 / 0.91 | 0.83 / 0.94 |
-| Oracle, ninth (`20261028-2259-ora`) | 0.61 / 0.82 | 0.63 / 0.87 | 0.67 / 0.87 | 0.82 / 0.94 |
+| PostgreSQL, fifteenth (`20261029-2333-pg`) | 0.69 / 0.89 | 0.78 / 0.91 | 0.80 / 0.92 | 0.86 / 0.94 |
+| Oracle, tenth (`20261029-2333-ora`) | 0.59 / 0.83 | 0.71 / 0.88 | 0.67 / 0.85 | 0.83 / 0.94 |
 
-At +250 µs, YCSB A, C and F are within 10% in every PostgreSQL cell, and TPC-C at SNAPSHOT and
-SERIALIZABLE. What is left, by size: the scan (YCSB E, +14% to +50% at p50), StockLevel on the inline
-layout on PostgreSQL, and on Oracle the decoupled layout's writes and the one-second buffer busy
-waits that the vendor's runs also have (todo 334's log, 2026-10-29), which make the Oracle ratios
-noisy in both directions.
+At +250 µs, YCSB A, C and F are within 10% in every cell of both engines, and TPC-C on PostgreSQL at
+SNAPSHOT and on the inline layout. What is left, by size:
+- the scan (YCSB E, +9% to +41% at p50);
+- StockLevel on the inline layout on PostgreSQL;
+- on Oracle, the decoupled layout's writes and the in-flight index's upkeep;
+- on Oracle, the inline rows' first-write growth, which is now in the measured minute because the
+  backfill is off for inline tables.
+
+The one-second buffer busy waits are the server's: the wait poller matches them to the vendor's own
+SERIALIZABLE runs, and each repetition's stall count now sits beside its throughput
+(`docs/benchmarks/benchbase-oracle-aws.md`, tenth run).
 
 Closed beside this todo on 2026-10-29: 328, 334, 335, 336 and 338. Their open items are todos 363
-(round trips on the other engines) and 364 (Oracle and PostgreSQL proposals not yet taken). Next:
-the full run from 7ce0408 or later, both engines, with each repetition's stall count and Oracle's
-wait poller.
+(round trips on the other engines) and 364 (Oracle and PostgreSQL proposals). On 2026-10-31 the user
+took two of 364's proposals:
+- the function-based Oracle in-flight index, being designed;
+- the 36-character backfill `tx_id`, handed to c7.
+
+Next: an AWS run once they land.
 
 ## Findings
 
