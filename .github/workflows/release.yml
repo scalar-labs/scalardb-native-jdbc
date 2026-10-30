@@ -202,7 +202,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Java 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v4
         with:
           distribution: temurin
           java-version: 25
@@ -210,7 +210,7 @@ jobs:
       # No cache on the release path: a tag job would restore what CI last saved on main, and the
       # release would be built and signed from outputs no reviewed commit accounts for
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           cache-disabled: true
 
@@ -257,14 +257,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up Java 25
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v4
         with:
           distribution: temurin
           java-version: 25
 
       # no cache, as in publish-maven: the zips are built from this commit alone
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           cache-disabled: true
 
