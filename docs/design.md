@@ -959,6 +959,19 @@ conflict, c7's finding), and under 16 concurrent SERIALIZABLE sessions each prep
 with no in-flight index, `INITRANS 50` changing nothing, 4 sessions the same): a property of any
 in-flight index on Oracle, which ScalarDB's storage connections meet where they run Oracle's
 SERIALIZABLE and the driver's own writes, which touch no in-flight entry, do not (todo 366).
+Measured as a paced mixed workload on the container (todo 366's log, 2026-10-31; ScalarDB-shaped
+writers at SERIALIZABLE preparing and committing 3 random rows a transaction, beside 4 driver-shaped
+READ COMMITTED writers): 4 sessions at 10 transactions a second each, 30 prepares a second on the
+table, lose 17% of their prepares and 12% of their commits to ORA-08177 on the plain index, 8% and
+12% on the function-based one, 0.0% without an in-flight index and 0.0% at READ COMMITTED; 16
+sessions at 50 a second 42% and 33%, 40% and 33%. Entries padded to one or two a leaf cut the rate
+four to ten times at the cost of the key set's probe, one block per two in-flight rows instead of
+one; a hash-partitioned index takes no expression as its key. ScalarDB itself runs READ COMMITTED
+when `scalar.db.jdbc.isolation_level` is unset and requires Oracle's SERIALIZABLE only for a virtual
+table, the decoupled layout, at create, import and every operation; so the inline layout is free of
+this once ScalarDB's connections run READ COMMITTED on Oracle, which the user docs should ask for
+there, and the decoupled layout waits on ScalarDB's Oracle minimum, which Oracle's statement-level
+consistency at READ COMMITTED would satisfy (todo 366's options, the user's call).
 
 ---
 
