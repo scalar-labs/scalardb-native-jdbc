@@ -40,13 +40,10 @@ jobs:
           OCR_USERNAME: ${{ secrets.OCR_USERNAME }}
           OCR_TOKEN: ${{ secrets.OCR_TOKEN }}
         run: |
-          for repo in database/enterprise database/standard; do
-            token=$(curl -s -u "$OCR_USERNAME:$OCR_TOKEN" \
-              "https://container-registry.oracle.com/auth?service=Oracle%20Registry&scope=repository:$repo:pull" \
-              | jq -r .token)
+          for repo in database/enterprise database/standard database/free; do
             echo "$repo:"
-            curl -s -H "Authorization: Bearer $token" \
-              "https://container-registry.oracle.com/v2/$repo/tags/list" | jq -c .tags
+            skopeo list-tags --creds "$OCR_USERNAME:$OCR_TOKEN" \
+              "docker://container-registry.oracle.com/$repo" | jq -c '[.Tags[] | select(startswith("19"))]'
           done
 
       - name: Log in to the GitHub Container Registry
