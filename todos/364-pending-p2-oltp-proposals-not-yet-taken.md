@@ -386,3 +386,10 @@ todo 334's log and the design sections named.
   back by then, so it reads the committed price: a smoke test of the text, not of a row in flight,
   fine). The verdict carries to 9aabeb0; the design's rule sentence now says "no hint but the
   committed copy's on the plain form". Lands on the user's word in c7's session.
+- 2026-11-01 (the CASE copy on main): c7 landed 5e1da62 + 13d3307 by fast-forward on the user's "land
+  it" in c7's session, rebased onto f4f69ec; `git range-diff efc47ae..9aabeb0 f4f69ec..13d3307` shows
+  both patches identical to the reviewed db5a464 + 9aabeb0, and the code diff between 9aabeb0 and
+  13d3307 outside docs and todos is empty. Not pushed. 6e told: a run from this main shows the
+  copy's effect (expected: RC inline toward 0.8, the item read at the vendor's 3 gets), and item 3
+  (the inline backfill A/B) and the harness plans capture can go to the user. The 19c run of the copy
+  follows with 33's workflow.

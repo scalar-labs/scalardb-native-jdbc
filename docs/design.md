@@ -1282,16 +1282,16 @@ union as a derived table.
   keep their forms: there the arms differ in their predicates and the first arm's index on the
   column is the point of the split (the layout table of section 1). The copy's text is plain SQL, a
   CASE and a COALESCE per column, which Oracle 19c runs as 23 does (todo 327): the suites run on
-  both. Built by c7 (db5a464 and 9aabeb0, 2026-11-01): `SqlAst.keyOnly` the test, false for a
-  subquery anywhere in the clauses, a NATURAL or USING join and an unqualified column of a join it
-  cannot place; `Router.caseCopies` the choice, Oracle at READ COMMITTED, inline, inner;
-  `SplitRead.caseCopy` the text; the gate dropped only where every ScalarDB table of the statement
-  is a copy, a mixed statement keeping it with the copy in its fallback. What must keep holding: the
-  READ COMMITTED inline read tests, a row in flight read as its before image by key, its anchor the
-  before image's identity, an in-flight insert invisible, the two-arm form for a predicate on a
-  non-key column, the gated aggregate with a non-key conjunct; to add: the copy's text for a key
-  lookup and for a key-prefix range, the aggregate without a gate, and the item read of
-  `OracleOltpIntegrationTest` at 3 gets.
+  both. Built by c7 (db5a464 and 9aabeb0, on main as 5e1da62 and 13d3307, 2026-11-01):
+  `SqlAst.keyOnly` the test, false for a subquery anywhere in the clauses, a NATURAL or USING join
+  and an unqualified column of a join it cannot place; `Router.caseCopies` the choice, Oracle at
+  READ COMMITTED, inline, inner; `SplitRead.caseCopy` the text; the gate dropped only where every
+  ScalarDB table of the statement is a copy, a mixed statement keeping it with the copy in its
+  fallback. What must keep holding: the READ COMMITTED inline read tests, a row in flight read as
+  its before image by key, its anchor the before image's identity, an in-flight insert invisible,
+  the two-arm form for a predicate on a non-key column, the gated aggregate with a non-key conjunct;
+  to add: the copy's text for a key lookup and for a key-prefix range, the aggregate without a gate,
+  and the item read of `OracleOltpIntegrationTest` at 3 gets.
 
   **A table found clear** (todo 329). The snapshot is the transaction's: a table that has no row in
   flight in it at one statement has none at any later statement either, since only the
