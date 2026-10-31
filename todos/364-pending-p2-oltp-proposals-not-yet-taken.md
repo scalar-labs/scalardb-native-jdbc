@@ -311,3 +311,45 @@ todo 334's log and the design sections named.
   unbackfilled first writes. Proposed to the user via 6e, in order: the JFR of the RC inline TPC-C run
   for the client's share; the routed read's text cost measured on the container; the RC stamp batch's
   per-element conditions; PCTFREE or the backfill for the inline growth.
+- 2026-10-31 (the eleventh run's server excess sized on the container; proposals via 6e, the user's
+  call; scratchpad `ora/osa2.jsh`, `osa4.jsh`, `osa5.jsh` and their `.txt`, tables OIT item-shaped 100K
+  rows and OLT order_line-shaped 300K rows, function-based in-flight indexes, 50 rows in flight):
+  (a) the READ COMMITTED key read on an inline table is the two-arm split, the committed copy UNION
+  ALL the in-flight arm through the index, whose arm is an INLIST ITERATOR of two probes (states 1
+  and 2) plus a UNION-ALL row source: at AWS 10.2 µs and 4 gets against the vendor's 4.8 and 3 on
+  item; on the container (medians, cpu µs / gets a call) the vendor 4.6 / 3.00 (OIT), 5.4 / 4.00
+  (OLT); the split as deployed 6.6 / 5.00, 7.2 / 6.00; the arm with BETWEEN 1 AND 2 (item 2 above)
+  6.8 / 4.00, 7.1 / 5.00, one probe instead of two but its plan makes the key a filter under the
+  state range (`access SYS_NC18$ >= 1 AND <= 2, filter SYS_NC19$ = :2`), so it scans every in-flight
+  entry of the table and is not for a keyed arm, and moot for the gate, which stops at its first
+  row; the CASE copy, `rc_T`'s form for the inline layout as one derived table, each non-key column
+  `CASE WHEN COALESCE(t.tx_state, 3) IN (1, 2) THEN t.before_c ELSE t.c END`, the keys plain, the
+  anchors the same CASE on `tx_id` and `tx_version`, `WHERE COALESCE(t.tx_state, 3) NOT IN (1, 2) OR
+  t.before_tx_id IS NOT NULL OR t.before_tx_version IS NOT NULL`, 5.2 / 3.00 and 5.6 / 4.00: the
+  vendor's gets, within 0.6 µs of its CPU, exact for a predicate that references only key columns
+  (there P = P_before, both arms select the same rows by the same key, the arm's filter is the OR
+  term, the before image's identity is the anchor as before); the in-flight key's before image read
+  alike by both forms. Proposal: on an inline table at READ COMMITTED a read whose predicate
+  references only the table's key columns takes the CASE copy in place of the two arms, Oracle first
+  (PostgreSQL's inline the same form once measured); item, stock, warehouse, district, customer by
+  id, oorder, new_order, order_line by order are such reads, about 20 a NewOrder, 100 of its 200 µs
+  of server CPU over the vendor's. (b) The same for an anchor-less aggregate with a key-only
+  predicate: Delivery's SUM over an order, the gated statement as written (4.2) on the container
+  8.6 µs / 6.15 gets against the vendor's 6.6 / 4.15, the gate evaluated once whether inside MAX()
+  or as an outer column (8.3 / 6.15), and a gate of 1 then costs the split read again (8.4 / 10.0, a
+  second round trip); the CASE copy 7.2 / 4.15 exact in one statement (223.4 the vendor's sum with
+  the in-flight amount, 123.4 the copy's and the split's), no gate, no fallback. At AWS that read
+  cost 15.5 gets against the vendor's 4.2 (the tenth 20.2), which the container's gated form does
+  not explain: the run's plans section holds the top texts by elapsed only; ask the harness for the
+  plans of every driver text above 10 gets a call. (c) The write side: the RC inline stock stamp
+  UPDATE has the vendor's plan (INDEX UNIQUE SCAN, TABLE ACCESS BY INDEX ROWID) and costs 51.4 gets
+  and 91.5 µs a 10-row batch against 40.3 and 41.3; the anchored WHERE (DECODE and two COALESCEs) and
+  the five stamp columns are trivial, so the excess is the first write's row growth on an
+  unbackfilled imported row (tx columns NULL to a 36-character tx_id and three numbers, the row
+  migrating when its block is full; 173K continued-row fetches a 60 s run, unchanged by the index;
+  redo 11.7 against 7.7 KB a commit): proposal, an A/B of the inline cells with the harness's
+  backfill on, as it backfills the decoupled cells, to size the growth's share (expected: the stock
+  batch toward 42 gets and 55 µs, the continued rows toward 0, redo down), and a setting-up-tables
+  note that an inline table's first writes grow its rows unless backfilled or loaded with PCTFREE.
+  Also: the ofa-oracle instance had died this morning (PMON, ORA-471 after a clock jump) and was
+  restarted; the scratch tables survived.
