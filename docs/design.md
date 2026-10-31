@@ -2982,32 +2982,33 @@ vendor's own statement, then on AWS with the rest.
   the uncommitted writer's row is taken over short of stamped, the hinted bulk block's own abort
   for it, and at SNAPSHOT the takeover UPDATE of the row committed after the snapshot meets
   ORA-08177, where the hinted bulk block's takeover meets it directly; the same `40001`,
-  rollback-only, at one round trip more. The data FORALL runs first and waits on the data table's
-  key, so a ScalarDB prepare and a driver DELETE, which write the data row too, are decided there
-  as today; only a writer of the metadata row alone, an imported table's tombstone committed after
-  a SNAPSHOT transaction's snapshot, reaches the metadata insert's ORA-00001. Both outcomes are to
-  be confirmed on 19c when this is built, beside the hinted form's on the same rows. The cost is
-  the `NOT EXISTS` probe, one unique scan of `T_meta`'s primary key per entry inside the same
-  call, 2 to 3 gets by the index's height, after which the insert's own unique check finds those
-  blocks cached: no round trip, one child cursor as before, the block's text one per write shape.
-  A 10-entry `order_line` batch pays about 20 to 30 gets more on a block the eighth run measured
-  at 70, a third more, and that, not caution, is why 23ai and later keep the hinted text byte for
-  byte though the `NOT EXISTS` form is right there too; measured on 19c when built. Only this
-  block changes: no other hinted insert reads `SQL%BULK_ROWCOUNT`. The single forms and the
-  keyed step block's imported branch read one row's `SQL%ROWCOUNT`, right on 19c (probe 5e); the
-  predicate block's `FORALL i IN VALUES OF l_new` over the stamp sums `SQL%ROWCOUNT`, the total,
-  also right; the keyed bulk blocks' and the predicate block's `SQL%BULK_ROWCOUNT` follow DML
-  without the hint; the INSERT ALL form and the inline INSERT read JDBC's counts. To add: on 19c,
-  `MoreWritesIntegrationTest.batches`, whose tombstone taken over in a batch is what the hinted
-  block misses there, and the `OracleOltpIntegrationTest` bulk block tests; the hinted FORALL's
-  total with a skipped row asserted in the probe beside 9c; a text test that the block below 23
-  has no hint and the 23 text is byte-identical; and the two outcomes above with a second
-  connection holding an uncommitted tombstone insert on an imported table, at both levels. Open:
-  on 19c Oracle's count of round trips for the INSERT over a tombstone, the INSERT ALL that fails
-  then the block, is 2 where 23ai's is 1 (`form4InsertAsOneStatement`); the rows are right. To
-  rule out first: `onMetadataTable` reads `all_constraints` once per constraint name into the
-  static `CONSTRAINT_TABLES`, one round trip at that constraint's first ORA-00001 in the JVM, so
-  the test is run twice in one JVM to see whether the second counts 1.
+  rollback-only, at one round trip more, and an abort's counts before it those of the entries one by
+  one, which may be more than the hinted block's none (both shapes JDBC allows for a failed batch).
+  The data FORALL runs first and waits on the data table's key, so a ScalarDB prepare and a driver
+  DELETE, which write the data row too, are decided there as today; only a writer of the metadata
+  row alone, an imported table's tombstone committed after a SNAPSHOT transaction's snapshot,
+  reaches the metadata insert's ORA-00001. Both outcomes are to be confirmed on 19c when this is
+  built, beside the hinted form's on the same rows. The cost is the `NOT EXISTS` probe, one unique
+  scan of `T_meta`'s primary key per entry inside the same call, 2 to 3 gets by the index's height,
+  after which the insert's own unique check finds those blocks cached: no round trip, one child
+  cursor as before, the block's text one per write shape. A 10-entry `order_line` batch pays about
+  20 to 30 gets more on a block the eighth run measured at 70, a third more, and that, not caution,
+  is why 23ai and later keep the hinted text byte for byte though the `NOT EXISTS` form is right
+  there too; measured on 19c when built. Only this block changes: no other hinted insert reads
+  `SQL%BULK_ROWCOUNT`. The single forms and the keyed step block's imported branch read one row's
+  `SQL%ROWCOUNT`, right on 19c (probe 5e); the predicate block's `FORALL i IN VALUES OF l_new` over
+  the stamp sums `SQL%ROWCOUNT`, the total, also right; the keyed bulk blocks' and the predicate
+  block's `SQL%BULK_ROWCOUNT` follow DML without the hint; the INSERT ALL form and the inline INSERT
+  read JDBC's counts. To add: on 19c, `MoreWritesIntegrationTest.batches`, whose tombstone taken
+  over in a batch is what the hinted block misses there, and the `OracleOltpIntegrationTest` bulk
+  block tests; the hinted FORALL's total with a skipped row asserted in the probe beside 9c; a text
+  test that the block below 23 has no hint and the 23 text is byte-identical; and the two outcomes
+  above with a second connection holding an uncommitted tombstone insert on an imported table, at
+  both levels. Open: on 19c Oracle's count of round trips for the INSERT over a tombstone, the
+  INSERT ALL that fails then the block, is 2 where 23ai's is 1 (`form4InsertAsOneStatement`); the
+  rows are right. To rule out first: `onMetadataTable` reads `all_constraints` once per constraint
+  name into the static `CONSTRAINT_TABLES`, one round trip at that constraint's first ORA-00001 in
+  the JVM, so the test is run twice in one JVM to see whether the second counts 1.
 
   What the driver does with the rows of a block of entries, per entry in order:
 
