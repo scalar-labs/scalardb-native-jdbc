@@ -1048,7 +1048,39 @@ class OracleFormsIntegrationTest {
   }
 
   /**
-   * 9d. {@code FORALL i IN INDICES OF} a sparse index-by table runs the entries it lists only, with
+   * 9c'. The same metadata insert as {@code INSERT ... SELECT ... FROM dual WHERE NOT EXISTS} the
+   * key's row, under {@code FORALL}: a key with a row, or one an earlier entry inserted, counted 0
+   * by {@code SQL%BULK_ROWCOUNT}, the others 1. Decides: the bulk INSERT's metadata insert on
+   * Oracle before 23, whose {@code SQL%BULK_ROWCOUNT} counts a row the hint of 9c skips as 1.
+   */
+  @Test
+  void notExistsPerIteration() throws Exception {
+    try (Connection c = ORA.open()) {
+      c.setAutoCommit(false);
+      String row =
+          cursorRow(
+              c,
+              "DECLARE TYPE t_n IS TABLE OF NUMBER INDEX BY PLS_INTEGER; l_k t_n; l_t NUMBER; l_c"
+                  + " VARCHAR2(100); BEGIN l_k(1) := 211; l_k(2) := 9; l_k(3) := 212; l_k(4) :="
+                  + " 211; FORALL i IN 1 .. 4 INSERT INTO ofa.bk_meta (k, tx_id, tx_state,"
+                  + " tx_version, tx_prepared_at, tx_committed_at) SELECT l_k(i), 'N', 3, 1, 0, 0"
+                  + " FROM dual WHERE NOT EXISTS (SELECT 1 FROM ofa.bk_meta m WHERE m.k = l_k(i));"
+                  + " l_t := SQL%ROWCOUNT; FOR i IN 1 .. 4 LOOP l_c := l_c || SQL%BULK_ROWCOUNT(i)"
+                  + " || ','; END LOOP; OPEN ? FOR SELECT l_c, l_t FROM dual; END;",
+              cs -> {});
+      log(
+          "9c' FORALL metadata INSERT ... WHERE NOT EXISTS of 211, 9 (has a row), 212, 211 again:"
+              + " counts/total "
+              + row);
+      assertThat(row).isEqualTo("1,0,1,0,/2");
+      assertThat(query(c, "SELECT k, tx_id FROM ofa.bk_meta WHERE k IN (9, 211, 212) ORDER BY k"))
+          .containsExactly("9/T0", "211/N", "212/N");
+      c.rollback();
+    }
+  }
+
+  /**
+   * 9d.{@code FORALL i IN INDICES OF} a sparse index-by table runs the entries it lists only, with
    * {@code i} the entry's index into the other collections. Decides: the takeover over the entries
    * whose metadata insert counted 0.
    */
