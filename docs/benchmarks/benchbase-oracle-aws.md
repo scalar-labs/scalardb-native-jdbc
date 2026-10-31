@@ -661,3 +661,73 @@ At +250 µs, SNAPSHOT inline's TPC-C transactions are +6% to +11% and its YCSB o
   twice. On the container, a function-based index holding only the rows in flight takes the gate
   probe from 6 gets to 1, a first write from 11.8 to 5.6 and an insert from 6.3 to 3.2 (todo 364,
   proposal 1, being designed).
+
+## Eleventh run: the function-based in-flight index and the 36-character backfill `tx_id` (2026-10-31)
+
+Run `20261031-1349-ora` on main `c4a7fcf`, the tenth run's matrix on a fresh stack. Since the tenth
+run's `bfa20aa`, main has:
+- **the function-based in-flight index** (`c4a7fcf`): one `CASE tx_state WHEN 1 THEN col WHEN 2
+  THEN col END` per column, NULL on committed rows, so the index holds only the rows in flight, and
+  every Oracle in-flight text spelled on the expressions;
+- **the 36-character backfill `tx_id`** (`36dfb48`), as long as a transaction's, so a backfilled
+  metadata row does not grow at its first write.
+
+All 8 cells passed in 5 h 24 min.
+
+Throughput, (c)/(a) (tenth run in brackets):
+
+| cell | TPC-C | A | C | E | F |
+|---|---|---|---|---|---|
+| RC decoupled, fast | 0.61 (0.59) | 0.80 (0.79) | 0.82 (0.85) | 0.76 (0.74) | 0.76 (0.79) |
+| RC inline, fast | 0.75 (0.71) | **0.93** (0.87) | 0.88 (0.85) | 0.86 (0.87) | **0.90** (0.88) |
+| SNAPSHOT decoupled, fast | 0.68 (0.67) | 0.78 (0.75) | **0.95** (0.84) | **0.93** (0.92) | 0.82 (0.79) |
+| SNAPSHOT inline, fast | 0.87 (0.83) | **0.93** (0.88) | 0.88 (0.86) | **0.93** (0.87) | **0.94** (0.88) |
+| RC decoupled, +250 µs | 0.83 (0.83) | **0.92** (0.92) | **0.94** (0.94) | 0.81 (0.83) | **0.91** (0.91) |
+| RC inline, +250 µs | **0.92** (0.88) | **0.96** (0.95) | **0.95** (0.95) | **0.90** (0.91) | **0.96** (0.96) |
+| SNAPSHOT decoupled, +250 µs | 0.86 (0.85) | **0.92** (0.91) | **0.97** (0.96) | **0.94** (0.94) | **0.93** (0.91) |
+| SNAPSHOT inline, +250 µs | **0.95** (0.94) | **0.96** (0.95) | **0.97** (0.96) | **0.95** (0.93) | **0.97** (0.96) |
+
+p50 overhead against the vendor, TPC-C, fast network (tenth run in brackets):
+
+| | Delivery | NewOrder | OrderStatus | Payment | StockLevel |
+|---|---|---|---|---|---|
+| RC decoupled | +90% (+94) | +55% (+57) | +65% (+67) | +55% (+60) | +20% (+20) |
+| RC inline | **+62%** (+91) | +26% (+28) | +25% (+29) | +30% (+29) | +19% (+19) |
+| SNAPSHOT decoupled | +62% (+73) | +35% (+44) | +23% (+32) | +47% (+51) | +15% (+13) |
+| SNAPSHOT inline | **+33%** (+48) | +16% (+19) | +25% (+36) | +17% (+23) | +17% (+19) |
+
+At +250 µs, SNAPSHOT inline's TPC-C transactions are +3% to +9% and its YCSB operations +3% to +5%.
+
+- **The index does what the container predicted.** Gets per call at RC inline, the vendor's in
+  brackets:
+  - the item read 7.0 → 4.0 (3.0); the customer, oorder and new_order key reads 10 → 5 (4);
+  - Delivery's gate probe 6.0 → 1.0;
+  - the 10-row stock UPDATE batch 71.2 → 51.4 (40.3);
+  - INSERT new_order 7.6 → 4.6 (4.4); INSERT oorder 10.5 → 7.6 (7.7);
+  - DELETE new_order 15.6 → 8.3 (7.3).
+
+  NewOrder's statements sum to about 180 gets, against 246 in the tenth run and the vendor's 152:
+  70% of the excess is gone. The plans read `<TABLE>_INFLIGHT` by `INDEX RANGE SCAN` under the
+  `CASE` predicate. SNAPSHOT inline has the same shape: the gated first reads 11.0 → 5.0 and
+  16.1 → 6.0, NewOrder about 221 → 166.
+- **Redo per commit** at RC inline is 11.7 KB against the vendor's 7.7 (17.2 in the tenth run), and
+  11.3 against 8.0 at SNAPSHOT inline (16.9). Decoupled: 18.6 (20.6) and 17.9 (19.6).
+- **Throughput moved less than the gets.** The vendor ran 4% to 10% slower on this stack than on
+  the tenth run's, so part of each ratio's gain is the stack's. In absolute terms the driver is
+  −6% to +1%. With 4 terminals in a closed loop, throughput follows the transaction's latency. The
+  index took 0.21 ms off the server's active time a commit at RC inline (1.94 → 1.73, the vendor's
+  1.12) and the driver's p50 fell 2,181 → 2,078 µs, about 5%. Backends' CPU over the vendor's: 0.81
+  → 0.60 ms a commit at RC inline.
+- **What is left on the server is CPU per statement at nearly equal gets.** At RC inline:
+  - a routed key read is 10.2 µs of CPU against the vendor's 4.8, at 4 gets against 3. NewOrder's
+    20 key reads make up about half of its excess;
+  - the 10-row stock UPDATE batch is 91.5 µs against 41.3, about a quarter;
+  - NewOrder's statements total 463 µs against the vendor's 265 (544 in the tenth run).
+
+  The client's share is in the run's flight recordings, not yet read.
+- **The 36-character backfill `tx_id` removes the backfilled rows' migration.** `table fetch
+  continued row` per 60 s run on decoupled YCSB A and F: 4 and 4 at RC (85,880 and 53,304 in the
+  tenth run), 7 and 7 at SNAPSHOT (21,371 and 32,938). Inline TPC-C is unchanged at 157,604 to
+  173,003: an inline table's rows, not backfilled, grow by their metadata at their first write.
+- **The one-second stalls** are 16 to 33 a repetition at SNAPSHOT on both drivers and 0 to 1 at RC,
+  as in the tenth run: Oracle SERIALIZABLE on the WAREHOUSE and DISTRICT blocks.
