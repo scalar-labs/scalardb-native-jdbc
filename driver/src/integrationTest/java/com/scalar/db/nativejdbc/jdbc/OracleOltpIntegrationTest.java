@@ -3270,6 +3270,7 @@ class OracleOltpIntegrationTest {
     String olData = NS + ".\"" + tableInfo("ccol").dataTable() + "\"";
     String itData = NS + ".\"" + tableInfo("ccit").dataTable() + "\"";
     String copy = "CASE WHEN COALESCE(t.\"tx_state\", 3) IN (1, 2) THEN";
+    String price520;
     Properties ttl = new Properties();
     ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59365");
     try (Connection d = ORA.openDriver(ttl);
@@ -3278,7 +3279,7 @@ class OracleOltpIntegrationTest {
       String sum9 = rows(v, "SELECT SUM(ol_amt) FROM " + olData + " WHERE ol_o = 9").get(0);
       String line3 =
           rows(v, "SELECT ol_amt FROM " + olData + " WHERE ol_o = 9 AND ol_n = 3").get(0);
-      String price520 = rows(v, "SELECT i_price FROM " + itData + " WHERE i_id = 520").get(0);
+      price520 = rows(v, "SELECT i_price FROM " + itData + " WHERE i_id = 520").get(0);
       // a line of order 9 in flight with a new amount, a line inserted in flight, 50 items in
       // flight
       TwoPhaseCommitTransaction held = preparedAmount(tpc, "ccol", 9, 3, 100);
@@ -3409,6 +3410,27 @@ class OracleOltpIntegrationTest {
         inserting.rollback();
         items.rollback();
       }
+    }
+    // a table still on the plain in-flight index, (tx_state, key): the copy carries the committed
+    // copy's NO_INDEX_SS, a skip scan of that index over the key's range possible under the OR
+    String index = tableInfo("ccit").inflightIndex(Engine.ORACLE);
+    try (Connection v = ORA.open()) {
+      ORA.execute(
+          v,
+          "DROP INDEX " + NS + ".\"" + index + "\"",
+          "CREATE INDEX " + NS + ".\"" + index + "\" ON " + itData + " (\"tx_state\", i_id)");
+    }
+    Properties fresh = new Properties();
+    fresh.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59366");
+    try (Connection d = ORA.openDriver(fresh)) {
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(false);
+      String item = "SELECT i_price FROM " + it + " WHERE i_id = 520";
+      assertThat(d.nativeSQL(item))
+          .contains(copy)
+          .contains("/*+ NO_INDEX_SS(t \"" + index + "\") */");
+      assertThat(rows(d, item)).containsExactly(price520);
+      d.rollback();
     }
   }
 

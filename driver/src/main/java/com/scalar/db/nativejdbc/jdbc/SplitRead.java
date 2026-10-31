@@ -511,8 +511,9 @@ final class SplitRead {
    * An inline table's rows as READ COMMITTED reads them, in one derived table (design 4.2 "The
    * key-only read on an inline table at READ COMMITTED as the CASE copy", todo 364): each row's
    * columns {@code read} and versions its before image's while it is in flight, its own otherwise,
-   * an in-flight insert, which has no before image, left out; {@code rc_T}'s form, no hint and no
-   * read of the in-flight index. Exact for a predicate on the key alone, which both images share.
+   * an in-flight insert, which has no before image, left out; {@code rc_T}'s form, no read of the
+   * in-flight index, and no hint but the committed copy's on the plain form of that index. Exact
+   * for a predicate on the key alone, which both images share.
    */
   private static String caseCopy(
       Engine engine, TableInfo t, List<String> read, @Nullable Versions v) {
@@ -549,7 +550,15 @@ final class SplitRead {
         cols.add("t." + engine.quote("tx_state") + " AS " + engine.quote(OWN + 2));
       }
     }
+    // on the plain in-flight index, (tx_state, key), the committed copy's hint: a skip scan of it
+    // over the key's range stays possible under the OR; nothing on the function-based form
+    // matches the state (design 4.2 "The read side on Oracle")
+    String hint =
+        engine == Engine.ORACLE && !t.inflightExpressions()
+            ? "/*+ NO_INDEX_SS(t " + engine.quote(t.inflightIndex(engine)) + ") */ "
+            : "";
     return "(SELECT "
+        + hint
         + String.join(", ", cols)
         + " FROM "
         + data(engine, t)
