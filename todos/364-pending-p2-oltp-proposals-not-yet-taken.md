@@ -293,3 +293,21 @@ todo 334's log and the design sections named.
   `bench-env/plans/overnight-oracle.json` (the tenth run's matrix), its own stack, expected done about
   19:10; 6e sends the results, the per-statement gets and the continued-row counts for the reading
   against the expectations above.
+- 2026-10-31 (the proof run 20261031-1349-ora, c4a7fcf, read against the tenth, 20261029-2333-ora;
+  the reading sent to 6e for the benchmark doc's eleventh-run section): the index did on the server
+  what the container predicted. Inline RC TPC-C (c), gets a call tenth → eleventh (vendor): the routed
+  key reads 7.0 → 4.0 (3.0) on item and 10 → 5 (4) on the 960K-row tables, Delivery's gate probe 6.0 →
+  1.0, the stock UPDATE batch 71.2 → 51.4 (40.3), the order_line INSERT batch 12.5 → 7.7 (6.6), the
+  inserts and first writes 3 to 6 fewer each (no index maintenance); NewOrder about 246 → 180 gets
+  against the vendor's 152, 70% of the excess gone. Redo 17.2 → 11.7 KB a commit (SNAPSHOT inline
+  16.9 → 11.3) against 7.7, as section 3 expected; backends' CPU excess a commit 0.81 → 0.60 ms (RC
+  inline), 0.51 → 0.24 (SNAPSHOT inline). Throughput ratios RC inline 0.71 → 0.75, SNAPSHOT inline
+  0.83 → 0.87, decoupled 0.59 → 0.61 and 0.67 → 0.68, short of the expected 0.8 / 0.9: the vendor
+  ran 4 to 10% slower on this stack, the driver flat, so the ratio gains are partly the stack's; the
+  gets were a tenth of the driver's 2 ms transaction, and the remaining 0.6 ms a commit of server
+  time over the vendor is per-statement CPU at near-equal gets (item read 10.2 vs 4.8 µs at 4 vs 3
+  gets, the stock stamp batch 91 vs 41 µs for 10 rows). Continued rows: the 36-character sentinel
+  took the decoupled YCSB A / F from 85,880 / 53,304 to 4 / 4 (RC); inline TPC-C 173K unchanged, the
+  unbackfilled first writes. Proposed to the user via 6e, in order: the JFR of the RC inline TPC-C run
+  for the client's share; the routed read's text cost measured on the container; the RC stamp batch's
+  per-element conditions; PCTFREE or the backfill for the inline growth.
