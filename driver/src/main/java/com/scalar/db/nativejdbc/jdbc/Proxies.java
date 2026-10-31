@@ -123,6 +123,27 @@ public final class Proxies {
     return null;
   }
 
+  // a test's stand-in for the server's major version for the connections it opens, 0 for the
+  // server's own: the form below 23 run on 23 (todo 327)
+  static volatile int oracleMajorForTests;
+
+  /**
+   * The Oracle server's major version, which ojdbc answers from its handshake without a round trip;
+   * 0 where it is not read, which takes the forms right on every version (design 4.4 "The INSERT's
+   * bulk block on Oracle before 23").
+   */
+  static int oracleMajor(Connection vendor) {
+    if (oracleMajorForTests > 0) {
+      return oracleMajorForTests;
+    }
+    try {
+      return vendor.getMetaData().getDatabaseMajorVersion();
+    } catch (SQLException e) {
+      LOG.debug("Oracle's major version not read: the bulk INSERT's form for before 23", e);
+      return 0;
+    }
+  }
+
   private static Object proxy(Class<?> type, InvocationHandler h) {
     return Proxy.newProxyInstance(Proxies.class.getClassLoader(), new Class<?>[] {type}, h);
   }
@@ -261,6 +282,8 @@ public final class Proxies {
     // ojdbc's SetFloatAndDoubleUseBinary, how it binds a double or float; null where it does not
     // say, or on another engine (design 4.4)
     final @Nullable Boolean binaryDoubles;
+    // the Oracle server's major version, 0 where it is not read or on another engine (design 4.4)
+    final int oracleMajor;
 
     ConnectionHandler(Connection vendor, Router router, Session session, Duration inflightWait) {
       super(vendor);
@@ -269,6 +292,7 @@ public final class Proxies {
       this.session = session;
       this.inflightWait = inflightWait;
       this.binaryDoubles = router.engine() == Engine.ORACLE ? binaryDoubles(vendor) : null;
+      this.oracleMajor = router.engine() == Engine.ORACLE ? oracleMajor(vendor) : 0;
     }
 
     Router.Route route(String sql) throws SQLException {
@@ -1565,7 +1589,11 @@ public final class Proxies {
                       int blockEnd = Math.min(same, i + Writes.ENTRIES_MAX);
                       int finalizedCount =
                           Writes.applyOracleEntries(
-                              owner.vendor, first, contexts.subList(0, blockEnd - i), finalized);
+                              owner.vendor,
+                              first,
+                              contexts.subList(0, blockEnd - i),
+                              finalized,
+                              owner.oracleMajor);
                       if (finalizedCount > 0) {
                         last[0] = first;
                         i += finalizedCount;

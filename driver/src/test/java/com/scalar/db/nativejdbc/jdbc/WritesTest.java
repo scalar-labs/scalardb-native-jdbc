@@ -1214,6 +1214,32 @@ class WritesTest {
         .contains(" FORALL i IN INDICES OF l_o UPDATE \"ns\".\"t_meta\" SET")
         .contains(" WHERE \"id\" = CAST(l_v1(i) AS number) AND COALESCE(\"tx_state\", 3) = 3;")
         .endsWith(" ? := l_r; ? := l_s; END;");
+    // below 23 the metadata insert under NOT EXISTS without the hint, whose counts per entry that
+    // server gets right; 23 and later the hinted text byte for byte, each form its own cache entry
+    // (design 4.4 "The INSERT's bulk block on Oracle before 23", todo 327)
+    List<String> slots = List.of("NUMBER", "VARCHAR2(32767)");
+    String hinted = insert.sql(slots);
+    assertThat(insert.sql(slots, 23)).isEqualTo(hinted);
+    assertThat(insert.sql(slots, 26)).isEqualTo(hinted);
+    String before23 = insert.sql(slots, 19);
+    assertThat(insert.sql(slots, 21)).isEqualTo(before23);
+    assertThat(insert.sql(slots, 0)).isEqualTo(before23);
+    assertThat(before23).doesNotContain("IGNORE_ROW_ON_DUPKEY_INDEX");
+    assertThat(untag(before23))
+        .contains(
+            " FORALL i IN 1 .. l_n INSERT INTO \"ns\".\"t_data\" (\"id\", x) VALUES (l_v1(i),"
+                + " l_v2(i)); FORALL i IN 1 .. l_n INSERT INTO \"ns\".\"t_meta\" (\"id\","
+                + " \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+                + " \"tx_committed_at\") SELECT CAST(l_v1(i) AS number), l_i, 3, 1, l_p, l_c FROM"
+                + " dual WHERE NOT EXISTS (SELECT 1 FROM \"ns\".\"t_meta\" m WHERE m.\"id\" ="
+                + " CAST(l_v1(i) AS number)); FOR i IN 1 .. l_n LOOP IF SQL%BULK_ROWCOUNT(i) = 0")
+        .contains(" WHERE \"id\" = CAST(l_v1(i) AS number) AND COALESCE(\"tx_state\", 3) = 3;")
+        .endsWith(" ? := l_r; ? := l_s; END;");
+    assertThat(before23.chars().filter(ch -> ch == '?').count())
+        .isEqualTo(hinted.chars().filter(ch -> ch == '?').count());
+    // the keyed write's block reads no skipped row's count: one form on every version
+    assertThat(keyed.sql(List.of("VARCHAR2(32767)", "NUMBER"), 19))
+        .isEqualTo(keyed.sql(List.of("VARCHAR2(32767)", "NUMBER")));
     // at READ COMMITTED the INSERT's the same, and the keyed write's built on the statement first:
     // the DML under the committed metadata row, with each slot's anchor or without, then the CAS
     // over the keys it returned (design 4.4 "The READ COMMITTED decoupled entries")
