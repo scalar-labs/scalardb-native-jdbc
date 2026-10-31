@@ -2634,7 +2634,20 @@ final class Writes {
     }
 
     String sql(List<String> types) {
-      return texts.computeIfAbsent(String.join(",", types), k -> hinted(build(types), "k"));
+      return texts.computeIfAbsent(String.join(",", types), k -> hinted(build(types, false), "k"));
+    }
+
+    /**
+     * The block for these slot types on a server of this form: below Oracle 23 the INSERT's
+     * metadata insert under {@code NOT EXISTS}, whose counts per entry that server gets right
+     * (design 4.4 "The INSERT's bulk block on Oracle before 23"); its own key in the cache, as one
+     * plan serves the connections of a DataSource.
+     */
+    String sql(List<String> types, int oracleMajor) {
+      return insert() && oracleMajor < 23
+          ? texts.computeIfAbsent(
+              "<23:" + String.join(",", types), k -> hinted(build(types, true), "k"))
+          : sql(types);
     }
 
     /** The READ COMMITTED block for these slot types, with each slot's anchor or without. */
@@ -2777,7 +2790,7 @@ final class Writes {
       return b.append(" END;").toString();
     }
 
-    private String build(List<String> types) {
+    private String build(List<String> types, boolean notExists) {
       Engine engine = n.engine;
       StringBuilder b =
           new StringBuilder("DECLARE l_i ")
@@ -2880,33 +2893,52 @@ final class Writes {
       }
       List<String> values = new ArrayList<>();
       List<String> byKey = new ArrayList<>();
+      List<String> byMetaKey = new ArrayList<>();
       for (int i = 0; i < keys.size(); i++) {
         String v =
             fill(Objects.requireNonNull(keyValues).get(i), Objects.requireNonNull(keyHoles).get(i));
         values.add(v);
         byKey.add(keys.get(i) + " = " + v);
+        byMetaKey.add("m." + keys.get(i) + " = " + v);
       }
-      return b.append(" FORALL i IN 1 .. l_n ")
-          .append(fill(dml, all))
-          .append("; FORALL i IN 1 .. l_n INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (")
-          .append(n.columns(""))
-          .append(")) */ INTO ")
-          .append(n.meta)
-          .append(" x (")
-          .append(n.columns(""))
-          .append(", ")
-          .append(n.txId)
-          .append(", ")
-          .append(n.txState)
-          .append(", ")
-          .append(n.txVersion)
-          .append(", ")
-          .append(n.preparedAt)
-          .append(", ")
-          .append(n.committedAt)
-          .append(") VALUES (")
-          .append(String.join(", ", values))
-          .append(", l_i, 3, 1, l_p, l_c); FOR i IN 1 .. l_n LOOP IF SQL%BULK_ROWCOUNT(i) = 0")
+      String metaColumns =
+          n.columns("")
+              + ", "
+              + n.txId
+              + ", "
+              + n.txState
+              + ", "
+              + n.txVersion
+              + ", "
+              + n.preparedAt
+              + ", "
+              + n.committedAt;
+      b.append(" FORALL i IN 1 .. l_n ").append(fill(dml, all));
+      if (notExists) {
+        // below 23 the hint's SQL%BULK_ROWCOUNT counts a skipped row as 1: the key's row read
+        b.append("; FORALL i IN 1 .. l_n INSERT INTO ")
+            .append(n.meta)
+            .append(" (")
+            .append(metaColumns)
+            .append(") SELECT ")
+            .append(String.join(", ", values))
+            .append(", l_i, 3, 1, l_p, l_c FROM dual WHERE NOT EXISTS (SELECT 1 FROM ")
+            .append(n.meta)
+            .append(" m WHERE ")
+            .append(String.join(" AND ", byMetaKey))
+            .append(")");
+      } else {
+        b.append("; FORALL i IN 1 .. l_n INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (")
+            .append(n.columns(""))
+            .append(")) */ INTO ")
+            .append(n.meta)
+            .append(" x (")
+            .append(metaColumns)
+            .append(") VALUES (")
+            .append(String.join(", ", values))
+            .append(", l_i, 3, 1, l_p, l_c)");
+      }
+      return b.append("; FOR i IN 1 .. l_n LOOP IF SQL%BULK_ROWCOUNT(i) = 0")
           .append(" THEN l_o(i) := i; END IF; END LOOP; l_r := l_o.COUNT; IF l_r > 0 THEN FORALL")
           .append(" i IN INDICES OF l_o UPDATE ")
           .append(n.meta)
@@ -2928,7 +2960,7 @@ final class Writes {
    * for the entries one by one (design 4.4).
    */
   private static int applyOracleBulk(
-      Connection vendor, Bulk bulk, List<Context> contexts, Finalized finalized)
+      Connection vendor, Bulk bulk, List<Context> contexts, Finalized finalized, int oracleMajor)
       throws SQLException {
     int done = 0;
     while (done < contexts.size()) {
@@ -2939,7 +2971,7 @@ final class Writes {
       }
       Run lead = new Run(vendor, chunk.get(0));
       lead.checkCancelled();
-      try (CallableStatement cs = lead.track(vendor.prepareCall(bulk.sql(types)))) {
+      try (CallableStatement cs = lead.track(vendor.prepareCall(bulk.sql(types, oracleMajor)))) {
         int at = lead.stamp(cs, 1);
         cs.setInt(at++, chunk.size());
         for (int e = 0; e < Bulk.SLOTS; e++) {
@@ -6399,7 +6431,7 @@ final class Writes {
    * an entry's row says is thrown, the entries before it recorded.
    */
   static int applyOracleEntries(
-      Connection vendor, Plan plan, List<Context> contexts, Finalized finalized)
+      Connection vendor, Plan plan, List<Context> contexts, Finalized finalized, int oracleMajor)
       throws SQLException {
     Bulk bulk = plan.bulk();
     Context first = contexts.get(0);
@@ -6412,7 +6444,7 @@ final class Writes {
       int got =
           bulk.readCommitted()
               ? applyOracleBulkRc(vendor, (KeyedPlan) plan, bulk, contexts, finalized)
-              : applyOracleBulk(vendor, bulk, contexts, finalized);
+              : applyOracleBulk(vendor, bulk, contexts, finalized, oracleMajor);
       if (got != 0) {
         return got;
       }

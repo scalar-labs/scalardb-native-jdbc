@@ -1440,6 +1440,9 @@ class OracleOltpIntegrationTest {
       // past its block's first-use check, with the constraint's table known
       d.setAutoCommit(false);
       long overTombstone = 0;
+      // each pass's count: the second's is measured, after the first's ORA-00001 on the same
+      // constraint put its table in the process's cache (todo 327: 2 on 19c, 1 on 23)
+      List<Long> passes = new ArrayList<>();
       try (PreparedStatement ins = d.prepareStatement("INSERT INTO " + NS + ".imp VALUES (?, ?)");
           PreparedStatement del = d.prepareStatement("DELETE FROM " + NS + ".imp WHERE k = ?")) {
         for (int x : List.of(11, 12)) {
@@ -1450,6 +1453,7 @@ class OracleOltpIntegrationTest {
           ins.setInt(1, 7);
           ins.setInt(2, x);
           overTombstone = trips.measure(() -> assertThat(ins.executeUpdate()).isEqualTo(1));
+          passes.add(overTombstone);
           d.commit();
         }
       }
@@ -1457,7 +1461,8 @@ class OracleOltpIntegrationTest {
       log(
           "form 4: the INSERT over a tombstone, INSERT ALL then the block, "
               + overTombstone
-              + " round trip(s) counted");
+              + " round trip(s) counted, each pass "
+              + passes);
       assertThat(overTombstone).isEqualTo(1);
       assertThat(rows(v, "SELECT \"tx_state\", \"tx_version\" FROM " + meta + " WHERE k = 7"))
           .containsExactly("3/7");
@@ -2204,6 +2209,16 @@ class OracleOltpIntegrationTest {
         return rs.getLong(1);
       }
     }
+  }
+
+  /** Whether {@code V$SQL} has an INSERT's bulk block holding {@code tag} of the form below 23. */
+  private static String notExistsBulks(String tag) {
+    return "SELECT COUNT(*) FROM (SELECT 1 FROM v$sql WHERE command_type = 47 AND"
+        + " DBMS_LOB.INSTR(sql_fulltext, 'FORALL i IN 1 .. l_n INSERT') > 0 AND"
+        + " DBMS_LOB.INSTR(sql_fulltext, 'FROM dual WHERE NOT EXISTS') > 0 AND"
+        + " DBMS_LOB.INSTR(sql_fulltext, '"
+        + tag
+        + "') > 0 AND ROWNUM = 1)";
   }
 
   /** The metadata row's version of the decoupled table's key {@code id}. */
@@ -3334,6 +3349,178 @@ class OracleOltpIntegrationTest {
         assertThat(scalarDbX(table, 61)).isEqualTo("e");
       }
     }
+  }
+
+  /**
+   * The INSERT's bulk block below Oracle 23 against the hinted form on the same rows (design 4.4
+   * "The INSERT's bulk block on Oracle before 23", todo 327): the metadata insert under {@code NOT
+   * EXISTS} is run here on 23 through the test's stand-in for the server's version, where its
+   * counts are right as on 19c (probe 9c'). A batch of three INSERTs into an imported table whose
+   * middle key has no data row and a metadata row another connection inserts, its tombstone at
+   * state 3 or a ScalarDB delete's at state 1: held uncommitted while the batch waits on it, then
+   * committed, or committed after the batch's transaction read the table; at both levels. Each
+   * outcome, the counts or the SQLState, and the rows after, is the hinted form's; an abort's
+   * counts before it may differ, the entries one by one after the form's ORA-00001.
+   */
+  @Test
+  void todo327_bulkInsertBelow23_endsAsTheHintedFormOverAnotherConnectionsTombstone()
+      throws Exception {
+    String meta =
+        NS
+            + "."
+            + Engine.ORACLE.quote(
+                Objects.requireNonNull(catalog.lookup(List.of(), N(NS), N("imp")).metadataTable()));
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    List<String> differ = new ArrayList<>();
+    int base = 600;
+    try (Connection v = ORA.open()) {
+      for (int level :
+          List.of(Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ)) {
+        for (int state : List.of(3, 1)) {
+          for (boolean early : List.of(false, true)) {
+            String[] got = new String[2];
+            for (int f = 0; f < 2; f++) {
+              int major = f == 0 ? 0 : 19;
+              got[f] = tombstoneOutcome(pool, v, meta, level, state, early, major, base);
+              base += 10;
+            }
+            String name =
+                (level == Connection.TRANSACTION_READ_COMMITTED ? "RC" : "SNAPSHOT")
+                    + " state "
+                    + state
+                    + (early ? " committed after the read" : " held, then committed");
+            log("todo 327 " + name + ": hinted " + got[0] + " | NOT EXISTS " + got[1]);
+            // the counts before an abort are not compared: the hinted bulk block aborts whole,
+            // where the form below 23's ORA-00001 runs the entries one by one up to the abort
+            if (!got[0]
+                .replaceAll("\\{[^}]*\\}", "")
+                .equals(got[1].replaceAll("\\{[^}]*\\}", ""))) {
+              differ.add(name);
+            }
+          }
+        }
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+    assertThat(differ).as("outcomes the two forms differ in").isEmpty();
+  }
+
+  /**
+   * One batch of {@link
+   * #todo327_bulkInsertBelow23_endsAsTheHintedFormOverAnotherConnectionsTombstone} on a connection
+   * that takes the form of {@code major} (0 the server's own): its outcome and the rows after,
+   * keyed from {@code base} so that both forms read alike.
+   */
+  private static String tombstoneOutcome(
+      ExecutorService pool,
+      Connection v,
+      String meta,
+      int level,
+      int state,
+      boolean early,
+      int major,
+      int base)
+      throws Exception {
+    Proxies.oracleMajorForTests = major;
+    Connection d;
+    try {
+      d = driver();
+    } finally {
+      Proxies.oracleMajorForTests = 0;
+    }
+    int k = base;
+    String tag = "/* tb" + System.nanoTime() + " */";
+    StringBuilder out = new StringBuilder();
+    try (d;
+        Connection b = ORA.open()) {
+      b.setAutoCommit(false);
+      d.setTransactionIsolation(level);
+      d.setAutoCommit(false);
+      String tombstone =
+          "INSERT INTO "
+              + meta
+              + " (k, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+              + " \"tx_committed_at\") VALUES ("
+              + k
+              + ", 'other', "
+              + state
+              + ", 5, 0, 0)";
+      if (early) {
+        // the transaction's first statement, on another table: its snapshot at SNAPSHOT
+        assertThat(rows(d, "SELECT COUNT(*) FROM " + NS + ".dbl WHERE k = 1")).containsExactly("1");
+      }
+      ORA.execute(b, tombstone);
+      if (early) {
+        b.commit();
+      }
+      try (PreparedStatement ps =
+          d.prepareStatement("INSERT " + tag + " INTO " + NS + ".imp VALUES (?, ?)")) {
+        for (int key : List.of(k + 1, k, k + 2)) {
+          ps.setInt(1, key);
+          ps.setInt(2, 7);
+          ps.addBatch();
+        }
+        Future<int[]> batch = pool.submit(ps::executeBatch);
+        if (!early) {
+          Thread.sleep(1500);
+          out.append(batch.isDone() ? "not waited " : "waited ");
+          b.commit();
+        }
+        try {
+          out.append(java.util.Arrays.toString(batch.get(30, TimeUnit.SECONDS)));
+          d.commit();
+          out.append(" committed");
+        } catch (java.util.concurrent.ExecutionException e) {
+          Throwable c = Objects.requireNonNull(e.getCause());
+          out.append(c instanceof SQLException ? ((SQLException) c).getSQLState() : c.toString());
+          if (c instanceof BatchUpdateException) {
+            int[] counts = ((BatchUpdateException) c).getUpdateCounts();
+            out.append('{').append(java.util.Arrays.toString(counts)).append('}');
+          }
+          d.rollback();
+        }
+      }
+      out.append(" bulk ").append(insertBulks(v, tag) > 0);
+      assertThat(rows(v, notExistsBulks(tag)))
+          .as("the bulk block's metadata insert under NOT EXISTS")
+          .containsExactly(major > 0 && major < 23 ? "1" : "0");
+      List<String> after = new ArrayList<>();
+      for (String r :
+          rows(
+              v,
+              "SELECT k - "
+                  + base
+                  + ", \"tx_id\", \"tx_state\", \"tx_version\" FROM "
+                  + meta
+                  + " WHERE k BETWEEN "
+                  + k
+                  + " AND "
+                  + (k + 2)
+                  + " ORDER BY k")) {
+        after.add(r.replaceFirst("/[0-9a-f-]{36}/", "/a tx/"));
+      }
+      out.append(" meta ").append(after);
+      out.append(
+          " data "
+              + rows(
+                  v,
+                  "SELECT k - "
+                      + base
+                      + " FROM "
+                      + NS
+                      + ".imp WHERE k BETWEEN "
+                      + k
+                      + " AND "
+                      + (k + 2)
+                      + " ORDER BY k"));
+      // the rows gone, a row at state 1 in flight for every read of the table after
+      ORA.execute(
+          v,
+          "DELETE FROM " + NS + ".imp WHERE k BETWEEN " + k + " AND " + (k + 2),
+          "DELETE FROM " + meta + " WHERE k BETWEEN " + k + " AND " + (k + 2));
+    }
+    return out.toString();
   }
 
   /**
