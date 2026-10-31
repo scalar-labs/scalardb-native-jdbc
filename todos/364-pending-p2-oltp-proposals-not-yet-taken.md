@@ -361,3 +361,21 @@ todo 334's log and the design sections named.
   the 19c branches or they onto this). Item (c), the inline backfill A/B, and the harness's plans
   capture are 6e's to put to the user after 1 and 2 land. Todo 366's option 1 runs on the container
   meanwhile (`ora/ser366.jsh`).
+- 2026-11-01 (review of c7's db5a464 on `inline-rc-case-copy`, from `git show`): mergeable. `SqlAst.keyOnly`
+  is the design's test and conservative where it cannot tell (a subquery in WHERE or ON, a NATURAL or
+  USING join, an unqualified column of a join without every table's columns known, a reference in a
+  subquery); `Router.caseCopies` takes the copy on Oracle at READ COMMITTED for an inline reference in
+  a top-level inner place, and the gate only where every ScalarDB table of the statement is a copy;
+  `SplitRead.caseCopy` spells the text as 4.2 has it, the anchors the before image's identity for a
+  row in flight through the same CASE. Two things the build taught the design, now in the paragraph:
+  the nullable side of a LEFT JOIN keeps its pieces (one copy turned the join inner,
+  `ReadIntegrationTest`'s `imp LEFT JOIN made` lost its unmatched rows), and a predicate naming no
+  column of the table is key-only. Tests: the new OLTP test (the lookup's text and before image, the
+  key-prefix range without the in-flight insert, the SUM in one round trip without a gate, the
+  non-key predicate's arms, the join's mixed copies, the item read at the vendor's 3 gets with 50
+  items in flight), form 6 and 7's expectations, ReadIntegrationTest's Oracle inline split text, the
+  AST unit cases; green on Free 23 (CatalogIntegrationTest's 15 failures are c7's reset script's,
+  unchanged). One nit, not blocking: the copy carries no `NO_INDEX_SS` hint; on a table still on the
+  plain in-flight index the committed copy's reason for it (the sixth run's skip scan) applies to the
+  copy too, so the hint belongs there where `inflightExpressions` is false. 19c not run: plain SQL,
+  the run follows with 33's workflow once both land. Lands on the user's word in c7's session.
