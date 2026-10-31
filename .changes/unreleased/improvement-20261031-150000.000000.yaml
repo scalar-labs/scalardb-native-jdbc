@@ -1,0 +1,3 @@
+kind: improvement
+body: 'On Oracle the setup builds the in-flight index function-based, over expressions that are NULL on a committed row, so it holds only the rows in flight, and the driver spells its in-flight checks on those expressions. A table set up by an earlier version keeps working with the plain index until the setup runs again and replaces it; until then `check` reports it as not set up, with the reason, which `--json` gives as `reason`.'
+time: 2026-10-31T15:00:00.000000+09:00

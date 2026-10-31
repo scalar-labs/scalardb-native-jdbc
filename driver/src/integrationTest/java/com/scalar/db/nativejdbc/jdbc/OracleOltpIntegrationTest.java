@@ -312,7 +312,10 @@ class OracleOltpIntegrationTest {
       String key = "SELECT x FROM " + NS + ".t WHERE id = 1";
       String routed = d.nativeSQL(key);
       // the state column, hinted twice, and no version lookups
-      assertThat(routed).contains(hint + " 1 FROM").contains(hint + " \"scalardb_native_meta\".");
+      // the key set's keys as the function-based in-flight index holds them (todo 364)
+      assertThat(routed)
+          .contains(hint + " 1 FROM")
+          .contains(hint + " CASE \"scalardb_native_meta\".");
       assertThat(routed).doesNotContain("\"scalardb_native_meta\".\"tx_version\"");
       // Oracle's hint report: each hint resolved and used, the probes an index range scan
       String plan = plan(v, routed);
@@ -1437,6 +1440,9 @@ class OracleOltpIntegrationTest {
       // past its block's first-use check, with the constraint's table known
       d.setAutoCommit(false);
       long overTombstone = 0;
+      // each pass's count: the second's is measured, after the first's ORA-00001 on the same
+      // constraint put its table in the process's cache (todo 327: 2 on 19c, 1 on 23)
+      List<Long> passes = new ArrayList<>();
       try (PreparedStatement ins = d.prepareStatement("INSERT INTO " + NS + ".imp VALUES (?, ?)");
           PreparedStatement del = d.prepareStatement("DELETE FROM " + NS + ".imp WHERE k = ?")) {
         for (int x : List.of(11, 12)) {
@@ -1447,6 +1453,7 @@ class OracleOltpIntegrationTest {
           ins.setInt(1, 7);
           ins.setInt(2, x);
           overTombstone = trips.measure(() -> assertThat(ins.executeUpdate()).isEqualTo(1));
+          passes.add(overTombstone);
           d.commit();
         }
       }
@@ -1454,7 +1461,8 @@ class OracleOltpIntegrationTest {
       log(
           "form 4: the INSERT over a tombstone, INSERT ALL then the block, "
               + overTombstone
-              + " round trip(s) counted");
+              + " round trip(s) counted, each pass "
+              + passes);
       assertThat(overTombstone).isEqualTo(1);
       assertThat(rows(v, "SELECT \"tx_state\", \"tx_version\" FROM " + meta + " WHERE k = 7"))
           .containsExactly("3/7");
@@ -2203,6 +2211,16 @@ class OracleOltpIntegrationTest {
     }
   }
 
+  /** Whether {@code V$SQL} has an INSERT's bulk block holding {@code tag} of the form below 23. */
+  private static String notExistsBulks(String tag) {
+    return "SELECT COUNT(*) FROM (SELECT 1 FROM v$sql WHERE command_type = 47 AND"
+        + " DBMS_LOB.INSTR(sql_fulltext, 'FORALL i IN 1 .. l_n INSERT') > 0 AND"
+        + " DBMS_LOB.INSTR(sql_fulltext, 'FROM dual WHERE NOT EXISTS') > 0 AND"
+        + " DBMS_LOB.INSTR(sql_fulltext, '"
+        + tag
+        + "') > 0 AND ROWNUM = 1)";
+  }
+
   /** The metadata row's version of the decoupled table's key {@code id}. */
   private static long metaVersion(Connection v, String meta, int id) throws SQLException {
     try (PreparedStatement ps =
@@ -2517,6 +2535,152 @@ class OracleOltpIntegrationTest {
     return of < 0 ? "(none)" : sql.substring(of + 15).split(" ")[0];
   }
 
+  /**
+   * Todo 364: the setup builds Oracle's in-flight index function-based, NULL on a committed row,
+   * and the driver spells every text on the in-flight states on its expressions, which alone the
+   * optimizer matches to it (design section 3, 4.2). With a row of each table in flight, reads,
+   * locking reads, keyed and beyond-the-key writes, a batch and an insert at SNAPSHOT and READ
+   * COMMITTED: every text they sent that names the expressions reads the in-flight index, and none
+   * scans the decoupled table's metadata table.
+   */
+  @Test
+  void todo364_everyInFlightTextReadsTheFunctionBasedIndex() throws Exception {
+    // tables of its own, an inline and a decoupled one, so that no other form's rows are touched
+    List<String> tables = List.of("fbd", "fbi");
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      for (String table : tables) {
+        admin.createTable(
+            N(NS),
+            N(table),
+            TableMetadata.newBuilder()
+                .addColumn(N("id"), intType())
+                .addColumn(N("x"), DataType.TEXT)
+                .addColumn(N("v"), intType())
+                .addPartitionKey(N("id"))
+                .build(),
+            table.equals("fbd") ? DECOUPLED : Map.of());
+      }
+    }
+    try (DistributedTransactionManager tm = factory.getTransactionManager()) {
+      DistributedTransaction tx = tm.begin();
+      for (int id = 1; id <= 20; id++) {
+        for (String table : tables) {
+          tx.insert(
+              Insert.newBuilder()
+                  .namespace(N(NS))
+                  .table(N(table))
+                  .partitionKey(id(id))
+                  .textValue(N("x"), "a")
+                  .bigIntValue(N("v"), 0)
+                  .build());
+        }
+      }
+      tx.commit();
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)fb[di]"),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
+          .hasSize(2)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    List<String> indexes = new ArrayList<>();
+    for (String table : tables) {
+      TableInfo info = tableInfo(table);
+      assertThat(info.inflightExpressions()).as(table).isTrue();
+      indexes.add(info.inflightIndex(Engine.ORACLE));
+    }
+    String meta = Objects.requireNonNull(tableInfo("fbd").metadataTable());
+    try (Connection v = ORA.open()) {
+      ORA.execute(v, "ALTER SYSTEM FLUSH SHARED_POOL");
+    }
+    // a catalog of its own, read after the tables were created (the driver shares one per TTL)
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59364");
+    try (Connection d = ORA.openDriver(ttl);
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      for (String table : tables) {
+        String n = NS + "." + table;
+        // a row in flight: the gates close, and the split forms run
+        TwoPhaseCommitTransaction held = prepared(tpc, table, 20, "h");
+        try {
+          for (int level :
+              new int[] {
+                Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_READ_COMMITTED
+              }) {
+            d.setTransactionIsolation(level);
+            d.setAutoCommit(false);
+            int fresh = 1000 + level;
+            for (String sql :
+                List.of(
+                    "SELECT x FROM " + n + " WHERE id = 5",
+                    "SELECT COUNT(*) FROM " + n + " WHERE v >= 0",
+                    "SELECT id, x FROM " + n + " WHERE id BETWEEN 10 AND 12",
+                    "SELECT x FROM " + n + " WHERE id = 13 FOR UPDATE",
+                    "UPDATE " + n + " SET v = v WHERE id = 14",
+                    "INSERT INTO " + n + " (id, x, v) VALUES (" + fresh + ", 'n', 0)",
+                    "DELETE FROM " + n + " WHERE id = " + fresh,
+                    "UPDATE " + n + " SET v = v WHERE x = 'none'")) {
+              try (Statement st = d.createStatement()) {
+                st.execute(sql);
+              } catch (SQLTransactionRollbackException e) {
+                // at SNAPSHOT a write beyond the key over the row in flight: its texts ran
+                d.rollback();
+              }
+            }
+            try (PreparedStatement ps =
+                d.prepareStatement("UPDATE " + n + " SET v = ? WHERE id = ?")) {
+              for (int id : new int[] {15, 16}) {
+                ps.setInt(1, 0);
+                ps.setInt(2, id);
+                ps.addBatch();
+              }
+              ps.executeBatch();
+            }
+            d.commit();
+          }
+        } finally {
+          d.rollback();
+          d.setAutoCommit(true);
+          held.rollback();
+        }
+      }
+    }
+    Map<String, List<String>> plans = new java.util.TreeMap<>();
+    try (Connection v = ORA.open();
+        PreparedStatement ps =
+            v.prepareStatement(
+                "SELECT s.sql_id || '/' || s.child_number, s.sql_fulltext, p.operation || ' ' ||"
+                    + " p.options || ' ' || p.object_name FROM v$sql s JOIN v$sql_plan p ON"
+                    + " p.sql_id = s.sql_id AND p.child_number = s.child_number WHERE"
+                    + " s.command_type IN (2, 3, 6, 7, 189) AND UPPER(s.sql_fulltext) LIKE"
+                    + " '%\"TX_STATE\" WHEN 1 THEN%' AND s.sql_text NOT LIKE '%v$sql%'"
+                    + " ORDER BY 1, p.id")) {
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          plans
+              .computeIfAbsent(rs.getString(1) + " " + rs.getString(2), k -> new ArrayList<>())
+              .add(rs.getString(3));
+        }
+      }
+    }
+    log("todo 364: " + plans.size() + " texts on the in-flight expressions");
+    assertThat(plans).as("texts spelled on the expressions").hasSizeGreaterThan(5);
+    plans.forEach(
+        (text, steps) -> {
+          assertThat(steps)
+              .as(text)
+              .anyMatch(x -> indexes.stream().anyMatch(i -> x.endsWith(" " + i)))
+              .noneMatch(x -> x.equals("TABLE ACCESS FULL " + meta));
+        });
+  }
+
   private static TableInfo tableInfo(String table) throws SQLException {
     return catalog.scalarDbTables().stream()
         .filter(t -> t.namespace().equals(N(NS)) && t.table().equals(N(table)))
@@ -2704,11 +2868,13 @@ class OracleOltpIntegrationTest {
               + String.format("%.1f", perRead)
               + " gets a read, the plan\n"
               + plan);
-      // each copy's gate alone reads the in-flight index, no probe per row: about 11 gets, where
-      // the key set's probes cost about 30 and the vendor's read 6
+      // each copy's gate reads the in-flight index, no probe per row, and the in-flight copy its
+      // rows by the key through the function-based index (todo 364): about 8 gets, where the key
+      // set's probes cost about 30 and the vendor's read 6
       assertThat(gets[1]).isGreaterThanOrEqualTo(300);
       assertThat(perRead).isLessThan(15);
-      assertThat(plan.toString().lines().filter(l -> l.contains("| TSTATE_INFLIGHT "))).hasSize(2);
+      assertThat(plan.toString().lines().filter(l -> l.contains("| TSTATE_INFLIGHT "))).hasSize(3);
+      assertThat(plan.toString()).containsPattern("\"M\"\\.\"SYS_NC\\d+\\$\"=1200");
       // the column itself: 1 for the row in flight, NULL for a committed row; 0 for a clear table
       String one =
           d.nativeSQL("SELECT x FROM " + NS + ".tstate WHERE w = 1 AND o = 5000 AND n = 0");
@@ -3183,6 +3349,178 @@ class OracleOltpIntegrationTest {
         assertThat(scalarDbX(table, 61)).isEqualTo("e");
       }
     }
+  }
+
+  /**
+   * The INSERT's bulk block below Oracle 23 against the hinted form on the same rows (design 4.4
+   * "The INSERT's bulk block on Oracle before 23", todo 327): the metadata insert under {@code NOT
+   * EXISTS} is run here on 23 through the test's stand-in for the server's version, where its
+   * counts are right as on 19c (probe 9c'). A batch of three INSERTs into an imported table whose
+   * middle key has no data row and a metadata row another connection inserts, its tombstone at
+   * state 3 or a ScalarDB delete's at state 1: held uncommitted while the batch waits on it, then
+   * committed, or committed after the batch's transaction read the table; at both levels. Each
+   * outcome, the counts or the SQLState, and the rows after, is the hinted form's; an abort's
+   * counts before it may differ, the entries one by one after the form's ORA-00001.
+   */
+  @Test
+  void todo327_bulkInsertBelow23_endsAsTheHintedFormOverAnotherConnectionsTombstone()
+      throws Exception {
+    String meta =
+        NS
+            + "."
+            + Engine.ORACLE.quote(
+                Objects.requireNonNull(catalog.lookup(List.of(), N(NS), N("imp")).metadataTable()));
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    List<String> differ = new ArrayList<>();
+    int base = 600;
+    try (Connection v = ORA.open()) {
+      for (int level :
+          List.of(Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ)) {
+        for (int state : List.of(3, 1)) {
+          for (boolean early : List.of(false, true)) {
+            String[] got = new String[2];
+            for (int f = 0; f < 2; f++) {
+              int major = f == 0 ? 0 : 19;
+              got[f] = tombstoneOutcome(pool, v, meta, level, state, early, major, base);
+              base += 10;
+            }
+            String name =
+                (level == Connection.TRANSACTION_READ_COMMITTED ? "RC" : "SNAPSHOT")
+                    + " state "
+                    + state
+                    + (early ? " committed after the read" : " held, then committed");
+            log("todo 327 " + name + ": hinted " + got[0] + " | NOT EXISTS " + got[1]);
+            // the counts before an abort are not compared: the hinted bulk block aborts whole,
+            // where the form below 23's ORA-00001 runs the entries one by one up to the abort
+            if (!got[0]
+                .replaceAll("\\{[^}]*\\}", "")
+                .equals(got[1].replaceAll("\\{[^}]*\\}", ""))) {
+              differ.add(name);
+            }
+          }
+        }
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+    assertThat(differ).as("outcomes the two forms differ in").isEmpty();
+  }
+
+  /**
+   * One batch of {@link
+   * #todo327_bulkInsertBelow23_endsAsTheHintedFormOverAnotherConnectionsTombstone} on a connection
+   * that takes the form of {@code major} (0 the server's own): its outcome and the rows after,
+   * keyed from {@code base} so that both forms read alike.
+   */
+  private static String tombstoneOutcome(
+      ExecutorService pool,
+      Connection v,
+      String meta,
+      int level,
+      int state,
+      boolean early,
+      int major,
+      int base)
+      throws Exception {
+    Proxies.oracleMajorForTests = major;
+    Connection d;
+    try {
+      d = driver();
+    } finally {
+      Proxies.oracleMajorForTests = 0;
+    }
+    int k = base;
+    String tag = "/* tb" + System.nanoTime() + " */";
+    StringBuilder out = new StringBuilder();
+    try (d;
+        Connection b = ORA.open()) {
+      b.setAutoCommit(false);
+      d.setTransactionIsolation(level);
+      d.setAutoCommit(false);
+      String tombstone =
+          "INSERT INTO "
+              + meta
+              + " (k, \"tx_id\", \"tx_state\", \"tx_version\", \"tx_prepared_at\","
+              + " \"tx_committed_at\") VALUES ("
+              + k
+              + ", 'other', "
+              + state
+              + ", 5, 0, 0)";
+      if (early) {
+        // the transaction's first statement, on another table: its snapshot at SNAPSHOT
+        assertThat(rows(d, "SELECT COUNT(*) FROM " + NS + ".dbl WHERE k = 1")).containsExactly("1");
+      }
+      ORA.execute(b, tombstone);
+      if (early) {
+        b.commit();
+      }
+      try (PreparedStatement ps =
+          d.prepareStatement("INSERT " + tag + " INTO " + NS + ".imp VALUES (?, ?)")) {
+        for (int key : List.of(k + 1, k, k + 2)) {
+          ps.setInt(1, key);
+          ps.setInt(2, 7);
+          ps.addBatch();
+        }
+        Future<int[]> batch = pool.submit(ps::executeBatch);
+        if (!early) {
+          Thread.sleep(1500);
+          out.append(batch.isDone() ? "not waited " : "waited ");
+          b.commit();
+        }
+        try {
+          out.append(java.util.Arrays.toString(batch.get(30, TimeUnit.SECONDS)));
+          d.commit();
+          out.append(" committed");
+        } catch (java.util.concurrent.ExecutionException e) {
+          Throwable c = Objects.requireNonNull(e.getCause());
+          out.append(c instanceof SQLException ? ((SQLException) c).getSQLState() : c.toString());
+          if (c instanceof BatchUpdateException) {
+            int[] counts = ((BatchUpdateException) c).getUpdateCounts();
+            out.append('{').append(java.util.Arrays.toString(counts)).append('}');
+          }
+          d.rollback();
+        }
+      }
+      out.append(" bulk ").append(insertBulks(v, tag) > 0);
+      assertThat(rows(v, notExistsBulks(tag)))
+          .as("the bulk block's metadata insert under NOT EXISTS")
+          .containsExactly(major > 0 && major < 23 ? "1" : "0");
+      List<String> after = new ArrayList<>();
+      for (String r :
+          rows(
+              v,
+              "SELECT k - "
+                  + base
+                  + ", \"tx_id\", \"tx_state\", \"tx_version\" FROM "
+                  + meta
+                  + " WHERE k BETWEEN "
+                  + k
+                  + " AND "
+                  + (k + 2)
+                  + " ORDER BY k")) {
+        after.add(r.replaceFirst("/[0-9a-f-]{36}/", "/a tx/"));
+      }
+      out.append(" meta ").append(after);
+      out.append(
+          " data "
+              + rows(
+                  v,
+                  "SELECT k - "
+                      + base
+                      + " FROM "
+                      + NS
+                      + ".imp WHERE k BETWEEN "
+                      + k
+                      + " AND "
+                      + (k + 2)
+                      + " ORDER BY k"));
+      // the rows gone, a row at state 1 in flight for every read of the table after
+      ORA.execute(
+          v,
+          "DELETE FROM " + NS + ".imp WHERE k BETWEEN " + k + " AND " + (k + 2),
+          "DELETE FROM " + meta + " WHERE k BETWEEN " + k + " AND " + (k + 2));
+    }
+    return out.toString();
   }
 
   /**

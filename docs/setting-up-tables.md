@@ -11,7 +11,8 @@ setup](concepts.md#the-setup) once. For each ScalarDB table, in either of Scalar
 [layouts](concepts.md#layout), inline or decoupled, it creates:
 
 - the **[in-flight index](concepts.md#in-flight-index)**, through which the driver finds the rows ScalarDB transactions are
-  writing;
+  writing. On Oracle it is a function-based index over expressions that are NULL on a committed
+  row, so it holds only the rows in flight ([On Oracle](#the-in-flight-index-on-oracle));
 - the **[read view](concepts.md#read-view)**, which shows each row's committed image. The driver falls back to it, and
   serves `SELECT *` on an inline table through it; other readers of the table may use it too.
 
@@ -31,6 +32,24 @@ It also:
   setup user does not own this needs the ALTER privilege on it; without it the setup reports the
   step and goes on;
 - grants SELECT on the read views to the users given with `--grant`.
+
+### The in-flight index on Oracle
+
+On Oracle the index has one expression per column, `CASE tx_state WHEN 1 THEN <column> WHEN 2 THEN
+<column> END`, over `tx_state` and the key. The expressions are hidden virtual columns of the
+table: they have no storage, and ScalarDB and applications do not see them. The driver spells its
+in-flight checks on the same expressions, as the index's form in the [catalog](concepts.md#catalog)
+says.
+
+A setup of an earlier version built a plain index on `(tx_state, <key>)`, which holds every row.
+The setup replaces it under the same name, `ONLINE` where the edition allows, and says `rebuilt
+in-flight index <name> in the function-based form`. Until it does, `check` reports the table as
+not set up (`in-flight index in the plain form`), and the driver keeps serving it with its checks
+spelled for the plain index. Until the applications' catalog TTL has passed (60 seconds by default),
+a running driver still spells its checks for the plain index, which against the new one scan the
+table. Run the setup with the applications stopped, or accept that minute of slower checks.
+`teardown` drops the index in either form. An older version's setup counts the new index as out of
+order and builds the plain one again.
 
 The setup is re-runnable, and is run again after a table is added. The tables themselves are
 ScalarDB's to create or import, with `scalar.db.jdbc.isolation_level` as
@@ -81,7 +100,8 @@ repeated.
 Read-only. It reports, and exits with 1 for any of them:
 
 - the database settings the driver needs (SQL Server's);
-- each table that is not set up;
+- each table that is not set up, and why where its objects exist: its in-flight index in another
+  column order, or on Oracle in the plain form, which the setup replaces;
 - the rows ScalarDB left prepared longer ago than `--lifetime` seconds (15). The driver cannot settle
   them; a ScalarDB read of the rows, or ScalarDB's recovery, settles them;
 - on an imported decoupled table, the rows with NULL metadata, which ScalarDB cannot write again

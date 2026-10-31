@@ -567,6 +567,55 @@ p50 overhead against the vendor, fast network:
   own serialization failures lower (a). Its p50 overheads, +9% to +10% for Delivery, NewOrder and
   Payment inline, are the closer measure.
 
+## Fifteenth run: overnight on `bfa20aa`, the backfill off on inline tables (2026-10-30)
+
+Run `20261029-2333-pg` from `bench-env/plans/overnight-postgresql.json` on main `bfa20aa`, beside
+Oracle's tenth run. Since the fourteenth run's `5de26b9`, nothing on main changes PostgreSQL's
+statements. The harness now backfills decoupled tables and not inline ones (`f0cdf0a`), and counts
+each repetition's one-second socket reads (`55048da`); it found none in any cell. The same matrix:
+TPC-C scale 32 and YCSB A, C, E, F at 1M rows, three levels, both layouts, fast and +250 µs. All 12
+cells passed in 6 h 56 min.
+
+Throughput, (c)/(a) (fourteenth run in brackets):
+
+| cell | TPC-C | A | C | E | F |
+|---|---|---|---|---|---|
+| RC decoupled, fast | 0.69 (0.70) | 0.81 (0.81) | 0.89 (0.87) | 0.71 (0.67) | 0.80 (0.81) |
+| RC inline, fast | 0.78 (0.76) | 0.86 (0.85) | **0.94** (0.95) | 0.87 (0.84) | 0.86 (0.87) |
+| SNAPSHOT decoupled, fast | 0.80 (0.80) | 0.85 (0.83) | 0.88 (0.88) | 0.80 (0.87) | 0.84 (0.81) |
+| SNAPSHOT inline, fast | 0.86 (0.83) | **0.92** (0.91) | **0.92** (0.88) | 0.85 (0.83) | **0.92** (0.90) |
+| SERIALIZABLE decoupled, fast | 0.84 (0.78) | 0.82 (0.83) | 0.87 (0.88) | 0.80 (0.80) | 0.83 (0.85) |
+| SERIALIZABLE inline, fast | **0.93** (0.96) | **0.90** (0.88) | 0.86 (0.86) | 0.82 (0.76) | **0.90** (0.90) |
+| RC decoupled, +250 µs | 0.89 (0.87) | **0.94** (0.93) | **0.96** (0.97) | 0.72 (0.70) | **0.94** (0.94) |
+| RC inline, +250 µs | **0.91** (0.89) | **0.95** (0.95) | **0.97** (0.98) | 0.85 (0.78) | **0.96** (0.96) |
+| SNAPSHOT decoupled, +250 µs | **0.92** (0.91) | **0.95** (0.94) | **0.96** (0.96) | 0.80 (0.81) | **0.95** (0.95) |
+| SNAPSHOT inline, +250 µs | **0.94** (0.94) | **0.97** (0.95) | **0.97** (0.98) | 0.82 (0.80) | **0.97** (0.97) |
+| SERIALIZABLE decoupled, +250 µs | 0.81 (0.97) | **0.95** (0.93) | **0.96** (0.97) | 0.81 (0.84) | **0.95** (0.96) |
+| SERIALIZABLE inline, +250 µs | **1.01** (0.96) | **0.97** (0.95) | **0.97** (0.96) | 0.80 (0.82) | **0.98** (0.98) |
+
+p50 overhead against the vendor, fast network:
+
+| | Delivery | NewOrder | OrderStatus | Payment | StockLevel | read (C) | update | RMW | scan | insert |
+|---|---|---|---|---|---|---|---|---|---|---|
+| RC decoupled | +82% | +33% | +40% | +43% | +66% | +12% | +29% | +28% | +41% | +26% |
+| RC inline | +63% | +18% | +21% | +31% | +28% | +6% | +21% | +18% | +15% | +15% |
+| SNAPSHOT decoupled | +37% | +20% | +36% | +29% | +15% | +13% | +24% | +20% | +24% | +27% |
+| SNAPSHOT inline | +18% | +13% | +36% | +18% | +21% | +8% | +5% | +6% | +16% | +20% |
+| SERIALIZABLE decoupled | +37% | +17% | +32% | +26% | +16% | +14% | +24% | +21% | +27% | +32% |
+| SERIALIZABLE inline | +15% | +9% | +34% | +13% | +11% | +15% | +8% | +8% | +22% | +11% |
+
+- **The same as the fourteenth run within the variation between runs.** The inline cells, now on
+  tables not backfilled, are no slower: on PostgreSQL every update writes a new row version anyway.
+- **SERIALIZABLE TPC-C swings with which side meets the serialization failures.** At +250 µs
+  decoupled it is 0.81 here and 0.97 in the fourteenth run. Here the driver's Payment was rejected
+  12,283 times and NewOrder 2,219, against the vendor's 0 and 7. In the fourteenth run the vendor's
+  were 6,200 and 1,199, against the driver's 592 and 100. The p50 overheads, +11% to +13% for
+  Delivery, NewOrder and Payment, did not move, so the cell's ratio is noise at this scale and four
+  terminals.
+- **At +250 µs every cell's YCSB A, C and F is within 6%**, and TPC-C at SNAPSHOT and inline is within
+  9%. The scan (YCSB E) remains the gap at every level, and StockLevel on the inline layout is +21% to
+  +28% fast.
+
 ## Reports
 
 ### HEAD 93f5217

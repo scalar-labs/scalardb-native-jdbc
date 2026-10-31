@@ -452,11 +452,14 @@ public final class Main implements Callable<Integer> {
       for (Check.Result r : results) {
         SQLException e = r.error();
         Duration oldest = r.oldest();
+        String reason = r.reason();
         items.add(
             "{\"table\":"
                 + Json.string(r.table())
                 + ",\"setUp\":"
                 + r.setUp()
+                + ",\"reason\":"
+                + (reason == null ? "null" : Json.string(reason))
                 + ",\"stuck\":"
                 + r.stuck()
                 + ",\"oldestSeconds\":"

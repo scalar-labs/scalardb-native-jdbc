@@ -2634,7 +2634,20 @@ final class Writes {
     }
 
     String sql(List<String> types) {
-      return texts.computeIfAbsent(String.join(",", types), k -> hinted(build(types), "k"));
+      return texts.computeIfAbsent(String.join(",", types), k -> hinted(build(types, false), "k"));
+    }
+
+    /**
+     * The block for these slot types on a server of this form: below Oracle 23 the INSERT's
+     * metadata insert under {@code NOT EXISTS}, whose counts per entry that server gets right
+     * (design 4.4 "The INSERT's bulk block on Oracle before 23"); its own key in the cache, as one
+     * plan serves the connections of a DataSource.
+     */
+    String sql(List<String> types, int oracleMajor) {
+      return insert() && oracleMajor < 23
+          ? texts.computeIfAbsent(
+              "<23:" + String.join(",", types), k -> hinted(build(types, true), "k"))
+          : sql(types);
     }
 
     /** The READ COMMITTED block for these slot types, with each slot's anchor or without. */
@@ -2777,7 +2790,7 @@ final class Writes {
       return b.append(" END;").toString();
     }
 
-    private String build(List<String> types) {
+    private String build(List<String> types, boolean notExists) {
       Engine engine = n.engine;
       StringBuilder b =
           new StringBuilder("DECLARE l_i ")
@@ -2857,9 +2870,9 @@ final class Writes {
             .append(n.inflightHint("m"))
             .append("1 FROM ")
             .append(n.meta)
-            .append(" m WHERE m.")
-            .append(n.txState)
-            .append(" IN (1, 2) AND ROWNUM = 1); IF l_g = 0 THEN FORALL i IN 1 .. l_n ")
+            .append(" m WHERE ")
+            .append(n.inflight("m"))
+            .append(" AND ROWNUM = 1); IF l_g = 0 THEN FORALL i IN 1 .. l_n ")
             .append(fill(dml, all))
             .append(" RETURNING ")
             .append(String.join(", ", keys))
@@ -2880,33 +2893,52 @@ final class Writes {
       }
       List<String> values = new ArrayList<>();
       List<String> byKey = new ArrayList<>();
+      List<String> byMetaKey = new ArrayList<>();
       for (int i = 0; i < keys.size(); i++) {
         String v =
             fill(Objects.requireNonNull(keyValues).get(i), Objects.requireNonNull(keyHoles).get(i));
         values.add(v);
         byKey.add(keys.get(i) + " = " + v);
+        byMetaKey.add("m." + keys.get(i) + " = " + v);
       }
-      return b.append(" FORALL i IN 1 .. l_n ")
-          .append(fill(dml, all))
-          .append("; FORALL i IN 1 .. l_n INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (")
-          .append(n.columns(""))
-          .append(")) */ INTO ")
-          .append(n.meta)
-          .append(" x (")
-          .append(n.columns(""))
-          .append(", ")
-          .append(n.txId)
-          .append(", ")
-          .append(n.txState)
-          .append(", ")
-          .append(n.txVersion)
-          .append(", ")
-          .append(n.preparedAt)
-          .append(", ")
-          .append(n.committedAt)
-          .append(") VALUES (")
-          .append(String.join(", ", values))
-          .append(", l_i, 3, 1, l_p, l_c); FOR i IN 1 .. l_n LOOP IF SQL%BULK_ROWCOUNT(i) = 0")
+      String metaColumns =
+          n.columns("")
+              + ", "
+              + n.txId
+              + ", "
+              + n.txState
+              + ", "
+              + n.txVersion
+              + ", "
+              + n.preparedAt
+              + ", "
+              + n.committedAt;
+      b.append(" FORALL i IN 1 .. l_n ").append(fill(dml, all));
+      if (notExists) {
+        // below 23 the hint's SQL%BULK_ROWCOUNT counts a skipped row as 1: the key's row read
+        b.append("; FORALL i IN 1 .. l_n INSERT INTO ")
+            .append(n.meta)
+            .append(" (")
+            .append(metaColumns)
+            .append(") SELECT ")
+            .append(String.join(", ", values))
+            .append(", l_i, 3, 1, l_p, l_c FROM dual WHERE NOT EXISTS (SELECT 1 FROM ")
+            .append(n.meta)
+            .append(" m WHERE ")
+            .append(String.join(" AND ", byMetaKey))
+            .append(")");
+      } else {
+        b.append("; FORALL i IN 1 .. l_n INSERT /*+ IGNORE_ROW_ON_DUPKEY_INDEX(x (")
+            .append(n.columns(""))
+            .append(")) */ INTO ")
+            .append(n.meta)
+            .append(" x (")
+            .append(metaColumns)
+            .append(") VALUES (")
+            .append(String.join(", ", values))
+            .append(", l_i, 3, 1, l_p, l_c)");
+      }
+      return b.append("; FOR i IN 1 .. l_n LOOP IF SQL%BULK_ROWCOUNT(i) = 0")
           .append(" THEN l_o(i) := i; END IF; END LOOP; l_r := l_o.COUNT; IF l_r > 0 THEN FORALL")
           .append(" i IN INDICES OF l_o UPDATE ")
           .append(n.meta)
@@ -2928,7 +2960,7 @@ final class Writes {
    * for the entries one by one (design 4.4).
    */
   private static int applyOracleBulk(
-      Connection vendor, Bulk bulk, List<Context> contexts, Finalized finalized)
+      Connection vendor, Bulk bulk, List<Context> contexts, Finalized finalized, int oracleMajor)
       throws SQLException {
     int done = 0;
     while (done < contexts.size()) {
@@ -2939,7 +2971,7 @@ final class Writes {
       }
       Run lead = new Run(vendor, chunk.get(0));
       lead.checkCancelled();
-      try (CallableStatement cs = lead.track(vendor.prepareCall(bulk.sql(types)))) {
+      try (CallableStatement cs = lead.track(vendor.prepareCall(bulk.sql(types, oracleMajor)))) {
         int at = lead.stamp(cs, 1);
         cs.setInt(at++, chunk.size());
         for (int e = 0; e < Bulk.SLOTS; e++) {
@@ -3826,9 +3858,9 @@ final class Writes {
           + n.inflightHint("m")
           + "1 FROM "
           + n.meta
-          + " m WHERE m."
-          + n.txState
-          + " IN (1, 2))";
+          + " m WHERE "
+          + n.inflight("m")
+          + ")";
     }
     if (n.engine == Engine.POSTGRESQL) {
       return "(" + firstInFlight(n) + ") IS NULL";
@@ -5620,7 +5652,8 @@ final class Writes {
             // a number bound for a text key would convert every key to a number (todo 277)
             value = "CAST(" + value + " AS " + full + ")";
           }
-          terms.add(k + " = " + value);
+          // the in-flight count's, the key as the in-flight index holds it (todo 364)
+          terms.add(n.inflightKey("", t.keyColumns().get(i)) + " = " + value);
           termsData.add("d." + k + " = " + value);
           if (!returns
               && (engine == Engine.MYSQL || engine == Engine.MARIADB)
@@ -5693,8 +5726,7 @@ final class Writes {
                   + " WHERE ("
                   + String.join(" OR ", match)
                   + ") AND "
-                  + n.txState
-                  + " IN (1, 2)",
+                  + n.inflight(""),
               matchBinds,
               floatKeys);
     }
@@ -6401,7 +6433,7 @@ final class Writes {
    * an entry's row says is thrown, the entries before it recorded.
    */
   static int applyOracleEntries(
-      Connection vendor, Plan plan, List<Context> contexts, Finalized finalized)
+      Connection vendor, Plan plan, List<Context> contexts, Finalized finalized, int oracleMajor)
       throws SQLException {
     Bulk bulk = plan.bulk();
     Context first = contexts.get(0);
@@ -6414,7 +6446,7 @@ final class Writes {
       int got =
           bulk.readCommitted()
               ? applyOracleBulkRc(vendor, (KeyedPlan) plan, bulk, contexts, finalized)
-              : applyOracleBulk(vendor, bulk, contexts, finalized);
+              : applyOracleBulk(vendor, bulk, contexts, finalized, oracleMajor);
       if (got != 0) {
         return got;
       }
@@ -7053,13 +7085,7 @@ final class Writes {
       // hinted to the in-flight index (design 4.2 on Oracle, todo 334)
       return anyRow(
           engine,
-          "SELECT "
-              + n.inflightHint("m")
-              + "1 FROM "
-              + n.meta
-              + " m WHERE m."
-              + n.txState
-              + " IN (1, 2)");
+          "SELECT " + n.inflightHint("m") + "1 FROM " + n.meta + " m WHERE " + n.inflight("m"));
     }
     if (engine == Engine.POSTGRESQL) {
       return firstInFlight(n);
@@ -10229,6 +10255,8 @@ final class Writes {
     final List<String> dataColumns;
     // the in-flight index of the metadata table, quoted, which Oracle's probes are hinted to
     final String inflightIndex;
+    // which spells the in-flight texts for the index's form (todo 364)
+    private final TableInfo info;
 
     Names(Engine engine, TableInfo t) {
       this.engine = engine;
@@ -10249,6 +10277,7 @@ final class Writes {
       this.inline = t.layout() == Layout.INLINE;
       this.dataColumns = t.dataColumns();
       this.inflightIndex = engine.quote(t.inflightIndex(engine));
+      this.info = t;
     }
 
     // SQL Server: the data table's primary key index, quoted, read once
@@ -10538,6 +10567,28 @@ final class Writes {
      * writes it (quoted where the SQL quotes it), to the in-flight index: a probe's plan must not
      * depend on the metadata table's statistics (design 4.2, todo 334). Elsewhere nothing.
      */
+    /**
+     * The condition that the metadata row {@code q} (empty for none) is in flight, spelled for the
+     * in-flight index's form (design 4.2, todo 364).
+     */
+    String inflight(String q) {
+      return info.inflight(engine, q);
+    }
+
+    /** A key column of {@code q} under {@link #inflight}, as the in-flight index holds it. */
+    String inflightKey(String q, String k) {
+      return info.inflightKey(engine, q, k);
+    }
+
+    /** {@link #inflightKey} of each key column equal to the same column of {@code b}. */
+    String inflightKeyJoin(String q, String b) {
+      List<String> terms = new ArrayList<>();
+      for (String k : keyColumns) {
+        terms.add(inflightKey(q, k) + " = " + b + "." + engine.quote(k));
+      }
+      return String.join(" AND ", terms);
+    }
+
     String inflightHint(String m) {
       return engine == Engine.ORACLE ? "/*+ INDEX(" + m + " " + inflightIndex + ") */ " : "";
     }

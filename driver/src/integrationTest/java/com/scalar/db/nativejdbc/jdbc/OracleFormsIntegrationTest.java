@@ -1020,7 +1020,9 @@ class OracleFormsIntegrationTest {
   /**
    * 9c. {@code IGNORE_ROW_ON_DUPKEY_INDEX} under {@code FORALL}, per iteration: a key with a row is
    * skipped and counted 0 by {@code SQL%BULK_ROWCOUNT}, the others inserted. Decides: the bulk
-   * INSERT's metadata insert and the list the takeover runs over.
+   * INSERT's metadata insert and the list the takeover runs over. Below 23 the skipped row counts
+   * 1, the total {@code SQL%ROWCOUNT} right on both: the bulk INSERT's form there is 9c' (todo
+   * 327).
    */
   @Test
   void ignoreRowOnDupkeyIndexPerIteration() throws Exception {
@@ -1040,7 +1042,8 @@ class OracleFormsIntegrationTest {
       log(
           "9c FORALL metadata INSERT of 201, 8 (has a row), 202 under the hint: counts/total "
               + row);
-      assertThat(row).isEqualTo("1,0,1,/2");
+      assertThat(row)
+          .isEqualTo(c.getMetaData().getDatabaseMajorVersion() < 23 ? "1,1,1,/2" : "1,0,1,/2");
       assertThat(query(c, "SELECT k, tx_id FROM ofa.bk_meta WHERE k IN (8, 201, 202) ORDER BY k"))
           .containsExactly("8/T0", "201/N", "202/N");
       c.rollback();

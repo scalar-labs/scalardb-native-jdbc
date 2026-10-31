@@ -167,3 +167,129 @@ todo 334's log and the design sections named.
   redo; with the 36-character one the table stayed at 9,216 blocks (12 bytes a row larger at rest),
   the reads fetched 465 continued rows at 4.01 gets, and the first write cost 4.09 gets and 392 B.
   So the backfill stamping a 36-character `tx_id` removes the growth; sent to 6e for the user.
+- 2026-10-31 (item 1, Fable): the user took the function-based in-flight index ("yes, have 89 design
+  it", via 6e; performance only, Oracle only; the 36-character sentinel, item 2's proposal, taken
+  the same day on 6e's record ("yes to all four") and built by c7 on its own branch, reviewed
+  separately). Designed in section 3 (the paragraph "Oracle's in-flight index is function-based",
+  after the Indexes paragraph; the setup paragraph's three sentences; the engine table's Oracle
+  cell) and 4.2 (the spelling rule in the Oracle paragraph, after the `INDEX` hint sentence) and 4.4
+  (the stuck-row contract). Verified on the container first (scratchpad `ora/dict.jsh`, `dict2.jsh`,
+  outputs `dict.txt`, `dict2.txt`): `ALL_INDEXES.INDEX_TYPE` is `FUNCTION-BASED NORMAL` against
+  `NORMAL`; `ALL_IND_COLUMNS` and ojdbc's `getIndexInfo` name the columns `SYS_NC00022$`,
+  `SYS_NC00023$`, so today's key-order check would count the index as in another order and the setup
+  would rebuild it every run; `ALL_IND_EXPRESSIONS` stores `CASE "TX_STATE" WHEN 1 THEN "K" WHEN 2
+  THEN "K" END` whether the DDL spells the simple or the searched CASE, and a predicate in either
+  spelling takes the index (access predicates on the hidden columns); the plain spelling against it
+  is a full scan of the table, 3,068 gets and 11 ms at 300,000 rows with nothing in flight, hint or
+  not, and the expression against the plain index an index full scan; the gather `FOR ALL COLUMNS
+  SIZE REPEAT` covers the hidden columns (a frequency histogram on the state expression),
+  `DBMS_STATS.SET_COLUMN_STATS` takes a hidden column by its quoted name and `SET_INDEX_STATS` the
+  index, and an unlocked regather replaces both, as it does `tx_state`'s today; the hidden columns
+  are absent from `getColumns` and `SELECT *`; a composite key's expressions take each column's type
+  (VARCHAR2, TIMESTAMP(3), NUMBER); the move, `DROP INDEX` and `CREATE INDEX ... ONLINE` in the
+  function-based form, 0.13 + 0.60 s on 300,000 rows; the keyed probe and a range gate on the key
+  expression are index range scans on both columns (4 gets with 10,000 in flight), the state
+  column's key set with the key expression in its select list is served from the index alone and
+  joined to the primary key, and `check`'s stuck count and the backfill's in-flight count hinted
+  cost 4,394 gets with 10,000 rows in flight (the rows read for their filter), 1 with none;
+  unhinted, the stuck count scans the table (the statistics say 10,000). Design choices: the catalog
+  carries the index's form and the driver spells a table's in-flight texts for it, so a table with
+  the plain index keeps today's texts until its setup runs again (no flag day; the alternative, the
+  expression spelling everywhere, would scan every table not yet rebuilt); the setup replaces a
+  plain index as it rebuilds one in another order, and `check` reports the plain form as not set up
+  with the reason, as the key order is reported; the `INDEX` and `NO_INDEX_SS` hints stay; the fixed
+  statistics keep `tx_state`'s histogram and add the hidden columns' and the index's; both layouts
+  and both levels through the same spellings (the index is on whichever table holds the state). Open
+  beside it: item 2's `BETWEEN 1 AND 2` would be one token in the same spelling helper (on the
+  function-based index it is a single range scan where `IN (1, 2)` is an `INLIST ITERATOR` of two, 2
+  gets either way at 10,000 in flight); not taken here, the user's call. Handed to c7 to build on a
+  branch; reviewed from `git show`; lands on the user's word; 6e plans the AWS proof run after.
+- 2026-10-31 (item 2's proposal, the 36-character backfill tx_id, Fable's review): c7's d39b722 on
+  backfill-tx-id-36 (one commit on 12afca4) reviewed from `git show`, mergeable. The constant
+  `scalardb-native-backfill-placeholder` is 36 characters (counted), bound only at the backfill's
+  stamp; nothing in the driver, the setup, check or the tests matches on the value or its length,
+  so rows stamped with the 24-character value work beside the new ones and nothing accepts both;
+  the setup test asserts every metadata row carries the constant and that it is a UUID's length;
+  design.md names the new value in section 3's setup paragraph and the backfill bullet (lines
+  added, no paragraph rewrapped, 38 fences); a changie entry. One nit, not blocking: the backfill
+  bullet's replaced line runs to 113 characters; c7 took it, the branch's head now db7f450 (the
+  line broken, nothing else, 38 fences). Lands on the user's word, as the others.
+
+
+- 2026-10-31 (c7, item 1 built on branch `oracle-fbi-inflight`): the catalog reads
+  `ALL_INDEXES.INDEX_TYPE` in the listing it reads already and carries the form on `TableInfo`
+  (`inflightExpressions`, with `inflight(engine, alias)` and `inflightKey(engine, alias, column)`;
+  `Writes.Names` wraps them). Spelled for the form: the split read's keyed `NOT EXISTS` and its
+  `DISTINCT` set, the in-flight copies (condition, and the key in their select list, so a key
+  conjunct the optimizer pushes into the copy matches the index), the after images, the SNAPSHOT
+  state column's probe and key set, D2's range gate (a `KeyRange` spelling for its conjuncts), the
+  batch block's gate, the clear gate, the coarse check, the insert's in-flight key count. The setup
+  builds the expressions, moves a plain index (`rebuilt in-flight index X in the function-based
+  form`), spells the view's second arm and the backfill's two in-flight counts (hinted), and sets
+  the hidden columns' and the index's statistics in the same block. `KeyOrder` reads Oracle's index
+  from `ALL_IND_COLUMNS` joined to `ALL_IND_EXPRESSIONS`; `check` gives the reason (`in-flight index
+  in the plain form` / `in another column order`), also as `reason` in `--json`. On the container
+  every Oracle suite text that names the expressions (29) reads the in-flight index, none scans the
+  decoupled metadata table; the inline 10-row read at SNAPSHOT with a row in flight elsewhere went
+  from about 11 to 8.3 gets, its in-flight arm now reaching the rows by the key through the index.
+  Found: one ScalarDB test prepare of 501 inserts at SERIALIZABLE right after a few small
+  transactions fails with ORA-08177 every time on the function-based index (10/10 against 0/10
+  plain, in plain SQL, scratchpad `s8177*.sql`): it splits the index's single, nearly empty leaf
+  that those transactions changed; a retry gets through (third attempt). In a steady stream of 200
+  prepares and commits on 2,000 rows the function-based index raised no more than the plain one:
+  updates of 1, 10 and 50 rows 0, 0, 0 against 0, 0, 1; inserts of 1, 10 and 50 rows 0, 4, 10
+  against 1, 6, 16. The test retries its prepare as ScalarDB's conflicts are retried.
+
+- 2026-10-31 (review of c7's a9412f8 on `oracle-fbi-inflight`, from `git show`): mergeable. Checked
+  against section 3's paragraph, 4.2's rule, 4.4's contract and the hand-off's site list: the
+  catalog's `INDEX_TYPE` column and `SetupObjects.inflightExpressions`, carried on `TableInfo` and
+  spelled by `inflight`/`inflightKey` (`Writes.Names` wrapping them); every Oracle in-flight text
+  spelled for the form: the split read's keyed `NOT EXISTS` and `DISTINCT` set (the key aliased back
+  to its name), the in-flight copies (the condition, and their key listed as the expression, so that
+  a conjunct the optimizer pushes into the copy matches the index: the inline SNAPSHOT 10-row read
+  8.3 gets from about 11, form 1's probe count 3), the after images' join, the SNAPSHOT state
+  column's probe and key set, D2's range gate through `KeyRange`'s spelling function, the batch
+  block's gate, the clear gate, the coarse check, the D3 insert's in-flight count (its data-side
+  read-back plain, as it must be); the key joins that read other metadata columns and the
+  `COALESCE` row filters untouched. The setup: `createIndex` with every column an expression
+  (`ONLINE`, the ORA-00439 fallback); the move on `KeyOrder.inflightMismatch` = `PLAIN_FORM` with
+  its own message; the view's second arm spelled (the view is replaced on every run, so the move
+  re-spells it); the backfill's two counts aliased and hinted; the statistics loop over
+  `ALL_IND_COLUMNS` with `EXISTS` in `ALL_IND_EXPRESSIONS`, spliced before the lock so the
+  as-if-backfilled `n` applies, the index's statistics only where an expression column was found.
+  `KeyOrder.oracleExpressions` reads `ALL_IND_COLUMNS` left-joined to `ALL_IND_EXPRESSIONS` (the
+  `LONG` read in order), parses Oracle's stored form and requires it to name `tx_state`; any plain
+  column is `PLAIN_FORM`. `check`'s reason in `toString` and `--json`, its stuck count aliased,
+  hinted and spelled; teardown by name unchanged; `setting-up-tables.md`, `concepts.md`, the
+  changie entry. Noted, no change asked: `--plan` on a table still in the plain form counts the
+  backfill's remaining rows with the expression spelling and the hint against the plain index, an
+  index full scan, harmless. Design: 4.2's rule gains the copies' select-list spelling and section
+  3 the ORA-08177 facts below (this note's commit); c7 rebases onto it and lands on the user's word.
+  c7's ORA-08177 finding checked under concurrency on the container (scratchpad `ora/ser8177.jsh`,
+  `ser8177b.jsh`, 300,000-row TI_P plain and TI_F function-based, 16 sessions at SERIALIZABLE each
+  200 prepare/commit pairs of 10 disjoint rows): prepares failing with ORA-08177, plain 53%,
+  function-based 52% (updates); inserts of new rows 60% against 66%; the commits 20–23% either way;
+  with the in-flight index dropped 0.4% and 1.6%; `INITRANS 50` on either index no change (57%,
+  56%); 4 sessions 52% and 55%. So the hot leaf is any in-flight index's on Oracle, the plain
+  index's `(1, k)`/`(2, k)` entries at its left edge as much as the function-based index's whole
+  content; the function-based form adds only the sequential empty-leaf split c7 found, retriable.
+  Who meets it: ScalarDB's storage connections where they run Oracle's SERIALIZABLE, which ScalarDB
+  requires for a virtual table there (`RdbEngineOracle.getMinimumIsolationLevelForConsistentVirtualTableRead`
+  = 8) and which raised c7's error; not the driver's own transactions, whose writes touch no
+  in-flight entry (a row's state stays 3). Pre-existing, not this commit's; filed as todo 366 for
+  the user.
+
+- 2026-10-31 (the branch heads after c7's rebase onto 7f49c7e, checked from git): `oracle-fbi-inflight`
+  is 59bfa82, a9412f8's patch with only this log's entries merged (nothing changed in `driver/`,
+  `tools/`, `.changes` or the two user docs, `range-diff`); `backfill-tx-id-36` is db934cd and a69a35b,
+  patch-identical to d39b722 and db7f450; 38 fences at both heads, `merge-tree` finds no conflict
+  between them. Both verdicts stand at these heads; the user's word names them.
+- 2026-10-31 (both branches on main, checked from git): c7 fast-forwarded them on the user's "land it";
+  main went 2625a84 → 36dfb48 (the 36-character backfill tx_id) → d4cd5eb (its design.md nit) →
+  c4a7fcf (the function-based in-flight index). `range-diff` reads 36dfb48 = db934cd, d4cd5eb =
+  a69a35b and c4a7fcf = 59bfa82, the reviewed patches unchanged; 38 fences at c4a7fcf; nothing pushed.
+  6e told the index is on main for the AWS proof run (the expected figures in design section 3).
+- 2026-10-31 13:49 (6e): the Oracle proof run 20261031-1349-ora started on the user's word from c4a7fcf,
+  `bench-env/plans/overnight-oracle.json` (the tenth run's matrix), its own stack, expected done about
+  19:10; 6e sends the results, the per-statement gets and the continued-row counts for the reading
+  against the expectations above.
