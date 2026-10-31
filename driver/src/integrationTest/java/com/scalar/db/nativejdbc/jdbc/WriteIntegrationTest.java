@@ -1285,8 +1285,10 @@ class WriteIntegrationTest {
     // the rows as the transaction starts: 1 a, 2 b, 3 c
     d.setAutoCommit(true);
     d.createStatement().executeUpdate("DELETE FROM " + t + " WHERE id IN (1, 2, 3, 4)");
-    d.createStatement()
-        .executeUpdate("INSERT INTO " + t + " (id, x) VALUES (1, 'a'), (2, 'b'), (3, 'c')");
+    // a row a statement, as Oracle before 23 has no multi-row VALUES
+    for (String row : List.of("(1, 'a')", "(2, 'b')", "(3, 'c')")) {
+      d.createStatement().executeUpdate("INSERT INTO " + t + " (id, x) VALUES " + row);
+    }
     d.setTransactionIsolation(level);
     d.setAutoCommit(false);
     try (Statement st = d.createStatement()) {
