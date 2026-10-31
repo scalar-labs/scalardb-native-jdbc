@@ -724,7 +724,26 @@ At +250 µs, SNAPSHOT inline's TPC-C transactions are +3% to +9% and its YCSB op
   - the 10-row stock UPDATE batch is 91.5 µs against 41.3, about a quarter;
   - NewOrder's statements total 463 µs against the vendor's 265 (544 in the tenth run).
 
-  The client's share is in the run's flight recordings, not yet read.
+- **The client is about a seventh of the gap.** From the flight recordings' CPU-time samples
+  (`jdk.CPUTimeSample`, 1 ms) of RC inline TPC-C, repetition 1, inside the measured minute, the
+  benchmark's worker threads spend:
+
+  | run | vendor | driver: own code | driver: ojdbc under it | driver: total |
+  |---|---|---|---|---|
+  | tenth | 138 µs | 55 µs | 174 µs | 235 µs |
+  | eleventh | 169 µs | 68 µs | 214 µs | 290 µs |
+
+  That is about 120 µs a transaction over the vendor, of the about 840 µs by which the driver's mean
+  transaction (4 terminals over throughput) is longer. The server's active time accounts for about
+  600 µs, and the round trips are equal (21.6 against 21.5 a commit).
+  - The driver's own code is mostly the proxy's dispatch: `StatementHandler.handle`, `forward`,
+    `invoke` and `proxy`, about 30 µs a transaction. Routing (`Router.ran`, `current`, `route`) is
+    about 10 µs, and the rest is spread thin.
+  - ojdbc's extra 45 µs is the driver's extra and larger statements: the callable blocks, the
+    batches' binds.
+  - Both drivers spent about 20% more client CPU a transaction on this stack than on the tenth
+    run's. That matches the vendor's lower throughput here: this stack's client was slower, not
+    the driver.
 - **The 36-character backfill `tx_id` removes the backfilled rows' migration.** `table fetch
   continued row` per 60 s run on decoupled YCSB A and F: 4 and 4 at RC (85,880 and 53,304 in the
   tenth run), 7 and 7 at SNAPSHOT (21,371 and 32,938). Inline TPC-C is unchanged at 157,604 to
