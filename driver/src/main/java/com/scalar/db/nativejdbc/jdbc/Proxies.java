@@ -123,8 +123,9 @@ public final class Proxies {
     return null;
   }
 
-  // a test's stand-in for the server's major version for the connections it opens, 0 for the
-  // server's own: the form below 23 run on 23 (todo 327)
+  // a test's stand-in for the server's major version, 0 for the server's own: the form below 23
+  // run on 23 (todo 327); JVM-wide, taken by every connection opened while it is set, so a test
+  // sets it around its own open alone
   static volatile int oracleMajorForTests;
 
   /**
