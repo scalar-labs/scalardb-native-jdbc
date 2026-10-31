@@ -289,3 +289,7 @@ todo 334's log and the design sections named.
   c4a7fcf (the function-based in-flight index). `range-diff` reads 36dfb48 = db934cd, d4cd5eb =
   a69a35b and c4a7fcf = 59bfa82, the reviewed patches unchanged; 38 fences at c4a7fcf; nothing pushed.
   6e told the index is on main for the AWS proof run (the expected figures in design section 3).
+- 2026-10-31 13:49 (6e): the Oracle proof run 20261031-1349-ora started on the user's word from c4a7fcf,
+  `bench-env/plans/overnight-oracle.json` (the tenth run's matrix), its own stack, expected done about
+  19:10; 6e sends the results, the per-statement gets and the continued-row counts for the reading
+  against the expectations above.
