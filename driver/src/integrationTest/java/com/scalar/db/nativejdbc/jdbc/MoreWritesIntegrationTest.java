@@ -667,8 +667,9 @@ class MoreWritesIntegrationTest {
         assertThat(ps.executeUpdate()).isEqualTo(1);
       }
       d.setAutoCommit(false);
-      // 202: leading whitespace, and a scalar subquery
-      assertThat(rows(d, "  \n SELECT x FROM wb.imp WHERE id = (SELECT 1) FOR UPDATE"))
+      // 202: leading whitespace, and a scalar subquery; Oracle before 23 needs its FROM
+      String one = engine == Engine.ORACLE ? "(SELECT 1 FROM dual)" : "(SELECT 1)";
+      assertThat(rows(d, "  \n SELECT x FROM wb.imp WHERE id = " + one + " FOR UPDATE"))
           .containsExactly("a");
       d.rollback();
       if (engine == Engine.MYSQL) {
