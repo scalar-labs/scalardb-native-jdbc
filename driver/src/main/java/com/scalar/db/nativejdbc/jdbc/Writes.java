@@ -6203,12 +6203,14 @@ final class Writes {
 
   /**
    * SQL Server's update conflict at SNAPSHOT, error 3960, which its driver reports under a plain
-   * SQLState, and Oracle's serialization failures, under 72000, as the retryable conflicts they
-   * are: first-committer-wins (design 5). A batch's keeps its update counts (todo 285).
+   * SQLState, Oracle's serialization failures, under 72000, and MariaDB's 1020 under
+   * innodb_snapshot_isolation, the default from 11.6.2, under HY000, as the retryable conflicts
+   * they are: first-committer-wins (design 5). A batch's keeps its update counts (todo 285).
    */
   static SQLException asRetryable(SQLException e) {
     if (!(e.getErrorCode() == 3960 && String.valueOf(e.getSQLState()).startsWith("S0"))
-        && !oracleSerialization(e)) {
+        && !oracleSerialization(e)
+        && !(e.getErrorCode() == 1020 && "HY000".equals(e.getSQLState()))) {
       return e;
     }
     if (e instanceof BatchUpdateException) {
