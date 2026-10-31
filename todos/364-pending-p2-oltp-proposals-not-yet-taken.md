@@ -379,3 +379,10 @@ todo 334's log and the design sections named.
   plain in-flight index the committed copy's reason for it (the sixth run's skip scan) applies to the
   copy too, so the hint belongs there where `inflightExpressions` is false. 19c not run: plain SQL,
   the run follows with 33's workflow once both land. Lands on the user's word in c7's session.
+- 2026-11-01 (c7's 9aabeb0 on top of db5a464, from `git show`): the nit folded in, the copy carrying
+  `/*+ NO_INDEX_SS(t "T_inflight") */` where `inflightExpressions` is false, as the committed copy
+  does, nothing on the function-based form; the new test's tail rebuilds ccit's index plain and reads
+  item 520 through the copy with the hint on a fresh catalog (the in-flight transactions are rolled
+  back by then, so it reads the committed price: a smoke test of the text, not of a row in flight,
+  fine). The verdict carries to 9aabeb0; the design's rule sentence now says "no hint but the
+  committed copy's on the plain form". Lands on the user's word in c7's session.
