@@ -1,0 +1,100 @@
+name: Oracle 19c
+
+# The Oracle integration tests on Oracle 19c while the driver is made to support it (todo 327): runs
+# on pushes to the oracle-19c branch, and moves into ci.yml once it passes. 19c is the organization's
+# private image, SE2 19.3.0, with the database created in it; the tests reach it as an existing
+# database (testing/Engines.java), so SYSDBA's setting the container gets is made here.
+on:
+  push:
+    branches:
+      - oracle-19c
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  oracle-19c:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      # which 19c release updates Oracle's own registry has, for a newer image than 19.3.0
+      - name: List Oracle's 19c images
+        continue-on-error: true
+        env:
+          OCR_USERNAME: ${{ secrets.OCR_USERNAME }}
+          OCR_TOKEN: ${{ secrets.OCR_TOKEN }}
+        run: |
+          for repo in database/enterprise database/standard; do
+            token=$(curl -s -u "$OCR_USERNAME:$OCR_TOKEN" \
+              "https://container-registry.oracle.com/auth?service=Oracle%20Registry&scope=repository:$repo:pull" \
+              | jq -r .token)
+            echo "$repo:"
+            curl -s -H "Authorization: Bearer $token" \
+              "https://container-registry.oracle.com/v2/$repo/tags/list" | jq -c .tags
+          done
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.CR_PAT }}
+
+      # the container is up in about 3 minutes, but one start never got there in 23: a second
+      # start after 12 minutes, the log of each shown
+      - name: Start Oracle 19c
+        run: |
+          ready() {
+            for _ in $(seq 72); do
+              if docker exec oracle19 /opt/oracle/checkDBStatus.sh > /dev/null 2>&1; then return 0; fi
+              sleep 10
+            done
+            return 1
+          }
+          docker pull -q ghcr.io/scalar-labs/oracle/db-prebuilt:19
+          started=false
+          for attempt in 1 2; do
+            docker run -d --name oracle19 -p 1521:1521 ghcr.io/scalar-labs/oracle/db-prebuilt:19
+            if ready; then started=true; break; fi
+            echo "::warning::Oracle 19c not ready after 12 minutes (attempt $attempt)"
+            docker logs --tail 100 oracle19
+            docker rm -f oracle19
+          done
+          "$started"
+          echo 'ALTER SYSTEM SET "_disable_last_successful_login_time" = TRUE SCOPE = MEMORY;' \
+            | docker exec -i oracle19 bash -c 'sqlplus -s / as sysdba'
+          echo 'SELECT banner_full FROM v$version;' \
+            | docker exec -i oracle19 bash -c 'sqlplus -s / as sysdba'
+
+      - name: Integration tests
+        run: >-
+          ./gradlew :driver:integrationTestOracle
+          -Dnativejdbc.oracle.url=jdbc:oracle:thin:@//localhost:1521/ORCLPDB1
+          -Dnativejdbc.oracle.username=system
+          -Dnativejdbc.oracle.password=Oracle
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-reports-oracle-19c
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
