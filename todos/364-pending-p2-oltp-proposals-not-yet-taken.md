@@ -353,3 +353,11 @@ todo 334's log and the design sections named.
   note that an inline table's first writes grow its rows unless backfilled or loaded with PCTFREE.
   Also: the ofa-oracle instance had died this morning (PMON, ORA-471 after a clock jump) and was
   restarted; the scratch tables survived.
+- 2026-10-31 (the user's word, "yes, 1 and 2", via 6e; "yes" to me for 366 first with the CASE copy
+  beside it): items (a) and (b) above designed on main as 31ec14c, design 4.2 "The key-only read on an
+  inline table at READ COMMITTED as the CASE copy", one paragraph for the key read and the anchor-less
+  aggregate, the 19c clause included; handed to c7 for its own branch (SplitRead's copy choice, the
+  key-only test beside `keyConjuncts`, the gated form's selection; suites on 23 and 19c; rebase onto
+  the 19c branches or they onto this). Item (c), the inline backfill A/B, and the harness's plans
+  capture are 6e's to put to the user after 1 and 2 land. Todo 366's option 1 runs on the container
+  meanwhile (`ora/ser366.jsh`).
