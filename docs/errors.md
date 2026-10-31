@@ -4,8 +4,9 @@ This page describes the errors the driver raises, by SQLState: what causes each 
 about it. Look up an SQLState here when an application gets an error from the driver.
 
 The driver's own errors carry these SQLStates. Errors from the database come through as the vendor
-driver reports them, except that SQL Server's update conflict (error 3960) and Oracle's
-serialization failures (ORA-08177, ORA-08176) come as `40001`.
+driver reports them, except that SQL Server's update conflict (error 3960), Oracle's
+serialization failures (ORA-08177, ORA-08176) and MariaDB's "Record has changed since last read"
+(error 1020) come as `40001`.
 
 ## Retry the transaction
 

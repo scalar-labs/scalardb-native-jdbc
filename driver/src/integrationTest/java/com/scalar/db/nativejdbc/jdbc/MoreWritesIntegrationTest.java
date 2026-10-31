@@ -720,16 +720,33 @@ class MoreWritesIntegrationTest {
       d.setAutoCommit(true);
       assertThat(d.createStatement().executeUpdate("DELETE FROM wb.fl WHERE x = 6")).isEqualTo(1);
       if (engine == Engine.MYSQL || engine == Engine.MARIADB) {
-        // 209, 214: at REPEATABLE READ a key deleted after the snapshot can be inserted again
+        // 209, 214: at REPEATABLE READ a key deleted after the snapshot can be inserted again,
+        // unless MariaDB's innodb_snapshot_isolation, the default from 11.6.2, refuses the change
+        // since the snapshot with 1020, which comes as 40001
+        boolean snapshotIsolation =
+            engine == Engine.MARIADB
+                && rows(d, "SELECT @@innodb_snapshot_isolation").equals(List.of("1"));
         d.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (0, 40)");
         try (Connection rr = e.openDriver()) {
           rr.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
           rr.setAutoCommit(false);
           assertThat(rows(rr, "SELECT COUNT(*) FROM wb.plain")).hasSize(1);
           d.createStatement().executeUpdate("DELETE FROM wb.ord WHERE k = 40");
-          assertThat(rr.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (1, 40)"))
-              .isEqualTo(1);
-          rr.commit();
+          if (snapshotIsolation) {
+            assertThatThrownBy(
+                    () ->
+                        rr.createStatement()
+                            .executeUpdate("INSERT INTO wb.ord (x, k) VALUES (1, 40)"))
+                .isInstanceOf(SQLTransactionRollbackException.class)
+                .extracting(x -> ((SQLException) x).getSQLState())
+                .isEqualTo("40001");
+            rr.rollback();
+          } else {
+            assertThat(
+                    rr.createStatement().executeUpdate("INSERT INTO wb.ord (x, k) VALUES (1, 40)"))
+                .isEqualTo(1);
+            rr.commit();
+          }
           // nor do concurrent INSERTs of other keys wait on each other's locks
           e.execute(d, "SET SESSION innodb_lock_wait_timeout = 2");
           e.execute(rr, "SET SESSION innodb_lock_wait_timeout = 2");
