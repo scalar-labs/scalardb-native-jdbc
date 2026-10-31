@@ -768,4 +768,49 @@ class SqlAstTest {
                 .isPresent())
         .isTrue();
   }
+
+  /** {@link SqlAst#keyOnly}'s cases (design 4.2, the CASE copy, todo 364). */
+  @Test
+  void keyOnly_namesOnlyTheReferencesKeyInWhereAndOn() {
+    List<String> keys = List.of("w", "o", "n");
+    List<String> cols = List.of("w", "o", "n", "i", "amt");
+    java.util.function.BiFunction<String, java.util.Set<String>, Boolean> first =
+        (sql, elsewhere) -> {
+          SqlAst ast = SqlAst.parse(sql, Engine.ORACLE).orElseThrow();
+          return ast.keyOnly(ast.tableRefs().get(0), keys, cols, elsewhere);
+        };
+    // the key's columns and none, the select list, grouping and order free
+    assertThat(first.apply("SELECT amt FROM ol WHERE w = ? AND o = ? AND n = ?", null)).isTrue();
+    assertThat(first.apply("SELECT SUM(amt) FROM ol WHERE w = 1 AND o BETWEEN ? AND ?", null))
+        .isTrue();
+    assertThat(first.apply("SELECT i, COUNT(*) FROM ol GROUP BY i ORDER BY i", null)).isTrue();
+    assertThat(first.apply("SELECT amt FROM ol x WHERE x.w = 1 AND ROWNUM = 1", null)).isTrue();
+    // a non-key column, unqualified or qualified, or inside an expression
+    assertThat(first.apply("SELECT amt FROM ol WHERE w = 1 AND amt > 0", null)).isFalse();
+    assertThat(first.apply("SELECT amt FROM ol x WHERE x.w = 1 AND x.i = 2", null)).isFalse();
+    assertThat(first.apply("SELECT amt FROM ol WHERE w = 1 OR UPPER(i) = 'A'", null)).isFalse();
+    // a subquery in the predicate
+    assertThat(first.apply("SELECT amt FROM ol WHERE w IN (SELECT w FROM s)", null)).isFalse();
+    // a join: the other table's columns aside, the ON clause's own counted
+    String join = "SELECT o.amt FROM ol o JOIN st s ON s.i = o.i WHERE o.w = 1 AND s.q < 3";
+    assertThat(first.apply(join, java.util.Set.of("i", "q"))).isFalse();
+    SqlAst ast = SqlAst.parse(join, Engine.ORACLE).orElseThrow();
+    assertThat(ast.keyOnly(ast.tableRefs().get(1), List.of("i"), List.of("i", "q"), null))
+        .as("the stock table: its key in ON, its q in WHERE")
+        .isFalse();
+    String byKey = "SELECT o.amt FROM ol o JOIN st s ON s.i = o.i WHERE o.w = 1";
+    SqlAst k = SqlAst.parse(byKey, Engine.ORACLE).orElseThrow();
+    assertThat(k.keyOnly(k.tableRefs().get(1), List.of("i"), List.of("i", "q"), null)).isTrue();
+    // an unqualified column of a join: placed by the other tables' columns, or not at all
+    String unqualified = "SELECT amt FROM ol, st WHERE w = 1 AND q < 3";
+    assertThat(first.apply(unqualified, java.util.Set.of("i", "q"))).isTrue();
+    assertThat(first.apply(unqualified, null)).isFalse();
+    assertThat(first.apply("SELECT amt FROM ol, st WHERE w = 1 AND i = 3", java.util.Set.of("i")))
+        .as("a column both tables have")
+        .isFalse();
+    // a reference inside a subquery
+    SqlAst inner =
+        SqlAst.parse("SELECT 1 FROM st WHERE q IN (SELECT w FROM ol)", Engine.ORACLE).orElseThrow();
+    assertThat(inner.keyOnly(inner.tableRefs().get(1), keys, cols, null)).isFalse();
+  }
 }

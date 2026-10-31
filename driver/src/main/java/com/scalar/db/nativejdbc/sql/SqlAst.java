@@ -3153,6 +3153,89 @@ public final class SqlAst {
   }
 
   /**
+   * Whether every column of {@code r} the statement's WHERE and ON clauses name is a key column of
+   * it, the select list, grouping and order free (design 4.2 "The key-only read on an inline table
+   * at READ COMMITTED as the CASE copy", todo 364). False for a reference in a subquery, for a
+   * subquery anywhere in those clauses, and for an unqualified column of a join that {@code
+   * elsewhere} cannot place.
+   *
+   * @param r a reference of the statement's own FROM clause
+   * @param keyColumns its table's key columns
+   * @param columns its table's columns
+   * @param elsewhere the columns of the statement's other tables, lowercased, or {@code null} where
+   *     they are not all known
+   * @return whether the predicate names no other column of {@code r}
+   */
+  public boolean keyOnly(
+      TableRef r, List<String> keyColumns, List<String> columns, @Nullable Set<String> elsewhere) {
+    if (!(statement instanceof PlainSelect) || (r.scope != null && r.scope != statement)) {
+      return false;
+    }
+    PlainSelect s = (PlainSelect) statement;
+    boolean alone = s.getJoins() == null || s.getJoins().isEmpty();
+    List<Expression> clauses = new ArrayList<>();
+    if (s.getWhere() != null) {
+      clauses.add(s.getWhere());
+    }
+    if (!alone) {
+      for (Join j : s.getJoins()) {
+        if (j.isNatural() || (j.getUsingColumns() != null && !j.getUsingColumns().isEmpty())) {
+          return false;
+        }
+        if (j.getOnExpressions() != null) {
+          clauses.addAll(j.getOnExpressions());
+        }
+      }
+    }
+    Set<String> keys = new HashSet<>();
+    for (String k : keyColumns) {
+      keys.add(k.toLowerCase(Locale.ROOT));
+    }
+    Set<String> own = new HashSet<>();
+    for (String c : columns) {
+      own.add(c.toLowerCase(Locale.ROOT));
+    }
+    String self = r.exposedName();
+    boolean[] keyOnly = {true};
+    ExpressionVisitorAdapter<Void> v =
+        new ExpressionVisitorAdapter<Void>() {
+          @Override
+          public <S> Void visit(Column c, S context) {
+            String name = lowerUnquoted(c.getColumnName());
+            boolean ofTable;
+            if (c.getTable() != null && c.getTable().getName() != null) {
+              ofTable = lowerUnquoted(c.getTable().getName()).equals(self);
+            } else if (alone) {
+              ofTable = own.contains(name); // else a pseudo-column, as ROWNUM
+            } else if (elsewhere == null || (own.contains(name) && elsewhere.contains(name))) {
+              keyOnly[0] = false; // not placed: another table's, or ambiguous
+              return null;
+            } else {
+              ofTable = own.contains(name);
+            }
+            keyOnly[0] &= !ofTable || keys.contains(name);
+            return null;
+          }
+
+          @Override
+          public <S> Void visit(ParenthesedSelect select, S context) {
+            keyOnly[0] = false;
+            return null;
+          }
+
+          @Override
+          public <S> Void visit(Select select, S context) {
+            keyOnly[0] = false;
+            return null;
+          }
+        };
+    for (Expression e : clauses) {
+      e.accept(v, null);
+    }
+    return keyOnly[0];
+  }
+
+  /**
    * The key column of {@code r}, as stored, that {@code c} names; null where it names none or
    * another table's. The qualifier as written, as {@link #selectsKey} reads it.
    */

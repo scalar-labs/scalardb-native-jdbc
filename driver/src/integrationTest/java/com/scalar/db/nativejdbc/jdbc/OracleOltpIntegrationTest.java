@@ -2674,11 +2674,11 @@ class OracleOltpIntegrationTest {
   }
 
   /**
-   * Form 6 on an inline table (design 4.2 "The read side on Oracle", todo 334): the committed copy
-   * at READ COMMITTED carries {@code NO_INDEX_SS(t "T_INFLIGHT")}, its state condition a filter on
-   * the row and never a key, and a range scan in a transaction reaches the rows by the primary
-   * key's range, not a skip scan of the in-flight index (tx_state, key), as the sixth run's plan
-   * had it.
+   * Form 6 on an inline table (design 4.2 "The read side on Oracle", todo 334): a range scan in a
+   * transaction at READ COMMITTED reaches the rows by the primary key's range, not a skip scan of
+   * the in-flight index (tx_state, key), as the sixth run's plan had it; on the key alone through
+   * the CASE copy (todo 364), and with a non-key column through the committed copy, which carries
+   * {@code NO_INDEX_SS(t "T_INFLIGHT")}, its state condition a filter on the row and never a key.
    */
   @Test
   void form6InlineRangeScanTakesThePrimaryKey() throws Exception {
@@ -2721,7 +2721,13 @@ class OracleOltpIntegrationTest {
         Connection v = ORA.open()) {
       d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
       d.setAutoCommit(false);
-      assertThat(d.nativeSQL(sql)).contains("/*+ NO_INDEX_SS(t \"TSCAN_INFLIGHT\") */");
+      // a key range: the CASE copy, unhinted, which no index on the state matches (todo 364)
+      assertThat(d.nativeSQL(sql))
+          .contains("CASE WHEN COALESCE(t.\"tx_state\", 3) IN (1, 2) THEN")
+          .doesNotContain("/*+")
+          .doesNotContain("UNION ALL");
+      assertThat(d.nativeSQL(sql + " AND x = 'r'"))
+          .contains("/*+ NO_INDEX_SS(t \"TSCAN_INFLIGHT\") */");
       assertThat(rows(d, sql)).hasSize(500);
       d.commit();
       d.setAutoCommit(true);
@@ -2747,7 +2753,7 @@ class OracleOltpIntegrationTest {
         }
       }
       log("form 6 (inline): a 500-row range scan at READ COMMITTED, the plan\n" + plan);
-      // the committed copy by the primary key's range; the in-flight arm by the in-flight index
+      // the CASE copy by the primary key's range, no skip scan of the in-flight index
       assertThat(plan.toString())
           .containsPattern("INDEX RANGE SCAN +\\| " + pk + " ")
           .doesNotContain("SKIP SCAN");
@@ -3013,10 +3019,21 @@ class OracleOltpIntegrationTest {
                 + closed
                 + " round trip(s)");
         assertThat(open).isEqualTo(1);
-        assertThat(closed).isEqualTo(2);
-        assertThat(executedTexts(v, tag))
-            .as(name + ": the gated text ran")
-            .anyMatch(t -> t.contains("\"scalardb_native_g0\""));
+        if (layout.equals("i")) {
+          // a key-only read of an inline table: the CASE copy, exact in one statement, no gate
+          // (todo 364)
+          assertThat(closed).isEqualTo(1);
+          assertThat(executedTexts(v, tag))
+              .as(name + ": the CASE copy ran")
+              .isNotEmpty()
+              .allMatch(t -> t.contains("CASE WHEN COALESCE(t.\"tx_state\", 3) IN (1, 2)"))
+              .noneMatch(t -> t.contains("scalardb_native_g0"));
+        } else {
+          assertThat(closed).isEqualTo(2);
+          assertThat(executedTexts(v, tag))
+              .as(name + ": the gated text ran")
+              .anyMatch(t -> t.contains("\"scalardb_native_g0\""));
+        }
         // a GROUP BY and a DISTINCT, the gate columns hidden
         try (PreparedStatement ps =
             d.prepareStatement(
@@ -3131,7 +3148,7 @@ class OracleOltpIntegrationTest {
           "SELECT /* vendor */ " + measured + " SUM(ol_amt) FROM " + olData + " WHERE ol_o = ?"
         };
         String[] patterns = {
-          "SELECT " + measured + "%scalardb_native_g0%",
+          "SELECT " + measured + (layout.equals("i") ? "%CASE WHEN%" : "%scalardb_native_g0%"),
           "SELECT /* split */ " + measured + "%",
           "SELECT /* vendor */ " + measured + "%"
         };
@@ -3159,9 +3176,9 @@ class OracleOltpIntegrationTest {
         d.commit();
         log(
             String.format(
-                "form 7 (%s): Delivery's SUM a call, gets / elapsed µs / CPU µs: as written behind"
-                    + " the gate %.1f / %.0f / %.0f, the split read %.1f / %.0f / %.0f, the"
-                    + " vendor's %.1f / %.0f / %.0f",
+                "form 7 (%s): Delivery's SUM a call, gets / elapsed µs / CPU µs: the driver's (the"
+                    + " gated text, inline the CASE copy) %.1f / %.0f / %.0f, its fallback run by"
+                    + " the vendor %.1f / %.0f / %.0f, the vendor's %.1f / %.0f / %.0f",
                 name,
                 per[0][0] / 50.0,
                 per[0][1] / 50.0,
@@ -3172,7 +3189,225 @@ class OracleOltpIntegrationTest {
                 per[2][0] / 50.0,
                 per[2][1] / 50.0,
                 per[2][2] / 50.0));
-        assertThat(per[0][0]).isLessThan(per[1][0]);
+        if (layout.equals("i")) {
+          // the CASE copy at the vendor's gets, within one a call
+          assertThat(per[0][0]).isLessThanOrEqualTo(per[2][0] + 50);
+        } else {
+          assertThat(per[0][0]).isLessThan(per[1][0]);
+        }
+      }
+    }
+  }
+
+  /**
+   * A key-only read of an inline table at READ COMMITTED as the CASE copy (design 4.2 "The key-only
+   * read on an inline table at READ COMMITTED as the CASE copy", todo 364): one derived table, no
+   * hint and no read of the in-flight index, in place of the two arms; a row in flight read as its
+   * before image by its key and in a key-prefix range, an in-flight insert left out; an order's SUM
+   * one round trip without a gate, the before image's amount in it; a predicate on a non-key column
+   * keeping the two arms, and in a join only the table whose columns the predicate names are its
+   * key; the item read at the vendor's 3 gets a call with 50 items in flight.
+   */
+  @Test
+  void todo364_keyOnlyInlineReadsAtReadCommittedTakeTheCaseCopy() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      admin.createTable(
+          N(NS),
+          N("ccol"),
+          TableMetadata.newBuilder()
+              .addColumn(N("ol_w"), intType())
+              .addColumn(N("ol_o"), intType())
+              .addColumn(N("ol_n"), intType())
+              .addColumn(N("ol_i"), intType())
+              .addColumn(N("ol_amt"), intType())
+              .addPartitionKey(N("ol_w"))
+              .addClusteringKey(N("ol_o"))
+              .addClusteringKey(N("ol_n"))
+              .build(),
+          true);
+      admin.createTable(
+          N(NS),
+          N("ccit"),
+          TableMetadata.newBuilder()
+              .addColumn(N("i_id"), intType())
+              .addColumn(N("i_price"), intType())
+              .addColumn(N("i_name"), DataType.TEXT)
+              .addPartitionKey(N("i_id"))
+              .build(),
+          true);
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      seed(
+          v,
+          "ccol",
+          "ol_w, ol_o, ol_n, ol_i, ol_amt",
+          "1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10), MOD(LEVEL * 7, 1000), MOD(LEVEL, 10) + 1",
+          "ol_w, ol_o, ol_n",
+          "1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10)",
+          3000);
+      seed(
+          v,
+          "ccit",
+          "i_id, i_price, i_name",
+          "LEVEL - 1, MOD(LEVEL, 100) + 1, 'item'",
+          "i_id",
+          "LEVEL - 1",
+          1000);
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)cc(ol|it)"),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
+          .hasSize(2)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    String ol = NS + ".ccol";
+    String it = NS + ".ccit";
+    String olData = NS + ".\"" + tableInfo("ccol").dataTable() + "\"";
+    String itData = NS + ".\"" + tableInfo("ccit").dataTable() + "\"";
+    String copy = "CASE WHEN COALESCE(t.\"tx_state\", 3) IN (1, 2) THEN";
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59365");
+    try (Connection d = ORA.openDriver(ttl);
+        Connection v = ORA.open();
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      String sum9 = rows(v, "SELECT SUM(ol_amt) FROM " + olData + " WHERE ol_o = 9").get(0);
+      String line3 =
+          rows(v, "SELECT ol_amt FROM " + olData + " WHERE ol_o = 9 AND ol_n = 3").get(0);
+      String price520 = rows(v, "SELECT i_price FROM " + itData + " WHERE i_id = 520").get(0);
+      // a line of order 9 in flight with a new amount, a line inserted in flight, 50 items in
+      // flight
+      TwoPhaseCommitTransaction held = preparedAmount(tpc, "ccol", 9, 3, 100);
+      TwoPhaseCommitTransaction inserting = tpc.begin();
+      inserting.insert(
+          Insert.newBuilder()
+              .namespace(N(NS))
+              .table(N("ccol"))
+              .partitionKey(ScalarDbNames.key("ol_w", 1))
+              .clusteringKey(
+                  com.scalar.db.io.Key.newBuilder()
+                      .addBigInt(N("ol_o"), 9)
+                      .addBigInt(N("ol_n"), 10)
+                      .build())
+              .bigIntValue(N("ol_i"), 1)
+              .bigIntValue(N("ol_amt"), 5)
+              .build());
+      inserting.prepare();
+      TwoPhaseCommitTransaction items = tpc.begin();
+      for (int i = 500; i < 550; i++) {
+        items.update(
+            Update.newBuilder()
+                .namespace(N(NS))
+                .table(N("ccit"))
+                .partitionKey(ScalarDbNames.key("i_id", i))
+                .bigIntValue(N("i_price"), 9999)
+                .build());
+      }
+      items.prepare();
+      try {
+        d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        d.setAutoCommit(false);
+        String inflightIndex = tableInfo("ccol").inflightIndex(Engine.ORACLE);
+        // the key lookup: one derived table, the row in flight its before image
+        String lookup = "SELECT ol_amt FROM " + ol + " WHERE ol_w = 1 AND ol_o = 9 AND ol_n = 3";
+        String routed = d.nativeSQL(lookup);
+        log("todo 364: the key lookup as the CASE copy: " + routed);
+        assertThat(routed)
+            .contains(copy)
+            .doesNotContain("UNION ALL")
+            .doesNotContain("/*+")
+            .doesNotContain(inflightIndex);
+        assertThat(rows(d, lookup)).containsExactly(line3);
+        // an order's lines, a key-prefix range: the inserted line left out
+        String range =
+            "SELECT ol_n, ol_amt FROM " + ol + " WHERE ol_w = 1 AND ol_o = ? ORDER BY ol_n";
+        assertThat(d.nativeSQL(range)).contains(copy).doesNotContain("UNION ALL");
+        try (PreparedStatement ps = d.prepareStatement(range)) {
+          ps.setInt(1, 9);
+          List<String> lines = rowsOf(ps);
+          assertThat(lines).hasSize(10).contains("3/" + line3);
+          assertThat(lines.get(9)).startsWith("9/");
+        }
+        // the order's SUM: one round trip, no gate, the before image's amount in it
+        String tag = "/* cs" + System.nanoTime() + " */";
+        String sum = "SELECT " + tag + " SUM(ol_amt) FROM " + ol + " WHERE ol_w = 1 AND ol_o = ?";
+        Counter rt = new Counter(d);
+        try (PreparedStatement ps = d.prepareStatement(sum)) {
+          ps.setInt(1, 8);
+          assertThat(rowsOf(ps)).hasSize(1); // the text's first parse, unmeasured
+          long trips =
+              rt.measure(
+                  () -> {
+                    ps.setInt(1, 9);
+                    assertThat(rowsOf(ps)).containsExactly(sum9);
+                  });
+          assertThat(trips).as("the SUM in one statement").isEqualTo(1);
+        }
+        assertThat(executedTexts(v, tag))
+            .isNotEmpty()
+            .allMatch(t -> t.contains(copy))
+            .noneMatch(t -> t.contains("scalardb_native_g0"));
+        // a predicate on a non-key column: the two arms
+        String nonKey = "SELECT ol_n FROM " + ol + " WHERE ol_w = 1 AND ol_o = 9 AND ol_amt > 0";
+        assertThat(d.nativeSQL(nonKey)).contains("UNION ALL").doesNotContain(copy);
+        assertThat(rows(d, nonKey)).hasSize(10);
+        // a join: the item's predicate its key, the line's a non-key column too
+        String join =
+            "SELECT o.ol_n, i.i_price FROM "
+                + ol
+                + " o JOIN "
+                + it
+                + " i ON i.i_id = o.ol_i WHERE o.ol_w = 1 AND o.ol_o = 9 ORDER BY o.ol_n";
+        String joined = d.nativeSQL(join);
+        log("todo 364: a join, the item's copy alone the CASE copy: " + joined);
+        assertThat(joined).contains(copy).contains("UNION ALL");
+        assertThat(rows(d, join)).hasSize(10);
+        // an item in flight read as its before image
+        assertThat(rows(d, "SELECT i_price FROM " + it + " WHERE i_id = 520"))
+            .containsExactly(price520);
+        d.commit();
+        // the item read's gets a call, over 50 calls after 10, against the vendor's
+        String measured = "/* ci" + System.nanoTime() + " */";
+        String[] texts = {
+          "SELECT " + measured + " i_price, i_name FROM " + it + " WHERE i_id = ?",
+          "SELECT /* vendor */ " + measured + " i_price, i_name FROM " + itData + " WHERE i_id = ?"
+        };
+        String[] patterns = {"SELECT " + measured + "%", "SELECT /* vendor */ " + measured + "%"};
+        double[] per = new double[2];
+        for (int f = 0; f < 2; f++) {
+          long[] at = null;
+          try (PreparedStatement ps = (f == 0 ? d : v).prepareStatement(texts[f])) {
+            for (int i = 100; i < 160; i++) {
+              if (i == 110) {
+                at = gets(v, patterns[f]);
+              }
+              ps.setInt(1, i);
+              assertThat(rowsOf(ps)).hasSize(1);
+            }
+          }
+          long[] now = gets(v, patterns[f]);
+          long[] from = Objects.requireNonNull(at);
+          assertThat(now[1] - from[1]).as(patterns[f]).isEqualTo(50);
+          per[f] = (now[0] - from[0]) / 50.0;
+        }
+        d.commit();
+        log(
+            String.format(
+                "todo 364: the item read a call with 50 items in flight, gets: the CASE copy %.2f,"
+                    + " the vendor's %.2f",
+                per[0], per[1]));
+        // the vendor's three, the primary key's two levels and the row: no read of the
+        // in-flight index
+        assertThat(per[0]).isLessThanOrEqualTo(3.2);
+      } finally {
+        d.rollback();
+        held.rollback();
+        inserting.rollback();
+        items.rollback();
       }
     }
   }

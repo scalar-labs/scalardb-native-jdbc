@@ -1,0 +1,3 @@
+kind: improvement
+body: 'On Oracle, a READ COMMITTED read of an inline table whose WHERE and ON clauses name only the table''s key columns now reads each row''s committed image from one derived table, with no second branch for the rows in flight and no read of the in-flight index. A key lookup costs what the plain statement costs, and an aggregate over such a predicate, such as an order''s sum, runs in one round trip without the gate.'
+time: 2026-11-01T09:00:00.000000+09:00

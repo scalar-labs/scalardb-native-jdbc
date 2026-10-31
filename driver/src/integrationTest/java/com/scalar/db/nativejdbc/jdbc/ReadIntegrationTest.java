@@ -278,16 +278,21 @@ class ReadIntegrationTest {
         }
       }
       try (Connection vendor = e.open()) {
-        // the reads above ran split, not through the read views
+        // the reads above ran split, not through the read views; on Oracle a key-only read of
+        // inline tables as the CASE copy, one derived table a table (todo 364)
         Router router = readCommitted(engine, catalog);
+        String split =
+            engine == Engine.ORACLE && inline
+                ? "NOT IN (1, 2) OR t.\"before_tx_id\" IS NOT NULL"
+                : "UNION ALL";
         String join =
             "SELECT m." + mx + " FROM " + made + " m JOIN " + ns + ".imp i ON m." + mid + " = i.id";
         assertThat(router.route(vendor, join).sql)
-            .contains("UNION ALL")
+            .contains(split)
             .doesNotContainIgnoringCase("rc_");
-        assertThat(router.route(vendor, join + " ORDER BY i.x").sql).contains("UNION ALL");
+        assertThat(router.route(vendor, join + " ORDER BY i.x").sql).contains(split);
         assertThat(router.route(vendor, "SELECT COUNT(*) FROM " + made).sql)
-            .contains("UNION ALL")
+            .contains(split)
             .doesNotContainIgnoringCase("rc_");
         // a LEFT JOIN's nullable side and a subquery's table are split too (milestone 3c)
         assertThat(

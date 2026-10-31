@@ -1542,7 +1542,8 @@ final class Router {
               true,
               null,
               Set.of(readRef),
-              true);
+              true,
+              Set.of());
       if (fastText != null && !n.inline) {
         // the clause locks the data row alone, OF the derived table's first key column: a write
         // block takes the data row before the metadata row, so a lock holding the metadata row
@@ -1930,6 +1931,7 @@ final class Router {
       keys.add(versioned ? n.keyColumns.size() : 0); // without versions, no key either
       anchorChecks.add(Writes.inFlightCheck(n));
     }
+    Set<SqlAst.TableRef> caseCopies = caseCopies(ast, split, scalarDb);
     SqlAst.SplitText text =
         SplitRead.emit(
             engine,
@@ -1951,7 +1953,8 @@ final class Router {
             states,
             null,
             own,
-            states);
+            states,
+            caseCopies);
     if (text == null && !own.isEmpty()) {
       // a * the copies cannot spell out: the versions looked up per row
       text =
@@ -1997,7 +2000,8 @@ final class Router {
         // with states, run only for a scrollable result, whose moves pass over rows unchecked
         r = r.checked(checks(scalarDb), fallback(ast, scalarDb));
       }
-      if (anchored.isEmpty()) {
+      // the CASE copy of every table is exact in one statement: no gate in front of it
+      if (anchored.isEmpty() && caseCopies.size() < scalarDb.size()) {
         r = gated(r, ast, scalarDb);
       }
       r =
@@ -2027,6 +2031,46 @@ final class Router {
     return snapshot
         ? withPlain(r.checked(checks(scalarDb), fallback(ast, scalarDb)), ast, scalarDb)
         : r;
+  }
+
+  /**
+   * On Oracle at READ COMMITTED, the split references of inline tables whose predicate names only
+   * their key, each read through one CASE copy in place of its two (design 4.2 "The key-only read
+   * on an inline table at READ COMMITTED as the CASE copy", todo 364).
+   */
+  private Set<SqlAst.TableRef> caseCopies(
+      SqlAst ast, SqlAst.Split split, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+    Set<SqlAst.TableRef> out = Collections.newSetFromMap(new IdentityHashMap<>());
+    if (engine != Engine.ORACLE || snapshot()) {
+      return out;
+    }
+    // an unqualified column of a join is a table's where no other table of the statement has one
+    // of its name, which only every table's columns known can tell
+    boolean known = ast.tableRefs().stream().allMatch(scalarDb::containsKey);
+    for (Map.Entry<SqlAst.TableRef, SqlAst.Place> p : split.places().entrySet()) {
+      SqlAst.TableRef r = p.getKey();
+      TableInfo t = scalarDb.get(r);
+      // an inner table alone: the split reads a LEFT JOIN's nullable side as inner joins and an
+      // unmatched piece, which one copy would lose
+      if (t == null || t.layout() != Layout.INLINE || p.getValue() != SqlAst.Place.INNER) {
+        continue;
+      }
+      Set<String> elsewhere = null;
+      if (known) {
+        elsewhere = new HashSet<>();
+        for (Map.Entry<SqlAst.TableRef, TableInfo> other : scalarDb.entrySet()) {
+          if (other.getKey() != r) {
+            for (String c : other.getValue().dataColumns()) {
+              elsewhere.add(c.toLowerCase(Locale.ROOT));
+            }
+          }
+        }
+      }
+      if (ast.keyOnly(r, t.keyColumns(), t.dataColumns(), elsewhere)) {
+        out.add(r);
+      }
+    }
+    return out;
   }
 
   /**
