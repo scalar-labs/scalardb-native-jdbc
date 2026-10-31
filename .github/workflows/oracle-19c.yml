@@ -33,19 +33,6 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      # which 19c release updates Oracle's own registry has, for a newer image than 19.3.0
-      - name: List Oracle's 19c images
-        continue-on-error: true
-        env:
-          OCR_USERNAME: ${{ secrets.OCR_USERNAME }}
-          OCR_TOKEN: ${{ secrets.OCR_TOKEN }}
-        run: |
-          for repo in database/enterprise database/standard database/free; do
-            echo "$repo:"
-            skopeo list-tags --creds "$OCR_USERNAME:$OCR_TOKEN" \
-              "docker://container-registry.oracle.com/$repo" | jq -c '[.Tags[] | select(startswith("19"))]'
-          done
-
       - name: Log in to the GitHub Container Registry
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
