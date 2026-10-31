@@ -284,3 +284,8 @@ todo 334's log and the design sections named.
   `tools/`, `.changes` or the two user docs, `range-diff`); `backfill-tx-id-36` is db934cd and a69a35b,
   patch-identical to d39b722 and db7f450; 38 fences at both heads, `merge-tree` finds no conflict
   between them. Both verdicts stand at these heads; the user's word names them.
+- 2026-10-31 (both branches on main, checked from git): c7 fast-forwarded them on the user's "land it";
+  main went 2625a84 → 36dfb48 (the 36-character backfill tx_id) → d4cd5eb (its design.md nit) →
+  c4a7fcf (the function-based in-flight index). `range-diff` reads 36dfb48 = db934cd, d4cd5eb =
+  a69a35b and c4a7fcf = 59bfa82, the reviewed patches unchanged; 38 fences at c4a7fcf; nothing pushed.
+  6e told the index is on main for the AWS proof run (the expected figures in design section 3).
