@@ -1,0 +1,3 @@
+kind: bugfix
+body: 'On Oracle before 23 (19c, 21c), a batch of INSERTs into a decoupled table now takes over a key''s existing metadata row, such as a tombstone, instead of leaving the old row''s transaction ID, state and version under the new data row: the batch''s metadata insert is written as `INSERT ... WHERE NOT EXISTS`, since those versions miscount the rows that `IGNORE_ROW_ON_DUPKEY_INDEX` skips. Oracle 23 and later keep the hinted statement unchanged.'
+time: 2026-10-31T20:00:00.000000+09:00
