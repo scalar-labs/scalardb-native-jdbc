@@ -389,9 +389,13 @@ class MoreWritesIntegrationTest {
       assertThat(st.executeUpdate("INSERT INTO wb.lq (x) VALUES ('g')")).isEqualTo(1);
       assertThat(st.executeUpdate("INSERT INTO wb.lq (\"id\", x) VALUES (0, 'z')")).isEqualTo(1);
       assertThat(rows(d, "SELECT x FROM wb.lq WHERE \"id\" = 0")).containsExactly("z");
-      // several rows that leave the IDENTITY key out, whose keys Oracle does not return: refused
+      // several rows that leave the IDENTITY key out, whose keys Oracle does not return: refused;
+      // Oracle before 23 refuses the multi-row VALUES itself
       assertThatThrownBy(() -> st.executeUpdate("INSERT INTO wb.lq (x) VALUES ('m'), ('n')"))
-          .isInstanceOf(SQLFeatureNotSupportedException.class);
+          .isInstanceOf(
+              d.getMetaData().getDatabaseMajorVersion() >= 23
+                  ? SQLFeatureNotSupportedException.class
+                  : SQLException.class);
       // FOR UPDATE OF a column the read does not select
       d.setAutoCommit(false);
       assertThat(rows(d, "SELECT id FROM wb.imp WHERE id = 1 FOR UPDATE OF x"))
@@ -1595,9 +1599,10 @@ class MoreWritesIntegrationTest {
     ExecutorService pool = Executors.newCachedThreadPool();
     String name = t.sql.substring("wb.".length());
     try (Connection d = e.openDriver()) {
-      d.createStatement()
-          .executeUpdate(
-              "INSERT INTO " + t.sql + " (id, x) VALUES (60, 'a'), (61, 'b'), (62, 'c')");
+      // a row a statement, as Oracle before 23 has no multi-row VALUES
+      for (String row : List.of("(60, 'a')", "(61, 'b')", "(62, 'c')")) {
+        d.createStatement().executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES " + row);
+      }
       d.setAutoCommit(false);
       if (e.engine() == Engine.POSTGRESQL) {
         // MySQL locks a row as it reads it, before the rest of the predicate runs, so no prepare
