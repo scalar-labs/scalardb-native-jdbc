@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   driver-version:
-    name: ${{ matrix.engine }} ${{ matrix.server || matrix.image }} ${{ matrix.version }}
+    name: ${{ matrix.engine }} ${{ matrix.image }} ${{ matrix.version }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -68,8 +68,9 @@ jobs:
           # Every server major its vendor supports, with CI's driver: CI runs PostgreSQL 16, MySQL
           # 8.4, MariaDB 11.4, SQL Server 2022 and Oracle Free 23. Left out at their end of life:
           # PostgreSQL 14 (November 2026), MySQL 8.0 and MariaDB 10.6; Oracle 21c, an innovation
-          # release. Oracle 19c, the other long-term release, is the organization's private image,
-          # which the job starts itself (the Oracle 19c steps).
+          # release. Oracle 19c, the other long-term release, is not supported yet: its
+          # SQL%BULK_ROWCOUNT counts a row IGNORE_ROW_ON_DUPKEY_INDEX skips, which the bulk INSERT
+          # relies on, and it has no multi-row VALUES (todo 327).
           - { engine: Postgresql, property: postgresql, image: 'postgres:15' }
           - { engine: Postgresql, property: postgresql, image: 'postgres:17' }
           - { engine: Postgresql, property: postgresql, image: 'postgres:18' }
@@ -82,12 +83,10 @@ jobs:
           - { engine: Sqlserver, property: sqlserver, image: 'mcr.microsoft.com/mssql/server:2017-latest' }
           - { engine: Sqlserver, property: sqlserver, image: 'mcr.microsoft.com/mssql/server:2019-latest' }
           - { engine: Sqlserver, property: sqlserver, image: 'mcr.microsoft.com/mssql/server:2025-latest' }
-          - { engine: Oracle, property: oracle, server: 'Oracle 19c' }
           # The corners: the oldest driver in the range against the oldest server
           - { engine: Postgresql, property: postgresql, image: 'postgres:15', version: 42.2.29, exclude: '*InterleavingIntegrationTest' }
           - { engine: Mariadb, property: mariadb, image: 'mariadb:10.11', version: 3.3.7 }
           - { engine: Sqlserver, property: sqlserver, image: 'mcr.microsoft.com/mssql/server:2017-latest', version: 11.2.3.jre11 }
-          - { engine: Oracle, property: oracle, server: 'Oracle 19c', version: 21.1.0.0 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -100,33 +99,6 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
-      - name: Log in to the GitHub Container Registry
-        if: ${{ matrix.server == 'Oracle 19c' }}
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.CR_PAT }}
-
-      # SE2 19.3.0, with the database created in the image; the tests reach it as an existing
-      # database (testing/Engines.java), so SYSDBA's setting the container gets is made here
-      - name: Start Oracle 19c
-        if: ${{ matrix.server == 'Oracle 19c' }}
-        run: |
-          docker run -d --name oracle19 -p 1521:1521 ghcr.io/scalar-labs/oracle/db-prebuilt:19
-          for _ in $(seq 120); do
-            if docker exec oracle19 /opt/oracle/checkDBStatus.sh > /dev/null 2>&1; then break; fi
-            sleep 10
-          done
-          docker exec oracle19 /opt/oracle/checkDBStatus.sh
-          echo 'ALTER SYSTEM SET "_disable_last_successful_login_time" = TRUE SCOPE = MEMORY;' \
-            | docker exec -i oracle19 bash -c 'sqlplus -s / as sysdba'
-          {
-            echo 'ORACLE_URL=-Dnativejdbc.oracle.url=jdbc:oracle:thin:@//localhost:1521/ORCLPDB1'
-            echo 'ORACLE_USER=-Dnativejdbc.oracle.username=system'
-            echo 'ORACLE_PASSWORD=-Dnativejdbc.oracle.password=Oracle'
-          } >> "$GITHUB_ENV"
-
       - name: Integration tests
         env:
           EXCLUDE: ${{ matrix.exclude }}
@@ -137,7 +109,6 @@ jobs:
           ${VERSION:+"-Pnativejdbc.${{ matrix.property }}.driverVersion=$VERSION"}
           ${IMAGE:+"-Dnativejdbc.${{ matrix.property }}.image=$IMAGE"}
           ${EXCLUDE:+"-Pnativejdbc.excludeTests=$EXCLUDE"}
-          ${ORACLE_URL:+"$ORACLE_URL" "$ORACLE_USER" "$ORACLE_PASSWORD"}
 
       - name: Upload test reports
         if: failure()
