@@ -173,11 +173,23 @@ class WriteIntegrationTest {
               d.createStatement()
                   .executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (10, 'p')"))
           .isEqualTo(1);
-      try (PreparedStatement ps =
-          d.prepareStatement("INSERT INTO " + t.sql + " (x, id) VALUES (?, ?), ('r', 12)")) {
-        ps.setString(1, "q");
-        ps.setInt(2, 11);
-        assertThat(ps.executeUpdate()).isEqualTo(2);
+      if (e.engine() != Engine.ORACLE || d.getMetaData().getDatabaseMajorVersion() >= 23) {
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO " + t.sql + " (x, id) VALUES (?, ?), ('r', 12)")) {
+          ps.setString(1, "q");
+          ps.setInt(2, 11);
+          assertThat(ps.executeUpdate()).isEqualTo(2);
+        }
+      } else {
+        // Oracle before 23 has no multi-row VALUES
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO " + t.sql + " (x, id) VALUES (?, ?)")) {
+          for (Object[] row : List.of(new Object[] {"q", 11}, new Object[] {"r", 12})) {
+            ps.setString(1, (String) row[0]);
+            ps.setInt(2, (Integer) row[1]);
+            assertThat(ps.executeUpdate()).isEqualTo(1);
+          }
+        }
       }
       try (PreparedStatement ps =
           d.prepareStatement("UPDATE " + t.sql + " SET x = ? WHERE id = ?")) {

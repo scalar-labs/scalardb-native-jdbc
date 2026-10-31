@@ -1391,11 +1391,10 @@ class MoreWritesIntegrationTest {
     ExecutorService pool = Executors.newCachedThreadPool();
     try (Connection d = e.openDriver();
         Connection other = e.openDriver()) {
-      d.createStatement()
-          .executeUpdate(
-              "INSERT INTO "
-                  + t.sql
-                  + " (id, x) VALUES (40, 'a'), (41, 'b'), (42, 'c'), (43, 'd')");
+      // a row a statement, as Oracle before 23 has no multi-row VALUES
+      for (String row : List.of("(40, 'a')", "(41, 'b')", "(42, 'c')", "(43, 'd')")) {
+        d.createStatement().executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES " + row);
+      }
       // the committed row, the driver's columns hidden, locked until the transaction ends
       d.setAutoCommit(false);
       try (PreparedStatement ps =
