@@ -761,7 +761,9 @@ class DecoupledReadCommittedIntegrationTest {
         System.out.println("[337] 3000 in flight, work_mem 64kB:\n" + held);
         // the gate kept; whether the set is hashed or probed per row is the planner's by size (a
         // 50,000-row table with 30,000 in flight probes per row, todo 337's log)
-        assertThat(held).contains("($0 IS NULL) OR (NOT ");
+        // PostgreSQL 17 names the gate's InitPlan output (InitPlan 1).col1, 16 $0
+        assertThat(held)
+            .containsAnyOf("($0 IS NULL) OR (NOT ", "((InitPlan 1).col1 IS NULL) OR (NOT ");
         assertThat(rows(v, routed)).containsExactly("1000");
       } finally {
         v.rollback();

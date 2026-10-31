@@ -465,11 +465,16 @@ class SnapshotIntegrationTest {
           assertThat(d.getTransactionIsolation())
               .as("%s: SERIALIZABLE set in SQL", at)
               .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
-          assertThat(rows(d, "SELECT @@transaction_isolation"))
+          // MariaDB names the variable transaction_isolation from 11.1 on, tx_isolation before
+          String variable =
+              e.engine() == Engine.MARIADB && d.getMetaData().getDatabaseMajorVersion() < 11
+                  ? "@@tx_isolation"
+                  : "@@transaction_isolation";
+          assertThat(rows(d, "SELECT " + variable))
               .as("%s: run at REPEATABLE READ", at)
               .containsExactly("REPEATABLE-READ");
           // a SELECT that names a level sets none (todo 244)
-          rows(d, "SELECT @@transaction_isolation = 'REPEATABLE-READ'");
+          rows(d, "SELECT " + variable + " = 'REPEATABLE-READ'");
           assertThat(d.getTransactionIsolation())
               .as("%s: after a SELECT naming REPEATABLE READ", at)
               .isEqualTo(Connection.TRANSACTION_SERIALIZABLE);
