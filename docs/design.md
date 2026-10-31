@@ -328,7 +328,7 @@ goes through the primary key.
   | Insert that may collide | `INSERT ... ON CONFLICT DO NOTHING`, check the row count | catch error 1062; the transaction survives. Not `INSERT IGNORE` for the user's statement, which also downgrades data errors such as a NOT NULL violation to warnings; the driver's own metadata rows use it (4.3) | catch 2627 or 2601; the transaction survives with `XACT_ABORT` off, which the driver requires | catch ORA-00001; statement-level rollback keeps the transaction |
   | Update count | rows matched | `useAffectedRows=false`, the default on both drivers; the value the vendor driver reports for the URL and the connect properties (`getPropertyInfo`, its own spellings and precedence) must not be true, or the connection is refused with `08004` | rows matched | rows matched |
   | In-flight index | partial index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` | filtered index `WHERE tx_state IN (1, 2)` | index on `(tx_state, <pk>)` |
-  | Retryable errors | SQLSTATE `40001`, `40P01` | SQLSTATE `40001` (error 1213), error 1205 (SQLSTATE `HY000`) | 1205 deadlock victim (`40001`), 3960 snapshot update conflict, 1222 if `LOCK_TIMEOUT` is set | ORA-08177 cannot serialize, ORA-00060 deadlock, ORA-08176; ScalarDB maps the same three |
+  | Retryable errors | SQLSTATE `40001`, `40P01` | SQLSTATE `40001` (error 1213), error 1205 (SQLSTATE `HY000`); MariaDB's 1020 under `innodb_snapshot_isolation` (SQLSTATE `HY000`) | 1205 deadlock victim (`40001`), 3960 snapshot update conflict, 1222 if `LOCK_TIMEOUT` is set | ORA-08177 cannot serialize, ORA-00060 deadlock, ORA-08176; ScalarDB maps the same three |
   | Duplicate key | `23505` | error 1062 | 2627, 2601 | ORA-00001 |
   | Coarse SERIALIZABLE path (4.2) | none: the coarse check, then the statement, as under SNAPSHOT; SSI covers the statement | the coarse check as a locking read of the in-flight index, `LOCK IN SHARE MODE`, whose gap lock blocks every prepare on the table until commit; the user's statement then runs on the data tables with `LOCK IN SHARE MODE` on every SELECT of it (as built, section 5) | the same `WITH (HOLDLOCK)` | SERIALIZABLE is refused |
   | Identifier quoting | `"name"` | `` `name` `` | `[name]` | `"NAME"`; unquoted names fold to upper case |
@@ -3345,7 +3345,7 @@ refuses to lock, is left alone, and a `#` comment, which the parser reads as an 
 (todos 239, 241, 243), as is a MySQL `OF` list that leaves a table of its SELECT out (todo 247). A
 passthrough level is followed by the session's level read back, not the statement's text, and set
 again, which clears a `SET TRANSACTION` for the next transaction alone (todo 249). MariaDB's 1020
-under `innodb_snapshot_isolation` ends the transaction as a deadlock does (todo 248). The application's own spelling of a clause is kept (todo 240), and a plain
+under `innodb_snapshot_isolation`, the default from MariaDB 11.6.2, ends the transaction as a deadlock does (todo 248) and comes as `40001`, the conflict it is. The application's own spelling of a clause is kept (todo 240), and a plain
 statement prepared at another level is prepared again (todo 242). A write's own reads take next-key locks at REPEATABLE READ. A read of one ScalarDB table row by row runs as that
 read under `FOR SHARE`, by the path of a user's locking read: the predicate locked on the data table,
 each row's metadata row locked again by primary key, and the rows compared with the same read in the

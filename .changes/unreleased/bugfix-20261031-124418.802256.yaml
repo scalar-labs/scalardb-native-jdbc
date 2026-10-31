@@ -1,0 +1,3 @@
+kind: bugfix
+body: On MariaDB 11.6.2 and later, where innodb_snapshot_isolation is on by default, a write conflict at REPEATABLE READ or SNAPSHOT (error 1020, "Record has changed since last read") now comes as 40001, so that applications retry it, rather than as HY000.
+time: 2026-10-31T12:44:18.802256+09:00

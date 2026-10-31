@@ -131,6 +131,9 @@ rollback-only. On the engines' own errors:
 
 - On MySQL and MariaDB, a lock wait timeout undoes the statement only, unless
   `innodb_rollback_on_timeout` is on.
+- On MariaDB with `innodb_snapshot_isolation` on, the default from 11.6.2, a write or a locking
+  read of a row changed since the transaction's snapshot fails with error 1020, "Record has changed
+  since last read", and MariaDB rolls the transaction back. It comes as `40001`: retry it.
 - On SQL Server, any error that ends the transaction, a deadlock or a conversion error among them,
   leaves it rollback-only too.
 
