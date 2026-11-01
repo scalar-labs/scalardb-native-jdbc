@@ -959,6 +959,19 @@ conflict, c7's finding), and under 16 concurrent SERIALIZABLE sessions each prep
 with no in-flight index, `INITRANS 50` changing nothing, 4 sessions the same): a property of any
 in-flight index on Oracle, which ScalarDB's storage connections meet where they run Oracle's
 SERIALIZABLE and the driver's own writes, which touch no in-flight entry, do not (todo 366).
+Measured as a paced mixed workload on the container (todo 366's log, 2026-10-31; ScalarDB-shaped
+writers at SERIALIZABLE preparing and committing 3 random rows a transaction, beside 4 driver-shaped
+READ COMMITTED writers): 4 sessions at 10 transactions a second each, 30 prepares a second on the
+table, lose 17% of their prepares and 12% of their commits to ORA-08177 on the plain index, 8% and
+12% on the function-based one, 0.0% without an in-flight index and 0.0% at READ COMMITTED; 16
+sessions at 50 a second 42% and 33%, 40% and 33%. Entries padded to one or two a leaf cut the rate
+four to ten times at the cost of the key set's probe, one block per two in-flight rows instead of
+one; a hash-partitioned index takes no expression as its key. ScalarDB itself runs READ COMMITTED
+when `scalar.db.jdbc.isolation_level` is unset and requires Oracle's SERIALIZABLE only for a virtual
+table, the decoupled layout, at create, import and every operation; so the inline layout is free of
+this once ScalarDB's connections run READ COMMITTED on Oracle, which the user docs should ask for
+there, and the decoupled layout waits on ScalarDB's Oracle minimum, which Oracle's statement-level
+consistency at READ COMMITTED would satisfy (todo 366's options, the user's call).
 
 ---
 
@@ -1230,6 +1243,55 @@ union as a derived table.
   open; the vendor's about 25 µs and 5.8 gets. Expected at AWS: Delivery's SUM from 220 to about 80
   µs, StockLevel's count from 1.5 ms toward 0.9 with order_line's range gate and stock's warehouse
   gate (`S_W_ID = ?` is a key conjunct), StockLevel at READ COMMITTED from +53-62% toward +25%.
+
+  *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
+  A read of an inline table whose predicate names only the table's key columns, every column of the
+  reference in the statement's WHERE and ON clauses a key column, the select list free, takes one
+  copy in place of the two arms above: the CASE copy, `rc_T`'s form for the inline layout as a
+  derived table, `(SELECT t.k, CASE WHEN COALESCE(t.tx_state, 3) IN (1, 2) THEN t.before_c ELSE t.c
+  END AS c, ..., CASE WHEN COALESCE(t.tx_state, 3) IN (1, 2) THEN t.before_tx_id ELSE t.tx_id END AS
+  v0, CASE WHEN COALESCE(t.tx_state, 3) IN (1, 2) THEN t.before_tx_version ELSE t.tx_version END AS
+  v1 FROM T t WHERE COALESCE(t.tx_state, 3) NOT IN (1, 2) OR t.before_tx_id IS NOT NULL OR
+  t.before_tx_version IS NOT NULL) alias`, the user's predicate, select list, ORDER BY and aggregate
+  on top as the split read has them, no read of the in-flight index, and no hint but the committed
+  copy's `NO_INDEX_SS` where the table's in-flight index is the plain form, a skip scan of
+  `(tx_state, key)` over the key's range staying possible under the OR. It is exact: on key columns
+  `P` is `P_before`, since `P_before` substitutes only the `before_<col>` columns, so the two arms
+  select the same rows of the same table by the same predicate, disjoint by state; the copy's WHERE
+  is the union of their state conditions, each row's columns are the committed row's or its before
+  image's as the arms' are, an in-flight insert, which has no committed image, is left out as the
+  arm leaves it, and the anchor is the committed image's identity in both cases, `(before_tx_id,
+  before_tx_version)` for a row in flight, as this section requires. The anchor-less aggregate of
+  the paragraph above on such a predicate takes the copy too, without the gate and its fallback: the
+  sum of an order's lines is exact in one statement. Measured on the container (todo 364's log,
+  2026-10-31; 50 rows in flight, medians, CPU µs and gets a call): the key read of an item-shaped
+  table, the vendor's statement 4.6 / 3.00, the split as deployed 6.6 / 5.00, the copy 5.2 / 3.00;
+  of an order_line-shaped table 5.4 / 4.00, 7.2 / 6.00, 5.6 / 4.00; the 10-row SUM over an order,
+  the vendor's 6.6 / 4.15, the gated statement 8.6 / 6.15 and the split again at a gate of 1, the
+  copy 7.2 / 4.15, its sum the split's (123.4, the before image) against the vendor's 223.4 with the
+  in-flight amount. At AWS the split's key read cost 10.2 µs and 4 gets against the vendor's 4.8 and
+  3 (the eleventh run, item), about 20 such reads a NewOrder, half of its 200 µs of server CPU over
+  the vendor's; expected: the READ COMMITTED inline TPC-C cell from 0.75 toward 0.8, Payment and
+  OrderStatus by their key reads, Delivery's SUM from 15.5 gets toward the vendor's 4.2. Oracle
+  first; PostgreSQL's inline tables take the same copy once measured there. The copy is taken for a
+  reference in a top-level inner place: the nullable side of an outer join keeps its pieces, since
+  the split reads it as inner joins over its committed and in-flight pieces and an unmatched piece,
+  which one copy would turn inner (c7's finding); a predicate that names no column of the table, a
+  `COUNT(*)` over it, is key-only and takes the copy. The locking read, the SNAPSHOT forms (the
+  plain read behind the gate is the vendor's statement already) and a predicate on a non-key column
+  keep their forms: there the arms differ in their predicates and the first arm's index on the
+  column is the point of the split (the layout table of section 1). The copy's text is plain SQL, a
+  CASE and a COALESCE per column, which Oracle 19c runs as 23 does (todo 327): the suites run on
+  both. Built by c7 (db5a464 and 9aabeb0, on main as 5e1da62 and 13d3307, 2026-11-01):
+  `SqlAst.keyOnly` the test, false for a subquery anywhere in the clauses, a NATURAL or USING join
+  and an unqualified column of a join it cannot place; `Router.caseCopies` the choice, Oracle at
+  READ COMMITTED, inline, inner; `SplitRead.caseCopy` the text; the gate dropped only where every
+  ScalarDB table of the statement is a copy, a mixed statement keeping it with the copy in its
+  fallback. What must keep holding: the READ COMMITTED inline read tests, a row in flight read as
+  its before image by key, its anchor the before image's identity, an in-flight insert invisible,
+  the two-arm form for a predicate on a non-key column, the gated aggregate with a non-key conjunct;
+  to add: the copy's text for a key lookup and for a key-prefix range, the aggregate without a gate,
+  and the item read of `OracleOltpIntegrationTest` at 3 gets.
 
   **A table found clear** (todo 329). The snapshot is the transaction's: a table that has no row in
   flight in it at one statement has none at any later statement either, since only the

@@ -120,7 +120,8 @@ final class SplitRead {
         raw,
         lock,
         Set.of(),
-        false);
+        false,
+        Set.of());
   }
 
   /**
@@ -132,7 +133,9 @@ final class SplitRead {
    * them from the row, and its committed copy keeps the rows whose own state is not in flight; a
    * table in the decoupled layout reads them by a left join to its metadata table, kept likewise. A
    * {@code *} over such a copy is spelled out as the table's columns, which it would otherwise
-   * show.
+   * show. Each reference of {@code caseCopies}, an inline table's whose predicate names only its
+   * key at READ COMMITTED, is one copy for every statement, the CASE copy of {@link #caseCopy}, in
+   * place of its committed and in-flight copies.
    */
   static SqlAst.@Nullable SplitText emit(
       Engine engine,
@@ -147,7 +150,8 @@ final class SplitRead {
       boolean raw,
       @Nullable String lock,
       Set<SqlAst.TableRef> own,
-      boolean state) {
+      boolean state,
+      Set<SqlAst.TableRef> caseCopies) {
     Map<SqlAst.TableRef, SqlAst.Place> places = split.places();
     List<SqlAst.TableRef> refs = new ArrayList<>();
     List<List<SqlAst.Piece>> pieces = new ArrayList<>();
@@ -163,7 +167,7 @@ final class SplitRead {
         default:
           of = List.of(SqlAst.Piece.COMMITTED, SqlAst.Piece.IN_FLIGHT);
       }
-      if (committedOnly) {
+      if (committedOnly || caseCopies.contains(e.getKey())) {
         of = List.of(SqlAst.Piece.COMMITTED);
       }
       refs.add(e.getKey());
@@ -241,6 +245,9 @@ final class SplitRead {
               TableInfo t = Objects.requireNonNull(scalarDb.get(ref));
               List<String> cols = Objects.requireNonNull(read.get(ref));
               Versions v = versions(ref, t);
+              if (caseCopies.contains(ref)) {
+                return caseCopy(engine, t, cols, v);
+              }
               switch (piece) {
                 case IN_FLIGHT:
                   return inFlight(engine, t, cols, false, v);
@@ -498,6 +505,70 @@ final class SplitRead {
       sql.append(" ").append(lock);
     }
     return sql.append(")").toString();
+  }
+
+  /**
+   * An inline table's rows as READ COMMITTED reads them, in one derived table (design 4.2 "The
+   * key-only read on an inline table at READ COMMITTED as the CASE copy", todo 364): each row's
+   * columns {@code read} and versions its before image's while it is in flight, its own otherwise,
+   * an in-flight insert, which has no before image, left out; {@code rc_T}'s form, no read of the
+   * in-flight index, and no hint but the committed copy's on the plain form of that index. Exact
+   * for a predicate on the key alone, which both images share.
+   */
+  private static String caseCopy(
+      Engine engine, TableInfo t, List<String> read, @Nullable Versions v) {
+    String inFlight = "COALESCE(t." + engine.quote("tx_state") + ", 3) IN (1, 2)";
+    List<String> cols = new ArrayList<>();
+    for (String c : read) {
+      String q = engine.quote(c);
+      cols.add(
+          t.keyColumns().contains(c)
+              ? "t." + q
+              : "CASE WHEN "
+                  + inFlight
+                  + " THEN "
+                  + t.beforeImage(engine, "t", c)
+                  + " ELSE t."
+                  + q
+                  + " END AS "
+                  + q);
+    }
+    if (v != null) {
+      for (int i = 0; i < 2; i++) {
+        String column = i == 0 ? "tx_id" : "tx_version";
+        cols.add(
+            "CASE WHEN "
+                + inFlight
+                + " THEN t."
+                + engine.quote("before_" + column)
+                + " ELSE t."
+                + engine.quote(column)
+                + " END AS "
+                + engine.quote(OWN + i));
+      }
+      if (v.state) {
+        cols.add("t." + engine.quote("tx_state") + " AS " + engine.quote(OWN + 2));
+      }
+    }
+    // on the plain in-flight index, (tx_state, key), the committed copy's hint: a skip scan of it
+    // over the key's range stays possible under the OR; nothing on the function-based form
+    // matches the state (design 4.2 "The read side on Oracle")
+    String hint =
+        engine == Engine.ORACLE && !t.inflightExpressions()
+            ? "/*+ NO_INDEX_SS(t " + engine.quote(t.inflightIndex(engine)) + ") */ "
+            : "";
+    return "(SELECT "
+        + hint
+        + String.join(", ", cols)
+        + " FROM "
+        + data(engine, t)
+        + " t WHERE COALESCE(t."
+        + engine.quote("tx_state")
+        + ", 3) NOT IN (1, 2) OR t."
+        + engine.quote("before_tx_id")
+        + " IS NOT NULL OR t."
+        + engine.quote("before_tx_version")
+        + " IS NOT NULL)";
   }
 
   /** No row, with the columns {@code read} of the table and their types. */

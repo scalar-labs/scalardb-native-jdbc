@@ -293,3 +293,118 @@ todo 334's log and the design sections named.
   `bench-env/plans/overnight-oracle.json` (the tenth run's matrix), its own stack, expected done about
   19:10; 6e sends the results, the per-statement gets and the continued-row counts for the reading
   against the expectations above.
+- 2026-10-31 (the proof run 20261031-1349-ora, c4a7fcf, read against the tenth, 20261029-2333-ora;
+  the reading sent to 6e for the benchmark doc's eleventh-run section): the index did on the server
+  what the container predicted. Inline RC TPC-C (c), gets a call tenth → eleventh (vendor): the routed
+  key reads 7.0 → 4.0 (3.0) on item and 10 → 5 (4) on the 960K-row tables, Delivery's gate probe 6.0 →
+  1.0, the stock UPDATE batch 71.2 → 51.4 (40.3), the order_line INSERT batch 12.5 → 7.7 (6.6), the
+  inserts and first writes 3 to 6 fewer each (no index maintenance); NewOrder about 246 → 180 gets
+  against the vendor's 152, 70% of the excess gone. Redo 17.2 → 11.7 KB a commit (SNAPSHOT inline
+  16.9 → 11.3) against 7.7, as section 3 expected; backends' CPU excess a commit 0.81 → 0.60 ms (RC
+  inline), 0.51 → 0.24 (SNAPSHOT inline). Throughput ratios RC inline 0.71 → 0.75, SNAPSHOT inline
+  0.83 → 0.87, decoupled 0.59 → 0.61 and 0.67 → 0.68, short of the expected 0.8 / 0.9: the vendor
+  ran 4 to 10% slower on this stack, the driver flat, so the ratio gains are partly the stack's; the
+  gets were a tenth of the driver's 2 ms transaction, and the remaining 0.6 ms a commit of server
+  time over the vendor is per-statement CPU at near-equal gets (item read 10.2 vs 4.8 µs at 4 vs 3
+  gets, the stock stamp batch 91 vs 41 µs for 10 rows). Continued rows: the 36-character sentinel
+  took the decoupled YCSB A / F from 85,880 / 53,304 to 4 / 4 (RC); inline TPC-C 173K unchanged, the
+  unbackfilled first writes. Proposed to the user via 6e, in order: the JFR of the RC inline TPC-C run
+  for the client's share; the routed read's text cost measured on the container; the RC stamp batch's
+  per-element conditions; PCTFREE or the backfill for the inline growth.
+- 2026-10-31 (the eleventh run's server excess sized on the container; proposals via 6e, the user's
+  call; scratchpad `ora/osa2.jsh`, `osa4.jsh`, `osa5.jsh` and their `.txt`, tables OIT item-shaped 100K
+  rows and OLT order_line-shaped 300K rows, function-based in-flight indexes, 50 rows in flight):
+  (a) the READ COMMITTED key read on an inline table is the two-arm split, the committed copy UNION
+  ALL the in-flight arm through the index, whose arm is an INLIST ITERATOR of two probes (states 1
+  and 2) plus a UNION-ALL row source: at AWS 10.2 µs and 4 gets against the vendor's 4.8 and 3 on
+  item; on the container (medians, cpu µs / gets a call) the vendor 4.6 / 3.00 (OIT), 5.4 / 4.00
+  (OLT); the split as deployed 6.6 / 5.00, 7.2 / 6.00; the arm with BETWEEN 1 AND 2 (item 2 above)
+  6.8 / 4.00, 7.1 / 5.00, one probe instead of two but its plan makes the key a filter under the
+  state range (`access SYS_NC18$ >= 1 AND <= 2, filter SYS_NC19$ = :2`), so it scans every in-flight
+  entry of the table and is not for a keyed arm, and moot for the gate, which stops at its first
+  row; the CASE copy, `rc_T`'s form for the inline layout as one derived table, each non-key column
+  `CASE WHEN COALESCE(t.tx_state, 3) IN (1, 2) THEN t.before_c ELSE t.c END`, the keys plain, the
+  anchors the same CASE on `tx_id` and `tx_version`, `WHERE COALESCE(t.tx_state, 3) NOT IN (1, 2) OR
+  t.before_tx_id IS NOT NULL OR t.before_tx_version IS NOT NULL`, 5.2 / 3.00 and 5.6 / 4.00: the
+  vendor's gets, within 0.6 µs of its CPU, exact for a predicate that references only key columns
+  (there P = P_before, both arms select the same rows by the same key, the arm's filter is the OR
+  term, the before image's identity is the anchor as before); the in-flight key's before image read
+  alike by both forms. Proposal: on an inline table at READ COMMITTED a read whose predicate
+  references only the table's key columns takes the CASE copy in place of the two arms, Oracle first
+  (PostgreSQL's inline the same form once measured); item, stock, warehouse, district, customer by
+  id, oorder, new_order, order_line by order are such reads, about 20 a NewOrder, 100 of its 200 µs
+  of server CPU over the vendor's. (b) The same for an anchor-less aggregate with a key-only
+  predicate: Delivery's SUM over an order, the gated statement as written (4.2) on the container
+  8.6 µs / 6.15 gets against the vendor's 6.6 / 4.15, the gate evaluated once whether inside MAX()
+  or as an outer column (8.3 / 6.15), and a gate of 1 then costs the split read again (8.4 / 10.0, a
+  second round trip); the CASE copy 7.2 / 4.15 exact in one statement (223.4 the vendor's sum with
+  the in-flight amount, 123.4 the copy's and the split's), no gate, no fallback. At AWS that read
+  cost 15.5 gets against the vendor's 4.2 (the tenth 20.2), which the container's gated form does
+  not explain: the run's plans section holds the top texts by elapsed only; ask the harness for the
+  plans of every driver text above 10 gets a call. (c) The write side: the RC inline stock stamp
+  UPDATE has the vendor's plan (INDEX UNIQUE SCAN, TABLE ACCESS BY INDEX ROWID) and costs 51.4 gets
+  and 91.5 µs a 10-row batch against 40.3 and 41.3; the anchored WHERE (DECODE and two COALESCEs) and
+  the five stamp columns are trivial, so the excess is the first write's row growth on an
+  unbackfilled imported row (tx columns NULL to a 36-character tx_id and three numbers, the row
+  migrating when its block is full; 173K continued-row fetches a 60 s run, unchanged by the index;
+  redo 11.7 against 7.7 KB a commit): proposal, an A/B of the inline cells with the harness's
+  backfill on, as it backfills the decoupled cells, to size the growth's share (expected: the stock
+  batch toward 42 gets and 55 µs, the continued rows toward 0, redo down), and a setting-up-tables
+  note that an inline table's first writes grow its rows unless backfilled or loaded with PCTFREE.
+  Also: the ofa-oracle instance had died this morning (PMON, ORA-471 after a clock jump) and was
+  restarted; the scratch tables survived.
+- 2026-10-31 (the user's word, "yes, 1 and 2", via 6e; "yes" to me for 366 first with the CASE copy
+  beside it): items (a) and (b) above designed on main as 31ec14c, design 4.2 "The key-only read on an
+  inline table at READ COMMITTED as the CASE copy", one paragraph for the key read and the anchor-less
+  aggregate, the 19c clause included; handed to c7 for its own branch (SplitRead's copy choice, the
+  key-only test beside `keyConjuncts`, the gated form's selection; suites on 23 and 19c; rebase onto
+  the 19c branches or they onto this). Item (c), the inline backfill A/B, and the harness's plans
+  capture are 6e's to put to the user after 1 and 2 land. Todo 366's option 1 runs on the container
+  meanwhile (`ora/ser366.jsh`).
+- 2026-11-01 (review of c7's db5a464 on `inline-rc-case-copy`, from `git show`): mergeable. `SqlAst.keyOnly`
+  is the design's test and conservative where it cannot tell (a subquery in WHERE or ON, a NATURAL or
+  USING join, an unqualified column of a join without every table's columns known, a reference in a
+  subquery); `Router.caseCopies` takes the copy on Oracle at READ COMMITTED for an inline reference in
+  a top-level inner place, and the gate only where every ScalarDB table of the statement is a copy;
+  `SplitRead.caseCopy` spells the text as 4.2 has it, the anchors the before image's identity for a
+  row in flight through the same CASE. Two things the build taught the design, now in the paragraph:
+  the nullable side of a LEFT JOIN keeps its pieces (one copy turned the join inner,
+  `ReadIntegrationTest`'s `imp LEFT JOIN made` lost its unmatched rows), and a predicate naming no
+  column of the table is key-only. Tests: the new OLTP test (the lookup's text and before image, the
+  key-prefix range without the in-flight insert, the SUM in one round trip without a gate, the
+  non-key predicate's arms, the join's mixed copies, the item read at the vendor's 3 gets with 50
+  items in flight), form 6 and 7's expectations, ReadIntegrationTest's Oracle inline split text, the
+  AST unit cases; green on Free 23 (CatalogIntegrationTest's 15 failures are c7's reset script's,
+  unchanged). One nit, not blocking: the copy carries no `NO_INDEX_SS` hint; on a table still on the
+  plain in-flight index the committed copy's reason for it (the sixth run's skip scan) applies to the
+  copy too, so the hint belongs there where `inflightExpressions` is false. 19c not run: plain SQL,
+  the run follows with 33's workflow once both land. Lands on the user's word in c7's session.
+- 2026-11-01 (c7's 9aabeb0 on top of db5a464, from `git show`): the nit folded in, the copy carrying
+  `/*+ NO_INDEX_SS(t "T_inflight") */` where `inflightExpressions` is false, as the committed copy
+  does, nothing on the function-based form; the new test's tail rebuilds ccit's index plain and reads
+  item 520 through the copy with the hint on a fresh catalog (the in-flight transactions are rolled
+  back by then, so it reads the committed price: a smoke test of the text, not of a row in flight,
+  fine). The verdict carries to 9aabeb0; the design's rule sentence now says "no hint but the
+  committed copy's on the plain form". Lands on the user's word in c7's session.
+- 2026-11-01 (the CASE copy on main): c7 landed 5e1da62 + 13d3307 by fast-forward on the user's "land
+  it" in c7's session, rebased onto f4f69ec; `git range-diff efc47ae..9aabeb0 f4f69ec..13d3307` shows
+  both patches identical to the reviewed db5a464 + 9aabeb0, and the code diff between 9aabeb0 and
+  13d3307 outside docs and todos is empty. Not pushed. 6e told: a run from this main shows the
+  copy's effect (expected: RC inline toward 0.8, the item read at the vendor's 3 gets), and item 3
+  (the inline backfill A/B) and the harness plans capture can go to the user. The 19c run of the copy
+  follows with 33's workflow.
+- 2026-11-01 (6e, the twelfth Oracle run `20261101-1528-ora` from `4804b71`, inline TPC-C, fast,
+  RC and SNAPSHOT, each backfilled and not): the copy as predicted. At RC inline the item read went
+  4.0 → 3.0 gets (the vendor's 3.0), 10.2 → 8.5 µs; the customer, oorder and warehouse key reads lost
+  a get and 2–4 µs each; the server's active time a commit fell 1.73 → 1.60 ms; (c)/(a) 0.75 → 0.79.
+  Delivery's SUM is the copy on the vendor's plan (PK range scan), 14.0 gets against the vendor's
+  4.2. The 10 extra gets are its 10 rows' forwarding pointers: Delivery only delivers loaded orders
+  in a 60 s run, and an unbackfilled inline row grows and migrates at its first write (184,000 to
+  201,000 `table fetch continued row` a run against the vendor's 1,400 to 2,300). Item 3 answered:
+  backfilled, the rows migrate during the setup instead (543,000 to 588,000 a run). The order_line
+  UPDATE then falls 62 → 33 gets, but the SUM stays at 14 and the stock batch rises 52 → 54.
+  Throughput −2 points at RC, +3 at SNAPSHOT, within the spread, so the default (off) stands.
+  Proposed to the user: a harness cell `inline-moved` (backfill, then `ALTER TABLE ... MOVE` and the
+  indexes rebuilt) for the steady state of rows inserted through the driver, and a docs note for
+  inline tables imported with data (backfill and `MOVE` once before going live, or a larger
+  `PCTFREE`). The new plans capture works: 23 plans in each RC inline run's server.txt.

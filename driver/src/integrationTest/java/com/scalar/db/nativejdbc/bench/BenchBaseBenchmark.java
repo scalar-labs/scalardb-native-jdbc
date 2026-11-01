@@ -135,9 +135,12 @@ class BenchBaseBenchmark {
     return System.getProperty("nativejdbc.benchbase.weights." + workload, "");
   }
 
-  // -Dnativejdbc.benchbase.layout=inline: ScalarDB's default layout, decoupled otherwise
-  private static final boolean DECOUPLED =
-      !System.getProperty("nativejdbc.benchbase.layout", "decoupled").equals("inline");
+  // -Dnativejdbc.benchbase.layout=inline: ScalarDB's default layout, decoupled otherwise;
+  // inline-backfilled: the inline layout with the setup's backfill, which the inline runs skip
+  private static final String LAYOUT =
+      System.getProperty("nativejdbc.benchbase.layout", "decoupled");
+  private static final boolean DECOUPLED = !LAYOUT.startsWith("inline");
+  private static final boolean BACKFILL = DECOUPLED || LAYOUT.equals("inline-backfilled");
 
   private static final String TIER = System.getProperty("nativejdbc.bench.tier", "local");
 
@@ -203,7 +206,7 @@ class BenchBaseBenchmark {
           .append(" s a run, ")
           .append(REPS)
           .append(" repetition(s), layout ")
-          .append(DECOUPLED ? "decoupled" : "inline")
+          .append(DECOUPLED ? "decoupled" : LAYOUT)
           .append(", ")
           .append(NET_DELAY_US)
           .append(" µs added to each round trip.\n");
@@ -342,15 +345,15 @@ class BenchBaseBenchmark {
       try (Connection c = e.open()) {
         assertThat(
                 // decoupled tables backfilled and inline ones not, as the runs since 20289be,
-                // whatever
-                // the setup's default (off on every table since the user's decision of 2026-10-29)
+                // whatever the setup's default (off on every table since the user's decision of
+                // 2026-10-29); inline-backfilled backfills the inline tables too
                 Setup.run(
                     catalog,
                     c,
                     t -> t.namespace().equals(ns),
                     Duration.ofMinutes(10),
                     List.of(),
-                    DECOUPLED))
+                    BACKFILL))
             .allMatch(Setup.Result::succeeded, "succeeded");
       }
     }
@@ -992,6 +995,13 @@ class BenchBaseBenchmark {
               Double.compare(y.getValue()[1] / y.getValue()[0], x.getValue()[1] / x.getValue()[0]));
       for (Map.Entry<String, double[]> g : perCall.subList(0, Math.min(10, perCall.size()))) {
         if (!top.contains(g.getKey())) {
+          top.add(g.getKey());
+        }
+      }
+      // and every one above 10 buffer gets a call among those run at least 100 times, whatever
+      // its time: a statement's gets against the vendor's are the server items' measure (todo 364)
+      for (Map.Entry<String, double[]> g : perCall) {
+        if (g.getValue()[5] / g.getValue()[0] > 10 && !top.contains(g.getKey())) {
           top.add(g.getKey());
         }
       }

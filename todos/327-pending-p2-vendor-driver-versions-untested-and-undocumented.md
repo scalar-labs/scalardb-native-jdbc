@@ -1,0 +1,182 @@
+---
+status: pending
+priority: p2
+issue_id: "327"
+tags: [ci, docs, compatibility, vendor-driver]
+dependencies: []
+---
+
+# The vendor driver versions the driver supports are neither tested nor documented
+
+## Problem Statement
+
+The application supplies its own vendor JDBC driver, and the driver uses whichever one
+`DriverManager` returns for the stripped URL, at whatever version (`NativeJdbcDriver.vendorDriver`).
+Nothing checks that version, and the integration tests run each engine against one version only, the
+one in `gradle/libs.versions.toml`. So the user docs cannot say which versions work: an older
+driver that behaves differently fails later as a wrong result or an odd error, not at connect.
+
+## Findings
+
+- The versions the tests run today: pgjdbc 42.7.14, Connector/J 26.7.0, MariaDB Connector/J 3.5.10,
+  mssql-jdbc 13.6.0.jre11, ojdbc11 23.26.3.0.0 (`gradle/libs.versions.toml`).
+- The only version checks in the driver are of the database server (`getDatabaseMajorVersion` in
+  `Router` and `Setup`), never of the vendor driver.
+- `.github/workflows/ci.yml` runs one job per engine, at those versions.
+
+## Proposed Solutions
+
+### Option 1: test a range in CI, then document it
+1. Let each vendor driver version be overridden from the command line, e.g.
+   `-Pnativejdbc.postgresql.driverVersion=42.5.0`, for the integration test tasks.
+2. Add CI jobs that run each engine at the oldest version to be claimed, beside the current one.
+3. Write the tested range per engine into the README's compatibility table and the user docs.
+
+**Effort:** Medium.
+
+## Recommended Action
+
+Option 1. Decided 2026-10-23: no warning or refusal at connect for a vendor driver version for now;
+the supported versions are documented only once CI verifies them.
+
+## Acceptance Criteria
+
+- [ ] Each engine's integration tests can run at a vendor driver version given on the command line.
+- [ ] CI runs each engine at the oldest supported vendor driver version and at the current one.
+- [ ] The supported range per engine is documented.
+
+## Work Log
+
+### 2026-10-23 - Raised while planning the user docs
+
+**By:** Claude Code
+- Getting started asks users to add their database's own JDBC driver; whether to bundle the vendor
+  drivers or publish per-engine starter artifacts was weighed and dropped, so the supported versions
+  need stating instead.
+
+### 2026-10-29 - The tested versions documented for 3.20.0
+
+**By:** Claude Code
+- README, Compatibility: a table of the server and JDBC driver versions CI tests per engine, said to
+  be the tested ones and other versions unverified; the zips' bundled drivers named. The third
+  acceptance criterion holds for exact versions only: the override and the oldest-version CI jobs
+  (criteria 1 and 2) are open, and need the oldest version to claim per engine decided.
+
+### 2026-10-30 - Driver ranges tested; the server-version matrix planned for after 3.20.0
+
+**By:** Claude Code
+- Done: `-Pnativejdbc.<engine>.driverVersion` and `-Pnativejdbc.excludeTests` in driver/build.gradle.kts,
+  `.github/workflows/vendor-drivers.yml` (by hand and weekly), and the README's ranges from run
+  40906274113 (52b510d). Run 40975593718 tries ojdbc11 23.4 to 23.8 to widen the Oracle 23 range.
+- Next, after the release: the database server versions, on two axes rather than the full product:
+  1. Server versions with CI's current driver: every major the vendor still supports past the
+     release, checked against the vendors' end-of-life dates when the matrix is built. PostgreSQL 15
+     to 18 (decided 2026-10-30: 14 reaches its end of life in November 2026 and is left out; 18 is
+     the newest, no postgres:19 image yet; CI's default, 16, may move to 18 once it passes). The
+     others to check the same way: MySQL 8.0, 8.4 and 9.x, MariaDB 10.6, 10.11 and 11.4, SQL Server
+     2019 and 2022, Oracle 21c XE beside Free 23 (19c has no free container image).
+  2. Driver versions with one server, as the workflow does now.
+  3. The corners: the oldest driver line against the oldest server, per engine.
+  About 25 to 30 more jobs. Needs an image override per engine in `testing/Engines.java`
+  (`-Pnativejdbc.<engine>.image`), shared with other sessions' tests. The driver branches on the
+  server version (PostgreSQL 15 in Setup, 16 in Router), so the server range is a real claim. The
+  README's Server column then becomes a range.
+
+### 2026-10-30 - Oracle 23.4 to 23.8 in the range; Oracle 19c and a flaky test next
+
+**By:** Claude Code
+- Run 40975593718: ojdbc11 23.4, 23.5, 23.7 and 23.8 pass; 23.6 and 23.26.0 failed only
+  `WriteIntegrationTest.reviewFindings` with ORA-12516 (the Oracle Free container out of
+  connections, seen with CI's driver too) and were rerun. README (5250405): ojdbc11 21.1 to 21.23
+  and 23.4 to 23.26; the server named Oracle AI Database 26ai Free (23.26), as the container reports.
+- After the release:
+  1. Oracle 19c, the other long-term release (23ai is now 26ai, release update 23.26; 21c was an
+     innovation release, skipped): `ghcr.io/scalar-labs/oracle/db-prebuilt:19` (19c SE2 19.3.0,
+     built 2024-07-16). Needs an image override in `testing/Engines.java` with its own service name,
+     credentials and startup wait, read access for this repository on the package, and a GHCR login
+     in the workflow. Expect 19c fallbacks in the Oracle statement forms (no IF EXISTS, no BOOLEAN).
+     A current release update (RDS 19.32 in bench-env) can confirm later.
+  2. Oracle 26ai Enterprise Edition: one run of the suite on AWS beside 19c, since Free and EE share
+     the code base; CI stays on Free.
+  3. The flaky test: `reviewFindings` on Oracle exhausts the Free container's connections now and
+     then (ORA-12516); fewer connections at once in the test, or a higher process limit in the
+     test container, so the weekly run stays a signal.
+
+## Resources
+
+- `NativeJdbcDriver.vendorDriver`, `gradle/libs.versions.toml`, `.github/workflows/ci.yml`.
+
+### 2026-10-31 - The 19c bulk INSERT design reviewed (design 4.4, oracle-19c dd0cf56)
+
+**By:** Claude Code (the design session, from `git show`)
+- feaff40 reviewed against design 4.4 and Writes.java on main c4a7fcf: the `NOT EXISTS` metadata
+  insert below 23 is right against the block. The takeover, the stamp condition and the abort count
+  work from the list of entries counted 0 alone, and the two forms differ only in that list: a row
+  there but not visible fails the insert with ORA-00001, SQLState 23000, `undoable`, the block undone
+  whole and the entries one by one through the single INSERT block, the same `40001` at one round
+  trip more; at SNAPSHOT the `NOT EXISTS` form meets ORA-00001 first and the single form's takeover
+  ORA-08177. Nothing else reads `SQL%BULK_ROWCOUNT` after a hinted FORALL (the other hinted inserts
+  read `SQL%ROWCOUNT`, one row's or the total; the other `BULK_ROWCOUNT` reads follow plain DML).
+  The cost claim holds: one unique scan of `T_meta`'s key per entry, 2 to 3 gets, about a third
+  more gets on a 10-entry block than the hinted text, which is why 23 keeps the hint.
+- Six wording edits asked (the SNAPSHOT sentence, the repeated key, the cost's magnitude, where the
+  version is read and the text cache keyed by the form, 21c, the acceptance tests named) and made
+  by the 19c session as dd0cf56 on `oracle-19c`, 38 fences. Mergeable. Open for the build:
+  `form4InsertAsOneStatement`'s 2 round trips on 19c against 1 on 23, `onMetadataTable`'s
+  `all_constraints` lookup to rule out first.
+
+### 2026-10-31 - c7's build of the 19c bulk INSERT form reviewed (oracle-19c-bulk-insert ae274d0)
+
+**By:** Claude Code (the design session, from `git show`)
+- Mergeable on the 19c CI run coming back green (`MoreWritesIntegrationTest.batches`, the new OLTP
+  test). `Bulk.sql(types, major)` takes the `NOT EXISTS` text for the INSERT below 23 under its own
+  cache key and the hinted text byte for byte otherwise (WritesTest); the version read once per
+  connection in `ConnectionHandler`, 0 unread, carried through `applyOracleEntries` to
+  `applyOracleBulk`, the one site that needed it; probe 9c asserts `1,1,1,/2` below 23; the OLTP
+  test runs the eight tombstone cases (two levels, states 3 and 1, held then committed or committed
+  after the read) on both forms through `Proxies.oracleMajorForTests`, SQLState and rows alike.
+- Decided: (a) an abort's counts before it differ (`{[1]}` from the entries one by one against the
+  hinted block's `{[]}`): the design's own table gives both, so one clause in the 19c paragraph, no
+  change to the build; (b) version 0 takes the `NOT EXISTS` form: kept, correctness first on a path
+  that occurs only on a broken connection. Notes: land feaff40 + dd0cf56 (oracle-19c) with or before
+  the build; `oracleMajorForTests` is JVM-wide, sound while the suite runs sequentially; form4's 2
+  round trips on 19c need the cause (a 10046 trace of the test's session) before the 19c run can
+  pass that assertion.
+- 2026-11-01 (33's 19c CI result for the bulk INSERT build, oracle-19c 18e05ee carrying ae274d0/e38d6c9,
+  run 41206828260, relayed to 89): oracle-23 green; oracle-19c 4 of 167 failed. The merge condition
+  held: `MoreWritesIntegrationTest.batches` passed on 19c, the bulk block tests too, the tombstone
+  taken over at both levels (metadata 30/3/3 and 40/3/3). The four: (1) the new OLTP test expects the
+  hinted form where 19c runs NOT EXISTS, a test bug, c7 makes the expectation version-conditional
+  against outcomes measured below 23; (2) `forallAndReturning`'s hinted probe records 1/1/1/1 on 19c,
+  c7 makes it version-conditional as 9c is; (3) form4 counts [2, 2] round trips on both passes, so not
+  a cold lookup, 33 takes a 10046 trace; (4) ORA-08177 in ScalarDB's `importTable`, the known flaky:
+  ScalarDB's connection at Oracle SERIALIZABLE (the fixture's `REPEATABLE_READ`), the same level todo
+  366 traces its failures to; on an inline table the fixture can run `READ_COMMITTED` (366's option 1,
+  the user's call), which would remove it there. Rerun pending from 33.
+- 2026-11-01 (33's 19c rerun, oracle-19c 93f544a = ae274d0 + e38d6c9 + c7's 20dc64b, run
+  41280820558): 19c 167 tests, 1 failed, `form4InsertAsOneStatement` at [2, 2] round trips on both
+  passes; the todo 327 test and `forallAndReturning` pass with the exact 19c figures, batches
+  passes. 23: 2 failed, `WriteIntegrationTest.reviewFindings` and `ObjectsCheckIntegrationTest`,
+  the known ORA-12516 connect-exhaustion flaky, untouched by the branch. 89's verdict: mergeable by
+  the condition; 20dc64b read from `git show` (test-only: below 23 the NOT EXISTS pass alone, held
+  to the hinted form's outcomes as measured on 23 with the abort counts left out as decided;
+  forallAndReturning "ok 1/1/1/1" below 23 as probe 9c). Before the landing: attribute form4's
+  second round trip by a 19c run of main at the merge base (the branch changes only Proxies and
+  Writes, both on the INSERT path): main at 2 as well = 19c's baseline, a version-conditional
+  expectation once the 10046 trace names the cause; main at 1 = the build's, a fix before landing.
+- 2026-11-01 (form4 attributed): two 19c runs without the build, 41182797634 (oracle-19c 04b2c1c)
+  and 41188432106 (5e25dac), driver code main at 7ed2254, failed `form4InsertAsOneStatement` at 2
+  round trips as well; between 7ed2254 and the build's base 0e5b5f9 only c4a7fcf and 36dfb48 touch
+  the driver and no hunk of theirs touches INSERT ALL, RETURNING or the bulk text (checked from git
+  by 89). So the second round trip is 19c's baseline, open for the 10046 trace; the assertion stays
+  as it is on 19c until the cause is named. The bulk INSERT build is mergeable with nothing left on
+  89's side; it lands on the user's word, rebased onto main's head. A strict run of main at 0e5b5f9
+  on 19c is the user's call, not a condition.
+- 2026-11-01 (landed): 33 landed the 19c work on main on the user's word, local and not pushed, main at
+  990b7e2. On top of bb152b7: the server-versions commits e60eca0, 6305a5f, d1e29bf (design.md's table
+  keeps main's function-based index row and the MariaDB 1020 entry); the design as reviewed, c636ca6 =
+  feaff40, 2713a81 = dd0cf56, dbf4b81 = cb5ce58; the build as reviewed, b3c29b4 = ae274d0, f1c4742 =
+  e38d6c9, daecdac = 20dc64b (range-diff by 89: every pair identical); probe 9c' 990b7e2 (the Oracle
+  forms test's bulk INSERT metadata insert as INSERT ... WHERE NOT EXISTS). Unit tests 416/416 and
+  spotless pass (33). Open here: form4's second round trip on 19c (the 10046 trace), a strict 19c run
+  of main (the user's call).

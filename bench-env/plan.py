@@ -15,7 +15,7 @@ A plan:
     "matrix": {
       "workloads": ["ycsb-a"],          # run in this order in each cell
       "levels": ["READ_COMMITTED", "SNAPSHOT"],   # also SERIALIZABLE
-      "layouts": ["decoupled", "inline"],
+      "layouts": ["decoupled", "inline"],   # also inline-backfilled: inline, the setup's backfill on
       "delays_us": [0]                  # microseconds added to each round trip (net-delay.sh)
     },
     "runs": "a,c",                      # optional: (a) the vendor, (c) the driver; also b, d
@@ -89,8 +89,8 @@ def load(path):
         if level not in LEVELS:
             fail(f"level {level!r}: one of {sorted(LEVELS)}")
     for layout in m["layouts"]:
-        if layout not in ("decoupled", "inline"):
-            fail(f"layout {layout!r}: decoupled or inline")
+        if layout not in ("decoupled", "inline", "inline-backfilled"):
+            fail(f"layout {layout!r}: decoupled, inline or inline-backfilled")
     for d in m["delays_us"]:
         if isinstance(d, bool) or not isinstance(d, int) or d < 0:
             fail(f"delay {d!r}: a whole number of microseconds")
