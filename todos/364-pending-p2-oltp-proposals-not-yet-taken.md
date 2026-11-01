@@ -408,3 +408,71 @@ todo 334's log and the design sections named.
   indexes rebuilt) for the steady state of rows inserted through the driver, and a docs note for
   inline tables imported with data (backfill and `MOVE` once before going live, or a larger
   `PCTFREE`). The new plans capture works: 23 plans in each RC inline run's server.txt.
+
+### 2026-11-01 (night): the decoupled layout's next items, measured by statement on the container
+
+The user's priority via 6e: the decoupled layout first. From 6e's V$SQL figures of the eleventh run's
+RC decoupled TPC-C (20261031-1349-ora, 0.61; CPU a call, driver against vendor): the 10-row stock
+write block 374 µs / 131 gets against 42 / 40 (inside it the data UPDATE `qa1` 141 / 80, the
+metadata CAS `qa2` 149 / 50, the block's own 84); order_line's insert block 151 / 45 against 27 (the
+metadata INSERT `k2` 69 / 38) and Delivery's update block 155 / 79 against 30 (the metadata stamp
+`g3` 64 / 51); the one-row blocks 64–107 against 8–19; the keyed reads stock 17.5 / 9 against 7.9 / 5
+and item 15.3 / 7 against 4.6 / 3. A NewOrder's server CPU adds up to ~1,130 µs against ~270. At
+SNAPSHOT decoupled (0.68) the reads are near the vendor's (stock's locking read 10.0 / 5 against
+8.0 / 5, item 5.4 / 3 against 4.7 / 3) and the gap is the write blocks (stock 259 / 92, the `k3` MERGE
+stamp 121 / 51; order_line 105 and 131; one-row 59–99).
+
+Mirrored by hand on the container (scratchpad `ora/dx366*.jsh`, `ora/fbi366*.jsh`; ST 3.2M rows with
+`ST_tx_metadata`, a function-based in-flight index added; forms alternated per round, warm cache,
+medians; CPU µs / gets a call):
+
+- Keyed reads at READ COMMITTED: vendor 4.7 / 4; the committed copy alone (the LEFT JOIN to the
+  metadata row for the anchors) 6.1 / 8; the driver's form, committed copy UNION ALL in-flight copy,
+  8.3 / 10; the CASE copy over the join 6.6 / 8; an anchor-less read with the gate column 6.5 / 6. So
+  the anchor join is +1.4 µs and +4 gets (structural at this level: the write's CAS needs the version
+  read, as ScalarDB's own READ_COMMITTED prepare does), and the in-flight branch +2.2 µs and +2 gets,
+  which the CASE copy removes (−20% of the read's CPU).
+- One-row write block as deployed: 40.2 / 20.8, its data UPDATE with the `EXISTS` gate and RETURNING
+  11.2 / 10, its metadata CAS 18.6 / 10.9, the block's own ~10; without the gate 36.0 / 17.1 (the DML
+  9.6 / 6.0); without the anchor conjuncts 34.0 / 21.0. The gate is 4 gets and ~1.6 µs of the DML,
+  ~10% of the block; the stamp is the largest piece and structural. In the 10-row block the gate is 41
+  gets of the data DML's 83 (its CPU 62 → 35). Dropping RETURNING for the bound keys measured worse
+  through a PL/SQL loop and is not an item.
+- The in-flight index's maintenance on a stamp (the index evaluated for the old and new row, no
+  entry changing): alternated per round, the setup's 3-expression index against none, one row 14.6
+  against 13.5, a 10-row FORALL 84.6 against 60.8 (its UPDATE 56.8 against 49.7): ~1–2.4 µs a row.
+  Not an item; the index's probe and first-write gains stand. (An earlier, non-alternated pass had
+  suggested 15 µs a row; that was drift between campaigns, hence the alternated rerun.)
+- Migrated rows: 20% of the container's `ST_tx_metadata` rows chain (the table's history); its gets
+  a stamp (10–14) are not the AWS table's (5), whose backfill writes the 36-char tx_id.
+
+Proposals, the user's call, in the order recommended:
+
+1. **The metadata table's primary key in the data key's order** ((C), 2026-10-28, with figures now):
+   order_line's metadata PK is (OL_D_ID, OL_NUMBER, OL_O_ID, OL_W_ID), so a NewOrder's 10 metadata
+   inserts land in 10 leaves (`k2` 38 gets) and a Delivery's 10 stamps probe 10 leaves (`g3` 51 gets,
+   ten times a Delivery); in the data order (W, D, O, NUMBER) they share one or two leaves, ~10 gets
+   each and less redo. Both levels, both of TPC-C's slowest decoupled transactions. Two ways, not
+   exclusive: the ScalarDB fix, `JdbcAdmin.getImportTableMetadata` taking the key columns by KEY_SEQ
+   (the user can add it to the ScalarDB feedback), and the setup rebuilding the metadata PK's index in
+   the data order where it differs (Oracle enforces a PK with an index whose columns are the key's in
+   any order, `USING INDEX`), the setup's check reading the order; measured on the container first
+   (an ORDER_LINE-shaped pair), then the AWS cell.
+2. **The CASE copy for decoupled keyed reads at READ COMMITTED**: 4.2's inline CASE copy over the
+   LEFT JOIN to the metadata row, `CASE WHEN COALESCE(m.tx_state, 3) IN (1, 2) THEN m.before_c ELSE
+   t.c END` per column and the before anchors the same way, the in-flight branch and its index probe
+   gone; exact as the inline argument, plus: a ScalarDB delete in flight keeps the data row until its
+   commit (the prepare is a Put at state 2 with the before image), so the join from the data table
+   finds every in-flight row that has a before image. −2 gets and ~−20% CPU a keyed read, 20 reads a
+   NewOrder. READ COMMITTED only.
+3. **The RC decoupled blocks' data DML without the metadata `EXISTS` gate**: the metadata CAS carries
+   the same conditions and decides; on `stamped < written` the block rolls back to a SAVEPOINT taken
+   at its start and reports the counts, and the Java side runs the entries through the single form as
+   it does today for a count of 0. Semantics as today (the conflict and in-flight cases end in the
+   same wait or abort, through the CAS instead of the gate); −4 gets a written row (−40 of the stock
+   block's 131 on AWS), ~−10% of a block's CPU. READ COMMITTED only.
+4. Not proposed: the anchor join at READ COMMITTED (ScalarDB parity), the in-flight index's upkeep
+   (measured small), the PL/SQL block's own cost (the round trip it saves is worth more), RETURNING
+   for bound keys.
+
+Sent to the user and to 6e (todo 329's record).
