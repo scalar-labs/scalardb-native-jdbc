@@ -2156,24 +2156,11 @@ runs first, as one statement:
   SNAPSHOT statement below has it, its WHERE extended by `AND COALESCE(t.tx_state, 3) = 3` and, when
   the transaction recorded a version of the key, by the anchor, `AND DECODE(t.tx_id, ?, 1, 0) = 1 AND
   COALESCE(t.tx_version, 0) = COALESCE(?, 0)`, its two values bound;
-- on a decoupled table, the block above without step 1: the DML under a gate on the key's row in
-  flight alone, `AND NOT EXISTS (SELECT /*+ INDEX(m T_inflight) */ 1 FROM T_meta m WHERE <m in
-  flight> AND <m's key as the index holds it> = t.k)`, one probe of the in-flight index, spelled as
-  the committed copy's `NOT EXISTS` and the gate column of 4.2 are (todo 364, 2026-11-02; before it
-  `AND EXISTS (SELECT 1 FROM T_meta m WHERE m.k = t.k AND COALESCE(m.tx_state, 3) = 3 <AND the
-  anchor>)`, the metadata row's state and anchor at the price of its primary key's probe and the
-  row, 4 gets a row); then under `l_written = 1` the CAS of step 3 with the state condition and the
-  anchor, the anchor's values bound where `l_id` and `l_version` stood, the state alone without one,
-  which decides what the gate decided before: a CAS that stamps nothing reads the key's state
-  through the same probe, and where the row is not in flight, its version moved or its metadata row
-  missing, the block rolls back to `SAVEPOINT scalardb_native_r`, taken at its start, and reports
-  nothing written, so the block of steps tells the outcome as it did when the gate closed; a row in
-  flight after the DML's read keeps `written 1, stamped 0`, the zero-row CAS's abort as before; back
-  through OUT binds `written, stamped`. Every outcome is as before, and so is every lock the driver
-  takes: the gate still writes no row in flight, and a row written and undone is unlocked by the
-  rollback before the block returns. Measured on the container (todo 364's log, 2026-11-02): the
-  one-row block 15.7 gets to 14.0 a call at the same CPU within noise, its DML 10.1 to 8.0 gets; the
-  ten-row block of 4.4 is there.
+- on a decoupled table, the block above without step 1: the DML under the same conditions read from
+  the metadata row, `AND EXISTS (SELECT 1 FROM T_meta m WHERE m.k = t.k AND COALESCE(m.tx_state, 3) =
+  3 <AND the anchor>)`, then under `l_written = 1` the CAS of step 3 with the same conditions, the
+  anchor's values bound where `l_id` and `l_version` stood, the state alone without one; back
+  through OUT binds `written, stamped`.
 
 The anchor is the version the transaction's reads recorded for the key as the statement binds it
 (`Anchors.key` of the bind values). The reads record the key as the row spells it, and a key the
@@ -3144,33 +3131,26 @@ vendor's own statement, then on AWS with the rest.
   bear on an INSERT. The keyed write's entries at this level take the merged form above built on the
   statement first of 4.3 rather than on step 1: one block per write shape and slot types, 16 slots,
   each slot's placeholders in collections typed as above and, in the anchored text, each slot's
-  anchor beside them, `l_ai(i)` and `l_av(i)`; the user's DML as `FORALL i IN 1 .. l_n` under the
-  in-flight gate of 4.3's keyed write (todo 364, 2026-11-02), `NOT EXISTS (SELECT /*+ INDEX(m
-  T_inflight) */ 1 FROM T_meta m WHERE <m in flight> AND <m's key as the index holds it> = t.k)`,
-  one probe of the in-flight index a row, and before it the metadata row's state and anchor, `EXISTS
-  (SELECT 1 FROM T_meta m WHERE m.k = t.k AND COALESCE(m.tx_state, 3) = 3 AND DECODE(m.tx_id,
-  l_ai(i), 1, 0) = 1 AND COALESCE(m.tx_version, 0) = COALESCE(l_av(i), 0))`, the anchor's two
-  conditions absent from the plain text, with `RETURNING k BULK COLLECT INTO l_w`, the count per
-  slot from `SQL%BULK_ROWCOUNT`; then the slots written mapped onto the keys returned, which
-  `FORALL` appends in slot order, a loop of at most 16, and the CAS of step 3 as one `FORALL` over
-  them, the key as the clear-table stamp spells it, the state condition and the slot's anchor,
+  anchor beside them, `l_ai(i)` and `l_av(i)`; the user's DML as `FORALL i IN 1 .. l_n` under
+  `EXISTS (SELECT 1 FROM T_meta m WHERE m.k = t.k AND COALESCE(m.tx_state, 3) = 3 AND
+  DECODE(m.tx_id, l_ai(i), 1, 0) = 1 AND COALESCE(m.tx_version, 0) = COALESCE(l_av(i), 0))`, the
+  anchor's two conditions absent from the plain text, with `RETURNING k BULK COLLECT INTO l_w`, the
+  count per slot from `SQL%BULK_ROWCOUNT`; then the slots written mapped onto the keys returned,
+  which `FORALL` appends in slot order, a loop of at most 16, and the CAS of step 3 as one `FORALL`
+  over them, the key as the clear-table stamp spells it, the state condition and the slot's anchor,
   `SQL%BULK_ROWCOUNT` per row; OUT the count per slot and the rows stamped. The rules are the
   vendor's batching's above: a count of 1 whose CAS counted 1 is the entry written and stamped; a
-  CAS short of its DML: the block reads, through the same probe, the state of each key written and
-  not stamped, under `SAVEPOINT scalardb_native_q` taken at its start; one in flight is the abort "a
-  row the statement writes changed after it was read", as before; none is a rollback to the
-  savepoint and every count 0, the entries then taking their single forms as a count of 0 does,
-  which tell a moved version or a missing metadata row as the gate's closing did before (todo 364,
-  2026-11-02; measured on the container, the ten-row block 188.6 gets to 169.0 and 341 to 328 µs of
-  CPU a call, its DML 88 to 54 gets and 69 to 41 µs; without any gate 142 gets and 267 µs, a form
-  not taken, since it writes and locks a row in flight or at another version before the CAS tells, a
-  new wait and a new deadlock path against ScalarDB's record commit and rollback, and a changed
-  outcome for a prepare that lands between the DML's read and the CAS); a count of 0 is the entry's
-  single form after the block, in order; the batch takes the block only when every entry resolves
-  alike, the block of entries otherwise; a failure undoes the block whole and the entries run one by
-  one. Expected at AWS: the stock batch near the SNAPSHOT bulk block's 0.28 ms and 97 gets a call
-  plus a metadata probe per row, the order_line batch at the bulk's 0.12 ms and 70 gets; measured on
-  the container first, as the inline forms were.
+  CAS short of its DML is the abort "a row the statement writes changed after it was read"; a count
+  of 0 is the entry's single form after the block, in order; the batch takes the block only when
+  every entry resolves alike, the block of entries otherwise; a failure undoes the block whole and
+  the entries run one by one. Expected at AWS: the stock batch near the SNAPSHOT bulk block's 0.28
+  ms and 97 gets a call plus a metadata probe per row, the order_line batch at the bulk's 0.12 ms
+  and 70 gets; measured on the container first, as the inline forms were. A gate on the in-flight
+  probe alone, the anchors left to the CAS and a savepoint rollback on a CAS miss, was measured on
+  the container 2026-11-02 (the ten-row block 189 gets to 169 and 341 to 328 µs, its DML 88 to 54
+  gets) and not taken, the user's call: a tenth of the block's gets and a few percent of its CPU
+  (todo 364); the form without any gate, 142 gets and 267 µs, writes and locks a row in flight
+  before the CAS tells, and was not proposed.
 
   *The INSERT's bulk block on Oracle before 23 (todo 327, 2026-10-31).* Oracle 19c's
   `SQL%BULK_ROWCOUNT` counts 1 for an entry whose row `IGNORE_ROW_ON_DUPKEY_INDEX` skipped (19c
