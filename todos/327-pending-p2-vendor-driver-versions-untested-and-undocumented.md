@@ -195,3 +195,14 @@ the supported versions are documented only once CI verifies them.
   replaced by the cause. The 19c workflow uploads the 23 job's reports too, for 8b's 23 figures,
   to be added to 8b's comment. Reviewed by the design session (89): no objection. The 10046 trace
   is not needed.
+
+### 2026-11-02 - Probe 8b on both servers; 19c in CI and on main
+
+**By:** Claude Code (the 19c session)
+- Probe 8b on both jobs of run 41318145531 (`oracle-19c` at ebdb2ee, both green), `v$mystat` round
+  trips / the proxy's client chunks: a plain UPDATE 19c 1/1, 23 1/1; an INSERT failing with
+  ORA-00001 19c 1/2, 23 0/2; the failing INSERT then the UPDATE 19c 2/3, 23 1/3. The client's
+  chunks are equal; only 19c's counter takes the failed call. In 8b's Javadoc (825c240); the
+  design session (89) has no objection.
+- `oracle-19c` merged into main (642cdb1); the 19c job moved into `ci.yml`, `oracle-19c.yml`
+  removed, README lists 19c as supported from 3.20.1 (e4a4352).
