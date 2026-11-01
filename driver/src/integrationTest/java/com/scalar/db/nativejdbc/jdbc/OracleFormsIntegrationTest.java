@@ -954,7 +954,10 @@ class OracleFormsIntegrationTest {
    * then a plain UPDATE, through ojdbc alone, as Oracle counts their round trips and as the proxy
    * counts the client's chunks. Decides (todo 327): whether form 4's INSERT over a tombstone, the
    * INSERT ALL that fails then the block, counted 2 on 19c and 1 on 23, is the server's count of a
-   * failed call or a call more from the driver.
+   * failed call or a call more from the driver. The server's count (run 41318145531): the UPDATE 1
+   * on both, the failing INSERT 1 on 19c and 0 on 23, the two together 2 on 19c and 1 on 23; the
+   * client's chunks the same on both, 1, 2 and 3. So 19c counts a failed call's round trip and 23
+   * does not, and the driver makes the same calls on both.
    */
   @Test
   void roundTripsOfAFailedCall() throws Exception {
