@@ -1297,7 +1297,13 @@ union as a derived table.
   its before image by key, its anchor the before image's identity, an in-flight insert invisible,
   the two-arm form for a predicate on a non-key column, the gated aggregate with a non-key conjunct;
   to add: the copy's text for a key lookup and for a key-prefix range, the aggregate without a gate,
-  and the item read of `OracleOltpIntegrationTest` at 3 gets.
+  and the item read of `OracleOltpIntegrationTest` at 3 gets. A positional ORDER BY item past the
+  select list, below 1, or beside a `*` whose count the text does not show keeps the two arms
+  (`Router.caseCopies` declines the copy for the statement, `SqlAst.ordersPastSelectList`): the copy
+  appends the hidden anchor columns to the select list, so `SELECT x FROM T ORDER BY 2` would sort
+  by a hidden column where the arms' lift leaves the statement whole for the database to refuse
+  (todo 144); found by c7 building the decoupled copy, 2026-11-02, the inline copy on main having
+  had it since 5e1da62, fixed with the decoupled copy.
 
 
   *The key-only read on a decoupled table at READ COMMITTED as the CASE copy over the metadata join
@@ -1331,33 +1337,31 @@ union as a derived table.
   stock at 17.5 µs / 9 gets against the vendor's 7.9 / 5 and item at 15.3 / 7 against 4.6 / 3, about
   twenty such reads a NewOrder; expected: 2 gets and about a fifth of the CPU off each, some 60–70
   µs of a NewOrder's ~860 µs of server CPU over the vendor's. The inline copy's other rules hold:
-  the nullable side of an outer join, a predicate on a non-key column, the locking read and the
-  SNAPSHOT forms keep their arms. Oracle only, as the inline copy: on PostgreSQL the join form
-  measured the same as the arms (todo 337). What must keep holding: the READ COMMITTED decoupled
-  read tests, a row in flight read as its before image by key with that image's identity as its
-  anchor, an in-flight insert invisible, a row without a metadata row read with NULL anchors, a
-  delete in flight read as the row before it; to add: the copy's text for a decoupled key lookup and
-  for a key-prefix range, the anchor-less key read still the gated statement as written, and the
-  item and stock reads of `OracleOltpIntegrationTest`'s decoupled cell at 8 gets.
-  **A table found clear** (todo 329). The snapshot is the transaction's: a table that has no row in
-  flight in it at one statement has none at any later statement either, since only the
+  the nullable side of an outer join, a predicate on a non-key column, a positional ORDER BY item
+  past the select list, the locking read and the SNAPSHOT forms keep their arms. Oracle only, as the
+  inline copy: on PostgreSQL the join form measured the same as the arms (todo 337). What must keep
+  holding: the READ COMMITTED decoupled read tests, a row in flight read as its before image by key
+  with that image's identity as its anchor, an in-flight insert invisible, a row without a metadata
+  row read with NULL anchors, a delete in flight read as the row before it; to add: the copy's text
+  for a decoupled key lookup and for a key-prefix range, the anchor-less key read still the gated
+  statement as written, and the item and stock reads of `OracleOltpIntegrationTest`'s decoupled cell
+  at 8 gets. **A table found clear** (todo 329). The snapshot is the transaction's: a table that has
+  no row in flight in it at one statement has none at any later statement either, since only the
   transaction's own writes, stamped committed, change what it sees. So a transaction remembers,
-  until it ends, each table it found clear: by a state of 0 as above, by the per-table check
-  below, by a write's gate (4.3) or by the coarse check sent before a locking read. On such a
-  table every later statement of the transaction runs as the vendor's: a read of any shape is the
-  statement as written over the data tables, a locking read likewise, and a write is the
-  statement as written with its stamp (4.3). A prepared read keeps a second vendor statement for
-  that text beside the rewritten one, prepared when first needed, its settings and parameters
-  replayed as it becomes the one executed; a read of an inline table whole (`*`) keeps the
-  rewritten text, which leaves the metadata columns out. A locking read on a table not yet found
-  clear is sent after the table's coarse check, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2)
-  ORDER BY <key> LIMIT 1`, in one round trip: a row found leaves the rows locked and asks the
-  predicate's in-flight check, which aborts for a row in flight the statement matches by either
-  image; none
-  found marks the table clear. A plain read on a table not yet found clear runs through the state
-  column above, whose probe is what marks the table, or through the per-table checks, the pending
-  ones as one statement. In autocommit nothing is remembered: each statement's snapshot is its
-  own.
+  until it ends, each table it found clear: by a state of 0 as above, by the per-table check below,
+  by a write's gate (4.3) or by the coarse check sent before a locking read. On such a table every
+  later statement of the transaction runs as the vendor's: a read of any shape is the statement as
+  written over the data tables, a locking read likewise, and a write is the statement as written
+  with its stamp (4.3). A prepared read keeps a second vendor statement for that text beside the
+  rewritten one, prepared when first needed, its settings and parameters replayed as it becomes the
+  one executed; a read of an inline table whole (`*`) keeps the rewritten text, which leaves the
+  metadata columns out. A locking read on a table not yet found clear is sent after the table's
+  coarse check, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2) ORDER BY <key> LIMIT 1`, in one round
+  trip: a row found leaves the rows locked and asks the predicate's in-flight check, which aborts
+  for a row in flight the statement matches by either image; none found marks the table clear. A
+  plain read on a table not yet found clear runs through the state column above, whose probe is what
+  marks the table, or through the per-table checks, the pending ones as one statement. In autocommit
+  nothing is remembered: each statement's snapshot is its own.
 
   **On Oracle both hold, at its SERIALIZABLE, the driver's SNAPSHOT, in a transaction** (todo 334).
   The argument above needs two things of the engine: one snapshot for every statement of the
