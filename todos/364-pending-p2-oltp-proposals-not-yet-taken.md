@@ -633,3 +633,22 @@ entries paragraph restored to their text before b40dc64, 4.4 keeping one sentenc
 was measured and not taken; the design above stays as the record of the form and its figures. Item 2
 goes on as designed at b40dc64 (`decoupled-rc-case-copy`); 6e takes the AWS READ COMMITTED and
 SNAPSHOT decoupled cells when it is on main.
+
+### 2026-11-02: c7's finding on item 2: a positional ORDER BY past the select list through the CASE copy
+
+Building the decoupled copy, c7 found (`WriteIntegrationTest.anchorReviewFindings`, todo 144's
+probe) that the CASE copy appends the hidden anchor columns to the user's select list, so `SELECT x
+FROM T ORDER BY 2` at READ COMMITTED in a transaction sorts by a hidden column and succeeds, where
+the two-arm form's lift leaves such a statement whole for the database to refuse (todo 144). The
+inline copy on main has had it since 5e1da62; a statement without a WHERE is key-only, so a
+full-table read with a bad position shows it. Fix on `decoupled-rc-case-copy`: `Router.caseCopies`
+declines the copy for the statement when `SqlAst.ordersPastSelectList()` (a position below 1, past
+the select items, or beside a `*`), both layouts; unit test and both todo 364 tests assert the error
+and no copy; `ReviewFindings` 127's marker accepts either form of the decoupled key read. Design 4.2
+amended (f95e7a5). Asked of c7: `SqlAst.gated`, the anchor-less read behind gate columns (D2,
+2026-10-28), appends its columns the same way without the lift and shows no positional handling in
+its builder; if it has the same hole, the same guard on the same branch with two tests (SNAPSHOT
+autocommit whole-table, READ COMMITTED with a key conjunct). Reported to the user through 6e: a
+restoration under item 2's condition, landing with item 2 unless the user wants it split out. Also
+from c7's first full Oracle run: the decoupled item read at 6.00 gets a call against the vendor's
+3.00, better than the design's 8; unit tests 416.
