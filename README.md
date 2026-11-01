@@ -120,6 +120,9 @@ driver versions below, the newest patch of each line in the range; use a version
 | SQL Server | 2022 | mssql-jdbc (`com.microsoft.sqlserver:mssql-jdbc`), `.jre11` | 11.2 to 13.6 |
 | Oracle | Oracle AI Database 26ai Free (23.26) | ojdbc11 (`com.oracle.database.jdbc:ojdbc11`) | 21.1 to 21.23, and 23.4 to 23.26 except 23.6 |
 
+- Oracle Database 19c is supported from 3.20.1, tested on 19c SE2 19.3.0 with ojdbc11 23.26: on
+  3.20.0 a batch of INSERTs into a decoupled table over a key's existing metadata row, such as a
+  tombstone, leaves the old row's transaction metadata under the new data row.
 - pgjdbc before 42.7 fails `Connection.abort()` on Java 24 or later with a `SecurityException`, as
   it does without the driver: use 42.7 there.
 - MariaDB Connector/J 3.4 fails one of the tests of writes that conflict with a transaction, and is

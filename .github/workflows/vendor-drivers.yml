@@ -68,9 +68,7 @@ jobs:
           # Every server major its vendor supports, with CI's driver: CI runs PostgreSQL 16, MySQL
           # 8.4, MariaDB 11.4, SQL Server 2022 and Oracle Free 23. Left out at their end of life:
           # PostgreSQL 14 (November 2026), MySQL 8.0 and MariaDB 10.6; Oracle 21c, an innovation
-          # release. Oracle 19c, the other long-term release, is not supported yet: its
-          # SQL%BULK_ROWCOUNT counts a row IGNORE_ROW_ON_DUPKEY_INDEX skips, which the bulk INSERT
-          # relies on, and it has no multi-row VALUES (todo 327).
+          # release. Oracle 19c, the other long-term release, runs in ci.yml from its private image.
           - { engine: Postgresql, property: postgresql, image: 'postgres:15' }
           - { engine: Postgresql, property: postgresql, image: 'postgres:17' }
           - { engine: Postgresql, property: postgresql, image: 'postgres:18' }

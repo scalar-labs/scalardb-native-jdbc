@@ -182,10 +182,11 @@ jobs:
   # The whole of CI on the tagged commit, the six engine configurations included, before anything
   # signed leaves: a tag can be pushed before, or regardless of, the branch's own run, and a version on
   # Central cannot be taken back. The daily isolation tests are not repeated here; certifying the line
-  # covers them (RELEASING.md).
+  # covers them (RELEASING.md). The secrets pass on for the Oracle 19c job's image (CR_PAT).
   ci:
     needs: verify-version
     uses: ./.github/workflows/ci.yml
+    secrets: inherit
 
   # Uploads the driver as a USER_MANAGED deployment: the Portal validates it and waits for someone to
   # release it (RELEASING.md). The job ends at the upload, so a deployment the Portal rejects still
