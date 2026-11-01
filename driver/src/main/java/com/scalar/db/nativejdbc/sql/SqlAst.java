@@ -3153,6 +3153,36 @@ public final class SqlAst {
   }
 
   /**
+   * Whether the statement's ORDER BY names a position the select list as written may not hold: past
+   * its items, below 1, or beside a {@code *}, whose count the text does not show. Columns appended
+   * to the list would answer such a position the database refuses (todo 144).
+   *
+   * @return whether a position of the ORDER BY may lie past the select list
+   */
+  public boolean ordersPastSelectList() {
+    if (!(statement instanceof PlainSelect)) {
+      return false;
+    }
+    PlainSelect s = (PlainSelect) statement;
+    if (s.getOrderByElements() == null) {
+      return false;
+    }
+    boolean star = false;
+    for (SelectItem<?> item : s.getSelectItems()) {
+      star |= item.getExpression() instanceof AllColumns;
+    }
+    for (OrderByElement o : s.getOrderByElements()) {
+      if (o.getExpression() instanceof LongValue) {
+        long position = ((LongValue) o.getExpression()).getValue();
+        if (star || position < 1 || position > s.getSelectItems().size()) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
    * Whether every column of {@code r} the statement's WHERE and ON clauses name is a key column of
    * it, the select list, grouping and order free (design 4.2 "The key-only read on an inline table
    * at READ COMMITTED as the CASE copy", todo 364). False for a reference in a subquery, for a

@@ -3387,7 +3387,12 @@ class OracleOltpIntegrationTest {
         // an item in flight read as its before image
         assertThat(rows(d, "SELECT i_price FROM " + it + " WHERE i_id = 520"))
             .containsExactly(price520);
-        d.commit();
+        // an ORDER BY position past the select list: no copy, refused as the vendor refuses it,
+        // not ordered by an appended version (todo 144)
+        String past = "SELECT i_price FROM " + it + " WHERE i_id = 520 ORDER BY 2";
+        assertThat(d.nativeSQL(past)).doesNotContain(copy);
+        assertThatThrownBy(() -> rows(d, past)).isInstanceOf(SQLException.class);
+        d.rollback();
         // the item read's gets a call, over 50 calls after 10, against the vendor's
         String measured = "/* ci" + System.nanoTime() + " */";
         String[] texts = {
@@ -3448,6 +3453,321 @@ class OracleOltpIntegrationTest {
           .contains("/*+ NO_INDEX_SS(t \"" + index + "\") */");
       assertThat(rows(d, item)).containsExactly(price520);
       d.rollback();
+    }
+  }
+
+  /**
+   * A key-only read of a decoupled table at READ COMMITTED that records its anchors as the CASE
+   * copy over the metadata join (design 4.2 "The key-only read on a decoupled table at READ
+   * COMMITTED as the CASE copy over the metadata join", todo 364 item 2): one derived table,
+   * unhinted, in place of the two arms; a row in flight read as its before image by its key and in
+   * a key-prefix range, an in-flight insert left out; an anchor-less read, an order's SUM or a key
+   * read in autocommit, the gated statement as written; a predicate on a non-key column and a LEFT
+   * JOIN's nullable side keeping the two arms; the item read at 8 gets a call with 50 items in
+   * flight; the before image's anchor, the item's version before it, taken by a write after its
+   * transaction rolled back.
+   */
+  @Test
+  void todo364_keyOnlyDecoupledReadsAtReadCommittedTakeTheCaseCopy() throws Exception {
+    Map<String, String> decoupled = Map.of("transaction-metadata-decoupling", "true");
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      admin.createTable(
+          N(NS),
+          N("dcol"),
+          TableMetadata.newBuilder()
+              .addColumn(N("ol_w"), intType())
+              .addColumn(N("ol_o"), intType())
+              .addColumn(N("ol_n"), intType())
+              .addColumn(N("ol_i"), intType())
+              .addColumn(N("ol_amt"), intType())
+              .addPartitionKey(N("ol_w"))
+              .addClusteringKey(N("ol_o"))
+              .addClusteringKey(N("ol_n"))
+              .build(),
+          decoupled);
+      admin.createTable(
+          N(NS),
+          N("dcit"),
+          TableMetadata.newBuilder()
+              .addColumn(N("i_id"), intType())
+              .addColumn(N("i_price"), intType())
+              .addColumn(N("i_name"), DataType.TEXT)
+              .addPartitionKey(N("i_id"))
+              .build(),
+          decoupled);
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      seed(
+          v,
+          "dcol",
+          "ol_w, ol_o, ol_n, ol_i, ol_amt",
+          "1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10), MOD(LEVEL * 7, 1000), MOD(LEVEL, 10) + 1",
+          "ol_w, ol_o, ol_n",
+          "1, TRUNC((LEVEL - 1) / 10), MOD(LEVEL - 1, 10)",
+          3000);
+      seed(
+          v,
+          "dcit",
+          "i_id, i_price, i_name",
+          "LEVEL - 1, MOD(LEVEL, 100) + 1, 'item'",
+          "i_id",
+          "LEVEL - 1",
+          1000);
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)dc(ol|it)"),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
+          .hasSize(2)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    String ol = NS + ".dcol";
+    String it = NS + ".dcit";
+    String olData = NS + ".\"" + tableInfo("dcol").dataTable() + "\"";
+    String itData = NS + ".\"" + tableInfo("dcit").dataTable() + "\"";
+    String copy = "CASE WHEN COALESCE(m.\"tx_state\", 3) IN (1, 2) THEN";
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59367");
+    try (Connection d = ORA.openDriver(ttl);
+        Connection v = ORA.open();
+        TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager()) {
+      String sum9 = rows(v, "SELECT SUM(ol_amt) FROM " + olData + " WHERE ol_o = 9").get(0);
+      String line3 =
+          rows(v, "SELECT ol_amt FROM " + olData + " WHERE ol_o = 9 AND ol_n = 3").get(0);
+      String price520 = rows(v, "SELECT i_price FROM " + itData + " WHERE i_id = 520").get(0);
+      // a line of order 9 in flight with a new amount, a line inserted in flight, 50 items in
+      // flight
+      TwoPhaseCommitTransaction held = preparedAmount(tpc, "dcol", 9, 3, 100);
+      TwoPhaseCommitTransaction inserting = tpc.begin();
+      inserting.insert(
+          Insert.newBuilder()
+              .namespace(N(NS))
+              .table(N("dcol"))
+              .partitionKey(ScalarDbNames.key("ol_w", 1))
+              .clusteringKey(
+                  com.scalar.db.io.Key.newBuilder()
+                      .addBigInt(N("ol_o"), 9)
+                      .addBigInt(N("ol_n"), 10)
+                      .build())
+              .bigIntValue(N("ol_i"), 1)
+              .bigIntValue(N("ol_amt"), 5)
+              .build());
+      inserting.prepare();
+      TwoPhaseCommitTransaction items = tpc.begin();
+      for (int i = 500; i < 550; i++) {
+        items.update(
+            Update.newBuilder()
+                .namespace(N(NS))
+                .table(N("dcit"))
+                .partitionKey(ScalarDbNames.key("i_id", i))
+                .bigIntValue(N("i_price"), 9999)
+                .build());
+      }
+      items.prepare();
+      boolean itemsHeld = true;
+      try {
+        d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        d.setAutoCommit(false);
+        // the key lookup: one derived table over the metadata join, the row in flight its before
+        // image
+        String lookup = "SELECT ol_amt FROM " + ol + " WHERE ol_w = 1 AND ol_o = 9 AND ol_n = 3";
+        String routed = d.nativeSQL(lookup);
+        log("todo 364 item 2: the key lookup as the CASE copy: " + routed);
+        assertThat(routed)
+            .contains(copy)
+            .contains(" LEFT JOIN ")
+            .doesNotContain("UNION ALL")
+            .doesNotContain("/*+");
+        assertThat(rows(d, lookup)).containsExactly(line3);
+        // an order's lines, a key-prefix range: the inserted line left out
+        String range =
+            "SELECT ol_n, ol_amt FROM " + ol + " WHERE ol_w = 1 AND ol_o = ? ORDER BY ol_n";
+        assertThat(d.nativeSQL(range)).contains(copy).doesNotContain("UNION ALL");
+        try (PreparedStatement ps = d.prepareStatement(range)) {
+          ps.setInt(1, 9);
+          List<String> lines = rowsOf(ps);
+          assertThat(lines).hasSize(10).contains("3/" + line3);
+          assertThat(lines.get(9)).startsWith("9/");
+        }
+        // an anchor-less read, the order's SUM: the gated statement as written, no copy
+        String sumTag = "/* ds" + System.nanoTime() + " */";
+        String sum =
+            "SELECT " + sumTag + " SUM(ol_amt) FROM " + ol + " WHERE ol_w = 1 AND ol_o = 9";
+        assertThat(rows(d, sum)).containsExactly(sum9);
+        assertThat(executedTexts(v, sumTag))
+            .isNotEmpty()
+            .anyMatch(t -> t.contains("scalardb_native_g0"))
+            .noneMatch(t -> t.contains(copy));
+        // a predicate on a non-key column: the two arms
+        String nonKey = "SELECT ol_n FROM " + ol + " WHERE ol_w = 1 AND ol_o = 9 AND ol_amt > 0";
+        assertThat(d.nativeSQL(nonKey)).contains("UNION ALL").doesNotContain(copy);
+        assertThat(rows(d, nonKey)).hasSize(10);
+        // an inner join: the item's predicate its key, its copy alone the CASE copy
+        String join =
+            "SELECT o.ol_n, i.i_price FROM "
+                + ol
+                + " o JOIN "
+                + it
+                + " i ON i.i_id = o.ol_i WHERE o.ol_w = 1 AND o.ol_o = 9 ORDER BY o.ol_n";
+        assertThat(d.nativeSQL(join)).contains(copy).contains("UNION ALL");
+        assertThat(rows(d, join)).hasSize(10);
+        // the item a LEFT JOIN's nullable side: its two arms kept
+        String outer =
+            "SELECT o.ol_n, i.i_price FROM "
+                + ol
+                + " o LEFT JOIN "
+                + it
+                + " i ON i.i_id = o.ol_i WHERE o.ol_w = 1 AND o.ol_o = 9 ORDER BY o.ol_n";
+        String outerRouted = d.nativeSQL(outer);
+        log("todo 364 item 2: a LEFT JOIN's nullable side: " + outerRouted);
+        assertThat(outerRouted).doesNotContain(copy);
+        assertThat(rows(d, outer)).hasSize(10);
+        // an item in flight read as its before image
+        String item520 = "SELECT i_price FROM " + it + " WHERE i_id = 520";
+        assertThat(rows(d, item520)).containsExactly(price520);
+        // an ORDER BY position past the select list: no copy, refused as the vendor refuses it,
+        // not ordered by an appended version (todo 144)
+        String past = item520 + " ORDER BY 2";
+        assertThat(d.nativeSQL(past)).doesNotContain(copy);
+        assertThatThrownBy(() -> rows(d, past)).isInstanceOf(SQLException.class);
+        d.rollback();
+        // a key read in autocommit records no anchors: the gated statement as written
+        d.setAutoCommit(true);
+        String autoTag = "/* da" + System.nanoTime() + " */";
+        assertThat(rows(d, "SELECT " + autoTag + " i_price FROM " + it + " WHERE i_id = 520"))
+            .containsExactly(price520);
+        assertThat(executedTexts(v, autoTag))
+            .isNotEmpty()
+            .anyMatch(t -> t.contains("scalardb_native_g0"))
+            .noneMatch(t -> t.contains(copy));
+        d.setAutoCommit(false);
+        // the item read's gets a call, over 50 calls after 10, against the vendor's
+        String measured = "/* di" + System.nanoTime() + " */";
+        String[] texts = {
+          "SELECT " + measured + " i_price, i_name FROM " + it + " WHERE i_id = ?",
+          "SELECT /* vendor */ " + measured + " i_price, i_name FROM " + itData + " WHERE i_id = ?"
+        };
+        String[] patterns = {"SELECT " + measured + "%", "SELECT /* vendor */ " + measured + "%"};
+        double[] per = new double[2];
+        for (int f = 0; f < 2; f++) {
+          long[] at = null;
+          try (PreparedStatement ps = (f == 0 ? d : v).prepareStatement(texts[f])) {
+            for (int i = 100; i < 160; i++) {
+              if (i == 110) {
+                at = gets(v, patterns[f]);
+              }
+              ps.setInt(1, i);
+              assertThat(rowsOf(ps)).hasSize(1);
+            }
+          }
+          long[] now = gets(v, patterns[f]);
+          long[] from = Objects.requireNonNull(at);
+          assertThat(now[1] - from[1]).as(patterns[f]).isEqualTo(50);
+          per[f] = (now[0] - from[0]) / 50.0;
+        }
+        d.commit();
+        log(
+            String.format(
+                "todo 364 item 2: the decoupled item read a call with 50 items in flight, gets:"
+                    + " the CASE copy %.2f, the vendor's %.2f",
+                per[0], per[1]));
+        // the primary key's two levels and the row, the metadata row's the same: no read of the
+        // in-flight index
+        assertThat(per[0]).isLessThanOrEqualTo(8.2);
+        // the before image's anchor: the item read in flight, its transaction rolled back, then
+        // written over the version read
+        assertThat(rows(d, item520)).containsExactly(price520);
+        items.rollback();
+        itemsHeld = false;
+        assertThat(update(d, "UPDATE " + it + " SET i_price = 7 WHERE i_id = 520")).isEqualTo(1);
+        d.commit();
+        assertThat(rows(v, "SELECT i_price FROM " + itData + " WHERE i_id = 520"))
+            .containsExactly("7");
+      } finally {
+        d.rollback();
+        held.rollback();
+        inserting.rollback();
+        if (itemsHeld) {
+          items.rollback();
+        }
+      }
+    }
+  }
+
+  /**
+   * An anchor-less read with an ORDER BY position past its select list on Oracle (design 4.2, todo
+   * 144): refused as the vendor refuses it, not ordered by a gate column appended to the list; in
+   * autocommit at SNAPSHOT, the whole table's gate, and at READ COMMITTED with a key conjunct, on
+   * both layouts.
+   */
+  @Test
+  void anchorlessReadsWithAPositionPastTheListAreRefused() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      for (String layout : List.of("i", "d")) {
+        admin.createTable(
+            N(NS),
+            N("pos" + layout),
+            TableMetadata.newBuilder()
+                .addColumn(N("k"), intType())
+                .addColumn(N("x"), intType())
+                .addPartitionKey(N("k"))
+                .build(),
+            layout.equals("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of());
+      }
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      for (String layout : List.of("i", "d")) {
+        seed(v, "pos" + layout, "k, x", "LEVEL, LEVEL", "k", "LEVEL", 10);
+      }
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)pos[id]"),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
+          .hasSize(2)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59368");
+    try (Connection d = ORA.openDriver(ttl);
+        Connection v = ORA.open()) {
+      for (String layout : List.of("i", "d")) {
+        String table = NS + ".pos" + layout;
+        for (int level :
+            List.of(
+                Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_READ_COMMITTED)) {
+          d.setTransactionIsolation(level);
+          String tag = "/* pp" + System.nanoTime() + " */";
+          String sql =
+              "SELECT "
+                  + tag
+                  + " x FROM "
+                  + table
+                  + (level == Connection.TRANSACTION_READ_COMMITTED ? " WHERE k = 3" : "")
+                  + " ORDER BY 2";
+          String name = layout + (level == Connection.TRANSACTION_READ_COMMITTED ? " RC" : " SNAP");
+          List<String> got = new ArrayList<>();
+          Throwable thrown = null;
+          try {
+            got = rows(d, sql);
+          } catch (SQLException ex) {
+            thrown = ex;
+          }
+          log("position past the list, " + name + ": " + (thrown == null ? got : thrown));
+          assertThat(thrown).as(name).isInstanceOf(SQLException.class);
+          assertThat(executedTexts(v, tag))
+              .as(name)
+              .noneMatch(t -> t.contains("scalardb_native_g0"));
+        }
+      }
     }
   }
 

@@ -771,6 +771,17 @@ class SqlAstTest {
 
   /** {@link SqlAst#keyOnly}'s cases (design 4.2, the CASE copy, todo 364). */
   @Test
+  void ordersPastSelectList_aPositionTheListAsWrittenMayNotHold() {
+    assertThat(parse("SELECT x FROM t ORDER BY 2").ordersPastSelectList()).isTrue();
+    assertThat(parse("SELECT x FROM t ORDER BY 0").ordersPastSelectList()).isTrue();
+    assertThat(parse("SELECT * FROM t ORDER BY 1").ordersPastSelectList()).isTrue();
+    assertThat(parse("SELECT t.* FROM t ORDER BY 1").ordersPastSelectList()).isTrue();
+    assertThat(parse("SELECT x, y FROM t ORDER BY 2, x").ordersPastSelectList()).isFalse();
+    assertThat(parse("SELECT x FROM t ORDER BY x").ordersPastSelectList()).isFalse();
+    assertThat(parse("SELECT x FROM t").ordersPastSelectList()).isFalse();
+  }
+
+  @Test
   void keyOnly_namesOnlyTheReferencesKeyInWhereAndOn() {
     List<String> keys = List.of("w", "o", "n");
     List<String> cols = List.of("w", "o", "n", "i", "amt");
