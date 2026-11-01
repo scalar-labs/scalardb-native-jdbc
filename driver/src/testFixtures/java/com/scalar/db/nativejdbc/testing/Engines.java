@@ -44,6 +44,10 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * postgres:18}, for the server versions the weekly run tests
  * (.github/workflows/vendor-drivers.yml).
  */
+@SuppressFBWarnings(
+    value = "REDOS",
+    justification =
+        "the multi-row INSERT pattern reads fixture DDL from the test sources, never data")
 public enum Engines {
   POSTGRESQL(Engine.POSTGRESQL) {
     @Override
