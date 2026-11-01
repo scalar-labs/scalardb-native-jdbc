@@ -16,7 +16,7 @@ through the vendor URL (run (a)): point read, range read, update and delete by k
 read, read-modify-write, JDBC batches, and the joins and aggregates of TPC-C. After todo 328 a write
 is one round trip on PostgreSQL, but YCSB is at 0.76x and TPC-C at 0.58x.
 
-## Status, 2026-10-31
+## Status, 2026-11-01
 
 Not met; the target stays. The default level is SNAPSHOT since 7cf5779, so SNAPSHOT's cells are the
 ones a new user meets. Latest AWS figures (PostgreSQL from `bfa20aa`, Oracle from `c4a7fcf`), TPC-C (c)/(a), fast network /
@@ -26,6 +26,7 @@ ones a new user meets. Latest AWS figures (PostgreSQL from `bfa20aa`, Oracle fro
 |---|---|---|---|---|
 | PostgreSQL, fifteenth (`20261029-2333-pg`) | 0.69 / 0.89 | 0.78 / 0.91 | 0.80 / 0.92 | 0.86 / 0.94 |
 | Oracle, eleventh (`20261031-1349-ora`, `c4a7fcf`) | 0.61 / 0.83 | 0.75 / 0.92 | 0.68 / 0.86 | 0.87 / 0.95 |
+| Oracle, twelfth (`20261101-1528-ora`, `4804b71`), inline TPC-C, fast only | | 0.79 | | 0.85 |
 
 At +250 µs, YCSB A, C and F are within 10% in every cell of both engines, and TPC-C on PostgreSQL at
 SNAPSHOT and on the inline layout. What is left, by size:
@@ -33,7 +34,9 @@ SNAPSHOT and on the inline layout. What is left, by size:
 - StockLevel on the inline layout on PostgreSQL;
 - on Oracle, the decoupled layout's writes and the in-flight index's upkeep;
 - on Oracle, the inline rows' first-write growth, which is now in the measured minute because the
-  backfill is off for inline tables.
+  backfill is off for inline tables. The twelfth run shows that backfilling only moves it: the rows
+  then migrate during the setup, and reads pay the forwarding pointer either way (Delivery's SUM:
+  14 gets against the vendor's 4.2, on the vendor's plan).
 
 The one-second buffer busy waits are the server's: the wait poller matches them to the vendor's own
 SERIALIZABLE runs, and each repetition's stall count now sits beside its throughput
@@ -47,8 +50,14 @@ took two of 364's proposals, both on main by `c4a7fcf` and measured in Oracle's 
   CPU per statement at nearly equal gets;
 - the 36-character backfill `tx_id`: the backfilled rows' migration is gone.
 
-Next: read the client's share in the RC inline TPC-C run's flight recording before more server work
-(todo 364's log, 2026-10-31).
+The client's share was read on 2026-10-31: about 120 µs a transaction of the 840 µs gap, so the
+server items stay the lever. On 2026-11-01 the CASE copy (todo 364) landed as `5e1da62` and
+`13d3307`. In the twelfth run it took RC inline from 0.75 to 0.79: the key reads now cost the
+vendor's gets, and the server's active time a commit fell 1.73 → 1.60 ms.
+
+Next, both the user's call: a harness cell that backfills and then `MOVE`s the inline tables, to
+measure the steady state that rows inserted through the driver already have; and a docs note on
+inline tables imported with data (todo 364's log, 2026-11-01).
 
 ## Findings
 

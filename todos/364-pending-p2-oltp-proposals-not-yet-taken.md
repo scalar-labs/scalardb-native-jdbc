@@ -393,3 +393,18 @@ todo 334's log and the design sections named.
   copy's effect (expected: RC inline toward 0.8, the item read at the vendor's 3 gets), and item 3
   (the inline backfill A/B) and the harness plans capture can go to the user. The 19c run of the copy
   follows with 33's workflow.
+- 2026-11-01 (6e, the twelfth Oracle run `20261101-1528-ora` from `4804b71`, inline TPC-C, fast,
+  RC and SNAPSHOT, each backfilled and not): the copy as predicted. At RC inline the item read went
+  4.0 → 3.0 gets (the vendor's 3.0), 10.2 → 8.5 µs; the customer, oorder and warehouse key reads lost
+  a get and 2–4 µs each; the server's active time a commit fell 1.73 → 1.60 ms; (c)/(a) 0.75 → 0.79.
+  Delivery's SUM is the copy on the vendor's plan (PK range scan), 14.0 gets against the vendor's
+  4.2. The 10 extra gets are its 10 rows' forwarding pointers: Delivery only delivers loaded orders
+  in a 60 s run, and an unbackfilled inline row grows and migrates at its first write (184,000 to
+  201,000 `table fetch continued row` a run against the vendor's 1,400 to 2,300). Item 3 answered:
+  backfilled, the rows migrate during the setup instead (543,000 to 588,000 a run). The order_line
+  UPDATE then falls 62 → 33 gets, but the SUM stays at 14 and the stock batch rises 52 → 54.
+  Throughput −2 points at RC, +3 at SNAPSHOT, within the spread, so the default (off) stands.
+  Proposed to the user: a harness cell `inline-moved` (backfill, then `ALTER TABLE ... MOVE` and the
+  indexes rebuilt) for the steady state of rows inserted through the driver, and a docs note for
+  inline tables imported with data (backfill and `MOVE` once before going live, or a larger
+  `PCTFREE`). The new plans capture works: 23 plans in each RC inline run's server.txt.

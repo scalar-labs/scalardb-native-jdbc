@@ -750,3 +750,68 @@ At +250 µs, SNAPSHOT inline's TPC-C transactions are +3% to +9% and its YCSB op
   173,003: an inline table's rows, not backfilled, grow by their metadata at their first write.
 - **The one-second stalls** are 16 to 33 a repetition at SNAPSHOT on both drivers and 0 to 1 at RC,
   as in the tenth run: Oracle SERIALIZABLE on the WAREHOUSE and DISTRICT blocks.
+
+## Twelfth run: the CASE copy at RC inline, and the inline tables backfilled or not (2026-11-01)
+
+Run `20261101-1528-ora` from `4804b71` on a fresh stack: TPC-C scale 32 on the inline layout at RC
+and SNAPSHOT, fast network only, 2 repetitions of 60 s. Since the eleventh run's `c4a7fcf`, main
+has:
+- **the CASE copy** (`5e1da62`, `13d3307`, todo 364): at RC on an inline table, a read whose
+  predicate names only key columns, key-only aggregates included, is one derived table with a
+  `CASE` per column, not the two-arm `UNION ALL` or the gated aggregate;
+- **the harness's `inline-backfilled` layout** (`4804b71`): the inline tables with the setup's
+  backfill, which the product and the `inline` cells leave off. The Oracle stats also keep the
+  plan of every statement above 10 gets a call.
+
+All 4 cells passed in 1 h 12 min.
+
+| cell | (a)/s | (c)/s | (c)/(a) | eleventh run |
+|---|---|---|---|---|
+| RC inline | 1755.2 | 1379.8 | **0.79** | 0.75 (1620.2, 1209.6) |
+| RC inline-backfilled | 1727.3 | 1322.0 | 0.77 | |
+| SNAPSHOT inline | 1700.2 | 1450.6 | 0.85 | 0.87 (1494.8, 1306.6) |
+| SNAPSHOT inline-backfilled | 1710.7 | 1499.5 | 0.88 | |
+
+p50 overhead against the vendor:
+
+| | Delivery | NewOrder | OrderStatus | Payment | StockLevel |
+|---|---|---|---|---|---|
+| RC inline | +58% (+62) | +19% (+26) | +23% (+25) | +22% (+30) | +15% (+19) |
+| RC inline-backfilled | +54% | +22% | +27% | +26% | +23% |
+| SNAPSHOT inline | +32% (+33) | +14% (+16) | +22% (+25) | +18% (+17) | +17% (+17) |
+| SNAPSHOT inline-backfilled | +26% | +15% | +25% | +18% | +25% |
+
+- **The CASE copy does what the container predicted at RC inline.** CPU µs and gets per call, the
+  eleventh run then this one, the vendor in brackets:
+  - the item read 10.2 / 4.0 → 8.5 / 3.0 (the vendor's 3.0 gets);
+  - the warehouse reads 15.8–17.3 / 3.3–3.5 → 12.3–13.6 / 2.2–2.4; the customer, oorder and
+    `C_DATA` key reads 14.4–20.2 / 5.0 → 12.2–19.2 / 4.0 (the vendor's 4.0);
+  - Delivery's SUM 27.3 / 15.5 (gated) → 28.4 / 14.0 (11.5 / 4.2).
+
+  The driver's server active time a commit fell 1.731 → 1.598 ms (the vendor 1.117 → 1.086), and
+  this stack ran the vendor 8% faster and the driver 14% faster than the eleventh run's. SNAPSHOT
+  inline does not use the copy; its 0.85 against 0.87 is the stack: the vendor gained 14% there,
+  the driver 11%.
+- **Delivery's SUM reads continued rows.** Its plan is the vendor's (`INDEX RANGE SCAN` on the
+  primary key, then `TABLE ACCESS BY INDEX ROWID BATCHED`), so the 10 gets over the vendor's are
+  its 10 rows' forwarding pointers. In a 60 s run, Delivery delivers only the loaded orders, and
+  inline rows grow at their first write, so every order line it updates migrates. `table fetch
+  continued row` per run: 184,000 to 201,000 for the driver against 1,400 to 2,300 for the vendor.
+- **The backfill moves the migration, it does not remove it.** Backfilled, the loaded rows grow and
+  migrate during the setup: 543,000 to 588,000 continued-row fetches per run. Delivery's
+  order_line UPDATE then finds the rows already grown (62 → 33 gets, 81 → 62 µs), but every read of
+  a migrated row pays the pointer: the SUM stays at 14 gets, and the 10-row stock UPDATE batch rises
+  to 54 gets. Throughput moves by −2 points at RC and +3 at SNAPSHOT, within the repetitions'
+  spread, so the product's default (backfill off) stands.
+- **The excess is the measurement's, not the steady state's.** A row the driver inserts carries its
+  metadata from birth, so it does not grow at its first update. Only rows that existed before the
+  setup grow once each, and BenchBase's loader writes every row the measured minute touches. A
+  cell that backfills and then rebuilds the tables (`ALTER TABLE ... MOVE`, which re-packs migrated
+  rows) would measure the steady state.
+- **Stalls** at SNAPSHOT are 5 to 27 a repetition for the vendor and 3 to 16 for the driver, at RC
+  0 to 6, as in the earlier runs.
+
+Next: a harness cell `inline-moved` (backfill, then `MOVE` with the indexes rebuilt) to measure the
+steady state, and a docs note on inline tables imported with data: back them up, then backfill and
+`MOVE` once before going live, or leave a larger `PCTFREE`. Both are the user's call (todo 364's
+log, 2026-11-01).
