@@ -77,9 +77,13 @@ per six, in-flight rows instead of one block.
 - ScalarDB's own storage connections where they run Oracle's SERIALIZABLE. The user docs ask
   `scalar.db.jdbc.isolation_level=REPEATABLE_READ` of every ScalarDB application at both driver
   levels on every engine (`transactions.md`'s table, `getting-started.md`, `setting-up-tables.md`),
-  and Oracle maps that to SERIALIZABLE (`transactions.md`, Oracle). ScalarDB itself runs READ
-  COMMITTED when the setting is unset (`JdbcConfig.getIsolation()` is empty, `JdbcUtils` sets
-  Hikari's level only from it; ScalarDB 3.20).
+  and on Oracle that value does not work at all: ojdbc accepts only READ_COMMITTED and SERIALIZABLE
+  (ORA-17030 on any other), so Hikari fails to initialize the pool (measured 2026-11-01 with
+  HikariCP 7.0.2 and ojdbc 23 as `JdbcUtils` configures them; scratchpad `ora/hik366.jsh`). What
+  works on Oracle is `SERIALIZABLE`, which the fixture already uses (`Engines.ORACLE.isolation()`
+  returns it, "Oracle has no REPEATABLE READ"), or `READ_COMMITTED`, or leaving it unset. ScalarDB
+  itself runs READ COMMITTED when the setting is unset (`JdbcConfig.getIsolation()` is empty,
+  `JdbcUtils` sets Hikari's level only from it; ScalarDB 3.20).
 - ScalarDB requires the level at or above Oracle's minimum, 8, only for a virtual table, the
   decoupled layout: `JdbcAdmin.getStorageInfo` computes `isConsistentVirtualTableReadGuaranteed`
   from a connection's level against `RdbEngineOracle.getMinimumIsolationLevelForConsistentVirtualTableRead`;
@@ -96,10 +100,13 @@ per six, in-flight rows instead of one block.
 1. Inline layout on Oracle: ScalarDB's connections at `READ_COMMITTED`, ScalarDB's own default.
    0.0% in the control. The driver needs nothing from ScalarDB's level on Oracle: ScalarDB's storage
    calls are their own short transactions with conditional updates, its reads take no locks (design
-   section 2, item 8), and Oracle gives a statement one snapshot at READ COMMITTED. A docs change,
+   section 2, item 8), and Oracle gives a statement one snapshot at READ COMMITTED. A docs change:
    the Oracle rows of `transactions.md`'s isolation table and the sentences in `getting-started.md`
-   and `setting-up-tables.md`, and the Oracle fixture (`ReadOnlyReaderIntegrationTest`,
-   `SerializableIntegrationTest` set `REPEATABLE_READ`). Recommended.
+   and `setting-up-tables.md` say `READ_COMMITTED` (or unset) for an inline table and `SERIALIZABLE`
+   for a decoupled one, since `REPEATABLE_READ` is refused by ojdbc; and the fixture's Oracle value
+   (`Engines.ORACLE.isolation()`, `SERIALIZABLE` for both layouts today) becomes `READ_COMMITTED`
+   for the inline layout, which also removes the ORA-08177 flaky of the inline imports in CI.
+   Recommended.
 2. Decoupled layout on Oracle: a ScalarDB-side change, `RdbEngineOracle`'s minimum level for a
    consistent virtual-table read from 8 to 2, since Oracle's READ COMMITTED already gives one
    statement one snapshot, which is all the virtual table's two-table read needs; one constant. With
@@ -121,3 +128,12 @@ per six, in-flight rows instead of one block.
   index-shape mitigations; the ScalarDB facts read from the 3.20 jar (`javap`); the recommendation
   sent to the user and to 6e for the benchmark doc. The user's call: the inline docs change (option
   1) and raising Oracle's minimum with the ScalarDB team (option 2).
+- 2026-11-01: the user asked why READ COMMITTED is enough for ScalarDB, whether the Consensus Commit
+  level sets the Oracle level (it does not: two unlinked settings), when the issue occurs (the JDBC
+  level at Oracle SERIALIZABLE on a table with an in-flight index, whatever the Consensus Commit
+  level or layout; the layout decides only whether it can be avoided), and for the options again;
+  answered with a container demo (`ora/cas366.jsh`: the second prepare-shaped UPDATE gets 0 rows at
+  READ COMMITTED and ORA-08177 at SERIALIZABLE, a reader's next statement sees the commit at both)
+  and Oracle's Concepts guide. Found while drafting the feedback: ojdbc refuses `REPEATABLE_READ`
+  (ORA-17030), so the docs' value fails on Oracle (above). The user takes option 2 to the ScalarDB
+  team; the feedback written as a page (the Artifact "Oracle Virtual Table Isolation") and as text.
