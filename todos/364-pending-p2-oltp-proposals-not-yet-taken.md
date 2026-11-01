@@ -523,3 +523,103 @@ second key index. All three carry the function-based in-flight index.
 - With ScalarDB's own fix (the import by `KEY_SEQ`), a new import's catalog order equals its primary
   key's and the driver's hint as spelled today is right; tables imported before it keep the by-name
   key and need the conversion.
+
+## Design of items 2 and 3 (2026-11-02, for c7)
+
+The user's pick, typed in 6e's session and relayed 2026-11-02: "For 1, it should be fixed in
+ScalarDB. I will ask the team, so can you give me the summary of the issue? For 2 and 3, they look
+good if they only improve performance." Item 1 is not built here; 6e writes the ScalarDB issue from
+the facts logged above (the import by `KEY_SEQ`; the measured insert cost of the by-name key; the
+hint's column order). Items 2 and 3 are designed below under the user's condition: the same rows,
+outcomes, waits, aborts and errors as today, performance alone; anything that would change one stops
+and goes back to the user through 6e before it lands. Each is one branch of c7's, reviewed here from
+`git show`, landing on the user's own word in c7's session; 6e takes the AWS READ COMMITTED and
+SNAPSHOT decoupled TPC-C cells when the second is on main. Item 2 first: the larger gain.
+
+### Item 2: the CASE copy for decoupled keyed reads at READ COMMITTED (branch `decoupled-rc-case-copy`)
+
+Design 4.2: the new paragraph "The key-only read on a decoupled table at READ COMMITTED as the CASE
+copy over the metadata join", and the todo 337 sentence above it amended (on Oracle the join is
+cheaper by the in-flight arm's probe; on PostgreSQL it measured the same).
+
+1. `Router.caseCopies`: admit a reference of a decoupled table under the inline tests (Oracle, READ
+   COMMITTED, `Place.INNER`, `SqlAst.keyOnly`) and one more, the reference in `own`, a read that
+   records anchors; an anchor-less decoupled read keeps 4.2's gated statement as written, whose gate
+   column costs less than the join (6.5 µs / 6 gets against 6.6 / 8). `own` is built before
+   `caseCopies` is called (`Router` ~1934).
+2. `SplitRead.caseCopy`, a decoupled table's form: `FROM <data> t LEFT JOIN <meta> m ON <keyJoin(m)>`;
+   the in-flight condition `COALESCE(m.tx_state, 3) IN (1, 2)`; a non-key column `CASE WHEN <in
+   flight> THEN <t.beforeImage(engine, "m", c)> ELSE t.c END AS c`, a key column `t.k`; the versions
+   `CASE ... THEN m.before_tx_id ELSE m.tx_id END AS <OWN>0`, the same for `tx_version` as `<OWN>1`,
+   `m.tx_state AS <OWN>2` with `v.state`; `WHERE COALESCE(m.tx_state, 3) NOT IN (1, 2) OR
+   m.before_tx_id IS NOT NULL OR m.before_tx_version IS NOT NULL`; no hint (the inline copy's
+   `NO_INDEX_SS` names an inline table's plain index; the decoupled committed copy carries none).
+   `emit` already reduces a `caseCopies` reference to one COMMITTED piece; `keyRange` (PostgreSQL)
+   untouched; `gated` drops its gate only where every ScalarDB table of the statement is a copy, as
+   today.
+3. Tests. Keep: the READ COMMITTED decoupled read cases of `WriteIntegrationTest`,
+   `MoreWritesIntegrationTest` and the imported-table suites: a row in flight read as its before
+   image by key with (`before_tx_id`, `before_tx_version`) as its anchor, an in-flight insert
+   invisible, a ScalarDB delete in flight read as the row before it, an imported row without a
+   metadata row read with NULL anchors and stamped by its later write (todo 360). Add: the copy's
+   text for a decoupled key lookup and for a key-prefix range (Delivery's `(W, D, O)`), the
+   anchor-less decoupled key read still the gated statement as written, the two arms kept for a
+   non-key predicate and for the nullable side of an outer join, and `OracleOltpIntegrationTest`'s
+   decoupled item read at 8 gets (the two arms 10). 19c runs the copy as 23 does (plain SQL); 33's
+   workflow after.
+4. Expected: each decoupled keyed read at READ COMMITTED −2 gets and about −20% CPU (container 8.3 /
+   10 → 6.6 / 8; AWS stock 17.5 / 9 and item 15.3 / 7), about twenty reads a NewOrder; the READ
+   COMMITTED decoupled TPC-C cell from 0.61 toward 0.64–0.66.
+
+### Item 3: the READ COMMITTED decoupled blocks' gate as the in-flight probe (branch `decoupled-rc-inflight-gate`)
+
+Design 4.3's decoupled bullet of "The keyed write at READ COMMITTED on Oracle" and 4.4's "The READ
+COMMITTED decoupled entries" amended. Measured first (`ora/dx366d.jsh`, the stock-shaped pair, 8
+rounds alternated, CPU µs / gets a call): the one-row block as deployed 38.0 / 15.70 (its DML 15.8 /
+10.14, its CAS 9.2 / 5.56), with the in-flight probe as the gate 39.4 / 13.97 (DML 11.8 / 7.99),
+without any gate 41.0 / 12.02 (DML 13.1 / 6.00), the vendor 10.7 / 6.0; the ten-row block as
+deployed 340.8 / 188.6 (DML 68.9 / 88.2, CAS 215.3 / 100.9), the probe gate 327.7 / 169.0 (DML 40.8
+/ 54.2), no gate 266.6 / 142.1 (DML 38.0 / 41.9), the vendor's array UPDATE 28.1 / 42.1. The form
+without a gate, the proposal as first written, is not designed: it writes and locks a row in flight
+or at another version before the CAS tells, which section 6 forbids (the READ COMMITTED wait holds
+no lock), opens a deadlock against a ScalarDB record commit or rollback that reaches the metadata
+row first, and turns the abort of a prepare that lands between the DML's read and the CAS into a
+wait. The probe gate keeps every outcome and every lock as today, at about half that gain: a third
+of the block's gets saved on the container becomes a tenth, the CPU a few percent.
+
+1. `Writes.rcFirstText`, the decoupled text (~3240–3262): the DML's gate `AND EXISTS (SELECT 1 FROM
+   T_meta m WHERE <key> AND COALESCE(m.tx_state, 3) = 3 <anchor>)` becomes `AND NOT EXISTS (SELECT
+   /*+ INDEX(m <T_inflight>) */ 1 FROM T_meta m WHERE <t.inflight(engine, "m")> AND
+   <inflightKeyJoin>)`, the spelling of `SplitRead.committed`'s `NOT_EXISTS` check with the hint of
+   4.2's gate column (on the plain-form index a range scan, as the gate column's is); the anchored
+   and plain texts share it, the anchor staying in `metaCas` alone. `SAVEPOINT scalardb_native_r;`
+   after `BEGIN`. After the CAS: `IF l_written = 1 AND l_stamped = 0 THEN SELECT COUNT(*) INTO l_f
+   FROM T_meta m WHERE <in flight> AND <key = l_k...>; IF l_f = 0 THEN ROLLBACK TO scalardb_native_r;
+   l_written := 0; END IF; END IF;`. OUT `written, stamped` as today; `applyRcFirst` unchanged: 0 →
+   null → the block of steps decides, a moved version or a missing metadata row told as today; 1 / 0
+   → the abort as today, the row having gone in flight after the DML's read.
+2. `Writes.Bulk.buildRc` and the bulk DML's builder (~2544–2570, `onDataTable(... AND EXISTS ...)`):
+   the same gate, without anchors in either text; `SAVEPOINT scalardb_native_q;` after `BEGIN`; after
+   the CAS `FORALL`: copy `SQL%BULK_ROWCOUNT(j)` for `j IN 1 .. l_r` into a collection before any
+   other SQL, then `IF l_s < l_r THEN` for each unstamped `j` a `SELECT COUNT(*) INTO l_x FROM T_meta
+   m WHERE <in flight> AND <key = l_w*(j)>` summed into `l_f`; `IF l_f = 0 THEN ROLLBACK TO
+   scalardb_native_q; l_r := 0; l_s := 0; FOR i IN 1 .. l_n LOOP l_o(i) := 0; END LOOP; END IF; END
+   IF;`. OUT as today; `applyOracleBulkRc` unchanged: `l_s != l_r` only when a row went in flight,
+   the abort as today; all zeros the entries' single forms as a count of 0 is today (the block of
+   entries, then the keyed block), which write the undone entries once each with the same stamp and
+   tell the others' outcomes as today. A created table's DELETE CAS (`DELETE FROM T_meta WHERE cas`)
+   is handled the same.
+3. Tests. Keep: `MoreWritesIntegrationTest`'s READ COMMITTED decoupled cases (`committedWhileItWaits`
+   by key, `inFlightWait`, `batches`, `timeoutMidWrite`), `WriteIntegrationTest`'s decoupled writes,
+   an imported table's key without a metadata row written and given its row (todo 360), two entries
+   on one key, a version moved by another connection between the read and the write aborting with
+   `40001` and today's message, the nested texts' parse counts. Add: the one-row and ten-row texts
+   with the probe gate and the savepoint; a moved version through the one-row block (written, undone,
+   the steps' abort) and through the ten-row block beside nine others (all undone, each then written
+   once by the entries' forms: versions +1, not +2); a key without a metadata row through each block
+   on an imported table (undone, then stamped by the steps); a key in flight through each (the gate
+   closed, nothing written, the wait or the abort as today). Measured through the driver on the
+   container before and after (`ClientCostIntegrationTest` or the dx scripts). 19c: `SAVEPOINT` and
+   `ROLLBACK TO` inside PL/SQL as on 23.
+4. Expected: −3 gets a written row (the stock block's DML from 80 toward 50 of the block's 131 gets
+   on AWS), the block's CPU −4 to −10%; some 40–60 µs of a NewOrder. Small; the user may drop it.
