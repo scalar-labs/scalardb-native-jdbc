@@ -623,3 +623,13 @@ of the block's gets saved on the container becomes a tenth, the CPU a few percen
    `ROLLBACK TO` inside PL/SQL as on 23.
 4. Expected: −3 gets a written row (the stock block's DML from 80 toward 50 of the block's 131 gets
    on AWS), the block's CPU −4 to −10%; some 40–60 µs of a NewOrder. Small; the user may drop it.
+
+### 2026-11-02: item 3 dropped, item 2 goes on (the user's call)
+
+The user, in 6e's session, on 6e's recommendation (keep 2, drop 3 at about 4% of a block's CPU):
+"yes, start the 19c run and drop item 3". Item 3 is not taken: c7 told not to build
+`decoupled-rc-inflight-gate`; design 4.3's decoupled bullet and 4.4's READ COMMITTED decoupled
+entries paragraph restored to their text before b40dc64, 4.4 keeping one sentence that the probe gate
+was measured and not taken; the design above stays as the record of the form and its figures. Item 2
+goes on as designed at b40dc64 (`decoupled-rc-case-copy`); 6e takes the AWS READ COMMITTED and
+SNAPSHOT decoupled cells when it is on main.
