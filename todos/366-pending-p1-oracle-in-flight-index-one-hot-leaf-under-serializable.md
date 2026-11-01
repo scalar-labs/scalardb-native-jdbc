@@ -137,3 +137,6 @@ per six, in-flight rows instead of one block.
   and Oracle's Concepts guide. Found while drafting the feedback: ojdbc refuses `REPEATABLE_READ`
   (ORA-17030), so the docs' value fails on Oracle (above). The user takes option 2 to the ScalarDB
   team; the feedback written as a page (the Artifact "Oracle Virtual Table Isolation") and as text.
+- 2026-11-01 (6e): the user's word, "For 1 (366), I will do both": option 1 (the inline docs change
+  and the fixture's Oracle level at `READ_COMMITTED` for inline) and option 2 (the user takes
+  `RdbEngineOracle`'s minimum to the ScalarDB team). Option 1 sent to 89 to design and route to c7.

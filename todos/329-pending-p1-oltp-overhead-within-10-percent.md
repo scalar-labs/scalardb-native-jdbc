@@ -55,9 +55,17 @@ server items stay the lever. On 2026-11-01 the CASE copy (todo 364) landed as `5
 `13d3307`. In the twelfth run it took RC inline from 0.75 to 0.79: the key reads now cost the
 vendor's gets, and the server's active time a commit fell 1.73 → 1.60 ms.
 
-Next, both the user's call: a harness cell that backfills and then `MOVE`s the inline tables, to
-measure the steady state that rows inserted through the driver already have; and a docs note on
-inline tables imported with data (todo 364's log, 2026-11-01).
+Priorities, the user's word on 2026-11-01:
+- **The decoupled layout first** ("it's slower so I want to prioritize it"): TPC-C 0.61 / 0.68 at
+  RC / SNAPSHOT on the fast network. The eleventh run's RC cell, CPU per call, driver against
+  vendor: the 10-row stock write block 374 µs against the vendor's 42 µs UPDATE (131 gets against
+  40), about 330 µs a NewOrder; order_line's two blocks about 150 µs each against 27 µs (INSERT)
+  and 30 µs (Delivery's UPDATE); the one-row write blocks of warehouse, district, customer,
+  new_order and oorder 60 to 107 µs against 8 to 19; the stock and item reads 17.5 and 15.3 µs
+  against 7.9 and 4.6.
+- **The inline layout stays open at a lower priority** ("faster is always better"): no steady-state
+  cell, since row growth is about 1% of RC inline's server gap.
+- The docs note on inline tables imported with data is optional.
 
 ## Findings
 
