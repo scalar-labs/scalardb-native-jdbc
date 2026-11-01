@@ -173,11 +173,23 @@ class WriteIntegrationTest {
               d.createStatement()
                   .executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (10, 'p')"))
           .isEqualTo(1);
-      try (PreparedStatement ps =
-          d.prepareStatement("INSERT INTO " + t.sql + " (x, id) VALUES (?, ?), ('r', 12)")) {
-        ps.setString(1, "q");
-        ps.setInt(2, 11);
-        assertThat(ps.executeUpdate()).isEqualTo(2);
+      if (e.engine() != Engine.ORACLE || d.getMetaData().getDatabaseMajorVersion() >= 23) {
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO " + t.sql + " (x, id) VALUES (?, ?), ('r', 12)")) {
+          ps.setString(1, "q");
+          ps.setInt(2, 11);
+          assertThat(ps.executeUpdate()).isEqualTo(2);
+        }
+      } else {
+        // Oracle before 23 has no multi-row VALUES
+        try (PreparedStatement ps =
+            d.prepareStatement("INSERT INTO " + t.sql + " (x, id) VALUES (?, ?)")) {
+          for (Object[] row : List.of(new Object[] {"q", 11}, new Object[] {"r", 12})) {
+            ps.setString(1, (String) row[0]);
+            ps.setInt(2, (Integer) row[1]);
+            assertThat(ps.executeUpdate()).isEqualTo(1);
+          }
+        }
       }
       try (PreparedStatement ps =
           d.prepareStatement("UPDATE " + t.sql + " SET x = ? WHERE id = ?")) {
@@ -1285,8 +1297,10 @@ class WriteIntegrationTest {
     // the rows as the transaction starts: 1 a, 2 b, 3 c
     d.setAutoCommit(true);
     d.createStatement().executeUpdate("DELETE FROM " + t + " WHERE id IN (1, 2, 3, 4)");
-    d.createStatement()
-        .executeUpdate("INSERT INTO " + t + " (id, x) VALUES (1, 'a'), (2, 'b'), (3, 'c')");
+    // a row a statement, as Oracle before 23 has no multi-row VALUES
+    for (String row : List.of("(1, 'a')", "(2, 'b')", "(3, 'c')")) {
+      d.createStatement().executeUpdate("INSERT INTO " + t + " (id, x) VALUES " + row);
+    }
     d.setTransactionIsolation(level);
     d.setAutoCommit(false);
     try (Statement st = d.createStatement()) {

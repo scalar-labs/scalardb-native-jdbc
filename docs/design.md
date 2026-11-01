@@ -3161,11 +3161,11 @@ vendor's own statement, then on AWS with the rest.
   block tests; the hinted FORALL's total with a skipped row asserted in the probe beside 9c; a text
   test that the block below 23 has no hint and the 23 text is byte-identical; and the two outcomes
   above with a second connection holding an uncommitted tombstone insert on an imported table, at
-  both levels. Open: on 19c Oracle's count of round trips for the INSERT over a tombstone, the
-  INSERT ALL that fails then the block, is 2 where 23ai's is 1 (`form4InsertAsOneStatement`); the
-  rows are right. To rule out first: `onMetadataTable` reads `all_constraints` once per constraint
-  name into the static `CONSTRAINT_TABLES`, one round trip at that constraint's first ORA-00001 in
-  the JVM, so the test is run twice in one JVM to see whether the second counts 1.
+  both levels. The round trips Oracle counts in `v$mystat` differ on a statement that fails: 19c
+  counts its round trip and 23ai does not, so the INSERT over a tombstone, the INSERT ALL that fails
+  then the block, counts 2 on 19c and 1 on 23ai for the same two calls (`form4InsertAsOneStatement`,
+  its expectation conditional on the major version; the forms probe 8b through ojdbc alone, a
+  failing INSERT then an UPDATE, counts the same 2 on 19c, run 41308957896).
 
   What the driver does with the rows of a block of entries, per entry in order:
 

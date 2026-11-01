@@ -16,6 +16,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.testcontainers.containers.JdbcDatabaseContainer;
 import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.mariadb.MariaDBContainer;
@@ -529,15 +531,58 @@ public enum Engines {
         : "SELECT 1 FROM information_schema.processlist WHERE state = 'User sleep'";
   }
 
-  /** Runs fixture DDL as given. */
+  /**
+   * Runs fixture DDL as given, but for a multi-row {@code INSERT ... VALUES} on Oracle before 23,
+   * which has none: there it runs as an {@code INSERT ALL} of the same rows.
+   */
   @SuppressFBWarnings(
       value = "SQL_INJECTION_JDBC",
       justification = "test fixture DDL written in the test sources, never data")
   public void execute(Connection c, String... sql) throws SQLException {
+    boolean singleRowValues =
+        engine == Engine.ORACLE && c.getMetaData().getDatabaseMajorVersion() < 23;
     try (Statement st = c.createStatement()) {
       for (String s : sql) {
-        st.execute(s);
+        st.execute(singleRowValues ? insertAll(s) : s);
       }
     }
+  }
+
+  private static final Pattern MULTI_ROW_INSERT =
+      Pattern.compile("(?is)INSERT INTO (\\S+(?: \\([^)]*\\))?) VALUES (\\(.*\\))");
+
+  /** {@code INSERT INTO t VALUES (a), (b)} as {@code INSERT ALL INTO t VALUES (a) INTO t ...}. */
+  static String insertAll(String sql) {
+    Matcher m = MULTI_ROW_INSERT.matcher(sql.trim());
+    if (!m.matches()) {
+      return sql;
+    }
+    List<String> rows = new ArrayList<>();
+    String values = m.group(2);
+    int depth = 0;
+    int start = 0;
+    boolean quoted = false;
+    for (int i = 0; i < values.length(); i++) {
+      char ch = values.charAt(i);
+      if (ch == '\'') {
+        quoted = !quoted;
+      } else if (!quoted && ch == '(') {
+        if (depth++ == 0) {
+          start = i;
+        }
+      } else if (!quoted && ch == ')' && --depth == 0) {
+        rows.add(values.substring(start, i + 1));
+      } else if (!quoted && depth == 0 && ch != ',' && !Character.isWhitespace(ch)) {
+        return sql; // not a plain list of rows
+      }
+    }
+    if (rows.size() < 2) {
+      return sql;
+    }
+    StringBuilder all = new StringBuilder("INSERT ALL");
+    for (String row : rows) {
+      all.append(" INTO ").append(m.group(1)).append(" VALUES ").append(row);
+    }
+    return all.append(" SELECT 1 FROM dual").toString();
   }
 }

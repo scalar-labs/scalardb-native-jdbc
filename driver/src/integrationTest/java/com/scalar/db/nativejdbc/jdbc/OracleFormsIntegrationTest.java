@@ -950,6 +950,64 @@ class OracleFormsIntegrationTest {
   }
 
   /**
+   * 8b. Not blocking, a measurement: a call that fails on the server, an INSERT meeting ORA-00001,
+   * then a plain UPDATE, through ojdbc alone, as Oracle counts their round trips and as the proxy
+   * counts the client's chunks. Decides (todo 327): whether form 4's INSERT over a tombstone, the
+   * INSERT ALL that fails then the block, counted 2 on 19c and 1 on 23, is the server's count of a
+   * failed call or a call more from the driver. The server's count (run 41318145531): the UPDATE 1
+   * on both, the failing INSERT 1 on 19c and 0 on 23, the two together 2 on 19c and 1 on 23; the
+   * client's chunks the same on both, 1, 2 and 3. So 19c counts a failed call's round trip and 23
+   * does not, and the driver makes the same calls on both.
+   */
+  @Test
+  void roundTripsOfAFailedCall() throws Exception {
+    Matcher m = Pattern.compile("@(?://)?([^:/]+):(\\d+)[/:](.+)$").matcher(ORA.url());
+    assertThat(m.find()).as(ORA.url()).isTrue();
+    try (CountingProxy proxy = new CountingProxy(m.group(1), Integer.parseInt(m.group(2)));
+        Connection c =
+            DriverManager.getConnection(
+                "jdbc:oracle:thin:@localhost:" + proxy.port() + "/" + m.group(3),
+                ORA.username(),
+                ORA.password());
+        PreparedStatement ins = c.prepareStatement("INSERT INTO ofa.m1 VALUES (?, 0)");
+        PreparedStatement upd = c.prepareStatement("UPDATE ofa.m1 SET x = x + 1 WHERE k = ?")) {
+      c.setAutoCommit(false);
+      Counter counter = new Counter(c, proxy);
+      SqlRunnable failing =
+          () -> {
+            ins.setInt(1, 1);
+            try {
+              ins.executeUpdate();
+              fail("the duplicate key was inserted");
+            } catch (SQLException e) {
+              assertThat(e.getErrorCode()).isEqualTo(1);
+            }
+          };
+      SqlRunnable update =
+          () -> {
+            upd.setInt(1, 1);
+            assertThat(upd.executeUpdate()).isEqualTo(1);
+          };
+      // warm up: both statements parsed once, the proxy's connection settled
+      failing.run();
+      update.run();
+      counter.measure("8b " + major(c) + ": a plain prepared UPDATE", update);
+      counter.measure("8b " + major(c) + ": an INSERT failing with ORA-00001", failing);
+      counter.measure(
+          "8b " + major(c) + ": the failing INSERT then the UPDATE",
+          () -> {
+            failing.run();
+            update.run();
+          });
+      c.rollback();
+    }
+  }
+
+  private static String major(Connection c) throws SQLException {
+    return "Oracle " + c.getMetaData().getDatabaseMajorVersion();
+  }
+
+  /**
    * 9a. {@code SQL%BULK_ROWCOUNT(i)} after a {@code FORALL} UPDATE with {@code RETURNING ... BULK
    * COLLECT INTO}: each entry's count, 0 for a key without a row, and the collection the keys
    * written in iteration order. Decides: the bulk block's per-entry counts and the stamp's keys

@@ -389,9 +389,13 @@ class MoreWritesIntegrationTest {
       assertThat(st.executeUpdate("INSERT INTO wb.lq (x) VALUES ('g')")).isEqualTo(1);
       assertThat(st.executeUpdate("INSERT INTO wb.lq (\"id\", x) VALUES (0, 'z')")).isEqualTo(1);
       assertThat(rows(d, "SELECT x FROM wb.lq WHERE \"id\" = 0")).containsExactly("z");
-      // several rows that leave the IDENTITY key out, whose keys Oracle does not return: refused
+      // several rows that leave the IDENTITY key out, whose keys Oracle does not return: refused;
+      // Oracle before 23 refuses the multi-row VALUES itself
       assertThatThrownBy(() -> st.executeUpdate("INSERT INTO wb.lq (x) VALUES ('m'), ('n')"))
-          .isInstanceOf(SQLFeatureNotSupportedException.class);
+          .isInstanceOf(
+              d.getMetaData().getDatabaseMajorVersion() >= 23
+                  ? SQLFeatureNotSupportedException.class
+                  : SQLException.class);
       // FOR UPDATE OF a column the read does not select
       d.setAutoCommit(false);
       assertThat(rows(d, "SELECT id FROM wb.imp WHERE id = 1 FOR UPDATE OF x"))
@@ -663,9 +667,12 @@ class MoreWritesIntegrationTest {
         assertThat(ps.executeUpdate()).isEqualTo(1);
       }
       d.setAutoCommit(false);
-      // 202: leading whitespace, and a scalar subquery
-      assertThat(rows(d, "  \n SELECT x FROM wb.imp WHERE id = (SELECT 1) FOR UPDATE"))
-          .containsExactly("a");
+      // 202: leading whitespace, and a scalar subquery; Oracle before 23 has no SELECT without
+      // FROM, and the locking read of a ScalarDB table there reads it alone, dual refused too
+      if (engine != Engine.ORACLE || d.getMetaData().getDatabaseMajorVersion() >= 23) {
+        assertThat(rows(d, "  \n SELECT x FROM wb.imp WHERE id = (SELECT 1) FOR UPDATE"))
+            .containsExactly("a");
+      }
       d.rollback();
       if (engine == Engine.MYSQL) {
         // 201: a trigger stores another key than the one given, which a committed row holds
@@ -1391,11 +1398,10 @@ class MoreWritesIntegrationTest {
     ExecutorService pool = Executors.newCachedThreadPool();
     try (Connection d = e.openDriver();
         Connection other = e.openDriver()) {
-      d.createStatement()
-          .executeUpdate(
-              "INSERT INTO "
-                  + t.sql
-                  + " (id, x) VALUES (40, 'a'), (41, 'b'), (42, 'c'), (43, 'd')");
+      // a row a statement, as Oracle before 23 has no multi-row VALUES
+      for (String row : List.of("(40, 'a')", "(41, 'b')", "(42, 'c')", "(43, 'd')")) {
+        d.createStatement().executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES " + row);
+      }
       // the committed row, the driver's columns hidden, locked until the transaction ends
       d.setAutoCommit(false);
       try (PreparedStatement ps =
@@ -1596,9 +1602,10 @@ class MoreWritesIntegrationTest {
     ExecutorService pool = Executors.newCachedThreadPool();
     String name = t.sql.substring("wb.".length());
     try (Connection d = e.openDriver()) {
-      d.createStatement()
-          .executeUpdate(
-              "INSERT INTO " + t.sql + " (id, x) VALUES (60, 'a'), (61, 'b'), (62, 'c')");
+      // a row a statement, as Oracle before 23 has no multi-row VALUES
+      for (String row : List.of("(60, 'a')", "(61, 'b')", "(62, 'c')")) {
+        d.createStatement().executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES " + row);
+      }
       d.setAutoCommit(false);
       if (e.engine() == Engine.POSTGRESQL) {
         // MySQL locks a row as it reads it, before the rest of the predicate runs, so no prepare

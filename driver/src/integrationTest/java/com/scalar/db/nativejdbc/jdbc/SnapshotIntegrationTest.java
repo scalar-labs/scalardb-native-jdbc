@@ -344,13 +344,17 @@ class SnapshotIntegrationTest {
       }
       d.rollback();
       // a key the statement repeats, or another unique constraint, is the application's duplicate
-      // too, never retried (todo 178)
+      // too, never retried (todo 178); Oracle before 23 has no multi-row VALUES
+      boolean multiRow =
+          e.engine() != Engine.ORACLE || d.getMetaData().getDatabaseMajorVersion() >= 23;
       for (String sql :
           pg
               ? List.of(
                   "INSERT INTO " + SN + ".t (id, x, v) VALUES (90, 'p', 0), (90, 'q', 0)",
                   "INSERT INTO " + SN + ".u (id, x, v) VALUES (91, 'p', 101), (92, 'q', 101)")
-              : List.of("INSERT INTO " + SN + ".t (id, x, v) VALUES (90, 'p', 0), (90, 'q', 0)")) {
+              : multiRow
+                  ? List.of("INSERT INTO " + SN + ".t (id, x, v) VALUES (90, 'p', 0), (90, 'q', 0)")
+                  : List.<String>of()) {
         try (Statement st = d.createStatement()) {
           assertThatThrownBy(() -> st.executeUpdate(sql))
               .as("%s: %s", at, sql)
