@@ -973,8 +973,9 @@ one; a hash-partitioned index takes no expression as its key. ScalarDB itself ru
 when `scalar.db.jdbc.isolation_level` is unset and requires Oracle's SERIALIZABLE only for a virtual
 table, the decoupled layout, at create, import and every operation; so the inline layout is free of
 this once ScalarDB's connections run READ COMMITTED on Oracle, which the user docs ask for there
-(transactions.md, ScalarDB's connections on Oracle), and the decoupled layout waits on ScalarDB's Oracle minimum, which Oracle's statement-level
-consistency at READ COMMITTED would satisfy (todo 366's options, the user's call).
+(transactions.md, ScalarDB's connections on Oracle), and the decoupled layout waits on ScalarDB's
+Oracle minimum, which Oracle's statement-level consistency at READ COMMITTED would satisfy (todo
+366's options, the user's call).
 
 ---
 
