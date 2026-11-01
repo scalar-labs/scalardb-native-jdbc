@@ -37,6 +37,17 @@ jobs:
       - name: Integration tests
         run: ./gradlew :driver:integrationTestOracle
 
+      # always, so that a measurement the tests log on 23 can be read beside 19c's
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-reports-oracle-23
+          path: |
+            **/build/reports/tests/**
+            **/build/test-results/**
+          if-no-files-found: ignore
+
   oracle-19c:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -93,7 +104,7 @@ jobs:
           -Dnativejdbc.oracle.password=Oracle
 
       - name: Upload test reports
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-reports-oracle-19c

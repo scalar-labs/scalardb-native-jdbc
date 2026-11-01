@@ -1434,14 +1434,16 @@ class OracleOltpIntegrationTest {
           .containsExactly("3/3");
       assertThat(rows(d, "SELECT x FROM " + NS + ".imp WHERE k = 7")).containsExactly("10");
       // INSERT ALL meets the tombstone on the metadata table's constraint and leaves no data row,
-      // and the block takes the row over: the INSERT ALL and the block, of which Oracle's count
+      // and the block takes the row over: the INSERT ALL and the block, of which Oracle 23's count
       // shows the block alone, a failed call adding no round trip to it (checked on ojdbc: a
-      // failing INSERT ALL then an UPDATE count 1). Measured on a statement already planned and
-      // past its block's first-use check, with the constraint's table known
+      // failing INSERT ALL then an UPDATE count 1), where 19c counts the failed call too (the forms
+      // probe 8b: through ojdbc alone a failing INSERT 1, then an UPDATE 2). Measured on a
+      // statement already planned and past its block's first-use check, with the constraint's
+      // table known
       d.setAutoCommit(false);
       long overTombstone = 0;
       // each pass's count: the second's is measured, after the first's ORA-00001 on the same
-      // constraint put its table in the process's cache (todo 327: 2 on 19c, 1 on 23)
+      // constraint put its table in the process's cache (todo 327: 2 on 19c, 1 on 23, probe 8b)
       List<Long> passes = new ArrayList<>();
       try (PreparedStatement ins = d.prepareStatement("INSERT INTO " + NS + ".imp VALUES (?, ?)");
           PreparedStatement del = d.prepareStatement("DELETE FROM " + NS + ".imp WHERE k = ?")) {
@@ -1463,7 +1465,7 @@ class OracleOltpIntegrationTest {
               + overTombstone
               + " round trip(s) counted, each pass "
               + passes);
-      assertThat(overTombstone).isEqualTo(1);
+      assertThat(overTombstone).isEqualTo(v.getMetaData().getDatabaseMajorVersion() < 23 ? 2 : 1);
       assertThat(rows(v, "SELECT \"tx_state\", \"tx_version\" FROM " + meta + " WHERE k = 7"))
           .containsExactly("3/7");
       assertThat(rows(d, "SELECT x FROM " + NS + ".imp WHERE k = 7")).containsExactly("12");
