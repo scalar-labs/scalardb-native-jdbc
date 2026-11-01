@@ -234,3 +234,12 @@ fixed by c7 as 89b49c2 (lines 976–977 rewrapped at 100, nothing else; the fenc
 main). Verdict for the pair 3ff8b73 + 89b49c2: mergeable. The verdict went to c7 by message and was
 not written here until 2026-11-02, when c7 found no record of it before landing; it lands on the
 user's word in c7's session, rebased onto main's head.
+
+### 2026-11-02: option 1 on main (77ece28 + d67342c)
+
+c7 rebased `oracle-366-docs-fixture` onto 0561b6a and fast-forwarded main on the user's "land it" in
+its session; the range-diff against the reviewed 3ff8b73 + 89b49c2 shows both commits identical, and
+design.md keeps its 38 fences. Nothing pushed. With this, the inline layout's recommended Oracle
+configuration (ScalarDB's connections at `READ_COMMITTED`) is in the user docs and runs through CI
+in `InlineIntegrationTest`. The todo stays open for the decoupled layout: option 2, ScalarDB
+lowering `RdbEngineOracle`'s minimum to READ COMMITTED, is the ScalarDB team's.
