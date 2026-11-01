@@ -3360,7 +3360,9 @@ class OracleOltpIntegrationTest {
    * state 3 or a ScalarDB delete's at state 1: held uncommitted while the batch waits on it, then
    * committed, or committed after the batch's transaction read the table; at both levels. Each
    * outcome, the counts or the SQLState, and the rows after, is the hinted form's; an abort's
-   * counts before it may differ, the entries one by one after the form's ORA-00001.
+   * counts before it may differ, the entries one by one after the form's ORA-00001. Below 23 the
+   * server's own form is the one under {@code NOT EXISTS} and the hinted one miscounts, so only
+   * that pass runs, held to the hinted form's outcomes as measured on 23.
    */
   @Test
   void todo327_bulkInsertBelow23_endsAsTheHintedFormOverAnotherConnectionsTombstone()
@@ -3374,21 +3376,28 @@ class OracleOltpIntegrationTest {
     List<String> differ = new ArrayList<>();
     int base = 600;
     try (Connection v = ORA.open()) {
+      int server = v.getMetaData().getDatabaseMajorVersion();
       for (int level :
           List.of(Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ)) {
         for (int state : List.of(3, 1)) {
           for (boolean early : List.of(false, true)) {
-            String[] got = new String[2];
-            for (int f = 0; f < 2; f++) {
-              int major = f == 0 ? 0 : 19;
-              got[f] = tombstoneOutcome(pool, v, meta, level, state, early, major, base);
-              base += 10;
-            }
             String name =
                 (level == Connection.TRANSACTION_READ_COMMITTED ? "RC" : "SNAPSHOT")
                     + " state "
                     + state
                     + (early ? " committed after the read" : " held, then committed");
+            String[] got = new String[2];
+            if (server < 23) {
+              got[0] = HINTED_ON_23.get(name);
+              got[1] = tombstoneOutcome(pool, v, meta, level, state, early, 0, server, base);
+              base += 10;
+            } else {
+              for (int f = 0; f < 2; f++) {
+                int major = f == 0 ? 0 : 19;
+                got[f] = tombstoneOutcome(pool, v, meta, level, state, early, major, server, base);
+                base += 10;
+              }
+            }
             log("todo 327 " + name + ": hinted " + got[0] + " | NOT EXISTS " + got[1]);
             // the counts before an abort are not compared: the hinted bulk block aborts whole,
             // where the form below 23's ORA-00001 runs the entries one by one up to the abort
@@ -3407,10 +3416,35 @@ class OracleOltpIntegrationTest {
   }
 
   /**
+   * The hinted form's outcomes in {@link
+   * #todo327_bulkInsertBelow23_endsAsTheHintedFormOverAnotherConnectionsTombstone}, measured on 23,
+   * for a server below 23, where that form miscounts.
+   */
+  private static final Map<String, String> HINTED_ON_23 =
+      Map.of(
+          "RC state 3 held, then committed",
+          "waited [1, 1, 1] committed bulk true meta [0/a tx/3/6, 1/a tx/3/1, 2/a tx/3/1]"
+              + " data [0, 1, 2]",
+          "RC state 3 committed after the read",
+          "[1, 1, 1] committed bulk true meta [0/a tx/3/6, 1/a tx/3/1, 2/a tx/3/1] data [0, 1, 2]",
+          "RC state 1 held, then committed",
+          "waited 40001{[]} bulk true meta [0/other/1/5] data []",
+          "RC state 1 committed after the read",
+          "40001{[]} bulk true meta [0/other/1/5] data []",
+          "SNAPSHOT state 3 held, then committed",
+          "waited 40001{[]} bulk true meta [0/other/3/5] data []",
+          "SNAPSHOT state 3 committed after the read",
+          "40001{[]} bulk true meta [0/other/3/5] data []",
+          "SNAPSHOT state 1 held, then committed",
+          "waited 40001{[]} bulk true meta [0/other/1/5] data []",
+          "SNAPSHOT state 1 committed after the read",
+          "40001{[]} bulk true meta [0/other/1/5] data []");
+
+  /**
    * One batch of {@link
    * #todo327_bulkInsertBelow23_endsAsTheHintedFormOverAnotherConnectionsTombstone} on a connection
-   * that takes the form of {@code major} (0 the server's own): its outcome and the rows after,
-   * keyed from {@code base} so that both forms read alike.
+   * that takes the form of {@code major} (0 the server's own, {@code server}): its outcome and the
+   * rows after, keyed from {@code base} so that both forms read alike.
    */
   private static String tombstoneOutcome(
       ExecutorService pool,
@@ -3420,6 +3454,7 @@ class OracleOltpIntegrationTest {
       int state,
       boolean early,
       int major,
+      int server,
       int base)
       throws Exception {
     Proxies.oracleMajorForTests = major;
@@ -3484,7 +3519,7 @@ class OracleOltpIntegrationTest {
       out.append(" bulk ").append(insertBulks(v, tag) > 0);
       assertThat(rows(v, notExistsBulks(tag)))
           .as("the bulk block's metadata insert under NOT EXISTS")
-          .containsExactly(major > 0 && major < 23 ? "1" : "0");
+          .containsExactly((major > 0 ? major : server) < 23 ? "1" : "0");
       List<String> after = new ArrayList<>();
       for (String r :
           rows(
