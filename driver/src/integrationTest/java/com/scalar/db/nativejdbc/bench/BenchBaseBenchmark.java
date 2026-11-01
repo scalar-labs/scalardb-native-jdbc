@@ -752,7 +752,15 @@ class BenchBaseBenchmark {
       String tables;
       try (Connection c = e.open();
           Statement st = c.createStatement()) {
-        st.execute("ALTER SYSTEM FLUSH SHARED_POOL");
+        try {
+          st.execute("ALTER SYSTEM FLUSH SHARED_POOL");
+        } catch (SQLException x) {
+          if (x.getErrorCode() != 1031) {
+            throw x;
+          }
+          // RDS refuses ALTER SYSTEM to its master user and flushes through its own package
+          st.execute("BEGIN rdsadmin.rdsadmin_util.flush_shared_pool; END;");
+        }
         tables = tableStatistics(c, ns);
       }
       Counters r = read(e);
