@@ -140,3 +140,82 @@ per six, in-flight rows instead of one block.
 - 2026-11-01 (6e): the user's word, "For 1 (366), I will do both": option 1 (the inline docs change
   and the fixture's Oracle level at `READ_COMMITTED` for inline) and option 2 (the user takes
   `RdbEngineOracle`'s minimum to the ScalarDB team). Option 1 sent to 89 to design and route to c7.
+
+## Design of option 1 (2026-11-01, for c7)
+
+The user's word via 6e: "For 1 (366), I will do both". Option 2 is the user's with the ScalarDB team
+(the feedback page). Option 1 is ours, docs and fixture, and stands whatever ScalarDB does: the docs
+today prescribe a value that does not start on Oracle, and ScalarDB's fix only lifts the decoupled
+requirement; Oracle users still have to choose READ_COMMITTED themselves.
+
+Facts the design rests on (measured 2026-11-01, `ora/rr366.jsh`, `ora/hik366.jsh`; ScalarDB 3.20 by
+`javap`): ojdbc accepts only READ_COMMITTED and SERIALIZABLE (`ORA-17030`), so
+`scalar.db.jdbc.isolation_level=REPEATABLE_READ` makes HikariCP fail to initialize every ScalarDB pool
+on Oracle (`JdbcUtils.createDataSource` sets the level on the transaction, table-metadata and admin
+pools alike). ScalarDB requires its engine minimum, SERIALIZABLE on Oracle, only for a virtual table:
+at `createTable` and `importTable` with decoupling and at every operation on one
+(`ConsensusCommitOperationChecker`); an inline table has no requirement, and unset means Oracle's
+READ COMMITTED. One `TransactionFactory` serves a test suite's tables of both layouts, so a suite
+with a decoupled table on Oracle must run ScalarDB at SERIALIZABLE; `InlineIntegrationTest` is the
+only suite whose tables are all inline (every other suite that imports or creates tables names
+`transaction-metadata-decoupling`). `ReadOnlyReaderIntegrationTest`, `SerializableIntegrationTest`
+and `MaelstromIntegrationTest` set the level themselves and do not run on Oracle.
+
+### The docs
+
+1. `docs/transactions.md`. The table (lines 26–31): in the rows for `TRANSACTION_READ_COMMITTED` and
+   `TRANSACTION_REPEATABLE_READ` the third column reads `REPEATABLE_READ` for "all five"; it becomes
+   `REPEATABLE_READ`, Oracle as [ScalarDB's connections on Oracle](#scalardbs-connections-on-oracle).
+   Line 34, "ScalarDB needs at least `REPEATABLE_READ` there to create or import a table the driver
+   serves.", becomes: ScalarDB needs at least `REPEATABLE_READ` there for a decoupled table the driver
+   serves, to create or import it and for every transaction on it; an inline table has no such
+   requirement. On Oracle the value depends on the layout (the new section). A new subsection
+   `### ScalarDB's connections on Oracle` in the Oracle section, after "No SERIALIZABLE on Oracle",
+   saying: `REPEATABLE_READ` is refused by the Oracle JDBC driver (`ORA-17030`, only `READ_COMMITTED`
+   and `SERIALIZABLE` exist) and ScalarDB's connection pool fails to start with it. For inline tables
+   set `READ_COMMITTED` or leave the setting unset, which is the same on Oracle: ScalarDB's own default,
+   and every ScalarDB read is one statement, which Oracle's READ COMMITTED gives a consistent snapshot
+   of. For decoupled tables ScalarDB requires `SERIALIZABLE`, its minimum for a virtual table on Oracle,
+   to create or import the table and for every transaction on it; at that level, on a table with the
+   setup's in-flight index, concurrent ScalarDB writes fail now and then with `ORA-08177`, which
+   ScalarDB reports as a retryable conflict (measured on Oracle Free 23: four writers at ten prepares a
+   second each, 8–17% of the prepares; sixteen unpaced writers, 40–50%; none at `READ_COMMITTED`); a
+   request to lower the minimum is with the ScalarDB team. The setting is the level of ScalarDB's own
+   connections only; the driver's connections set theirs with `setTransactionIsolation`.
+2. `docs/getting-started.md` line 144–145: "ScalarDB needs `REPEATABLE_READ` here to create or import
+   a table the driver serves." becomes: ScalarDB needs `REPEATABLE_READ` here for a decoupled table the
+   driver serves (option C); on Oracle the value follows the layout, `READ_COMMITTED` for inline (A, B)
+   and `SERIALIZABLE` for decoupled (C), as [ScalarDB's connections on
+   Oracle](transactions.md#scalardbs-connections-on-oracle) says. The properties example (line 138) is
+   PostgreSQL's and stays.
+3. `docs/setting-up-tables.md` lines 54–56: "with `scalar.db.jdbc.isolation_level` as [Isolation
+   levels](...) gives" gains ", on Oracle by layout ([ScalarDB's connections on Oracle](...))".
+4. `docs/configuration.md` lines 123–124: "has which values go with each level" gains " and, on
+   Oracle, with each layout".
+5. `docs/design.md` section 3, the function-based paragraph's last sentence (line ~970), "which the
+   user docs should ask for there" becomes "which the user docs ask for there (transactions.md,
+   ScalarDB's connections on Oracle)"; section 1 item 8's sentence on the minimum per engine is
+   already on main (this commit).
+
+### The fixture
+
+6. `Engines.java`. `isolation()` keeps its values: `REPEATABLE_READ`, Oracle `SERIALIZABLE`, since a
+   suite with a decoupled table needs it there; Oracle's comment (line 138) says why: ojdbc accepts
+   only `READ_COMMITTED` and `SERIALIZABLE`, and the suites' decoupled tables need `SERIALIZABLE`
+   until ScalarDB's Oracle minimum drops, after which this returns `READ_COMMITTED` and `inlineIsolation`
+   goes. New `String inlineIsolation()`: the level the docs give ScalarDB for a suite whose tables are
+   all inline, `isolation()` on every engine but Oracle, `READ_COMMITTED` there. New `public
+   TransactionFactory scalarDbInline()`: `scalarDb(Properties)` with `scalar.db.jdbc.isolation_level`
+   set to `inlineIsolation()` (and the `Properties` form if a caller needs extras). `scalarDb(Properties)`
+   unchanged.
+7. `InlineIntegrationTest` takes `e.scalarDbInline()` for its admins and managers (the imports at
+   lines 69, 181, 286 and the managers at 207, 250, every `e.scalarDb()` in the class), with a line
+   saying it runs ScalarDB at the level the docs give for inline tables on each engine, `READ_COMMITTED`
+   on Oracle. This is what puts the recommended Oracle configuration through CI. The `ORA-08177` import
+   flaky of ScalarDB's own writes at SERIALIZABLE stays possible in the mixed suites until option 2.
+8. Not changed: the benchmark harness's ScalarDB properties (6e's; the import runs once and the
+   ScalarDB client is idle during a run; `READ_COMMITTED` for inline cells is 6e's call), the driver.
+
+Checks: the docs build (links resolve: the new anchor `#scalardbs-connections-on-oracle`); unit tests;
+`InlineIntegrationTest` on Oracle locally; spotless. Lands on the user's word in c7's session, rebased
+onto main's head.

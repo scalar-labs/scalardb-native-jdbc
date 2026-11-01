@@ -81,9 +81,12 @@ anywhere, because the driver never reads it.
    transaction's prepares, is one transaction, and no lock outlives the call. A scan keeps its
    connection open until the scanner is closed. On PostgreSQL, MySQL, MariaDB and Oracle ScalarDB's reads
    take no locks; at SERIALIZABLE on PostgreSQL they take SSI's predicate locks, which block nothing. On
-   SQL Server they do: ScalarDB's connections must run at REPEATABLE READ or higher
-   for decoupled tables, enforced only at create and import time through `StorageInfo` and otherwise by
-   the `scalar.db.jdbc.isolation_level` setting, and that level is lock-based there, so a ScalarDB get or
+   SQL Server they do: ScalarDB's connections must run at its minimum for decoupled tables, REPEATABLE
+   READ on PostgreSQL, MySQL, MariaDB and SQL Server and SERIALIZABLE on Oracle
+   (`RdbEngineStrategy.getMinimumIsolationLevelForConsistentVirtualTableRead`), checked through
+   `StorageInfo` at create and import time and, in 3.20, at every operation on a virtual table
+   (`ConsensusCommitOperationChecker`), and set by the `scalar.db.jdbc.isolation_level` setting; on SQL
+   Server that level is lock-based, so a ScalarDB get or
    scan holds shared locks, and range
    locks at SERIALIZABLE, until the call ends, or until the scanner is closed. Those locks block driver
    writes and can deadlock with them; the deadlock is detected and retryable on both sides.
