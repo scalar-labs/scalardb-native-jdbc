@@ -1931,7 +1931,7 @@ final class Router {
       keys.add(versioned ? n.keyColumns.size() : 0); // without versions, no key either
       anchorChecks.add(Writes.inFlightCheck(n));
     }
-    Set<SqlAst.TableRef> caseCopies = caseCopies(ast, split, scalarDb);
+    Set<SqlAst.TableRef> caseCopies = caseCopies(ast, split, scalarDb, own);
     SqlAst.SplitText text =
         SplitRead.emit(
             engine,
@@ -2036,12 +2036,20 @@ final class Router {
   /**
    * On Oracle at READ COMMITTED, the split references of inline tables whose predicate names only
    * their key, each read through one CASE copy in place of its two (design 4.2 "The key-only read
-   * on an inline table at READ COMMITTED as the CASE copy", todo 364).
+   * on an inline table at READ COMMITTED as the CASE copy", todo 364); a decoupled table's too
+   * where the read records its anchors, those of {@code own}: an anchor-less one keeps the gated
+   * statement as written, whose gate column costs less than the metadata join (design 4.2 "The
+   * key-only read on a decoupled table at READ COMMITTED as the CASE copy over the metadata join").
    */
   private Set<SqlAst.TableRef> caseCopies(
-      SqlAst ast, SqlAst.Split split, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+      SqlAst ast,
+      SqlAst.Split split,
+      IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb,
+      Set<SqlAst.TableRef> own) {
     Set<SqlAst.TableRef> out = Collections.newSetFromMap(new IdentityHashMap<>());
-    if (engine != Engine.ORACLE || snapshot()) {
+    // a position past the select list left for the database to refuse, as the split read leaves
+    // it, not answered by the copy's appended versions (todo 144)
+    if (engine != Engine.ORACLE || snapshot() || ast.ordersPastSelectList()) {
       return out;
     }
     // an unqualified column of a join is a table's where no other table of the statement has one
@@ -2052,7 +2060,9 @@ final class Router {
       TableInfo t = scalarDb.get(r);
       // an inner table alone: the split reads a LEFT JOIN's nullable side as inner joins and an
       // unmatched piece, which one copy would lose
-      if (t == null || t.layout() != Layout.INLINE || p.getValue() != SqlAst.Place.INNER) {
+      if (t == null
+          || (t.layout() != Layout.INLINE && !own.contains(r))
+          || p.getValue() != SqlAst.Place.INNER) {
         continue;
       }
       Set<String> elsewhere = null;
@@ -2082,7 +2092,12 @@ final class Router {
    * and for a {@code *} over an inline table, whose data table holds the metadata.
    */
   private Route gated(Route r, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
-    if (engine != Engine.ORACLE || ast.hasLockingOrIntoClause() || scalarDb.isEmpty()) {
+    // a position past the select list left for the database to refuse, as the split read leaves
+    // it, not answered by an appended gate column (todo 144)
+    if (engine != Engine.ORACLE
+        || ast.hasLockingOrIntoClause()
+        || scalarDb.isEmpty()
+        || ast.ordersPastSelectList()) {
       return r;
     }
     boolean snapshot = snapshot();

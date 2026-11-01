@@ -289,7 +289,9 @@ class ReviewFindingsIntegrationTest {
       try {
         soft.assertThat(c.nativeSQL("SELECT " + x + " FROM " + t + " WHERE " + id + " = 2"))
             .as("127 split read in a failed transaction")
-            .contains("UNION ALL");
+            // the two arms, or on Oracle the key lookup's CASE copy over the metadata join (todo
+            // 364)
+            .containsAnyOf("UNION ALL", "NOT IN (1, 2) OR m.\"before_tx_id\" IS NOT NULL");
       } catch (SQLException ex) {
         soft.fail("127 nativeSQL in a failed transaction: " + ex.getMessage());
       }
