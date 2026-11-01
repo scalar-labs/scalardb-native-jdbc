@@ -3774,8 +3774,22 @@ class OracleOltpIntegrationTest {
         }
       }
       out.append(" bulk ").append(insertBulks(v, tag) > 0);
+      // on a miss, what the server holds of the tag's texts and the outcome so far: CI run
+      // 41289095326 missed the NOT EXISTS text once on 23, not reproduced locally
       assertThat(rows(v, notExistsBulks(tag)))
-          .as("the bulk block's metadata insert under NOT EXISTS")
+          .as(
+              "the bulk block's metadata insert under NOT EXISTS, major %d, outcome %s, the tag's"
+                  + " texts %s",
+              major,
+              out,
+              rows(
+                  v,
+                  "SELECT command_type || ' ' || executions || ' '"
+                      + " || DBMS_LOB.INSTR(sql_fulltext, 'NOT EXISTS') || ' '"
+                      + " || SUBSTR(sql_text, 1, 120) FROM v$sql WHERE"
+                      + " DBMS_LOB.INSTR(sql_fulltext, '"
+                      + tag
+                      + "') > 0 AND DBMS_LOB.INSTR(sql_fulltext, 'v$sql') = 0"))
           .containsExactly((major > 0 ? major : server) < 23 ? "1" : "0");
       List<String> after = new ArrayList<>();
       for (String r :
