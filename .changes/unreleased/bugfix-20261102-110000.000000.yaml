@@ -1,0 +1,3 @@
+kind: bugfix
+body: 'On Oracle, a read whose ORDER BY names a position past its select list, such as `SELECT x FROM t ORDER BY 2`, again fails with ORA-01785 as it does on the database. A read without anchors, such as one in autocommit, and a key-only read at READ COMMITTED had sorted silently by a column the driver adds to the select list.'
+time: 2026-11-02T11:00:00.000000+09:00
