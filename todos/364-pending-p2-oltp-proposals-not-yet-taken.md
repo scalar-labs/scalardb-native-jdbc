@@ -476,3 +476,50 @@ Proposals, the user's call, in the order recommended:
    for bound keys.
 
 Sent to the user and to 6e (todo 329's record).
+
+### 2026-11-02: item 1 measured on the container (facts for the user's pick; nothing designed)
+
+6e's relay of the previous night ("yes to all three") was withdrawn the same night: the user's "Can
+you give me the three?" asked for the list, not for the build. Nothing of items 1–3 is designed or
+sent to c7; the measurement below was run before the correction and stands as input to the pick.
+
+An ORDER_LINE-shaped metadata table of 300K committed rows (W 1..10, D 1..10, O 1..300, N 1..10;
+scratchpad `ora/key366.jsh` and `ora/key366b.jsh`), three copies: A as ScalarDB's import and today's
+setup leave it, the primary key (D, N, O, W) by column name plus the key index `T_key` (W, D, O, N);
+C the import alone, no key index; B after the proposed conversion, a unique index (W, D, O, N) built
+ONLINE, the import's primary key dropped with its index and added again USING INDEX that one, no
+second key index. All three carry the function-based in-flight index.
+
+- The conversion on 300K rows: `CREATE UNIQUE INDEX ... ONLINE` 0.4–0.7 s, `ALTER TABLE ... DROP
+  PRIMARY KEY DROP INDEX` 35–68 ms, `ALTER TABLE ... ADD PRIMARY KEY (W, D, O, N) USING INDEX ...`
+  90–97 ms; uniqueness never lapses, the unique index holds it between the two. Oracle also accepts
+  the constraint written in the catalog's order over an index in the other (133 ms), but
+  `getPrimaryKeys` then reports the constraint's order, so a setup would write the constraint in the
+  data order and its check would read it there by `KEY_SEQ`.
+- Two campaigns (6 rounds x 150 calls with the three copies always in the same order, then 9 x 150
+  with the forms rotated one a round), CPU µs / gets / redo bytes a call of ten rows:
+  - k2, the FORALL INSERT of an order's ten metadata rows: A 39.6–71.4 / 38.7–38.9 / 7.0 KB; C
+    22.1–22.6 / 33.5–33.6 / 4.2–4.4 KB; B 19.6–20.8 / 7.7–9.0 / 2.9–3.9 KB. The second index costs
+    more CPU than the scattered order does; the data order pins one leaf for the ten rows.
+  - g3, the FORALL stamp UPDATE by full key: A 66–71 / 52; C 54–77 / 52; B 64–69 / 42. Ten gets, no
+    CPU to speak of: the probes are unique scans either way.
+  - the (W, D, O) prefix count: A 5.4–6.6 / 3.0 (`T_key`), C 33–35 / 23 (the skip scan, the (C)
+    finding), B 5.5–5.6 / 3.0 (the primary key). B keeps what `T_key` bought.
+  So item 1's gain is the insert: against today's layout CPU −45% or more, gets 39 → 8, redo −45 to
+  −60% per ten rows; AWS's k2 at 38.4 gets a call (the eleventh run) matches A's 38.7. The stamp's
+  "51 → ~10" in the proposal was wrong: g3 keeps ~42 gets, its probes being unique scans.
+- A fact that changes item 1's shape: `IGNORE_ROW_ON_DUPKEY_INDEX(x (cols))` resolves the index by
+  the columns in the index's own order; `(D, N, O, W)` over an index (W, D, O, N) is ORA-38913 "Index
+  specified in the index hint is invalid". The driver spells the catalog's order at its three insert
+  sites (`Writes` 2931, 5987, 10638), so the conversion alone would break the decoupled inserts: item
+  1 needs the hint naming the index, `IGNORE_ROW_ON_DUPKEY_INDEX(x "name")`, honored in the stored
+  spelling (a lower-case misspelling is ORA-38913 too), the name learned by the catalog with the
+  setup's objects (the metadata table's primary key index from `ALL_CONSTRAINTS`, or the setup's
+  unique `T_key` when listed), the columns in the catalog's order where none is known; a catalog
+  loaded before a conversion run beside the application spells the old form until it refreshes.
+- MySQL and MariaDB key the metadata table by name too (section 3); their primary key is the
+  clustered index, so the same rule there is `ALTER TABLE ... DROP PRIMARY KEY, ADD PRIMARY KEY (the
+  data order), ALGORITHM=INPLACE, LOCK=NONE`, a table rebuild, not measured (no container up).
+- With ScalarDB's own fix (the import by `KEY_SEQ`), a new import's catalog order equals its primary
+  key's and the driver's hint as spelled today is right; tables imported before it keep the by-name
+  key and need the conversion.
