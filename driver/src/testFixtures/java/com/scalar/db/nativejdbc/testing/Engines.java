@@ -139,9 +139,17 @@ public enum Engines {
       return "system"; // ScalarDB creates a user per namespace, which needs DBA rights
     }
 
+    // ojdbc accepts only READ_COMMITTED and SERIALIZABLE (ORA-17030), and the suites' decoupled
+    // tables need SERIALIZABLE, ScalarDB's minimum for a virtual table on Oracle; once that minimum
+    // drops this returns READ_COMMITTED and inlineIsolation goes (todo 366)
     @Override
     String isolation() {
-      return "SERIALIZABLE"; // Oracle has no REPEATABLE READ
+      return "SERIALIZABLE";
+    }
+
+    @Override
+    String inlineIsolation() {
+      return "READ_COMMITTED";
     }
   };
 
@@ -182,6 +190,14 @@ public enum Engines {
 
   String isolation() {
     return "REPEATABLE_READ";
+  }
+
+  /**
+   * The level the docs give ScalarDB's connections for a suite whose tables are all inline: {@link
+   * #isolation()}, READ_COMMITTED on Oracle (transactions.md, ScalarDB's connections on Oracle).
+   */
+  String inlineIsolation() {
+    return isolation();
   }
 
   /** The engines selected for this run. */
@@ -262,6 +278,16 @@ public enum Engines {
   /** ScalarDB's Consensus Commit on this database, for its transaction managers. */
   public TransactionFactory scalarDb() throws SQLException {
     return scalarDb(new Properties());
+  }
+
+  /**
+   * ScalarDB's Consensus Commit on this database for a suite whose tables are all inline, its
+   * connections at {@link #inlineIsolation()}.
+   */
+  public TransactionFactory scalarDbInline() throws SQLException {
+    Properties p = new Properties();
+    p.setProperty("scalar.db.jdbc.isolation_level", inlineIsolation());
+    return scalarDb(p);
   }
 
   /**

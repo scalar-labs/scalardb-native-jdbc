@@ -25,13 +25,15 @@ COMMITTED costs more in the driver](#why-read-committed-costs-more-in-the-driver
 
 | `setTransactionIsolation` | `scalar.db.consensus_commit.isolation_level` | `scalar.db.jdbc.isolation_level` | Engines |
 | --- | --- | --- | --- |
-| `TRANSACTION_READ_COMMITTED` | `READ_COMMITTED` | `REPEATABLE_READ` | all five |
-| `TRANSACTION_REPEATABLE_READ` (SNAPSHOT, the driver's default) | `SNAPSHOT` (ScalarDB's default) | `REPEATABLE_READ` | all five |
+| `TRANSACTION_READ_COMMITTED` | `READ_COMMITTED` | `REPEATABLE_READ`, Oracle as [ScalarDB's connections on Oracle](#scalardbs-connections-on-oracle) | all five |
+| `TRANSACTION_REPEATABLE_READ` (SNAPSHOT, the driver's default) | `SNAPSHOT` (ScalarDB's default) | `REPEATABLE_READ`, Oracle as [ScalarDB's connections on Oracle](#scalardbs-connections-on-oracle) | all five |
 | `TRANSACTION_SERIALIZABLE` | `SERIALIZABLE` | `SERIALIZABLE`, for the driver, not for ScalarDB | [PostgreSQL](#serializable-on-postgresql) |
 | `TRANSACTION_SERIALIZABLE` | `SERIALIZABLE` | `REPEATABLE_READ`, with a short lock wait | [MySQL and MariaDB](#serializable-on-mysql-and-mariadb), [SQL Server](#serializable-on-sql-server) |
 
 `scalar.db.jdbc.isolation_level` is the level of ScalarDB's own connections to the database.
-ScalarDB needs at least `REPEATABLE_READ` there to create or import a table the driver serves.
+ScalarDB needs at least `REPEATABLE_READ` there for a decoupled table the driver serves, to create or
+import it and for every transaction on it; an inline table has no such requirement. On Oracle the
+value depends on the layout ([ScalarDB's connections on Oracle](#scalardbs-connections-on-oracle)).
 
 - `TRANSACTION_REPEATABLE_READ` is snapshot isolation, called SNAPSHOT in these docs. SQL Server and
   Oracle map the levels to their own ([SQL Server](#sql-server), [Oracle](#oracle)).
@@ -289,3 +291,22 @@ and range locks held to commit, as the driver uses on the other engines; Oracle 
 lets a driver run a stricter level than the one asked for, never a weaker one, so the driver refuses
 it. For tables the driver also writes on Oracle, run ScalarDB at `READ_COMMITTED` or `SNAPSHOT`, to
 match.
+
+### ScalarDB's connections on Oracle
+
+`scalar.db.jdbc.isolation_level=REPEATABLE_READ` does not work on Oracle: the Oracle JDBC driver
+accepts only `READ_COMMITTED` and `SERIALIZABLE` and refuses it with `ORA-17030`, and ScalarDB's
+connection pool fails to start. The value follows the tables' layout:
+
+- Inline tables: set `READ_COMMITTED`, or leave the setting unset, which is the same on Oracle.
+  Every ScalarDB read is one statement, and Oracle's READ COMMITTED gives each statement a consistent
+  snapshot.
+- Decoupled tables: ScalarDB requires `SERIALIZABLE`, its minimum for a virtual table on Oracle, to
+  create or import the table and for every transaction on it. At that level, on a table with the
+  setup's in-flight index, concurrent ScalarDB writes fail now and then with `ORA-08177`, which
+  ScalarDB reports as a retryable conflict. Measured on Oracle Free 23: four writers at ten prepares a
+  second each lost 8–17% of their prepares, sixteen unpaced writers 40–50%, and none at
+  `READ_COMMITTED`. A request to lower the minimum is with the ScalarDB team.
+
+The setting is the level of ScalarDB's own connections only; the driver's connections set theirs
+with `setTransactionIsolation`.

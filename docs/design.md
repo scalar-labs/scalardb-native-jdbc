@@ -81,9 +81,12 @@ anywhere, because the driver never reads it.
    transaction's prepares, is one transaction, and no lock outlives the call. A scan keeps its
    connection open until the scanner is closed. On PostgreSQL, MySQL, MariaDB and Oracle ScalarDB's reads
    take no locks; at SERIALIZABLE on PostgreSQL they take SSI's predicate locks, which block nothing. On
-   SQL Server they do: ScalarDB's connections must run at REPEATABLE READ or higher
-   for decoupled tables, enforced only at create and import time through `StorageInfo` and otherwise by
-   the `scalar.db.jdbc.isolation_level` setting, and that level is lock-based there, so a ScalarDB get or
+   SQL Server they do: ScalarDB's connections must run at its minimum for decoupled tables, REPEATABLE
+   READ on PostgreSQL, MySQL, MariaDB and SQL Server and SERIALIZABLE on Oracle
+   (`RdbEngineStrategy.getMinimumIsolationLevelForConsistentVirtualTableRead`), checked through
+   `StorageInfo` at create and import time and, in 3.20, at every operation on a virtual table
+   (`ConsensusCommitOperationChecker`), and set by the `scalar.db.jdbc.isolation_level` setting; on SQL
+   Server that level is lock-based, so a ScalarDB get or
    scan holds shared locks, and range
    locks at SERIALIZABLE, until the call ends, or until the scanner is closed. Those locks block driver
    writes and can deadlock with them; the deadlock is detected and retryable on both sides.
@@ -724,7 +727,8 @@ So the backfill becomes an option, off by default.
   statements, wait and retries as the setup's. It needs DML on the metadata table and no DDL, and
   can be run at any time and repeated. It also repairs the rows ScalarDB's defect left: the all-NULL
   metadata row gets the sentinel stamp, after which ScalarDB's prepare condition is `tx_id =
-  'scalardb-native-backfill-placeholder'`, which is not converted to an insert, and the row is writable through
+  'scalardb-native-backfill-placeholder'`, which is not converted to an insert, and the row is
+  writable through
   ScalarDB again. On Oracle, after it fills a decoupled table's metadata table, it sets that table's
   statistics as the setup sets them after a backfill. It acts on imported decoupled tables only: a
   run without `--table` must not rewrite every inline application table, and `setup --backfill`
@@ -958,6 +962,19 @@ conflict, c7's finding), and under 16 concurrent SERIALIZABLE sessions each prep
 with no in-flight index, `INITRANS 50` changing nothing, 4 sessions the same): a property of any
 in-flight index on Oracle, which ScalarDB's storage connections meet where they run Oracle's
 SERIALIZABLE and the driver's own writes, which touch no in-flight entry, do not (todo 366).
+Measured as a paced mixed workload on the container (todo 366's log, 2026-10-31; ScalarDB-shaped
+writers at SERIALIZABLE preparing and committing 3 random rows a transaction, beside 4 driver-shaped
+READ COMMITTED writers): 4 sessions at 10 transactions a second each, 30 prepares a second on the
+table, lose 17% of their prepares and 12% of their commits to ORA-08177 on the plain index, 8% and
+12% on the function-based one, 0.0% without an in-flight index and 0.0% at READ COMMITTED; 16
+sessions at 50 a second 42% and 33%, 40% and 33%. Entries padded to one or two a leaf cut the rate
+four to ten times at the cost of the key set's probe, one block per two in-flight rows instead of
+one; a hash-partitioned index takes no expression as its key. ScalarDB itself runs READ COMMITTED
+when `scalar.db.jdbc.isolation_level` is unset and requires Oracle's SERIALIZABLE only for a virtual
+table, the decoupled layout, at create, import and every operation; so the inline layout is free of
+this once ScalarDB's connections run READ COMMITTED on Oracle, which the user docs ask for there
+(transactions.md, ScalarDB's connections on Oracle), and the decoupled layout waits on ScalarDB's Oracle minimum, which Oracle's statement-level
+consistency at READ COMMITTED would satisfy (todo 366's options, the user's call).
 
 ---
 
@@ -1051,8 +1068,11 @@ union as a derived table.
   transaction then costs the
   vendor's probe and the metadata row's, 8 against 5 µs warm, its in-flight arm a probe of an empty
   partial index; a form reading both images from one join of `T` and `T_meta`, a `CASE` per non-key
-  column, measured the same and would hide those columns behind expressions (section 3), so there is
-  no cheaper anchored key read at this level (todo 337). A `*` or `t.*` over such a copy is
+  column, measured the same there and would hide those columns behind expressions (section 3), so
+  there is no cheaper anchored key read at this level on PostgreSQL (todo 337); on Oracle, where the
+  in-flight arm's probe of the function-based index costs 2 gets and a fifth of the read, the
+  anchored key read takes that join as the CASE copy (below, todo 364). A `*` or `t.*` over such a
+  copy is
   spelled out as the table's columns, which the copy would otherwise show; where it cannot be, a
   NATURAL or USING join, the lookups stay. A statement prepared in the other mode is prepared
   again when it
@@ -1230,25 +1250,129 @@ union as a derived table.
   µs, StockLevel's count from 1.5 ms toward 0.9 with order_line's range gate and stock's warehouse
   gate (`S_W_ID = ?` is a key conjunct), StockLevel at READ COMMITTED from +53-62% toward +25%.
 
-  **A table found clear** (todo 329). The snapshot is the transaction's: a table that has no row in
-  flight in it at one statement has none at any later statement either, since only the
-  transaction's own writes, stamped committed, change what it sees. So a transaction remembers,
-  until it ends, each table it found clear: by a state of 0 as above, by the per-table check
-  below, by a write's gate (4.3) or by the coarse check sent before a locking read. On such a
-  table every later statement of the transaction runs as the vendor's: a read of any shape is the
-  statement as written over the data tables, a locking read likewise, and a write is the
-  statement as written with its stamp (4.3). A prepared read keeps a second vendor statement for
-  that text beside the rewritten one, prepared when first needed, its settings and parameters
-  replayed as it becomes the one executed; a read of an inline table whole (`*`) keeps the
-  rewritten text, which leaves the metadata columns out. A locking read on a table not yet found
-  clear is sent after the table's coarse check, `SELECT 1 FROM T_meta WHERE tx_state IN (1, 2)
-  ORDER BY <key> LIMIT 1`, in one round trip: a row found leaves the rows locked and asks the
-  predicate's in-flight check, which aborts for a row in flight the statement matches by either
-  image; none
-  found marks the table clear. A plain read on a table not yet found clear runs through the state
-  column above, whose probe is what marks the table, or through the per-table checks, the pending
-  ones as one statement. In autocommit nothing is remembered: each statement's snapshot is its
-  own.
+  *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
+  A read of an inline table whose predicate names only the table's key columns, every column of the
+  reference in the statement's WHERE and ON clauses a key column, the select list free, takes one
+  copy in place of the two arms above: the CASE copy, `rc_T`'s form for the inline layout as a
+  derived table, `(SELECT t.k, CASE WHEN COALESCE(t.tx_state, 3) IN (1, 2) THEN t.before_c ELSE t.c
+  END AS c, ..., CASE WHEN COALESCE(t.tx_state, 3) IN (1, 2) THEN t.before_tx_id ELSE t.tx_id END AS
+  v0, CASE WHEN COALESCE(t.tx_state, 3) IN (1, 2) THEN t.before_tx_version ELSE t.tx_version END AS
+  v1 FROM T t WHERE COALESCE(t.tx_state, 3) NOT IN (1, 2) OR t.before_tx_id IS NOT NULL OR
+  t.before_tx_version IS NOT NULL) alias`, the user's predicate, select list, ORDER BY and aggregate
+  on top as the split read has them, no read of the in-flight index, and no hint but the committed
+  copy's `NO_INDEX_SS` where the table's in-flight index is the plain form, a skip scan of
+  `(tx_state, key)` over the key's range staying possible under the OR. It is exact: on key columns
+  `P` is `P_before`, since `P_before` substitutes only the `before_<col>` columns, so the two arms
+  select the same rows of the same table by the same predicate, disjoint by state; the copy's WHERE
+  is the union of their state conditions, each row's columns are the committed row's or its before
+  image's as the arms' are, an in-flight insert, which has no committed image, is left out as the
+  arm leaves it, and the anchor is the committed image's identity in both cases, `(before_tx_id,
+  before_tx_version)` for a row in flight, as this section requires. The anchor-less aggregate of
+  the paragraph above on such a predicate takes the copy too, without the gate and its fallback: the
+  sum of an order's lines is exact in one statement. Measured on the container (todo 364's log,
+  2026-10-31; 50 rows in flight, medians, CPU µs and gets a call): the key read of an item-shaped
+  table, the vendor's statement 4.6 / 3.00, the split as deployed 6.6 / 5.00, the copy 5.2 / 3.00;
+  of an order_line-shaped table 5.4 / 4.00, 7.2 / 6.00, 5.6 / 4.00; the 10-row SUM over an order,
+  the vendor's 6.6 / 4.15, the gated statement 8.6 / 6.15 and the split again at a gate of 1, the
+  copy 7.2 / 4.15, its sum the split's (123.4, the before image) against the vendor's 223.4 with the
+  in-flight amount. At AWS the split's key read cost 10.2 µs and 4 gets against the vendor's 4.8 and
+  3 (the eleventh run, item), about 20 such reads a NewOrder, half of its 200 µs of server CPU over
+  the vendor's; expected: the READ COMMITTED inline TPC-C cell from 0.75 toward 0.8, Payment and
+  OrderStatus by their key reads, Delivery's SUM from 15.5 gets toward the vendor's 4.2. Oracle
+  first; PostgreSQL's inline tables take the same copy once measured there. The copy is taken for a
+  reference in a top-level inner place: the nullable side of an outer join keeps its pieces, since
+  the split reads it as inner joins over its committed and in-flight pieces and an unmatched piece,
+  which one copy would turn inner (c7's finding); a predicate that names no column of the table, a
+  `COUNT(*)` over it, is key-only and takes the copy. The locking read, the SNAPSHOT forms (the
+  plain read behind the gate is the vendor's statement already) and a predicate on a non-key column
+  keep their forms: there the arms differ in their predicates and the first arm's index on the
+  column is the point of the split (the layout table of section 1). The copy's text is plain SQL, a
+  CASE and a COALESCE per column, which Oracle 19c runs as 23 does (todo 327): the suites run on
+  both. Built by c7 (db5a464 and 9aabeb0, on main as 5e1da62 and 13d3307, 2026-11-01):
+  `SqlAst.keyOnly` the test, false for a subquery anywhere in the clauses, a NATURAL or USING join
+  and an unqualified column of a join it cannot place; `Router.caseCopies` the choice, Oracle at
+  READ COMMITTED, inline, inner; `SplitRead.caseCopy` the text; the gate dropped only where every
+  ScalarDB table of the statement is a copy, a mixed statement keeping it with the copy in its
+  fallback. What must keep holding: the READ COMMITTED inline read tests, a row in flight read as
+  its before image by key, its anchor the before image's identity, an in-flight insert invisible,
+  the two-arm form for a predicate on a non-key column, the gated aggregate with a non-key conjunct;
+  to add: the copy's text for a key lookup and for a key-prefix range, the aggregate without a gate,
+  and the item read of `OracleOltpIntegrationTest` at 3 gets. A positional ORDER BY item past the
+  select list, below 1, or beside a `*` whose count the text does not show keeps the two arms
+  (`Router.caseCopies` declines the copy for the statement, `SqlAst.ordersPastSelectList`): the copy
+  appends the hidden anchor columns to the select list, so `SELECT x FROM T ORDER BY 2` would sort
+  by a hidden column where the arms' lift leaves the statement whole for the database to refuse
+  (todo 144); found by c7 building the decoupled copy, 2026-11-02, the inline copy on main having
+  had it since 5e1da62, fixed with the decoupled copy. The gated statement as written (above)
+  appends its gate columns the same way and declines likewise (`Router.gated`), c7 having shown an
+  autocommit SNAPSHOT read sorted by the gate column; Oracle's ORA-01785 on both layouts, in and out
+  of a transaction, is the tested outcome
+  (`OracleOltpIntegrationTest.anchorlessReadsWithAPositionPastTheListAreRefused`), and a set
+  operation never takes a copy or a gate, the split's text builder reading one plain select only.
+
+
+  *The key-only read on a decoupled table at READ COMMITTED as the CASE copy over the metadata join
+  (todo 364, 2026-11-02).* A decoupled table's reference under the same conditions, the predicate on
+  its key columns alone, a top-level inner place, Oracle at READ COMMITTED, and recording anchors,
+  takes one copy too, the committed copy's left join with the in-flight arm folded into it: `(SELECT
+  t.k, CASE WHEN COALESCE(m.tx_state, 3) IN (1, 2) THEN m.before_c ELSE t.c END AS c, ..., CASE WHEN
+  COALESCE(m.tx_state, 3) IN (1, 2) THEN m.before_tx_id ELSE m.tx_id END AS v0, CASE WHEN
+  COALESCE(m.tx_state, 3) IN (1, 2) THEN m.before_tx_version ELSE m.tx_version END AS v1 FROM T t
+  LEFT JOIN T_meta m ON m.k = t.k WHERE COALESCE(m.tx_state, 3) NOT IN (1, 2) OR m.before_tx_id IS
+  NOT NULL OR m.before_tx_version IS NOT NULL) alias`, the state as `m.tx_state AS v2` where the
+  read carries states, no read of the in-flight index and no hint, as the committed copy of a
+  decoupled table has none. It is exact as the inline copy is, with one more step: the in-flight arm
+  reads the metadata table alone, so the copy, which starts from the data row, has to find a data
+  row for every metadata row in flight that has a before image; it does, since a before image is a
+  committed row's, which a Put's prepare leaves in the data table under the after image and a
+  Delete's prepare leaves as it is (section 1, fact 2), and the record commit that removes a deleted
+  row removes its metadata row in the same database transaction (fact 3), so one statement sees both
+  or neither; an in-flight insert has no before image and is left out as the arm leaves it; a data
+  row without a metadata row, an imported table's before its backfill, is a committed row with NULL
+  anchors in both forms; the key columns come from `t`, the arm's from `m`, equal under the join;
+  and the anchor of a row in flight is the before image's identity, as above. The anchor-less
+  decoupled read keeps the statement as written behind its gate column (above), which costs less
+  than the join (measured 6.5 µs and 6 gets against 6.6 and 8), where the inline copy, which reads
+  no second table, serves both. Measured on the container (todo 364's log, 2026-11-01; a
+  stock-shaped pair of 3.2M rows, 20 rows in flight, warm, medians, CPU µs and gets a call): the
+  vendor's key read 4.7 / 4, the committed copy alone 6.1 / 8, the two arms as deployed 8.3 / 10,
+  the CASE copy 6.6 / 8; the in-flight arm's probe of the function-based index, 2 gets and about 2
+  µs, a fifth of the read, is what the copy saves, and the left join's 4 gets are the anchor's price
+  at this level (todo 337, above). At AWS the eleventh run's READ COMMITTED decoupled TPC-C read
+  stock at 17.5 µs / 9 gets against the vendor's 7.9 / 5 and item at 15.3 / 7 against 4.6 / 3, about
+  twenty such reads a NewOrder; expected: 2 gets and about a fifth of the CPU off each, some 60–70
+  µs of a NewOrder's ~860 µs of server CPU over the vendor's. The inline copy's other rules hold:
+  the nullable side of an outer join, a predicate on a non-key column, a positional ORDER BY item
+  past the select list, the locking read and the SNAPSHOT forms keep their arms. Oracle only, as the
+  inline copy: on PostgreSQL the join form measured the same as the arms (todo 337). What must keep
+  holding: the READ COMMITTED decoupled read tests, a row in flight read as its before image by key
+  with that image's identity as its anchor, an in-flight insert invisible, a row without a metadata
+  row read with NULL anchors, a delete in flight read as the row before it; to add: the copy's text
+  for a decoupled key lookup and for a key-prefix range, the anchor-less key read still the gated
+  statement as written, and the item read of `OracleOltpIntegrationTest`'s decoupled cell, 6.00 gets
+  a call as built with 50 items in flight (c7, 2026-11-02; the test bounds it at 8.2; the 8
+  estimated above is the stock-shaped pair's, whose deeper indexes cost a get more a probe). Built
+  by c7 as 708aba0 and 67de0b1 on `decoupled-rc-case-copy`, reviewed mergeable 2026-11-02:
+  `SplitRead.caseCopy` takes the metadata alias for a decoupled table and joins it,
+  `Router.caseCopies` admits a decoupled reference only in `own`, and both the copy and the gated
+  statement decline under `SqlAst.ordersPastSelectList`. **A table found clear** (todo 329). The
+  snapshot is the transaction's: a table that has no row in flight in it at one statement has none
+  at any later statement either, since only the transaction's own writes, stamped committed, change
+  what it sees. So a transaction remembers, until it ends, each table it found clear: by a state of
+  0 as above, by the per-table check below, by a write's gate (4.3) or by the coarse check sent
+  before a locking read. On such a table every later statement of the transaction runs as the
+  vendor's: a read of any shape is the statement as written over the data tables, a locking read
+  likewise, and a write is the statement as written with its stamp (4.3). A prepared read keeps a
+  second vendor statement for that text beside the rewritten one, prepared when first needed, its
+  settings and parameters replayed as it becomes the one executed; a read of an inline table whole
+  (`*`) keeps the rewritten text, which leaves the metadata columns out. A locking read on a table
+  not yet found clear is sent after the table's coarse check, `SELECT 1 FROM T_meta WHERE tx_state
+  IN (1, 2) ORDER BY <key> LIMIT 1`, in one round trip: a row found leaves the rows locked and asks
+  the predicate's in-flight check, which aborts for a row in flight the statement matches by either
+  image; none found marks the table clear. A plain read on a table not yet found clear runs through
+  the state column above, whose probe is what marks the table, or through the per-table checks, the
+  pending ones as one statement. In autocommit nothing is remembered: each statement's snapshot is
+  its own.
 
   **On Oracle both hold, at its SERIALIZABLE, the driver's SNAPSHOT, in a transaction** (todo 334).
   The argument above needs two things of the engine: one snapshot for every statement of the
@@ -3036,7 +3160,75 @@ vendor's own statement, then on AWS with the rest.
   every entry resolves alike, the block of entries otherwise; a failure undoes the block whole and
   the entries run one by one. Expected at AWS: the stock batch near the SNAPSHOT bulk block's 0.28
   ms and 97 gets a call plus a metadata probe per row, the order_line batch at the bulk's 0.12 ms
-  and 70 gets; measured on the container first, as the inline forms were.
+  and 70 gets; measured on the container first, as the inline forms were. A gate on the in-flight
+  probe alone, the anchors left to the CAS and a savepoint rollback on a CAS miss, was measured on
+  the container 2026-11-02 (the ten-row block 189 gets to 169 and 341 to 328 µs, its DML 88 to 54
+  gets) and not taken, the user's call: a tenth of the block's gets and a few percent of its CPU
+  (todo 364); the form without any gate, 142 gets and 267 µs, writes and locks a row in flight
+  before the CAS tells, and was not proposed.
+
+  *The INSERT's bulk block on Oracle before 23 (todo 327, 2026-10-31).* Oracle 19c's
+  `SQL%BULK_ROWCOUNT` counts 1 for an entry whose row `IGNORE_ROW_ON_DUPKEY_INDEX` skipped (19c
+  SE2 19.3.0, the forms probes 9c and 5f: `1,1,1` where 23ai counts `1,0,1`), while the
+  statement's total `SQL%ROWCOUNT` is right. The bulk block above takes over the entries whose
+  metadata insert counted 0, so on 19c it would take over none: a key whose metadata row was there
+  before, a tombstone or an imported table's row, would keep the old row's `tx_id`, state and
+  version under the new data row, and ScalarDB would read the new row under them. On a server
+  whose major version is below 23, 21c with 19c, the block's metadata insert is therefore
+  `FORALL i IN 1 .. l_n INSERT INTO T_meta (k, tx_id, tx_state, tx_version, tx_prepared_at,
+  tx_committed_at) SELECT <the slot's key values>, l_i, 3, 1, l_p, l_c FROM dual WHERE NOT EXISTS
+  (SELECT 1 FROM T_meta m WHERE m.k = <the slot's key values>)` without the hint, whose
+  `SQL%BULK_ROWCOUNT` counts 0 for a key with a row and 1 otherwise, on 19c and 23ai alike (probe
+  9c': `1,0,1,0` over a key with a row and a key given twice); on 21c, where the hint's count is
+  not verified, the form is right by construction, its count that of plain DML. A key given twice
+  never reaches the metadata insert: the data FORALL raises ORA-00001 on the data table's key
+  first and the entries run one by one, as today (the table's row "two entries on one key"), so
+  the probe's fourth 0 is not used. The version is read once per connection from
+  `DatabaseMetaData.getDatabaseMajorVersion()`, which ojdbc answers from the handshake without a
+  round trip, beside the `SetFloatAndDoubleUseBinary` read in `Proxies`, and carried into `Bulk`,
+  whose cache of texts is keyed by the form wherever a plan is shared by connections, so that one
+  DataSource's text never serves a server of the other form. Everything after the insert is the
+  block above: the takeover over the entries counted 0, its stamp under `COALESCE(tx_state, 3) =
+  3`, the rows taken over short of stamped an abort, the OUT binds; they work from the list of
+  entries counted 0 alone. The two forms differ only in that list: the hint skips a row that is
+  there at the insert after any wait, `NOT EXISTS` one visible at the statement's read point. A
+  row there but not visible reaches the unique index: one another transaction inserted and has not
+  committed waits on its index entry as the hinted insert does and, if it commits, fails the
+  insert with ORA-00001; one committed after the read point (the statement's at READ COMMITTED,
+  the transaction's snapshot at SNAPSHOT) fails it with ORA-00001 at once. Either way the failure
+  is SQLState 23000, `undoable`, the block is undone whole as for a duplicate data row, and the
+  entries run one by one through the single INSERT block, whose hinted insert reads `SQL%ROWCOUNT`
+  (right on 19c, probe 5e), skips the row and takes it over under `COALESCE(tx_state, 3) = 3`:
+  the uncommitted writer's row is taken over short of stamped, the hinted bulk block's own abort
+  for it, and at SNAPSHOT the takeover UPDATE of the row committed after the snapshot meets
+  ORA-08177, where the hinted bulk block's takeover meets it directly; the same `40001`,
+  rollback-only, at one round trip more, and an abort's counts before it those of the entries one by
+  one, which may be more than the hinted block's none (both shapes JDBC allows for a failed batch).
+  The data FORALL runs first and waits on the data table's key, so a ScalarDB prepare and a driver
+  DELETE, which write the data row too, are decided there as today; only a writer of the metadata
+  row alone, an imported table's tombstone committed after a SNAPSHOT transaction's snapshot,
+  reaches the metadata insert's ORA-00001. Both outcomes are to be confirmed on 19c when this is
+  built, beside the hinted form's on the same rows. The cost is the `NOT EXISTS` probe, one unique
+  scan of `T_meta`'s primary key per entry inside the same call, 2 to 3 gets by the index's height,
+  after which the insert's own unique check finds those blocks cached: no round trip, one child
+  cursor as before, the block's text one per write shape. A 10-entry `order_line` batch pays about
+  20 to 30 gets more on a block the eighth run measured at 70, a third more, and that, not caution,
+  is why 23ai and later keep the hinted text byte for byte though the `NOT EXISTS` form is right
+  there too; measured on 19c when built. Only this block changes: no other hinted insert reads
+  `SQL%BULK_ROWCOUNT`. The single forms and the keyed step block's imported branch read one row's
+  `SQL%ROWCOUNT`, right on 19c (probe 5e); the predicate block's `FORALL i IN VALUES OF l_new` over
+  the stamp sums `SQL%ROWCOUNT`, the total, also right; the keyed bulk blocks' and the predicate
+  block's `SQL%BULK_ROWCOUNT` follow DML without the hint; the INSERT ALL form and the inline INSERT
+  read JDBC's counts. To add: on 19c, `MoreWritesIntegrationTest.batches`, whose tombstone taken
+  over in a batch is what the hinted block misses there, and the `OracleOltpIntegrationTest` bulk
+  block tests; the hinted FORALL's total with a skipped row asserted in the probe beside 9c; a text
+  test that the block below 23 has no hint and the 23 text is byte-identical; and the two outcomes
+  above with a second connection holding an uncommitted tombstone insert on an imported table, at
+  both levels. The round trips Oracle counts in `v$mystat` differ on a statement that fails: 19c
+  counts its round trip and 23ai does not, so the INSERT over a tombstone, the INSERT ALL that fails
+  then the block, counts 2 on 19c and 1 on 23ai for the same two calls (`form4InsertAsOneStatement`,
+  its expectation conditional on the major version; the forms probe 8b through ojdbc alone, a
+  failing INSERT then an UPDATE, counts the same 2 on 19c, run 41308957896).
 
   What the driver does with the rows of a block of entries, per entry in order:
 

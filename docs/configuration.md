@@ -121,4 +121,5 @@ and SQL Server, give ScalarDB's own connections a short lock wait
 
 Every ScalarDB application that writes the same tables sets two isolation settings in its own
 ScalarDB configuration, such as `scalardb.properties`, to match the driver's level: `scalar.db.consensus_commit.isolation_level` and `scalar.db.jdbc.isolation_level`.
-[Isolation levels](transactions.md#isolation-levels) has which values go with each level.
+[Isolation levels](transactions.md#isolation-levels) has which values go with each level and, on
+Oracle, with each layout.

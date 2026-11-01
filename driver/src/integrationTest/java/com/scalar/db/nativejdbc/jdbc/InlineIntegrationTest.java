@@ -39,7 +39,8 @@ import org.junit.jupiter.params.provider.MethodSource;
  * ScalarDB's inline layout, the metadata in the row, as milestone 10a builds it: a table imported
  * without decoupling holds its rows with NULL metadata, which the setup stamps as the backfill of a
  * decoupled table does, and the driver reads at READ COMMITTED. The reads with rows in flight run
- * in {@code ReadIntegrationTest}, by layout.
+ * in {@code ReadIntegrationTest}, by layout. ScalarDB runs at the level the docs give for inline
+ * tables on each engine, READ_COMMITTED on Oracle ({@link Engines#scalarDbInline()}).
  */
 @SuppressFBWarnings(
     value = {"SQL_INJECTION_JDBC", "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"},
@@ -64,7 +65,7 @@ class InlineIntegrationTest {
           "INSERT INTO inl.imp VALUES (1, 'a')",
           "INSERT INTO inl.imp VALUES (2, 'b')");
     }
-    try (DistributedTransactionAdmin admin = e.admin()) {
+    try (DistributedTransactionAdmin admin = e.scalarDbInline().getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.importTable(ns, e.storedTable("imp"), Map.of(), Map.of());
     }
@@ -176,7 +177,7 @@ class InlineIntegrationTest {
           "CREATE TABLE inl2.imp (id " + e.intType() + " PRIMARY KEY, x VARCHAR(10))",
           "INSERT INTO inl2.imp VALUES (1, 'a')");
     }
-    try (DistributedTransactionAdmin admin = e.admin()) {
+    try (DistributedTransactionAdmin admin = e.scalarDbInline().getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.importTable(ns, table, Map.of(), Map.of());
     }
@@ -204,7 +205,7 @@ class InlineIntegrationTest {
     // ScalarDB updates one and deletes the other, prepared: their before images are found
     // through before_tx_version = 0, which ScalarDB writes over a NULL tx_version (todo 291)
     try (TwoPhaseCommitTransactionManager tpc =
-        e.scalarDb().getTwoPhaseCommitTransactionManager()) {
+        e.scalarDbInline().getTwoPhaseCommitTransactionManager()) {
       TwoPhaseCommitTransaction held = tpc.begin();
       try {
         held.update(
@@ -247,7 +248,7 @@ class InlineIntegrationTest {
                       + " FROM inl2.imp WHERE id > 1 ORDER BY id"))
           .containsExactly("2/3/1");
     }
-    try (DistributedTransactionManager tm = e.scalarDb().getTransactionManager()) {
+    try (DistributedTransactionManager tm = e.scalarDbInline().getTransactionManager()) {
       DistributedTransaction tx = tm.begin();
       Optional<Result> two =
           tx.get(
@@ -281,7 +282,7 @@ class InlineIntegrationTest {
           "INSERT INTO inl3.t VALUES (1, 1)",
           "INSERT INTO inl3.t VALUES (2, 1)");
     }
-    try (DistributedTransactionAdmin admin = e.admin()) {
+    try (DistributedTransactionAdmin admin = e.scalarDbInline().getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.importTable(ns, e.storedTable("t"), Map.of(), Map.of());
     }
