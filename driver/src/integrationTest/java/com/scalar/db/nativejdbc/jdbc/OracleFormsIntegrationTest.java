@@ -592,7 +592,9 @@ class OracleFormsIntegrationTest {
           "5f IGNORE_ROW_ON_DUPKEY_INDEX inside a FORALL INSERT over (1, 7, 2): total,"
               + " SQL%BULK_ROWCOUNT 1..3: "
               + forallInsert);
-      assertThat(forallInsert).isEqualTo("ok 1/0/1/0");
+      // below 23 SQL%BULK_ROWCOUNT counts a skipped row as inserted (todo 327, probe 9c)
+      assertThat(forallInsert)
+          .isEqualTo(c.getMetaData().getDatabaseMajorVersion() < 23 ? "ok 1/1/1/1" : "ok 1/0/1/0");
       assertThat(rows(c, "SELECT k, tx_id FROM ofa.f1_meta ORDER BY k"))
           .contains("1/M1", "2/T0", "7/F1");
       c.rollback();
