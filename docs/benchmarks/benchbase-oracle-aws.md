@@ -815,3 +815,39 @@ Next: a harness cell `inline-moved` (backfill, then `MOVE` with the indexes rebu
 steady state, and a docs note on inline tables imported with data: back them up, then backfill and
 `MOVE` once before going live, or leave a larger `PCTFREE`. Both are the user's call (todo 364's
 log, 2026-11-01).
+
+## Oracle 19c on RDS (20261102-0045-ora19)
+
+The first BenchBase run on Oracle 19c, at the user's request (2026-11-02): RDS for Oracle
+Standard Edition 2, licence-included, version 19 (19.0.0.0.ru-2026-07), db.m5.2xlarge, from
+9713535 (plan `plans/oracle19.json`: TPC-C scale 32 and YCSB A at 1M rows, 4 terminals, both
+levels, both layouts, the fast network, two repetitions of 60 s). The harness empties the shared
+pool through `rdsadmin.rdsadmin_util.flush_shared_pool` on RDS (d6834fb; the smoke run
+20261101-2218-ora19 failed on `ALTER SYSTEM`). The run also took matrix.sh's read-overhead step
+(launched without `READS=0`), about 3.5 hours before the BenchBase cells; its reports are kept but
+not read here.
+
+Throughput, (c)/(a), with the 26ai runs on EC2 (Enterprise Edition 23.26.1, fast network) beside:
+
+| cell | TPC-C 19c | TPC-C 26ai | YCSB A 19c | YCSB A 26ai |
+|---|---|---|---|---|
+| RC decoupled | 0.82 | 0.61 | 0.93 | 0.80 |
+| RC inline | 0.76 | 0.79 (twelfth run) | 0.97 | 0.93 |
+| SNAPSHOT decoupled | 0.84 | 0.68 | 0.89 | 0.78 |
+| SNAPSHOT inline | 0.89 | 0.85 (twelfth run) | 1.02 | 0.93 |
+
+The 26ai decoupled and YCSB figures are 20261031-1349-ora's. The ratios are not a version
+comparison: the RDS server runs the vendor's TPC-C at 760–800 transactions a second against
+1,450–1,750 on the EC2 26ai host, at the same round trip (about 120 µs), so the driver's fixed
+cost a transaction is a smaller share on RDS. The 26ai cells with 250 µs of added delay, whose
+vendor throughput is about 520 a second, read 0.83 / 0.92 / 0.86 / 0.95 for TPC-C in the same
+order, close to the 19c figures except RC inline.
+
+RC inline is the one cell below its decoupled neighbour on 19c. Server time a commit for (c):
+active 4.19 ms with 2.73 ms of CPU, against decoupled RC's 4.03 with 3.17, so about 1.5 ms a
+commit of RC inline is waits, against 0.9 for decoupled; the vendor's (a) in that cell also ran
+4–5% faster than in the others. Not yet read by statement or wait event.
+
+A version comparison needs both versions on one host type: RDS offers 26ai only as
+`oracle-ee-cdb` with a bring-your-own licence, and the EC2 stack would need the 19.3 container
+image. The user's call.
