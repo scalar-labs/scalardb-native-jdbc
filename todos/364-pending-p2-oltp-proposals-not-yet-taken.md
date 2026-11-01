@@ -652,3 +652,34 @@ autocommit whole-table, READ COMMITTED with a key conjunct). Reported to the use
 restoration under item 2's condition, landing with item 2 unless the user wants it split out. Also
 from c7's first full Oracle run: the decoupled item read at 6.00 gets a call against the vendor's
 3.00, better than the design's 8; unit tests 416.
+
+### 2026-11-02: item 2 reviewed mergeable: 708aba0 + 67de0b1 on `decoupled-rc-case-copy` (the design's note)
+
+Reviewed from `git show` (on b40dc64; c7 rebases onto main at landing). `SplitRead.caseCopy` reads
+the metadata through alias `m` for a decoupled table, `FROM <data> t LEFT JOIN <meta> m ON <key>`,
+each non-key column and both anchors `CASE WHEN COALESCE(m.tx_state, 3) IN (1, 2) THEN m.before_c
+ELSE t.c END`, the state `m.tx_state`, the WHERE on `m`, no hint; the inline form unchanged, as
+designed. `Router.caseCopies` takes `own` and admits a decoupled reference only in it (a read that
+records anchors), the inline rule unchanged; `own` is the anchored references on Oracle (plus the
+inline state references), so an anchor-less decoupled read keeps the gated statement as written,
+checked by the test's executed texts (`scalardb_native_g0` present, no copy). The ORDER BY finding:
+`SqlAst.ordersPastSelectList` (a `LongValue` item below 1, past the select items, or beside a `*`,
+`t.*` included since `AllTableColumns` extends `AllColumns`; a plain select only, which is enough,
+the split's text builder refusing anything else at `emitSplit`) guards both `Router.caseCopies` and
+`Router.gated`, so the two-arm form's lift leaves the statement whole and Oracle raises ORA-01785 as
+before; the gated hole confirmed by c7 on main (an autocommit SNAPSHOT read of an inline table sorted
+by the gate column). Tests: `todo364_keyOnlyDecoupledReadsAtReadCommittedTakeTheCaseCopy` (the copy's
+text for a lookup and a prefix range; before images in flight with the insert left out; the SUM and
+an autocommit key read gated as written; a non-key predicate keeping the arms; an inner join with
+the item's copy alone; a LEFT JOIN's nullable side without a copy; the before-image anchor taken by
+a write after the in-flight transaction rolled back; ORDER BY 2 refused; the item read bounded at
+8.2 gets, measured 6.00 with 50 items in flight against the vendor's 3.00),
+`anchorlessReadsWithAPositionPastTheListAreRefused` (both layouts, autocommit, SNAPSHOT whole-table
+and READ COMMITTED keyed: ORA-01785, no gate column executed), the inline copy test's ORDER BY 2
+assertion, `SqlAstTest.ordersPastSelectList_...`, ReviewFindings 127's either-form marker;
+changelogs: an improvement for the copy and a bugfix for the ORDER BY position (the gated form may be
+released). c7's run: unit 417, the Oracle suite 189 tests, 0 failures. Design 4.2 amended here: the
+gated guard, the set-operation remark, the 6-gets figure and the build's record. Lands on the user's
+word in c7's session (the user asleep; 6e puts the ORDER BY defect and the landing to them in the
+morning); then 6e's AWS READ COMMITTED and SNAPSHOT decoupled cells. Expected there: the RC decoupled
+TPC-C cell from 0.61 toward 0.64–0.66; the SNAPSHOT cell unchanged (the copy is READ COMMITTED only).
