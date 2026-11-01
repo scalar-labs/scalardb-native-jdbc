@@ -142,7 +142,9 @@ Two ScalarDB settings concern isolation. Both belong in the ScalarDB configurati
 application that writes these tables, the order service's included:
 
 - `scalar.db.jdbc.isolation_level`, the level of ScalarDB's own connections to the database.
-  ScalarDB needs `REPEATABLE_READ` here to create or import a table the driver serves.
+  ScalarDB needs `REPEATABLE_READ` here for a decoupled table the driver serves (C). On Oracle the
+  value follows the layout, `READ_COMMITTED` for inline (A, B) and `SERIALIZABLE` for decoupled (C),
+  as [ScalarDB's connections on Oracle](transactions.md#scalardbs-connections-on-oracle) says.
 - `scalar.db.consensus_commit.isolation_level`, the level of ScalarDB's transactions. It must be the
   level the driver's connections use, since a weaker level on either side breaks what the other
   side's level protects. This guide leaves it at ScalarDB's default, SNAPSHOT, and runs `snsql` and

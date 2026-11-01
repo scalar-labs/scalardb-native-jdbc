@@ -53,7 +53,8 @@ order and builds the plain one again.
 
 The setup is re-runnable, and is run again after a table is added. The tables themselves are
 ScalarDB's to create or import, with `scalar.db.jdbc.isolation_level` as
-[Isolation levels](transactions.md#isolation-levels) gives.
+[Isolation levels](transactions.md#isolation-levels) gives, on Oracle by layout ([ScalarDB's
+connections on Oracle](transactions.md#scalardbs-connections-on-oracle)).
 
 ## Running it
 
