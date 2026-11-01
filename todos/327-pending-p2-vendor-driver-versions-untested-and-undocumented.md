@@ -180,3 +180,18 @@ the supported versions are documented only once CI verifies them.
   forms test's bulk INSERT metadata insert as INSERT ... WHERE NOT EXISTS). Unit tests 416/416 and
   spotless pass (33). Open here: form4's second round trip on 19c (the 10046 trace), a strict 19c run
   of main (the user's call).
+
+### 2026-11-01 - Form 4's second round trip on 19c is 19c's count of a failed call
+
+**By:** Claude Code (the 19c session)
+- The forms probe 8b (`roundTripsOfAFailedCall`, 0c73e34 on `oracle-19c`), through ojdbc alone and
+  the counting proxy, on 19c (run 41308957896): a plain UPDATE 1 round trip by `v$mystat` and 1
+  client chunk, an INSERT failing with ORA-00001 1 and 2, the failing INSERT then the UPDATE 2 and
+  3. Form 4's INSERT over a tombstone, the INSERT ALL that fails then the block, counts the same 2
+  (each pass [2, 2]). On 23 the test's own note records a failing INSERT ALL then an UPDATE through
+  ojdbc as 1: 19c's `v$mystat` counts a failed call's round trip and 23's does not. The driver
+  makes the same two calls on both; no extra call on 19c.
+- `form4InsertAsOneStatement` expects 2 below 23 and 1 otherwise (0d16f47); design 4.4's open item
+  replaced by the cause. The 19c workflow uploads the 23 job's reports too, for 8b's 23 figures,
+  to be added to 8b's comment. Reviewed by the design session (89): no objection. The 10046 trace
+  is not needed.
