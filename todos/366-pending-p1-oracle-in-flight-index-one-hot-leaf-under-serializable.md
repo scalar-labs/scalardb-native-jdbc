@@ -219,3 +219,18 @@ and `MaelstromIntegrationTest` set the level themselves and do not run on Oracle
 Checks: the docs build (links resolve: the new anchor `#scalardbs-connections-on-oracle`); unit tests;
 `InlineIntegrationTest` on Oracle locally; spotless. Lands on the user's word in c7's session, rebased
 onto main's head.
+
+## Review record (2026-11-01, written down 2026-11-02 at c7's ask)
+
+Option 1 as built by c7 on `oracle-366-docs-fixture`: 3ff8b73 (the docs by layout and the inline
+suite at `READ_COMMITTED`, on 4d499bc) was reviewed from `git show` on 2026-11-01 and found
+mergeable, read against the design above: the transactions.md table rows and line 34's
+decoupled-only requirement, the new subsection and its anchor `#scalardbs-connections-on-oracle`,
+the three one-clause pointers, design section 3's sentence, `Engines` (`isolation()` kept with its
+comment, `inlineIsolation()`, `scalarDbInline()` through `scalarDb(Properties)`, whose `putIfAbsent`
+leaves the level), and `InlineIntegrationTest`'s five call sites with the class comment; the
+subsection's figures match the measurements above. One nit, design.md line 976 at 144 characters,
+fixed by c7 as 89b49c2 (lines 976–977 rewrapped at 100, nothing else; the fence count 38 as on
+main). Verdict for the pair 3ff8b73 + 89b49c2: mergeable. The verdict went to c7 by message and was
+not written here until 2026-11-02, when c7 found no record of it before landing; it lands on the
+user's word in c7's session, rebased onto main's head.

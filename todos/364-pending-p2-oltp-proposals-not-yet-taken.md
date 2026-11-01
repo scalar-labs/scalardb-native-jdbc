@@ -683,3 +683,11 @@ gated guard, the set-operation remark, the 6-gets figure and the build's record.
 word in c7's session (the user asleep; 6e puts the ORDER BY defect and the landing to them in the
 morning); then 6e's AWS READ COMMITTED and SNAPSHOT decoupled cells. Expected there: the RC decoupled
 TPC-C cell from 0.61 toward 0.64–0.66; the SNAPSHOT cell unchanged (the copy is READ COMMITTED only).
+
+### 2026-11-02: item 2 on main (37e278f + 10ebd49)
+
+c7 rebased `decoupled-rc-case-copy` onto bfc7fde (6e's reading of the 19c run) and fast-forwarded
+main on the user's "land it" in its session; the range-diff against the reviewed 708aba0 + 67de0b1
+shows both commits identical. Nothing pushed. 6e now takes the AWS READ COMMITTED and SNAPSHOT
+decoupled TPC-C cells to the user (expected above: the RC decoupled cell from 0.61 toward
+0.64–0.66, the SNAPSHOT cell unchanged as the control).
