@@ -846,7 +846,21 @@ order, close to the 19c figures except RC inline.
 RC inline is the one cell below its decoupled neighbour on 19c. Server time a commit for (c):
 active 4.19 ms with 2.73 ms of CPU, against decoupled RC's 4.03 with 3.17, so about 1.5 ms a
 commit of RC inline is waits, against 0.9 for decoupled; the vendor's (a) in that cell also ran
-4–5% faster than in the others. Not yet read by statement or wait event.
+4–5% faster than in the others.
+
+Read by wait event and statement (2026-11-02): the RDS server is bound by its commits. `log file
+sync` averages 2.0–2.4 ms a wait on RDS against 0.11 ms on the EC2 26ai host (twelfth run, RC
+inline), two waits a transaction for both drivers, about a third of all session time; that cost is
+the same for both drivers, which is why every 19c ratio sits higher than 26ai's. RC inline's (c)
+waits longer per sync than the other (c) cells: 2.3–2.4 ms against 1.5–1.8 for decoupled and
+2.1–2.2 for SNAPSHOT inline (the vendor 2.0–2.1 in every cell), with LGWR's writes 1.50–1.56 ms
+against 1.18–1.32 and more DBWR I/O (`db file async I/O submit` 13.5–14.8 s a run against
+7.0–7.7 for decoupled RC). About 0.7 ms a sync, twice a transaction, matches the cell's ~1.4 ms
+of extra waits; its server CPU a commit (2.73 ms) is below decoupled RC's (3.17). The cause of the
+slower log writes is not settled from two 60-second runs. One 19c-only statement cost: the
+inline order_line INSERT (ojdbc's batch of an order's lines) reads 43 gets a call on 19c at both
+levels against 7.4 on 26ai and the vendor's 6.5, and 62 µs of CPU against 36: about 0.6% of a
+NewOrder, not the cell's gap.
 
 A version comparison needs both versions on one host type: RDS offers 26ai only as
 `oracle-ee-cdb` with a bring-your-own licence, and the EC2 stack would need the 19.3 container
