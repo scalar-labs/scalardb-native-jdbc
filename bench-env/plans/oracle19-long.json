@@ -1,5 +1,5 @@
 {
-  "description": "Oracle 19c on RDS (SE2 19, licence-included), the long run: TPC-C scale 32 and YCSB A, C, E and F at 1M rows, READ COMMITTED and SNAPSHOT, both layouts, the fast network, two repetitions of 180 s; from main with todo 364 item 2 (the user's ask, 2026-11-02)",
+  "description": "Oracle 19c on RDS (SE2 19, licence-included), the overnight run: TPC-C scale 32 and YCSB A, C, E and F at 1M rows, READ COMMITTED and SNAPSHOT, both layouts, the fast network and +250 \u00b5s, two repetitions of 60 s as the earlier Oracle runs; from main with todo 364 item 2 (the user's ask, 2026-11-02)",
   "workloads": {
     "tpcc": {
       "benchmark": "tpcc",
@@ -43,12 +43,13 @@
       "inline"
     ],
     "delays_us": [
-      0
+      0,
+      250
     ]
   },
   "runs": "a,c",
   "reps": 2,
-  "time_s": 180,
+  "time_s": 60,
   "terminals": 4,
   "loader_threads": 8,
   "jvm_args": [
