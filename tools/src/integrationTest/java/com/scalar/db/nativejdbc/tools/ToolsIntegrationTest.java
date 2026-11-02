@@ -197,8 +197,9 @@ class ToolsIntegrationTest {
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(ns, true);
-      admin.importTable(ns, imp, Map.of("transaction-metadata-decoupling", "true"), Map.of());
-      admin.importTable(ns, inl, Map.of(), Map.of());
+      Engines.importTable(
+          admin, ns, imp, Map.of("transaction-metadata-decoupling", "true"), Map.of());
+      Engines.importTable(admin, ns, inl, Map.of(), Map.of());
     }
     String meta = engine.quote(ns) + "." + engine.quote(imp + "_tx_metadata");
     String impName = ns + "." + imp;

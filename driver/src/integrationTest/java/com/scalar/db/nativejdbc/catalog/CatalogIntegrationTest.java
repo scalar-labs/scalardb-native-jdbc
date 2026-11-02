@@ -98,16 +98,20 @@ class CatalogIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       String app = e.storedSchema("app");
-      admin.importTable(app, e.storedTable("Orders"), DECOUPLED, Map.of());
-      admin.importTable(app, e.storedTable("imported_inline"), Map.of(), Map.of());
+      Engines.importTable(admin, app, e.storedTable("Orders"), DECOUPLED, Map.of());
+      Engines.importTable(admin, app, e.storedTable("imported_inline"), Map.of(), Map.of());
       // where the engine ignores case, ScalarDB accepts a spelling that differs from the stored
       // one and records it as given
       boolean ignoresCase;
       try (Connection c = e.open()) {
         ignoresCase = e.engine().tableNamesCaseInsensitive(c);
       }
-      admin.importTable(
-          app, ignoresCase ? "MIXED_case" : e.storedTable("Mixed_Case"), DECOUPLED, Map.of());
+      Engines.importTable(
+          admin,
+          app,
+          ignoresCase ? "MIXED_case" : e.storedTable("Mixed_Case"),
+          DECOUPLED,
+          Map.of());
       admin.createNamespace("ns", true);
       admin.createTable(
           "ns",
@@ -149,7 +153,7 @@ class CatalogIntegrationTest {
 
   private static Catalog catalog(Engines e) throws Exception {
     prepare(e);
-    return new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    return e.catalog();
   }
 
   private static final List<String> NO_SESSION = List.of();
@@ -408,9 +412,9 @@ class CatalogIntegrationTest {
       stored = rs.getString(1);
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
-      admin.importTable("APP", stored, DECOUPLED, Map.of());
+      Engines.importTable(admin, "APP", stored, DECOUPLED, Map.of());
     }
-    try (Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open)) {
+    try (Catalog catalog = e.catalog()) {
       TableInfo t = catalog.lookup(NO_SESSION, "app", "größe");
       assertThat(t.layout()).isEqualTo(Layout.DECOUPLED_IMPORTED);
       assertThat(t.table()).isEqualTo(stored);
@@ -421,7 +425,7 @@ class CatalogIntegrationTest {
   @MethodSource("engines")
   void aHit_returnsTheClassificationAlreadyMade(Engines e) throws Exception {
     prepare(e);
-    try (Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open)) {
+    try (Catalog catalog = e.catalog()) {
       TableInfo first = catalog.lookup(NO_SESSION, "app", e.storedTable("Orders"));
       assertThat(catalog.lookup(NO_SESSION, "app", e.storedTable("Orders"))).isSameAs(first);
       String virtual = e.engine().quote(e.storedTable("Orders") + "_scalardb");
@@ -587,13 +591,16 @@ class CatalogIntegrationTest {
             Duration.ofSeconds(60),
             fixedClock(now),
             false);
-    Catalog byInvalidate = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Engines.track(byTtl);
+    Catalog byInvalidate = e.catalog();
     assertThat(layout(byTtl, "app", "late1")).isEqualTo(Layout.PLAIN);
     assertThat(layout(byInvalidate, "app", "late2")).isEqualTo(Layout.PLAIN);
 
     try (DistributedTransactionAdmin admin = e.admin()) {
-      admin.importTable(e.storedSchema("app"), e.storedTable("late1"), DECOUPLED, Map.of());
-      admin.importTable(e.storedSchema("app"), e.storedTable("late2"), DECOUPLED, Map.of());
+      Engines.importTable(
+          admin, e.storedSchema("app"), e.storedTable("late1"), DECOUPLED, Map.of());
+      Engines.importTable(
+          admin, e.storedSchema("app"), e.storedTable("late2"), DECOUPLED, Map.of());
     }
     assertThat(layout(byTtl, "app", "late1")).isEqualTo(Layout.PLAIN); // still the old load
     now[0] = now[0].plusSeconds(61);
@@ -618,6 +625,7 @@ class CatalogIntegrationTest {
             Duration.ofSeconds(60),
             fixedClock(now),
             false);
+    Engines.track(catalog);
     List<String> path = List.of("public", "app");
     try (Connection c = e.open()) {
       e.execute(c, "CREATE TABLE app.r128 (id int)");
@@ -649,6 +657,7 @@ class CatalogIntegrationTest {
             Duration.ofSeconds(60),
             fixedClock(now),
             false);
+    Engines.track(catalog);
     List<String> app = List.of("APP");
     try (Connection c = e.open()) {
       e.execute(c, "CREATE OR REPLACE SYNONYM app.moving FOR app.plain");

@@ -120,7 +120,7 @@ class ReviewFindingsIntegrationTest {
       }
       tx.commit();
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       Setup.run(catalog, c, i -> i.namespace().equals(rv), Duration.ofMinutes(1), List.of(), true);
     }
@@ -485,10 +485,10 @@ class ReviewFindingsIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("ix"), true);
-      admin.importTable(
-          N("ix"), N("t"), Map.of("transaction-metadata-decoupling", "true"), Map.of());
+      Engines.importTable(
+          admin, N("ix"), N("t"), Map.of("transaction-metadata-decoupling", "true"), Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(

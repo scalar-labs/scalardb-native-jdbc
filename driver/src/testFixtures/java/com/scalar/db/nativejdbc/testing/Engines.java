@@ -1,6 +1,9 @@
 package com.scalar.db.nativejdbc.testing;
 
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.exception.storage.ExecutionException;
+import com.scalar.db.io.DataType;
+import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
@@ -10,12 +13,15 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.testcontainers.containers.JdbcDatabaseContainer;
@@ -155,6 +161,13 @@ public enum Engines {
 
   private static final Map<Engines, Started> STARTED = new EnumMap<>(Engines.class);
 
+  /**
+   * The catalogs the tests made through {@link #catalog} or {@link #track}, held weakly: a catalog
+   * no test still refers to drops out with its metadata, one a class keeps in a field stays and is
+   * released again after each later class. Guarded by itself.
+   */
+  private static final Set<Catalog> CATALOGS = Collections.newSetFromMap(new WeakHashMap<>());
+
   private static final class Started {
     final String url;
     final String username;
@@ -270,9 +283,75 @@ public enum Engines {
     return DriverManager.getConnection(s.url, s.username, s.password);
   }
 
+  /**
+   * A catalog on this database with the default metadata schema, as the driver makes one, whose
+   * session {@link #releaseCatalogSessions} releases after each test class.
+   */
+  public Catalog catalog() {
+    return track(new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, this::open));
+  }
+
+  /** Returns the catalog, its session released after each test class. */
+  public static Catalog track(Catalog catalog) {
+    synchronized (CATALOGS) {
+      CATALOGS.add(catalog);
+    }
+    return catalog;
+  }
+
+  /**
+   * Releases the sessions of the catalogs the tests made, keeping the catalogs: one a test class
+   * keeps in a field, or one an outer class still uses after a nested class, opens a new session
+   * when used again. Each held its session for the JVM's life otherwise (89's review of 30dede3).
+   */
+  public static void releaseCatalogSessions() {
+    synchronized (CATALOGS) {
+      for (Catalog c : CATALOGS) {
+        c.releaseConnection();
+      }
+    }
+  }
+
   /** ScalarDB's admin on this database. */
   public DistributedTransactionAdmin admin() throws Exception {
     return scalarDb().getTransactionAdmin();
+  }
+
+  /**
+   * ScalarDB's {@code importTable}, again on ORA-08177: its admin connection reads the new table's
+   * columns through ojdbc's {@code getColumns} at SERIALIZABLE, which on Oracle fails now and then
+   * right after the table's {@code CREATE TABLE} (CI runs 41362044124 and earlier). The read comes
+   * before the import writes anything, so the import runs again as a whole. A stopgap: todo 366
+   * removes the cause, an inline table's import at READ_COMMITTED (option 1) and a decoupled one's
+   * once ScalarDB lowers its Oracle minimum (option 2).
+   */
+  public static void importTable(
+      DistributedTransactionAdmin admin,
+      String namespace,
+      String table,
+      Map<String, String> options,
+      Map<String, DataType> overrideColumnsType)
+      throws ExecutionException, InterruptedException {
+    for (int attempt = 1; ; attempt++) {
+      try {
+        admin.importTable(namespace, table, options, overrideColumnsType);
+        return;
+      } catch (ExecutionException ex) {
+        if (attempt == 3 || !causedBy08177(ex)) {
+          throw ex;
+        }
+        Thread.sleep(200L * attempt);
+      }
+    }
+  }
+
+  private static boolean causedBy08177(Throwable t) {
+    for (Throwable c = t; c != null; c = c.getCause()) {
+      if (c instanceof SQLException s && s.getErrorCode() == 8177) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** ScalarDB's Consensus Commit on this database, for its transaction managers. */

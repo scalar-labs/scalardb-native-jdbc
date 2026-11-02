@@ -149,14 +149,15 @@ class SqlLogicIntegrationTest {
         admin.createCoordinatorTables(true);
         admin.createNamespace(e.storedSchema(scalarDb), true);
         for (String t : tables) {
-          admin.importTable(
+          Engines.importTable(
+              admin,
               e.storedSchema(scalarDb),
               e.storedTable(t),
               layout.equals("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of(),
               Map.of());
         }
       }
-      Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+      Catalog catalog = e.catalog();
       try (Connection c = e.open()) {
         String ns = e.storedSchema(scalarDb);
         assertThat(

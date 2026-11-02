@@ -7,7 +7,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.scalar.db.api.DistributedTransactionAdmin;
 import com.scalar.db.api.TableMetadata;
-import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
@@ -104,7 +103,7 @@ class UnparsedIntegrationTest {
       }
       assertThat(
               Setup.run(
-                  new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
+                  e.catalog(),
                   c,
                   t -> t.namespace().equals(N("up")),
                   Duration.ofMinutes(1),

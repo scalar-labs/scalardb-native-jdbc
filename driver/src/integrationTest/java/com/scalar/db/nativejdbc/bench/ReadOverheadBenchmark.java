@@ -1308,11 +1308,15 @@ class ReadOverheadBenchmark {
       admin.createCoordinatorTables(true);
       admin.createNamespace(ns, true);
       for (String t : tables) {
-        admin.importTable(
-            ns, e.storedTable(t), Map.of("transaction-metadata-decoupling", "true"), Map.of());
+        Engines.importTable(
+            admin,
+            ns,
+            e.storedTable(t),
+            Map.of("transaction-metadata-decoupling", "true"),
+            Map.of());
       }
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       for (String t : tables) {
         String col = indexed.get(t);
@@ -1444,7 +1448,7 @@ class ReadOverheadBenchmark {
         run(d, sql, ps, placeholders(ps), q.params, 4242, 7);
       }
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     String ns = e.storedSchema("bn");
     try (Connection c = e.open()) {
       if (engine == Engine.ORACLE) {
