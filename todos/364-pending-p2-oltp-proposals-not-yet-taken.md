@@ -691,3 +691,28 @@ main on the user's "land it" in its session; the range-diff against the reviewed
 shows both commits identical. Nothing pushed. 6e now takes the AWS READ COMMITTED and SNAPSHOT
 decoupled TPC-C cells to the user (expected above: the RC decoupled cell from 0.61 toward
 0.64–0.66, the SNAPSHOT cell unchanged as the control).
+
+### 2026-11-02: a 19c-only cost on the inline order_line batch INSERT (6e's finding; a fact, nothing proposed)
+
+6e's 19c run on RDS (20261102-0045-ora19, docs/benchmarks/benchbase-oracle-aws.md at 06ba980): the
+inline order_line INSERT, ojdbc's batch of an order's ten lines as one array execution, reads 43
+gets a call on 19c at both levels against the vendor's 6.5 there and 7.4–7.9 on 26ai, 62 µs of CPU
+against 36; about 0.6% of a NewOrder. Read against 6e's server files: the single-row inserts into
+the same kind of table cost 19c nothing extra (new_order 4.4 gets for both drivers, history 1.1),
+so the excess is the batch's alone, about 3.7 gets a row, the shape of one primary-key descent per
+row (blevel 3 at scale 32) where the vendor's array insert descends once for the sorted batch. On
+26ai the same batch cost 12.5–13.3 gets with the plain in-flight index, every row an entry, and
+7.4–7.9 since the function-based one (c4a7fcf). The 23ai container reproduces both (scratchpad
+`ora/ins19.jsh`: four order_line-shaped tables of 1.2M rows, 10-row batches through
+`executeBatch`, forms alternated, medians of five rounds of 200 calls): the vendor's shape 6.7
+gets a call, inline with the function-based index 7.0, inline with no in-flight index 7.0, inline
+with the plain index 11.6; one row a call 4.5, 4.5, 4.4 and 8.0. So on 23ai and 26ai the
+function-based index costs an array insert nothing, and the 43 is 19c's handling of it. The
+hypothesis: 19c maintains a table's indexes row by row when one of them is function-based, losing
+the array insert's single descent per index, while a single-row insert sees no difference. Not
+confirmed: no 19c server is at hand here (the container image is 23ai; 19c is RDS or 33's
+workflow). What would settle it: `ora/ins19.jsh`, or a test of its shape, against a 19c instance.
+If confirmed, the cost is bounded to multi-row batch inserts into inline tables on 19c, about 4
+gets and 4 µs a row, TPC-C's order_line being the only such statement; the trade on 19c would be
+the function-based index's savings on every gated read and first write against that. No remedy
+proposed; the user's call whether to confirm it.
