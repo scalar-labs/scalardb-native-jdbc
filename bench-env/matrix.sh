@@ -7,7 +7,7 @@
 # a run per in-flight count with changed images, its rows checked against VIEW_LJ. WRITERS=1 adds
 # InFlightCheckBenchmark's writers mode, REPS runs, one engine at a time so that the engines do not
 # share the client's CPU (with -Dnativejdbc.bench.checkPlan=true, Oracle's plan of the predicate's
-# check instead); READS=0 leaves out the read benchmark. BENCHBASE=1 adds BenchBase's workloads
+# check instead); READS=0 leaves out the read benchmark, the default with a PLAN. BENCHBASE=1 adds BenchBase's workloads
 # (BenchBaseBenchmark, milestone T6), one engine at a time; BASE_DIR, a second tree (run.sh's
 # BASELINE), runs them after, its reports prefixed base-. BB_RUNS picks the runs (a,c by default; d
 # is the vendor on the ScalarDB tables, the layout's cost alone;
@@ -45,7 +45,8 @@ failures() {
     cp "$f" "results/$1-$(basename "$f")"
   done
 }
-[ "${READS:-1}" = 0 ] || for n in ${INFLIGHT:-100 10000}; do
+# a plan is BenchBase alone unless READS=1 asks for the read benchmark too
+[ "${READS:-${PLAN:+0}}" = 0 ] || for n in ${INFLIGHT:-100 10000}; do
   for rep in $(seq 1 "${REPS:-3}") ${CHANGED:+changed}; do
     changed=(); [ "$rep" = changed ] && changed=(-Dnativejdbc.bench.changed=true)
     echo "=== $tier i$n-$rep $(date +%T)"

@@ -19,7 +19,8 @@
 # Before either: aws login --profile hiroyuki_yamada (the user signs in). run.sh then works only as
 # the role scalardb-bench (setup-account.sh), assumed anew on every refresh.
 # Environment: STACK (a stack beside others, see tf below), BENCH_DB_PASSWORD, SSH_KEY (the private key of bench.tfvars' public one), BENCH_BUCKET,
-# MAX_RUN_MINUTES (default 480, below a login session of 12 hours, with room for the destroy);
+# MAX_RUN_MINUTES (default 480, below a login session of 12 hours, with room for the destroy; `plan`
+# sets the instances' lifetime 30 minutes past it, so give it to `plan` too);
 # PLAN, a benchmark plan (plan.py, plans/) shipped to the client whichever tree goes, checked before
 # the apply; matrix.sh's REPS, INFLIGHT, CHANGED, WRITERS, READS, BENCHBASE, BB_WORKLOADS, BB_TIME, BB_RUNS,
 # BB_JVM_ARGS, BB_LAYOUTS, BB_ISOLATIONS and NET_DELAYS (a slower network than the placement gives,
@@ -65,7 +66,10 @@ case "${1:-}" in
     [ "$ws" = default ] || terraform -chdir="$here/terraform" workspace list | grep -qw "$ws" ||
       terraform -chdir="$here/terraform" workspace new "$ws" >/dev/null
     # the plan file holds the variables, the password included: no placeholder (*.tfplan is ignored)
-    TF_VAR_db_password=${BENCH_DB_PASSWORD:?} tf plan -input=false -var-file=${TFVARS:-bench.tfvars} -out="$planfile"
+    # the instances outlive the run's own limit, after which detached.sh tears down (a run ended by
+    # the instances' shutdown loses its reports and leaves the RDS instance; 20261102-0045-ora19)
+    TF_VAR_db_password=${BENCH_DB_PASSWORD:?} tf plan -input=false -var-file=${TFVARS:-bench.tfvars} \
+      -var "lifetime_minutes=$((${MAX_RUN_MINUTES:-480} + 30))" -out="$planfile"
     exit ;;
   apply)
     # the plan written by `plan` alone, as for a security group's new address while `run` waits
@@ -154,7 +158,7 @@ for key, url in urls.items():
   if [ -n "${BASELINE:-}" ]; then
     (cd "$repo" && git archive "$BASELINE") | ssh_ "rm -rf $tier-base && mkdir $tier-base && tar -x -C $tier-base"
   fi
-  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-1}' BENCHBASE='${BENCHBASE:-}' BB_WORKLOADS='${BB_WORKLOADS:-}' BB_TIME='${BB_TIME:-}' BB_RUNS='${BB_RUNS:-}' BB_JVM_ARGS='${BB_JVM_ARGS:-}' BB_LAYOUTS='${BB_LAYOUTS:-}' BB_ISOLATIONS='${BB_ISOLATIONS:-}' NET_DELAYS='${NET_DELAYS:-}' PLAN='${PLAN:+bench-env/run-plan.json}' BASE_DIR='${BASELINE:+../$tier-base}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
+  cmd="cd $tier && BENCH_DB_PASSWORD='$BENCH_DB_PASSWORD' REPS='${REPS:-3}' INFLIGHT='${INFLIGHT:-100 10000}' CHANGED='${CHANGED:-}' WRITERS='${WRITERS:-}' READS='${READS:-${PLAN:+0}}' BENCHBASE='${BENCHBASE:-}' BB_WORKLOADS='${BB_WORKLOADS:-}' BB_TIME='${BB_TIME:-}' BB_RUNS='${BB_RUNS:-}' BB_JVM_ARGS='${BB_JVM_ARGS:-}' BB_LAYOUTS='${BB_LAYOUTS:-}' BB_ISOLATIONS='${BB_ISOLATIONS:-}' NET_DELAYS='${NET_DELAYS:-}' PLAN='${PLAN:+bench-env/run-plan.json}' BASE_DIR='${BASELINE:+../$tier-base}' bash bench-env/matrix.sh $tier $(echo $args) -- $*"
   if [ -n "${BENCH_BUCKET:-}" ]; then cmds+=("$cmd"); continue; fi
   (
     ssh_ "$cmd" > "$out/$tier.log" 2>&1 || echo "tier $tier failed, see $out/$tier.log"
