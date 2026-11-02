@@ -334,7 +334,8 @@ class BenchBaseBenchmark {
       }
       try (DistributedTransactionAdmin admin = e.admin()) {
         for (String t : imported) {
-          admin.importTable(
+          Engines.importTable(
+              admin,
               ns,
               t,
               DECOUPLED ? Map.of("transaction-metadata-decoupling", "true") : Map.of(),

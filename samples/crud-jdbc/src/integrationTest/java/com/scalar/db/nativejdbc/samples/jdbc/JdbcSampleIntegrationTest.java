@@ -76,7 +76,8 @@ class JdbcSampleIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
-      admin.importTable(
+      Engines.importTable(
+          admin,
           ns,
           table,
           inline ? Map.of() : Map.of("transaction-metadata-decoupling", "true"),

@@ -59,8 +59,8 @@ class SetupIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createNamespace(su, true);
-      admin.importTable(su, e.storedTable("imp"), DECOUPLED, Map.of());
-      admin.importTable(su, e.storedTable("konly"), DECOUPLED, Map.of());
+      Engines.importTable(admin, su, e.storedTable("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, su, e.storedTable("konly"), DECOUPLED, Map.of());
       admin.createTable(
           su,
           "comp",
@@ -275,7 +275,7 @@ class SetupIntegrationTest {
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(ns, true);
-      admin.importTable(ns, e.storedTable("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, ns, e.storedTable("imp"), DECOUPLED, Map.of());
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     String table = name + ".imp";
@@ -489,7 +489,7 @@ class SetupIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createNamespace(sk, true);
-      admin.importTable(sk, e.storedTable("ord"), DECOUPLED, Map.of());
+      Engines.importTable(admin, sk, e.storedTable("ord"), DECOUPLED, Map.of());
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     TableInfo t = catalog.lookup(List.of(), sk, e.storedTable("ord"));

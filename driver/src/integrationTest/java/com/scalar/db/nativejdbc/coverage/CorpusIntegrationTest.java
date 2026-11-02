@@ -104,7 +104,7 @@ class CorpusIntegrationTest {
         String ns = e.storedSchema(set + l.getKey());
         admin.createNamespace(ns, true);
         for (String t : IMPORTED) {
-          admin.importTable(ns, e.storedTable(t), l.getValue(), Map.of());
+          Engines.importTable(admin, ns, e.storedTable(t), l.getValue(), Map.of());
         }
       }
     }

@@ -207,25 +207,25 @@ class MoreWritesIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("wb"), true);
-      admin.importTable(N("wb"), N("imp"), DECOUPLED, Map.of());
-      admin.importTable(N("wb"), N("gen"), DECOUPLED, Map.of());
-      admin.importTable(N("wb"), N("cov"), DECOUPLED, Map.of());
-      admin.importTable(N("wb"), N("tz"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("wb"), N("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("wb"), N("gen"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("wb"), N("cov"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("wb"), N("tz"), DECOUPLED, Map.of());
       for (String table : List.of("ord", "nn", "vk", "fl", "dbl")) {
-        admin.importTable(N("wb"), N(table), DECOUPLED, Map.of());
+        Engines.importTable(admin, N("wb"), N(table), DECOUPLED, Map.of());
       }
       if (e.engine() == Engine.SQLSERVER) {
-        admin.importTable(N("wb"), N("dt"), DECOUPLED, Map.of());
-        admin.importTable(N("wb"), N("tk"), DECOUPLED, Map.of());
+        Engines.importTable(admin, N("wb"), N("dt"), DECOUPLED, Map.of());
+        Engines.importTable(admin, N("wb"), N("tk"), DECOUPLED, Map.of());
       }
       if (e.engine() == Engine.ORACLE) {
-        admin.importTable(N("wb"), N("ct"), DECOUPLED, Map.of());
-        admin.importTable(N("wb"), N("ch"), DECOUPLED, Map.of());
-        admin.importTable(N("wb"), N("lq"), DECOUPLED, Map.of());
+        Engines.importTable(admin, N("wb"), N("ct"), DECOUPLED, Map.of());
+        Engines.importTable(admin, N("wb"), N("ch"), DECOUPLED, Map.of());
+        Engines.importTable(admin, N("wb"), N("lq"), DECOUPLED, Map.of());
       }
       if (e.engine() == Engine.MYSQL) {
-        admin.importTable(N("wb"), N("seq"), DECOUPLED, Map.of());
-        admin.importTable(N("wb"), N("trg"), DECOUPLED, Map.of());
+        Engines.importTable(admin, N("wb"), N("seq"), DECOUPLED, Map.of());
+        Engines.importTable(admin, N("wb"), N("trg"), DECOUPLED, Map.of());
       }
       admin.createTable(
           N("wb"),
@@ -236,7 +236,7 @@ class MoreWritesIntegrationTest {
               .addPartitionKey(N("id"))
               .build(),
           DECOUPLED);
-      admin.importTable(N("wb"), N("impi"), Map.of(), Map.of());
+      Engines.importTable(admin, N("wb"), N("impi"), Map.of(), Map.of());
       admin.createTable(
           N("wb"),
           N("madei"),

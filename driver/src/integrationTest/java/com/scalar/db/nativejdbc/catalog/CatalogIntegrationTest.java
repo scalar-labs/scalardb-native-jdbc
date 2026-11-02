@@ -98,16 +98,20 @@ class CatalogIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       String app = e.storedSchema("app");
-      admin.importTable(app, e.storedTable("Orders"), DECOUPLED, Map.of());
-      admin.importTable(app, e.storedTable("imported_inline"), Map.of(), Map.of());
+      Engines.importTable(admin, app, e.storedTable("Orders"), DECOUPLED, Map.of());
+      Engines.importTable(admin, app, e.storedTable("imported_inline"), Map.of(), Map.of());
       // where the engine ignores case, ScalarDB accepts a spelling that differs from the stored
       // one and records it as given
       boolean ignoresCase;
       try (Connection c = e.open()) {
         ignoresCase = e.engine().tableNamesCaseInsensitive(c);
       }
-      admin.importTable(
-          app, ignoresCase ? "MIXED_case" : e.storedTable("Mixed_Case"), DECOUPLED, Map.of());
+      Engines.importTable(
+          admin,
+          app,
+          ignoresCase ? "MIXED_case" : e.storedTable("Mixed_Case"),
+          DECOUPLED,
+          Map.of());
       admin.createNamespace("ns", true);
       admin.createTable(
           "ns",
@@ -408,7 +412,7 @@ class CatalogIntegrationTest {
       stored = rs.getString(1);
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
-      admin.importTable("APP", stored, DECOUPLED, Map.of());
+      Engines.importTable(admin, "APP", stored, DECOUPLED, Map.of());
     }
     try (Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open)) {
       TableInfo t = catalog.lookup(NO_SESSION, "app", "größe");
@@ -592,8 +596,10 @@ class CatalogIntegrationTest {
     assertThat(layout(byInvalidate, "app", "late2")).isEqualTo(Layout.PLAIN);
 
     try (DistributedTransactionAdmin admin = e.admin()) {
-      admin.importTable(e.storedSchema("app"), e.storedTable("late1"), DECOUPLED, Map.of());
-      admin.importTable(e.storedSchema("app"), e.storedTable("late2"), DECOUPLED, Map.of());
+      Engines.importTable(
+          admin, e.storedSchema("app"), e.storedTable("late1"), DECOUPLED, Map.of());
+      Engines.importTable(
+          admin, e.storedSchema("app"), e.storedTable("late2"), DECOUPLED, Map.of());
     }
     assertThat(layout(byTtl, "app", "late1")).isEqualTo(Layout.PLAIN); // still the old load
     now[0] = now[0].plusSeconds(61);

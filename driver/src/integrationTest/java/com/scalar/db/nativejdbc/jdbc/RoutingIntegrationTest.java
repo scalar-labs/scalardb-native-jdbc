@@ -54,7 +54,8 @@ class RoutingIntegrationTest {
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("m1", true);
       if (!admin.tableExists("m1", "s")) {
-        admin.importTable("m1", "s", Map.of("transaction-metadata-decoupling", "true"), Map.of());
+        Engines.importTable(
+            admin, "m1", "s", Map.of("transaction-metadata-decoupling", "true"), Map.of());
       }
     }
     try (Connection c = PG.open()) {
@@ -526,8 +527,8 @@ class RoutingIntegrationTest {
         PreparedStatement ps = c.prepareStatement("SELECT x FROM m1.late")) {
       assertThat(outcome(ps::executeQuery)).isEqualTo("read nothing"); // a plain table
       try (DistributedTransactionAdmin admin = PG.admin()) {
-        admin.importTable(
-            "m1", "late", Map.of("transaction-metadata-decoupling", "true"), Map.of());
+        Engines.importTable(
+            admin, "m1", "late", Map.of("transaction-metadata-decoupling", "true"), Map.of());
       }
       Thread.sleep(600); // past the TTL, with no lookup on this catalog in between
       // routed again: now a ScalarDB table, and one not set up yet

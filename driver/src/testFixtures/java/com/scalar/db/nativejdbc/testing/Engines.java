@@ -1,6 +1,8 @@
 package com.scalar.db.nativejdbc.testing;
 
 import com.scalar.db.api.DistributedTransactionAdmin;
+import com.scalar.db.exception.storage.ExecutionException;
+import com.scalar.db.io.DataType;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
@@ -257,6 +259,41 @@ public enum Engines {
   /** ScalarDB's admin on this database. */
   public DistributedTransactionAdmin admin() throws Exception {
     return scalarDb().getTransactionAdmin();
+  }
+
+  /**
+   * ScalarDB's {@code importTable}, again on ORA-08177: its admin connection reads the new table's
+   * columns through ojdbc's {@code getColumns} at SERIALIZABLE, which on Oracle fails now and then
+   * right after the table's {@code CREATE TABLE} (CI runs 41362044124 and earlier). The read comes
+   * before the import writes anything, so the import runs again as a whole.
+   */
+  public static void importTable(
+      DistributedTransactionAdmin admin,
+      String namespace,
+      String table,
+      Map<String, String> options,
+      Map<String, DataType> overrideColumnsType)
+      throws ExecutionException, InterruptedException {
+    for (int attempt = 1; ; attempt++) {
+      try {
+        admin.importTable(namespace, table, options, overrideColumnsType);
+        return;
+      } catch (ExecutionException ex) {
+        if (attempt == 3 || !causedBy08177(ex)) {
+          throw ex;
+        }
+        Thread.sleep(200L * attempt);
+      }
+    }
+  }
+
+  private static boolean causedBy08177(Throwable t) {
+    for (Throwable c = t; c != null; c = c.getCause()) {
+      if (c instanceof SQLException s && s.getErrorCode() == 8177) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** ScalarDB's Consensus Commit on this database, for its transaction managers. */

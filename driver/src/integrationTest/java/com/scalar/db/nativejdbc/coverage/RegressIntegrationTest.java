@@ -192,7 +192,8 @@ class RegressIntegrationTest {
       admin.createCoordinatorTables(true);
       admin.createNamespace(scalarDb, true);
       for (String t : IMPORTED) {
-        admin.importTable(
+        Engines.importTable(
+            admin,
             scalarDb,
             t,
             layout.equals("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of(),

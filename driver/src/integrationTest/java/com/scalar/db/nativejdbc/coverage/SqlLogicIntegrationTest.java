@@ -149,7 +149,8 @@ class SqlLogicIntegrationTest {
         admin.createCoordinatorTables(true);
         admin.createNamespace(e.storedSchema(scalarDb), true);
         for (String t : tables) {
-          admin.importTable(
+          Engines.importTable(
+              admin,
               e.storedSchema(scalarDb),
               e.storedTable(t),
               layout.equals("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of(),

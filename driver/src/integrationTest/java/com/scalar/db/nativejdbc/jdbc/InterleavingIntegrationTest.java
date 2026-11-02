@@ -148,8 +148,8 @@ class InterleavingIntegrationTest {
       admin.createNamespace(N("il"), true);
       for (String isolation : ISOLATIONS) {
         String suffix = "_" + isolation.toLowerCase(Locale.ROOT);
-        admin.importTable(N("il"), N("imp" + suffix), DECOUPLED, Map.of());
-        admin.importTable(N("il"), N("impi" + suffix), Map.of(), Map.of());
+        Engines.importTable(admin, N("il"), N("imp" + suffix), DECOUPLED, Map.of());
+        Engines.importTable(admin, N("il"), N("impi" + suffix), Map.of(), Map.of());
         admin.createTable(
             N("il"),
             N("made" + suffix),

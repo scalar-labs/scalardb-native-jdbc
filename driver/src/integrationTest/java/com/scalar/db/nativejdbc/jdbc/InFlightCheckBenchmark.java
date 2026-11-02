@@ -132,8 +132,12 @@ class InFlightCheckBenchmark {
       admin.createCoordinatorTables(true);
       admin.createNamespace(ns, true);
       for (String table : List.of("o", "c")) {
-        admin.importTable(
-            ns, e.storedTable(table), Map.of("transaction-metadata-decoupling", "true"), Map.of());
+        Engines.importTable(
+            admin,
+            ns,
+            e.storedTable(table),
+            Map.of("transaction-metadata-decoupling", "true"),
+            Map.of());
       }
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);

@@ -95,8 +95,8 @@ class DecoupledReadCommittedIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = factory.getTransactionAdmin()) {
       admin.createNamespace(NS, true);
-      admin.importTable(NS, "imp", DECOUPLED, Map.of());
-      admin.importTable(NS, "big", DECOUPLED, Map.of());
+      Engines.importTable(admin, NS, "imp", DECOUPLED, Map.of());
+      Engines.importTable(admin, NS, "big", DECOUPLED, Map.of());
       admin.createTable(
           NS,
           "made",
@@ -849,7 +849,7 @@ class DecoupledReadCommittedIntegrationTest {
           "INSERT INTO " + NS + ".mil SELECT g, 'a' FROM generate_series(1, 1000000) g");
     }
     try (DistributedTransactionAdmin admin = factory.getTransactionAdmin()) {
-      admin.importTable(NS, "mil", DECOUPLED, Map.of());
+      Engines.importTable(admin, NS, "mil", DECOUPLED, Map.of());
     }
     catalog.invalidate(); // the table ScalarDB has just imported
     TableInfo mil = catalog.lookup(List.of(), NS, "mil");

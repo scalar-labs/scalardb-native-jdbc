@@ -113,7 +113,8 @@ class WriteCorpusIntegrationTest {
         String ns = e.storedSchema(layout);
         admin.createNamespace(ns, true);
         for (String t : IMPORTED) {
-          admin.importTable(
+          Engines.importTable(
+              admin,
               ns,
               e.storedTable(t),
               layout.endsWith("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of(),

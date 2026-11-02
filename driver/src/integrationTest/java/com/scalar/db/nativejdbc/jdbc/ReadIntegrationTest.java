@@ -114,7 +114,7 @@ class ReadIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true); // the commit state of every transaction
       admin.createNamespace(rd, true);
-      admin.importTable(rd, imp, layout, Map.of());
+      Engines.importTable(admin, rd, imp, layout, Map.of());
       admin.createTable(
           rd,
           "made",
@@ -483,7 +483,7 @@ class ReadIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace("rk", true);
-      admin.importTable("rk", "kc", DECOUPLED, Map.of());
+      Engines.importTable(admin, "rk", "kc", DECOUPLED, Map.of());
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     TableInfo kc = catalog.lookup(List.of(), "rk", "kc");
@@ -1155,7 +1155,7 @@ class ReadIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(sdb, true);
-      admin.importTable(sdb, "nx", inline ? Map.of() : DECOUPLED, Map.of());
+      Engines.importTable(admin, sdb, "nx", inline ? Map.of() : DECOUPLED, Map.of());
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     String nxScalarDb =

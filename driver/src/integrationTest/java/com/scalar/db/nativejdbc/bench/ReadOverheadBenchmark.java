@@ -1308,8 +1308,12 @@ class ReadOverheadBenchmark {
       admin.createCoordinatorTables(true);
       admin.createNamespace(ns, true);
       for (String t : tables) {
-        admin.importTable(
-            ns, e.storedTable(t), Map.of("transaction-metadata-decoupling", "true"), Map.of());
+        Engines.importTable(
+            admin,
+            ns,
+            e.storedTable(t),
+            Map.of("transaction-metadata-decoupling", "true"),
+            Map.of());
       }
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);

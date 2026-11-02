@@ -485,8 +485,8 @@ class ReviewFindingsIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("ix"), true);
-      admin.importTable(
-          N("ix"), N("t"), Map.of("transaction-metadata-decoupling", "true"), Map.of());
+      Engines.importTable(
+          admin, N("ix"), N("t"), Map.of("transaction-metadata-decoupling", "true"), Map.of());
     }
     Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     try (Connection c = e.open()) {

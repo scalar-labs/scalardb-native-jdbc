@@ -57,7 +57,7 @@ class ScalarDbNullMetadataIntegrationTest {
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(ns, true);
-      admin.importTable(ns, e.storedTable("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, ns, e.storedTable("imp"), DECOUPLED, Map.of());
     }
     // ScalarDB's name for an imported decoupled table is its LEFT OUTER virtual table
     String table = e.storedTable("imp") + "_scalardb";

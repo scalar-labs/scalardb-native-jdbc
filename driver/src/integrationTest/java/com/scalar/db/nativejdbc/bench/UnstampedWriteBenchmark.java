@@ -92,8 +92,12 @@ class UnstampedWriteBenchmark {
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(ns, true);
-      admin.importTable(
-          ns, e.storedTable("t"), Map.of("transaction-metadata-decoupling", "true"), Map.of());
+      Engines.importTable(
+          admin,
+          ns,
+          e.storedTable("t"),
+          Map.of("transaction-metadata-decoupling", "true"),
+          Map.of());
     }
     Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
     String meta = engine.quote(ns) + "." + engine.quote(e.storedTable("t") + "_tx_metadata");

@@ -199,12 +199,12 @@ class OracleOltpIntegrationTest {
       }
     }
     try (DistributedTransactionAdmin admin = ORA.admin()) {
-      admin.importTable(N(NS), N("imp"), DECOUPLED, Map.of());
-      admin.importTable(N(NS), N("gen"), DECOUPLED, Map.of());
-      admin.importTable(N(NS), N("dbl"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N(NS), N("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N(NS), N("gen"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N(NS), N("dbl"), DECOUPLED, Map.of());
       for (KeyType k : KeyType.values()) {
-        admin.importTable(
-            N(NS), N(k.name().toLowerCase(java.util.Locale.ROOT)), DECOUPLED, Map.of());
+        Engines.importTable(
+            admin, N(NS), N(k.name().toLowerCase(java.util.Locale.ROOT)), DECOUPLED, Map.of());
       }
     }
     catalog = new Catalog(Engine.ORACLE, Catalog.DEFAULT_METADATA_SCHEMA, ORA::open);
@@ -850,7 +850,7 @@ class OracleOltpIntegrationTest {
           "INSERT INTO " + NS + ".impw VALUES (2, 1, 0)");
     }
     try (DistributedTransactionAdmin admin = ORA.admin()) {
-      admin.importTable(N(NS), N("impw"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N(NS), N("impw"), DECOUPLED, Map.of());
     }
     catalog.invalidate();
     try (Connection v = ORA.open()) {
@@ -5110,7 +5110,7 @@ class OracleOltpIntegrationTest {
           "INSERT INTO " + NS + ".unst SELECT LEVEL, 0 FROM dual CONNECT BY LEVEL <= 100");
     }
     try (DistributedTransactionAdmin admin = ORA.admin()) {
-      admin.importTable(N(NS), N("unst"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N(NS), N("unst"), DECOUPLED, Map.of());
     }
     catalog.invalidate();
     String meta;

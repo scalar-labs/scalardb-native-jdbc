@@ -74,8 +74,12 @@ class RouteCostBenchmark {
       admin.createCoordinatorTables(true);
       admin.createNamespace(rc, true);
       for (String t : List.of("c", "o", "i", "p")) {
-        admin.importTable(
-            rc, e.storedTable(t), Map.of("transaction-metadata-decoupling", "true"), Map.of());
+        Engines.importTable(
+            admin,
+            rc,
+            e.storedTable(t),
+            Map.of("transaction-metadata-decoupling", "true"),
+            Map.of());
       }
     }
     Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);

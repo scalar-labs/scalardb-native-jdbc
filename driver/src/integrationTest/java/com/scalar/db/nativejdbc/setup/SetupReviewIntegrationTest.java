@@ -79,7 +79,7 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("r69", true);
-      admin.importTable("r69", "t", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r69", "t", DECOUPLED, Map.of());
     }
     try (Connection c = PG.open()) {
       // an in-flight ScalarDB insert: prepared, no before image (PrepareMutationComposer)
@@ -106,8 +106,8 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("r70", true);
-      admin.importTable("r70", "orders", DECOUPLED, Map.of());
-      admin.importTable("r70", "Orders", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r70", "orders", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r70", "Orders", DECOUPLED, Map.of());
     }
     // the objects the setup creates for r70.orders only
     try (Connection c = PG.open()) {
@@ -130,7 +130,7 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("r70b", true);
-      admin.importTable("r70b", "t", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r70b", "t", DECOUPLED, Map.of());
     }
     try (Connection c = PG.open()) {
       PG.execute(
@@ -153,7 +153,7 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("r316", true);
-      admin.importTable("r316", "t", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r316", "t", DECOUPLED, Map.of());
     }
     try (Connection c = PG.open()) {
       // the read view an earlier setup made, in ScalarDB's key-first order
@@ -186,7 +186,7 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("r356", true);
-      admin.importTable("r356", "t", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r356", "t", DECOUPLED, Map.of());
     }
     try (Connection c = PG.open()) {
       // the read view an earlier setup made: the before image uncast, so v reads as integer
@@ -222,7 +222,7 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("r356b", true);
-      admin.importTable("r356b", "t", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r356b", "t", DECOUPLED, Map.of());
     }
     try (Connection c = PG.open()) {
       PG.execute(
@@ -253,7 +253,7 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("r71", true);
-      admin.importTable("r71", "t", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r71", "t", DECOUPLED, Map.of());
     }
     assertThat(setup(catalog(), "r71", Duration.ofSeconds(30))).isEqualTo("completed");
     try (Connection c = PG.open();
@@ -281,7 +281,7 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("r72", true);
-      admin.importTable("r72", "t", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r72", "t", DECOUPLED, Map.of());
     }
     try (Connection c = PG.open()) {
       PG.execute(
@@ -314,7 +314,7 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = my.admin()) {
       admin.createNamespace("r72m", true);
-      admin.importTable("r72m", "t", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r72m", "t", DECOUPLED, Map.of());
     }
     try (Connection c = my.open()) {
       my.execute(
@@ -344,7 +344,7 @@ class SetupReviewIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("r73", true);
-      admin.importTable("r73", "t", DECOUPLED, Map.of());
+      Engines.importTable(admin, "r73", "t", DECOUPLED, Map.of());
     }
     try (Connection c = PG.open()) {
       PG.execute(c, "ALTER TABLE r73.t_tx_metadata ADD CONSTRAINT v CHECK (tx_version > 1)");
