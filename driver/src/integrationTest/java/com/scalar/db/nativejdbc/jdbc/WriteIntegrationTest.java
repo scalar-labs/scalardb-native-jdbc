@@ -91,8 +91,8 @@ class WriteIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("wr"), true);
-      admin.importTable(N("wr"), N("imp"), DECOUPLED, Map.of());
-      admin.importTable(N("wr"), N("impi"), Map.of(), Map.of());
+      Engines.importTable(admin, N("wr"), N("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("wr"), N("impi"), Map.of(), Map.of());
       for (String made : List.of("made", "madei")) {
         admin.createTable(
             N("wr"),
@@ -120,7 +120,7 @@ class WriteIntegrationTest {
       }
       tx.commit();
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -456,12 +456,12 @@ class WriteIntegrationTest {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("rsd"), true);
       admin.createNamespace(N("rf"), true);
-      admin.importTable(N("rsd"), N("t"), DECOUPLED, Map.of());
-      admin.importTable(N("rf"), N("imp"), DECOUPLED, Map.of());
-      admin.importTable(N("rf"), N("ch"), DECOUPLED, Map.of());
-      admin.importTable(N("rf"), N("ts"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("rsd"), N("t"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("rf"), N("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("rf"), N("ch"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("rf"), N("ts"), DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -680,7 +680,7 @@ class WriteIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("an"), true);
-      admin.importTable(N("an"), N("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("an"), N("imp"), DECOUPLED, Map.of());
       admin.createTable(
           N("an"),
           N("made"),
@@ -704,7 +704,7 @@ class WriteIntegrationTest {
       }
       tx.commit();
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -873,7 +873,7 @@ class WriteIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("aj"), true);
-      admin.importTable(N("aj"), N("p"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("aj"), N("p"), DECOUPLED, Map.of());
       admin.createTable(
           N("aj"),
           N("c"),
@@ -904,7 +904,7 @@ class WriteIntegrationTest {
         }
         tx.commit();
       }
-      Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+      Catalog catalog = e.catalog();
       try (Connection c = e.open()) {
         assertThat(
                 Setup.run(
@@ -1063,10 +1063,7 @@ class WriteIntegrationTest {
     } finally {
       // the driver's objects first, which ScalarDB's drop would otherwise stop at
       try (Connection c = e.open()) {
-        Setup.teardown(
-            new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
-            c,
-            t -> t.namespace().equals(N("aj")));
+        Setup.teardown(e.catalog(), c, t -> t.namespace().equals(N("aj")));
       }
       try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
         admin.dropTable(N("aj"), N("c"), true);
@@ -1098,9 +1095,9 @@ class WriteIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("af"), true);
-      admin.importTable(N("af"), N("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("af"), N("imp"), DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -1258,10 +1255,10 @@ class WriteIntegrationTest {
     try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(N("ryw"), true);
-      admin.importTable(N("ryw"), N("imp"), DECOUPLED, Map.of());
-      admin.importTable(N("ryw"), N("impi"), Map.of(), Map.of());
+      Engines.importTable(admin, N("ryw"), N("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, N("ryw"), N("impi"), Map.of(), Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(

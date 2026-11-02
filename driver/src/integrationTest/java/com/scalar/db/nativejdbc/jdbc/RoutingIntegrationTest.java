@@ -54,17 +54,13 @@ class RoutingIntegrationTest {
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("m1", true);
       if (!admin.tableExists("m1", "s")) {
-        admin.importTable("m1", "s", Map.of("transaction-metadata-decoupling", "true"), Map.of());
+        Engines.importTable(
+            admin, "m1", "s", Map.of("transaction-metadata-decoupling", "true"), Map.of());
       }
     }
     try (Connection c = PG.open()) {
       Setup.run(
-          new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open),
-          c,
-          t -> t.namespace().equals("m1"),
-          Duration.ofMinutes(1),
-          List.of(),
-          true);
+          PG.catalog(), c, t -> t.namespace().equals("m1"), Duration.ofMinutes(1), List.of(), true);
     }
     url = "jdbc:scalardb-native:" + PG.url().substring("jdbc:".length());
     props = new Properties();
@@ -483,7 +479,7 @@ class RoutingIntegrationTest {
 
   @Test
   void aStatementText_isRoutedOnce_untilWhatItWasDecidedUnderMoves() throws SQLException {
-    Catalog catalog = new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open);
+    Catalog catalog = PG.catalog();
     Session session = new Session(PG.engine());
     Router router = new Router(PG.engine(), catalog, session);
     router.setIsolation(Connection.TRANSACTION_READ_COMMITTED);
@@ -509,10 +505,7 @@ class RoutingIntegrationTest {
       if (admin.tableExists("m1", "late")) {
         try (Connection c = PG.open()) {
           // the setup's view depends on the table
-          Setup.teardown(
-              new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open),
-              c,
-              t -> t.table().equals("late"));
+          Setup.teardown(PG.catalog(), c, t -> t.table().equals("late"));
         }
         admin.dropTable("m1", "late"); // a previous run imported it
         try (Connection c = PG.open()) {
@@ -526,8 +519,8 @@ class RoutingIntegrationTest {
         PreparedStatement ps = c.prepareStatement("SELECT x FROM m1.late")) {
       assertThat(outcome(ps::executeQuery)).isEqualTo("read nothing"); // a plain table
       try (DistributedTransactionAdmin admin = PG.admin()) {
-        admin.importTable(
-            "m1", "late", Map.of("transaction-metadata-decoupling", "true"), Map.of());
+        Engines.importTable(
+            admin, "m1", "late", Map.of("transaction-metadata-decoupling", "true"), Map.of());
       }
       Thread.sleep(600); // past the TTL, with no lookup on this catalog in between
       // routed again: now a ScalarDB table, and one not set up yet

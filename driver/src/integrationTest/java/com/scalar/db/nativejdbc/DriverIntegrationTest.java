@@ -36,7 +36,8 @@ class DriverIntegrationTest {
     try (DistributedTransactionAdmin admin = PG.admin()) {
       admin.createNamespace("drv", true);
       if (!admin.tableExists("drv", "t")) {
-        admin.importTable("drv", "t", Map.of("transaction-metadata-decoupling", "true"), Map.of());
+        Engines.importTable(
+            admin, "drv", "t", Map.of("transaction-metadata-decoupling", "true"), Map.of());
       }
     }
     url = "jdbc:scalardb-native:" + PG.url().substring("jdbc:".length());

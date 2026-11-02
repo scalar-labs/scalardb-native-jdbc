@@ -55,7 +55,7 @@ class ObjectsCheckIntegrationTest {
                 : Map.of("transaction-metadata-decoupling", "true"));
       }
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     dropIfThere(e, "TABLE oc.audit_oc");
     dropIfThere(e, "TABLE oc.parent_oc");
     try (Connection c = e.open()) {

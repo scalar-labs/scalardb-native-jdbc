@@ -59,8 +59,8 @@ class SetupIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createNamespace(su, true);
-      admin.importTable(su, e.storedTable("imp"), DECOUPLED, Map.of());
-      admin.importTable(su, e.storedTable("konly"), DECOUPLED, Map.of());
+      Engines.importTable(admin, su, e.storedTable("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, su, e.storedTable("konly"), DECOUPLED, Map.of());
       admin.createTable(
           su,
           "comp",
@@ -73,7 +73,7 @@ class SetupIntegrationTest {
               .build(),
           DECOUPLED);
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     TableInfo imp = catalog.lookup(List.of(), su, e.storedTable("imp"));
     String meta = name(engine, su, Objects.requireNonNull(imp.metadataTable()));
     String data = name(engine, su, imp.dataTable());
@@ -275,9 +275,9 @@ class SetupIntegrationTest {
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(ns, true);
-      admin.importTable(ns, e.storedTable("imp"), DECOUPLED, Map.of());
+      Engines.importTable(admin, ns, e.storedTable("imp"), DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     String table = name + ".imp";
     try {
       List<Setup.Result> results;
@@ -489,9 +489,9 @@ class SetupIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createNamespace(sk, true);
-      admin.importTable(sk, e.storedTable("ord"), DECOUPLED, Map.of());
+      Engines.importTable(admin, sk, e.storedTable("ord"), DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     TableInfo t = catalog.lookup(List.of(), sk, e.storedTable("ord"));
     String meta = Objects.requireNonNull(t.metadataTable());
     String a = e.storedColumn("a");

@@ -14,7 +14,6 @@ import com.scalar.db.api.Upsert;
 import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
-import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.isolation.MaelstromIntegrationTest.Level;
 import com.scalar.db.nativejdbc.setup.Setup;
@@ -235,7 +234,7 @@ class BankIntegrationTest {
       try (Connection c = e.open()) {
         assertThat(
                 Setup.run(
-                    new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
+                    e.catalog(),
                     c,
                     t -> t.namespace().equals(namespace),
                     Duration.ofMinutes(1),

@@ -66,13 +66,13 @@ class InlineIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
-      admin.importTable(ns, e.storedTable("imp"), Map.of(), Map.of());
+      Engines.importTable(admin, ns, e.storedTable("imp"), Map.of(), Map.of());
     }
     // ScalarDB added the metadata columns, NULL in every row
     try (Connection c = e.open()) {
       assertThat(rows(c, nullTxId)).containsExactly("2");
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       // an inline table is backfilled only when asked, --backfill (todo 361)
       List<Setup.Result> results =
@@ -178,9 +178,9 @@ class InlineIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
-      admin.importTable(ns, table, Map.of(), Map.of());
+      Engines.importTable(admin, ns, table, Map.of(), Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -283,9 +283,9 @@ class InlineIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
-      admin.importTable(ns, e.storedTable("t"), Map.of(), Map.of());
+      Engines.importTable(admin, ns, e.storedTable("t"), Map.of(), Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
