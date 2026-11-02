@@ -265,7 +265,9 @@ public enum Engines {
    * ScalarDB's {@code importTable}, again on ORA-08177: its admin connection reads the new table's
    * columns through ojdbc's {@code getColumns} at SERIALIZABLE, which on Oracle fails now and then
    * right after the table's {@code CREATE TABLE} (CI runs 41362044124 and earlier). The read comes
-   * before the import writes anything, so the import runs again as a whole.
+   * before the import writes anything, so the import runs again as a whole. A stopgap: todo 366
+   * removes the cause, an inline table's import at READ_COMMITTED (option 1) and a decoupled one's
+   * once ScalarDB lowers its Oracle minimum (option 2).
    */
   public static void importTable(
       DistributedTransactionAdmin admin,
