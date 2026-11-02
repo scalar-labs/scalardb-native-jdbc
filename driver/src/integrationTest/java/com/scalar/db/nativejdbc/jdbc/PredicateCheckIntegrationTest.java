@@ -18,7 +18,6 @@ import com.scalar.db.api.TwoPhaseCommitTransaction;
 import com.scalar.db.api.TwoPhaseCommitTransactionManager;
 import com.scalar.db.api.Update;
 import com.scalar.db.io.DataType;
-import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
@@ -80,7 +79,7 @@ class PredicateCheckIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
+                  e.catalog(),
                   c,
                   t -> t.namespace().equals(N("pc")),
                   Duration.ofMinutes(1),

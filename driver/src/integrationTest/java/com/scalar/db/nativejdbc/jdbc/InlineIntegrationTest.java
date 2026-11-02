@@ -72,7 +72,7 @@ class InlineIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(rows(c, nullTxId)).containsExactly("2");
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       // an inline table is backfilled only when asked, --backfill (todo 361)
       List<Setup.Result> results =
@@ -180,7 +180,7 @@ class InlineIntegrationTest {
       admin.createCoordinatorTables(true);
       Engines.importTable(admin, ns, table, Map.of(), Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -285,7 +285,7 @@ class InlineIntegrationTest {
       admin.createCoordinatorTables(true);
       Engines.importTable(admin, ns, e.storedTable("t"), Map.of(), Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(

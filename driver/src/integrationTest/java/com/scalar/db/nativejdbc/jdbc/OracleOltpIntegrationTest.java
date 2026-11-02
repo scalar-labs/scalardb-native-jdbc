@@ -207,7 +207,7 @@ class OracleOltpIntegrationTest {
             admin, N(NS), N(k.name().toLowerCase(java.util.Locale.ROOT)), DECOUPLED, Map.of());
       }
     }
-    catalog = new Catalog(Engine.ORACLE, Catalog.DEFAULT_METADATA_SCHEMA, ORA::open);
+    catalog = ORA.catalog();
     try (Connection c = ORA.open()) {
       assertThat(
               Setup.run(

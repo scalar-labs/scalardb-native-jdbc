@@ -342,7 +342,7 @@ class BenchBaseBenchmark {
               Map.of());
         }
       }
-      Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+      Catalog catalog = e.catalog();
       try (Connection c = e.open()) {
         assertThat(
                 // decoupled tables backfilled and inline ones not, as the runs since 20289be,

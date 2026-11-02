@@ -122,7 +122,7 @@ class DecoupledReadCommittedIntegrationTest {
       }
       tx.commit();
     }
-    catalog = new Catalog(Engine.POSTGRESQL, Catalog.DEFAULT_METADATA_SCHEMA, PG::open);
+    catalog = PG.catalog();
     try (Connection c = PG.open()) {
       List<Setup.Result> set =
           Setup.run(

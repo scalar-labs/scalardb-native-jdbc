@@ -142,7 +142,7 @@ class BackfillPlansBenchmark {
             Map.of());
       }
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       for (String t : tables) {
         String stored = e.storedTable(t);

@@ -3,6 +3,7 @@ package com.scalar.db.nativejdbc.testing;
 import com.scalar.db.api.DistributedTransactionAdmin;
 import com.scalar.db.exception.storage.ExecutionException;
 import com.scalar.db.io.DataType;
+import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.service.TransactionFactory;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
@@ -149,6 +150,9 @@ public enum Engines {
 
   private static final Map<Engines, Started> STARTED = new EnumMap<>(Engines.class);
 
+  /** The catalogs the tests made through {@link #catalog} or {@link #track}; guarded by itself. */
+  private static final List<Catalog> CATALOGS = new ArrayList<>();
+
   private static final class Started {
     final String url;
     final String username;
@@ -254,6 +258,35 @@ public enum Engines {
   public Connection open() throws SQLException {
     Started s = started();
     return DriverManager.getConnection(s.url, s.username, s.password);
+  }
+
+  /**
+   * A catalog on this database with the default metadata schema, as the driver makes one, whose
+   * session {@link #releaseCatalogSessions} releases after each test class.
+   */
+  public Catalog catalog() {
+    return track(new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, this::open));
+  }
+
+  /** Returns the catalog, its session released after each test class. */
+  public static Catalog track(Catalog catalog) {
+    synchronized (CATALOGS) {
+      CATALOGS.add(catalog);
+    }
+    return catalog;
+  }
+
+  /**
+   * Releases the sessions of the catalogs the tests made, keeping the catalogs: one a test class
+   * keeps in a field, or one an outer class still uses after a nested class, opens a new session
+   * when used again. Each held its session for the JVM's life otherwise (89's review of 30dede3).
+   */
+  public static void releaseCatalogSessions() {
+    synchronized (CATALOGS) {
+      for (Catalog c : CATALOGS) {
+        c.releaseConnection();
+      }
+    }
   }
 
   /** ScalarDB's admin on this database. */

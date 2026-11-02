@@ -73,7 +73,7 @@ class SetupIntegrationTest {
               .build(),
           DECOUPLED);
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     TableInfo imp = catalog.lookup(List.of(), su, e.storedTable("imp"));
     String meta = name(engine, su, Objects.requireNonNull(imp.metadataTable()));
     String data = name(engine, su, imp.dataTable());
@@ -277,7 +277,7 @@ class SetupIntegrationTest {
       admin.createNamespace(ns, true);
       Engines.importTable(admin, ns, e.storedTable("imp"), DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     String table = name + ".imp";
     try {
       List<Setup.Result> results;
@@ -491,7 +491,7 @@ class SetupIntegrationTest {
       admin.createNamespace(sk, true);
       Engines.importTable(admin, sk, e.storedTable("ord"), DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     TableInfo t = catalog.lookup(List.of(), sk, e.storedTable("ord"));
     String meta = Objects.requireNonNull(t.metadataTable());
     String a = e.storedColumn("a");

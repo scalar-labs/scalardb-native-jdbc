@@ -138,7 +138,7 @@ class ReadIntegrationTest {
       }
       tx.commit();
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     // ScalarDB addresses an imported table by its virtual table, imp_scalardb
     String impScalarDb =
         Objects.requireNonNullElse(catalog.lookup(List.of(), rd, imp).virtualTable(), imp);
@@ -485,7 +485,7 @@ class ReadIntegrationTest {
       admin.createNamespace("rk", true);
       Engines.importTable(admin, "rk", "kc", DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     TableInfo kc = catalog.lookup(List.of(), "rk", "kc");
     assertThat(kc.keyColumns()).containsExactly("cid", "pid");
     try (Connection c = e.open()) {
@@ -623,7 +623,7 @@ class ReadIntegrationTest {
           Insert.newBuilder().namespace(sdb).table("ty").partitionKey(Key.ofInt("id", 2)).build());
       tx.commit();
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -770,7 +770,7 @@ class ReadIntegrationTest {
           true,
           inline ? Map.of() : DECOUPLED);
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -1157,7 +1157,7 @@ class ReadIntegrationTest {
       admin.createNamespace(sdb, true);
       Engines.importTable(admin, sdb, "nx", inline ? Map.of() : DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     String nxScalarDb =
         Objects.requireNonNullElse(catalog.lookup(List.of(), sdb, "nx").virtualTable(), "nx");
     try (Connection c = e.open()) {

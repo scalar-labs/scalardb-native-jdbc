@@ -261,7 +261,7 @@ class MoreWritesIntegrationTest {
       }
       tx.commit();
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       List<Setup.Result> set =
           Setup.run(

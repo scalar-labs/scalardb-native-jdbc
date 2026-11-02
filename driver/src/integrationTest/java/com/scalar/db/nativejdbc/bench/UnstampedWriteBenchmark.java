@@ -99,7 +99,7 @@ class UnstampedWriteBenchmark {
           Map.of("transaction-metadata-decoupling", "true"),
           Map.of());
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     String meta = engine.quote(ns) + "." + engine.quote(e.storedTable("t") + "_tx_metadata");
     String id = engine.quote(e.storedColumn("id"));
     try (Connection c = e.open()) {

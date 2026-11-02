@@ -122,7 +122,7 @@ class WriteCorpusIntegrationTest {
         }
       }
     }
-    Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       List<String> scalarDb = List.of(e.storedSchema(set + "d"), e.storedSchema(set + "i"));
       assertThat(

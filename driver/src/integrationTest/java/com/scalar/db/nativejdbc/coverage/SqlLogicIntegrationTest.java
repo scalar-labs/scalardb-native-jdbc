@@ -157,7 +157,7 @@ class SqlLogicIntegrationTest {
               Map.of());
         }
       }
-      Catalog catalog = new Catalog(engine, Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+      Catalog catalog = e.catalog();
       try (Connection c = e.open()) {
         String ns = e.storedSchema(scalarDb);
         assertThat(

@@ -35,7 +35,7 @@ class SetupReviewIntegrationTest {
   }
 
   private static Catalog catalog() {
-    return new Catalog(PG.engine(), Catalog.DEFAULT_METADATA_SCHEMA, PG::open);
+    return PG.catalog();
   }
 
   private static String setup(Catalog catalog, String schema, Duration wait) throws SQLException {
@@ -54,10 +54,11 @@ class SetupReviewIntegrationTest {
   }
 
   private static Catalog catalogAs(Engines engine, String user) {
-    return new Catalog(
-        engine.engine(),
-        Catalog.DEFAULT_METADATA_SCHEMA,
-        () -> DriverManager.getConnection(engine.url(), user, "pw"));
+    return Engines.track(
+        new Catalog(
+            engine.engine(),
+            Catalog.DEFAULT_METADATA_SCHEMA,
+            () -> DriverManager.getConnection(engine.url(), user, "pw")));
   }
 
   private static long count(Connection c, String sql) throws SQLException {
@@ -324,7 +325,7 @@ class SetupReviewIntegrationTest {
           "GRANT SELECT ON scalardb.* TO 'r72app'@'%'",
           "GRANT SELECT ON test.* TO 'r72app'@'%'"); // the URL's database
     }
-    Catalog admin = new Catalog(my.engine(), Catalog.DEFAULT_METADATA_SCHEMA, my::open);
+    Catalog admin = my.catalog();
     assertThat(setup(my, admin, "r72m", Duration.ofSeconds(30), List.of("r72app@%")))
         .isEqualTo("completed");
     assertThat(catalogAs(my, "r72app").lookup(List.of(), "r72m", "t").isSetUp()).isTrue();

@@ -153,7 +153,7 @@ class CatalogIntegrationTest {
 
   private static Catalog catalog(Engines e) throws Exception {
     prepare(e);
-    return new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    return e.catalog();
   }
 
   private static final List<String> NO_SESSION = List.of();
@@ -414,7 +414,7 @@ class CatalogIntegrationTest {
     try (DistributedTransactionAdmin admin = e.admin()) {
       Engines.importTable(admin, "APP", stored, DECOUPLED, Map.of());
     }
-    try (Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open)) {
+    try (Catalog catalog = e.catalog()) {
       TableInfo t = catalog.lookup(NO_SESSION, "app", "größe");
       assertThat(t.layout()).isEqualTo(Layout.DECOUPLED_IMPORTED);
       assertThat(t.table()).isEqualTo(stored);
@@ -425,7 +425,7 @@ class CatalogIntegrationTest {
   @MethodSource("engines")
   void aHit_returnsTheClassificationAlreadyMade(Engines e) throws Exception {
     prepare(e);
-    try (Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open)) {
+    try (Catalog catalog = e.catalog()) {
       TableInfo first = catalog.lookup(NO_SESSION, "app", e.storedTable("Orders"));
       assertThat(catalog.lookup(NO_SESSION, "app", e.storedTable("Orders"))).isSameAs(first);
       String virtual = e.engine().quote(e.storedTable("Orders") + "_scalardb");
@@ -591,7 +591,8 @@ class CatalogIntegrationTest {
             Duration.ofSeconds(60),
             fixedClock(now),
             false);
-    Catalog byInvalidate = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Engines.track(byTtl);
+    Catalog byInvalidate = e.catalog();
     assertThat(layout(byTtl, "app", "late1")).isEqualTo(Layout.PLAIN);
     assertThat(layout(byInvalidate, "app", "late2")).isEqualTo(Layout.PLAIN);
 
@@ -624,6 +625,7 @@ class CatalogIntegrationTest {
             Duration.ofSeconds(60),
             fixedClock(now),
             false);
+    Engines.track(catalog);
     List<String> path = List.of("public", "app");
     try (Connection c = e.open()) {
       e.execute(c, "CREATE TABLE app.r128 (id int)");
@@ -655,6 +657,7 @@ class CatalogIntegrationTest {
             Duration.ofSeconds(60),
             fixedClock(now),
             false);
+    Engines.track(catalog);
     List<String> app = List.of("APP");
     try (Connection c = e.open()) {
       e.execute(c, "CREATE OR REPLACE SYNONYM app.moving FOR app.plain");

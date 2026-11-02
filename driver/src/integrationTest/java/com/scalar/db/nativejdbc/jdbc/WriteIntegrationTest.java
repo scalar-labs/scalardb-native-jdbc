@@ -120,7 +120,7 @@ class WriteIntegrationTest {
       }
       tx.commit();
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -461,7 +461,7 @@ class WriteIntegrationTest {
       Engines.importTable(admin, N("rf"), N("ch"), DECOUPLED, Map.of());
       Engines.importTable(admin, N("rf"), N("ts"), DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -704,7 +704,7 @@ class WriteIntegrationTest {
       }
       tx.commit();
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -904,7 +904,7 @@ class WriteIntegrationTest {
         }
         tx.commit();
       }
-      Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+      Catalog catalog = e.catalog();
       try (Connection c = e.open()) {
         assertThat(
                 Setup.run(
@@ -1063,10 +1063,7 @@ class WriteIntegrationTest {
     } finally {
       // the driver's objects first, which ScalarDB's drop would otherwise stop at
       try (Connection c = e.open()) {
-        Setup.teardown(
-            new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
-            c,
-            t -> t.namespace().equals(N("aj")));
+        Setup.teardown(e.catalog(), c, t -> t.namespace().equals(N("aj")));
       }
       try (DistributedTransactionAdmin admin = scalarDb.getTransactionAdmin()) {
         admin.dropTable(N("aj"), N("c"), true);
@@ -1100,7 +1097,7 @@ class WriteIntegrationTest {
       admin.createNamespace(N("af"), true);
       Engines.importTable(admin, N("af"), N("imp"), DECOUPLED, Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
@@ -1261,7 +1258,7 @@ class WriteIntegrationTest {
       Engines.importTable(admin, N("ryw"), N("imp"), DECOUPLED, Map.of());
       Engines.importTable(admin, N("ryw"), N("impi"), Map.of(), Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
