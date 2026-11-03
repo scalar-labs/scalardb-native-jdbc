@@ -155,6 +155,21 @@ class BenchBaseBenchmark {
   private static final boolean SERVER_STATS =
       Boolean.getBoolean("nativejdbc.benchbase.serverStats");
 
+  // -Dnativejdbc.benchbase.tpchCheck=5: after TPC-H's run (c), each query through the vendor URL
+  // and the driver's on the tables (c) left, a warm-up then this many timed executions of each,
+  // in a transaction and in autocommit, its rows compared (bench/TpchCheck.java); 0, off
+  private static final int TPCH_CHECK = Integer.getInteger("nativejdbc.benchbase.tpchCheck", 0);
+
+  // -Dnativejdbc.benchbase.tpchCheckTimeout=600: the check's query timeout, in seconds
+  private static final int TPCH_CHECK_TIMEOUT =
+      Integer.getInteger("nativejdbc.benchbase.tpchCheckTimeout", 600);
+
+  // -Dnativejdbc.benchbase.tpchCheckLongMs=1000: a query whose warm-up through the vendor URL
+  // takes longer is timed by its warm-ups alone, where a fixed cost of the driver's would not
+  // show, so that a large scale factor's check stays within hours
+  private static final int TPCH_CHECK_LONG_MS =
+      Integer.getInteger("nativejdbc.benchbase.tpchCheckLongMs", 1000);
+
   private static final Path OUT = Path.of("build", "bench");
 
   private static final String SCHEMA = "bb";
@@ -220,6 +235,12 @@ class BenchBaseBenchmark {
         }
       }
       report.append(table(workload, results));
+      Path check = dir.resolve(workload + "-c-" + REPS).resolve("check.md");
+      if (Files.exists(check)) {
+        report
+            .append("\nTPC-H queries on the tables of (c), the vendor URL against the driver's:\n")
+            .append(Files.readString(check, StandardCharsets.UTF_8));
+      }
       Files.writeString(dir.resolveSibling(dir.getFileName() + ".md"), report);
     }
     System.out.println(report);
@@ -443,8 +464,60 @@ class BenchBaseBenchmark {
                 : pgAtStart[0] == null
                     ? null
                     : Server.since(e, pgAtStart[0], sampler, roundTrip, dir.resolve("server.txt"));
+    if (TPCH_CHECK > 0 && run.equals("c") && benchmark(workload).equals("tpch")) {
+      tpchCheck(e, workload, dir);
+    }
     return Result.read(
         run, dir, histograms, imported, plain, server, stalls(dir.resolve("execute.jfr")));
+  }
+
+  /**
+   * The TPC-H queries through the vendor URL and the driver's on the tables run (c) left, in a JVM
+   * of BenchBase's classpath (bench/TpchCheck.java): its table in {@code {dir}/check.md}.
+   */
+  private static void tpchCheck(Engines e, String workload, Path dir) throws Exception {
+    Path source =
+        Path.of(
+            Objects.requireNonNull(BenchBaseBenchmark.class.getResource("/bench/TpchCheck.java"))
+                .toURI());
+    String url = benchUrl(e);
+    List<String> command =
+        List.of(
+            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            "-cp",
+            classpath(),
+            source.toString(),
+            url,
+            "jdbc:scalardb-native:" + url.substring("jdbc:".length()),
+            benchUser(e),
+            e.password(),
+            e.engine() == Engine.ORACLE ? "ORACLE" : "POSTGRES",
+            scale(workload).isEmpty() ? "1" : scale(workload),
+            String.valueOf(TPCH_CHECK),
+            String.valueOf(level(vendorIsolation(e.engine()))),
+            String.valueOf(level(ISOLATION)),
+            String.valueOf(TPCH_CHECK_TIMEOUT),
+            String.valueOf(TPCH_CHECK_LONG_MS));
+    Path log = dir.resolve("check.log");
+    Process p =
+        new ProcessBuilder(command)
+            .directory(HOME.toFile())
+            .redirectError(log.toFile())
+            .redirectOutput(dir.resolve("check.md").toFile())
+            .start();
+    if (!p.waitFor(6, TimeUnit.HOURS)) {
+      p.destroyForcibly();
+      throw new IllegalStateException("the TPC-H check did not finish: " + log);
+    }
+    if (p.exitValue() != 0) {
+      throw new IllegalStateException(
+          "the TPC-H check failed (" + p.exitValue() + "): " + log + "\n" + tail(log));
+    }
+  }
+
+  /** A java.sql.Connection level constant from its name, as BenchBase's config spells it. */
+  private static int level(String name) throws ReflectiveOperationException {
+    return Connection.class.getField("TRANSACTION_" + name).getInt(null);
   }
 
   /**
@@ -1433,6 +1506,18 @@ class BenchBaseBenchmark {
     }
   }
 
+  /** The vendor URL BenchBase connects with: on PostgreSQL, the benchmark's schema current. */
+  private static String benchUrl(Engines e) throws SQLException {
+    return e.engine() == Engine.ORACLE
+        ? e.url()
+        : e.url() + (e.url().contains("?") ? "&" : "?") + "currentSchema=" + SCHEMA;
+  }
+
+  /** The user BenchBase logs on as: on Oracle, the runner whose logon sets the schema. */
+  private static String benchUser(Engines e) throws SQLException {
+    return e.engine() == Engine.ORACLE ? ORACLE_RUNNER : e.username();
+  }
+
   private static String tail(Path log) throws IOException {
     List<String> lines = Files.readAllLines(log, StandardCharsets.UTF_8);
     return String.join("\n", lines.subList(Math.max(0, lines.size() - 40), lines.size()));
@@ -1470,16 +1555,13 @@ class BenchBaseBenchmark {
         f.newDocumentBuilder()
             .parse(sample.resolve("sample_" + benchmark(workload) + "_config.xml").toFile());
     boolean vendor = run.equals("a") || run.equals("d");
-    String url =
-        e.engine() == Engine.ORACLE
-            ? e.url()
-            : e.url() + (e.url().contains("?") ? "&" : "?") + "currentSchema=" + SCHEMA;
+    String url = benchUrl(e);
     set(
         d,
         "driver",
         vendor ? vendorDriverClass(e.engine()) : "com.scalar.db.nativejdbc.NativeJdbcDriver");
     set(d, "url", vendor ? url : "jdbc:scalardb-native:" + url.substring("jdbc:".length()));
-    set(d, "username", e.engine() == Engine.ORACLE ? ORACLE_RUNNER : e.username());
+    set(d, "username", benchUser(e));
     set(d, "password", e.password());
     set(d, "isolation", "TRANSACTION_" + (vendor ? vendorIsolation(e.engine()) : ISOLATION));
     set(d, "terminals", String.valueOf(TERMINALS));
