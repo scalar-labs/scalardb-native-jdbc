@@ -165,6 +165,31 @@ the checks and the plain statement for a read whose generic plan is costly (the 
 asks `EXPLAIN (GENERIC_PLAN)` once per text for the parallel question) is the lever. The user's
 call.
 
+### 2026-11-03: review of b3ed1ea on `tpch-row-check` (28; the TPC-H check for the SF 10 cloud run)
+
+Test sources only: `BenchBaseBenchmark` gains `-Dnativejdbc.benchbase.tpchCheck=N` (with
+`tpchCheckTimeout` 600 s and `tpchCheckLongMs` 1000), which after TPC-H's run (c) launches
+`bench/TpchCheck.java` in source-launch mode on BenchBase's classpath; the program runs each
+query (Q15 aside) through BenchBase's own `getStatement` with seed q, the engine's dialect and
+the run's scale, a warm-up each side then N timed executions alternating vendor and driver, in a
+transaction each (the run's two levels) and in autocommit, every execution's rows compared with
+the vendor's first (numbers within a relative 1e-9), a query whose vendor warm-up passes the long
+threshold timed by its warm-ups alone; medians to `{run dir}/check.md`, which the report appends;
+`benchUrl`/`benchUser` factored out of `writeConfig`. Read in full. Local run at SF 0.1: every
+execution the vendor's rows; warm Q19 1.17/1.19x, Q22 1.04/1.11x, Q2 1.04/1.13x, which supports
+the cold-planning reading above.
+
+Verdict: mergeable with one change. `tpchCheck` throws when the child fails or outruns six hours,
+after run (c) completed, so a check failure at the end of a twelve-hour run would fail the test
+and lose the report; it should write the failure (exit code, the log's tail) into `check.md` and
+return, so `Result.read` and the report go on. Nits, optional: the password on the child's
+command line is visible in `ps` (the environment would carry it); the engine is mapped to
+`POSTGRES` for anything but Oracle, so restrict the check to the two or map BenchBase's
+`DatabaseType` by engine; the rows are compared in order, so an ORDER BY tie could show as a
+false `no` (sort both sides if one appears); with `reps` above 1 the check runs after every (c)
+repetition, and the report shows the last; and confirm `check.md` stays free of BenchBase's log
+lines (log4j's console appender writes to stdout where the table goes).
+
 ## Acceptance Criteria
 
 - [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
