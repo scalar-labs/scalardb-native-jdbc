@@ -1,0 +1,3 @@
+kind: improvement
+body: 'A read in autocommit at SNAPSHOT or SERIALIZABLE that the driver checks table by table, such as a join of five or more ScalarDB tables, now runs as written over the data tables when no row of them is in flight, as it does inside a transaction. It had read every table through its committed-rows view: on PostgreSQL, TPC-H joins of six to eight tables took over 30 seconds against 20-60 ms.'
+time: 2026-11-03T10:00:00.000000+09:00

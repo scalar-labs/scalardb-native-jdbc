@@ -306,6 +306,9 @@ class SnapshotIntegrationTest {
       held.rollback();
       if (level == Connection.TRANSACTION_REPEATABLE_READ) {
         scrollableInAutocommit(d, tpc, at);
+        if (pg) {
+          autocommitPastTheSplit(d, tpc, at);
+        }
       }
 
       // an unmatched row of an outer join that a row in flight would match (todo 167)
@@ -1259,6 +1262,61 @@ class SnapshotIntegrationTest {
     assertThat(seen)
         .as("%s: scrollable reads in autocommit counting an uncommitted row", at)
         .isZero();
+  }
+
+  /**
+   * In autocommit a read past the split, five tables, whose own transaction found every table clear
+   * runs as written over the data tables; with a row in flight in one it runs through {@code rc_T},
+   * and a prepared one switches back and forth with the tables (todo 367). The text the server ran
+   * is the read's own {@code current_query()}.
+   */
+  private static void autocommitPastTheSplit(
+      Connection d, TwoPhaseCommitTransactionManager tpc, String at) throws Exception {
+    d.setAutoCommit(true);
+    StringBuilder sql =
+        new StringBuilder("SELECT t1.id, t1.x, current_query() FROM " + SN + ".t t1");
+    for (int i = 2; i <= 5; i++) {
+      sql.append(" JOIN ").append(SN).append(".t t").append(i).append(" ON t").append(i);
+      sql.append(".id = t1.id");
+    }
+    sql.append(" WHERE t1.id <= 3");
+    String order = " ORDER BY t1.id";
+    try (Statement st = d.createStatement();
+        PreparedStatement ps = d.prepareStatement(sql + " AND t1.id >= ?" + order)) {
+      ps.setInt(1, 1);
+      String asWritten = at + ": in autocommit, every table clear";
+      assertPastTheSplit(st.executeQuery(sql + order), asWritten);
+      assertPastTheSplit(ps.executeQuery(), asWritten + ", prepared");
+      TwoPhaseCommitTransaction held = prepared(tpc, "t", 7, "b");
+      try {
+        // the table's check, the split's being past: the read aborts before any text runs
+        String inFlight = at + ": in autocommit, a row in flight";
+        assertThatThrownBy(() -> st.executeQuery(sql + order).close())
+            .as(inFlight)
+            .isInstanceOf(SQLTransactionRollbackException.class);
+        assertThatThrownBy(() -> ps.executeQuery().close())
+            .as(inFlight + ", prepared")
+            .isInstanceOf(SQLTransactionRollbackException.class);
+      } finally {
+        held.rollback();
+      }
+      assertPastTheSplit(ps.executeQuery(), asWritten + ", prepared again");
+    } finally {
+      d.setAutoCommit(false);
+    }
+  }
+
+  private static void assertPastTheSplit(ResultSet rs, String what) throws SQLException {
+    List<String> rows = new ArrayList<>();
+    String text = null;
+    try (rs) {
+      while (rs.next()) {
+        rows.add(rs.getString(1) + "/" + rs.getString(2));
+        text = rs.getString(3);
+      }
+    }
+    assertThat(rows).as(what).containsExactly("1/a", "2/a", "3/a");
+    assertThat(text).as(what + ": the text run").contains("\"t").doesNotContain("rc_");
   }
 
   /** Waits until a transaction waits on a lock, so that the next one forms the deadlock. */
