@@ -5727,8 +5727,14 @@ public final class SqlAst {
     /** For each query, the query it is written in; none for an outermost one. */
     final Map<PlainSelect, PlainSelect> parents = new IdentityHashMap<>();
 
-    /** The query a column is written in and every query enclosing it, by identity. */
-    Set<PlainSelect> enclosing(Column c) {
+    /**
+     * The query a column is written in and every query enclosing it, by identity; null where none
+     * was recorded, which keeps the whole-row reading.
+     */
+    @Nullable Set<PlainSelect> enclosing(Column c) {
+      if (!columnBlocks.containsKey(c)) {
+        return null;
+      }
       Set<PlainSelect> out = Collections.newSetFromMap(new IdentityHashMap<>());
       for (PlainSelect q = columnBlocks.get(c); q != null; q = parents.get(q)) {
         out.add(q);
