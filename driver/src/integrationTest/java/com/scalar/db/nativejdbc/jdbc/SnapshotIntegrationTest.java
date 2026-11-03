@@ -1266,9 +1266,9 @@ class SnapshotIntegrationTest {
 
   /**
    * In autocommit a read past the split, five tables, whose own transaction found every table clear
-   * runs as written over the data tables; with a row in flight in one it runs through {@code rc_T},
-   * and a prepared one switches back and forth with the tables (todo 367). The text the server ran
-   * is the read's own {@code current_query()}.
+   * runs as written over the data tables, prepared too (todo 367); with a row in flight in one it
+   * aborts, the table's check coming before any text past the split, and runs as written again
+   * after. The text the server ran is the read's own {@code current_query()}.
    */
   private static void autocommitPastTheSplit(
       Connection d, TwoPhaseCommitTransactionManager tpc, String at) throws Exception {
