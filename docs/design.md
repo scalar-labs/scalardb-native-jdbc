@@ -1372,8 +1372,38 @@ union as a derived table.
   the predicate's in-flight check, which aborts for a row in flight the statement matches by either
   image; none found marks the table clear. A plain read on a table not yet found clear runs through
   the state column above, whose probe is what marks the table, or through the per-table checks, the
-  pending ones as one statement. In autocommit nothing is remembered: each statement's snapshot is
-  its own.
+  pending ones as one statement. In autocommit nothing is remembered across statements: each
+  statement's snapshot is its own. *The autocommit checked read as written (todo 367, 2026-11-03).*
+  A checked read in autocommit, one whose route carries the coarse checks, the fallback through
+  `rc_T` of a shape the split does not cover among them, already runs its checks and the read in a
+  transaction of its own (todo 283) at the snapshot level, Oracle's SERIALIZABLE set for it: one
+  snapshot, which the checks and the read share, so checks that find every table clear vouch for the
+  statement as written exactly as a transaction's do. The own transaction therefore takes the plain
+  statement once its checks passed, as a transaction does: the plain switch admits it beside a
+  marking transaction (`marks || own` in `Proxies`), the own transaction's whole fetch, set since
+  its end closes a cursor, goes on the statement that runs, the one switched to, and a prepared
+  read's second vendor statement is switched back at the next execute whose checks find a table in
+  flight, which keeps the rewritten text, exact as before. As built the switch asked `marks`, which
+  autocommit never sets, so every autocommit read past the split ran through `rc_T`, into which no
+  engine pushes a join predicate (section 3): on PostgreSQL 16, decoupled, TPC-H at scale factor 0.1
+  (session 28, 2026-11-03), BenchBase's Q5, Q7, Q8 and Q9, 6-8 tables, passed a 30 s timeout against
+  the vendor's 20-60 ms, Q2 188x, Q11 276x, Q22 312x, Q20 99x, Q18 25x, Q16 13x, and Q21 ran the
+  container out of shared memory, where in a transaction the same 21 queries ran as written at
+  1.0-1.4x cold (Q22 3.5x, Q19 2.2x); BenchBase's workers run in transactions, BI tools and
+  psql-style clients in autocommit. Expected: the transaction's figures plus the two round trips the
+  own transaction costs already, the checks' and the commit's. Unchanged: the own transaction's
+  level, the Oracle gated form, which runs first and leaves the own transaction the closed gate's
+  path, a table found in flight, whose execute keeps the rewritten text, and an inline table read
+  whole, which keeps it too. Not taken: the gate column form on PostgreSQL, which would save the two
+  round trips and nothing of this cliff, a separate item if an autocommit OLTP read ever needs it;
+  and the READ COMMITTED autocommit read past the split, which has no checks and no own transaction
+  and runs through `rc_T` still: one statement in autocommit has no cross-statement meaning, so its
+  own transaction could run at the snapshot level on PostgreSQL as it does on Oracle and take this
+  form, a second step for the user's call. What must keep holding:
+  `SnapshotIntegrationTest.scrollableInAutocommit` and the found-clear tests of todo 329; to add: an
+  autocommit read past the split on PostgreSQL and Oracle that runs as written, by the text the
+  vendor received, and returns the committed rows, and the same read with a row in flight, which
+  returns them through `rc_T`.
 
   **On Oracle both hold, at its SERIALIZABLE, the driver's SNAPSHOT, in a transaction** (todo 334).
   The argument above needs two things of the engine: one snapshot for every statement of the
