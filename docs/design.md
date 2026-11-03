@@ -1457,7 +1457,16 @@ union as a derived table.
   *in flight*, `T JOIN T_meta` restricted to the rows in flight that have a before image, with every
   non-key column `c` read as `before_c`. Either reads only the columns the statement may read from
   the table, every column it qualifies by the table and every unqualified one, and all of them under
-  a `*` or a NATURAL or USING join; on a 50-column table this shortens the statement up to 5x, which
+  a `*` or a NATURAL or USING join, or for an unqualified name equal to the table's exposed name,
+  PostgreSQL's whole-row reference (todo 110), written in the table's own query block or in a
+  subquery of it, where a correlated reference sees the table; one written in an enclosing or a
+  sibling block cannot see the table and names its own block's, a derived table's column as TPC-H
+  Q9's `nation` over the unaliased table `nation` of its derived table, and is an ordinary column
+  name to the rule (todo 368, 2026-11-03: on an inline table the whole-row reading has no plain
+  statement, so Q9 ran through `rc_T` in a transaction whose checks had passed, 1,035 s against the
+  vendor's 59 ms on PostgreSQL 16 at scale factor 0.1, and 64 ms as written with the alias renamed;
+  the walker records each column's block as it does each table's, and each block's parent); on a
+  50-column table this shortens the statement up to 5x, which
   MySQL and MariaDB parse on every execution. A row is in exactly one copy of its table, so the copies are
   disjoint and need no dedup, and each copy is the user's own statement over base tables, so every
   join and filter keeps its indexes; the copies with a table in flight start from the in-flight index

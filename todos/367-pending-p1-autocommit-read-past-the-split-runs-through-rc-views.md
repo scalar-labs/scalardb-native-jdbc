@@ -39,6 +39,10 @@ Q2 188x, Q11 276x, Q22 312x, Q20 99x, Q18 25x, Q16 13x; Q21 runs the container o
 statement. BenchBase never shows it because its workers run in transactions; BI tools and
 psql-style clients run in autocommit.
 
+Inline layout (28, the same day, main at 8c25ffc): autocommit is the same cliff, Q5, Q7, Q8 and Q9
+time out, Q2 178x, Q11 196x, Q22 326x, Q21 out of `/dev/shm`; in a transaction 20 of 21 queries
+within 0.79-1.28x, and Q9's own case in a transaction is todo 368's (the whole-row rule).
+
 ## Design (4.2, "The autocommit checked read as written", 2026-11-03)
 
 The own transaction takes the plain statement once its checks passed, as a transaction does. The
