@@ -3771,6 +3771,83 @@ class OracleOltpIntegrationTest {
     }
   }
 
+  /**
+   * An autocommit read past the split on Oracle at the driver's SNAPSHOT (todo 367): a scrollable
+   * one, which the gated form declines, runs its checks and the read in a transaction of its own,
+   * and with every table clear the statement as written over the data tables, by the text the
+   * server ran; five tables joined on a column besides the key, on both layouts.
+   */
+  @Test
+  void autocommitScrollableReadPastTheSplitRunsAsWritten() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      for (String layout : List.of("i", "d")) {
+        admin.createTable(
+            N(NS),
+            N("acs" + layout),
+            TableMetadata.newBuilder()
+                .addColumn(N("k"), intType())
+                .addColumn(N("x"), intType())
+                .addPartitionKey(N("k"))
+                .build(),
+            layout.equals("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of());
+      }
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      for (String layout : List.of("i", "d")) {
+        seed(v, "acs" + layout, "k, x", "LEVEL, LEVEL * 10", "k", "LEVEL", 10);
+      }
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)acs[id]"),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
+          .hasSize(2)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59369");
+    try (Connection d = ORA.openDriver(ttl);
+        Connection v = ORA.open()) {
+      d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      assertThat(d.getAutoCommit()).isTrue();
+      for (String layout : List.of("i", "d")) {
+        String table = NS + ".acs" + layout;
+        String tag = "/* acs" + System.nanoTime() + " */";
+        StringBuilder sql =
+            new StringBuilder("SELECT " + tag + " t1.k, t1.x FROM " + table + " t1");
+        for (int i = 2; i <= 5; i++) {
+          sql.append(" JOIN ").append(table).append(" t").append(i);
+          sql.append(" ON t").append(i).append(".x = t1.x");
+        }
+        sql.append(" WHERE t1.k <= 3 ORDER BY t1.k");
+        List<String> got = new ArrayList<>();
+        try (Statement st =
+                d.createStatement(ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY);
+            ResultSet rs = st.executeQuery(sql.toString())) {
+          while (rs.next()) {
+            got.add(rs.getString(1) + "/" + rs.getString(2));
+          }
+        }
+        List<String> texts = executedTexts(v, tag);
+        log("autocommit scrollable past the split, " + layout + ": " + texts);
+        assertThat(got).as(layout).containsExactly("1/10", "2/20", "3/30");
+        String data = "\"OO\".\"" + tableInfo("acs" + layout).dataTable() + "\" t";
+        assertThat(texts)
+            .as(layout + ": the text run")
+            .singleElement()
+            .satisfies(
+                t ->
+                    assertThat(t)
+                        .contains(data + "1 ", data + "5 ")
+                        .doesNotContain("RC_", "CASE", "scalardb_native"));
+      }
+    }
+  }
+
   /** Seeds a ScalarDB table of either layout with committed rows, their stamps full-sized. */
   private static void seed(
       Connection v,
