@@ -21,8 +21,9 @@ A plan:
     "runs": "a,c",                      # optional: (a) the vendor, (c) the driver; also b, d
     "reps": 2, "time_s": 120, "terminals": 4,
     "loader_threads": 8,                # optional, BenchBase's sample otherwise
-    "jvm_args": ["-Doracle.jdbc.implicitStatementCacheSize=128"]   # optional, the execute phase's
-  }
+    "jvm_args": ["-Doracle.jdbc.implicitStatementCacheSize=128"],  # optional, the execute phase's
+    "harness": {"tpchCheck": 3}         # optional: -Dnativejdbc.benchbase.<name>=<value> for the
+  }                                     # harness itself (BenchBaseBenchmark's properties)
 
 A workload's weights are in the order of its BenchBase sample config (YCSB: read, insert, scan,
 update, delete, read-modify-write); its scale is BenchBase's scale factor (YCSB: 1,000 rows each).
@@ -33,7 +34,7 @@ import sys
 LEVELS = {"READ_COMMITTED": "READ_COMMITTED", "SNAPSHOT": "REPEATABLE_READ",
           "SERIALIZABLE": "SERIALIZABLE"}
 TOP = {"workloads", "matrix", "runs", "reps", "time_s", "terminals", "loader_threads", "jvm_args",
-       "description"}
+       "harness", "description"}
 WORKLOAD = {"benchmark", "weights", "scale"}
 MATRIX = {"workloads", "levels", "layouts", "delays_us"}
 
@@ -63,6 +64,12 @@ def load(path):
     if not isinstance(p.get("jvm_args", []), list) or not all(
             isinstance(a, str) and a for a in p.get("jvm_args", [])):
         fail("jvm_args: a list of non-empty strings")
+    h = p.get("harness", {})
+    if not isinstance(h, dict) or not all(
+            isinstance(k, str) and k.isidentifier() and not isinstance(v, bool)
+            and isinstance(v, (str, int, float)) and str(v) and not any(c.isspace() for c in str(v))
+            for k, v in h.items()):
+        fail("harness: names to whole numbers, numbers or strings without spaces")
     for wid, w in p["workloads"].items():
         if set(w) - WORKLOAD or "benchmark" not in w:
             fail(f"workload {wid!r}: keys are {sorted(WORKLOAD)}, benchmark required")
@@ -109,6 +116,8 @@ def props(p):
         out.append(f"-Dnativejdbc.benchbase.loaderThreads={p['loader_threads']}")
     if p.get("jvm_args"):
         out.append(f"-Dnativejdbc.benchbase.jvmArgs={' '.join(p['jvm_args'])}")
+    for k, v in p.get("harness", {}).items():
+        out.append(f"-Dnativejdbc.benchbase.{k}={v}")
     for wid in p["matrix"]["workloads"]:
         w = p["workloads"][wid]
         out.append(f"-Dnativejdbc.benchbase.benchmark.{wid}={w['benchmark']}")
