@@ -22,34 +22,35 @@ import java.util.Objects;
  * its last digits). Q15, which creates a view, is left out as in the runs. Prints a Markdown table
  * of the medians.
  *
- * <p>Run by BenchBaseBenchmark with BenchBase's classpath: {@code java TpchCheck.java <vendor url>
- * <driver url> <user> <password> <POSTGRES|ORACLE> <scale> <reps> <vendor level> <driver level>
- * <timeout s> <long ms>}.
+ * <p>Run by BenchBaseBenchmark with BenchBase's classpath, the password in the environment's
+ * {@code TPCH_CHECK_PASSWORD}: {@code java TpchCheck.java <vendor url> <driver url> <user>
+ * <POSTGRES|ORACLE> <scale> <reps> <vendor level> <driver level> <timeout s> <long ms>}.
  */
 public class TpchCheck {
   public static void main(String[] a) throws Exception {
-    DatabaseType type = DatabaseType.valueOf(a[4]);
-    double scale = Double.parseDouble(a[5]);
-    int reps = Integer.parseInt(a[6]);
-    int vendorLevel = Integer.parseInt(a[7]);
-    int driverLevel = Integer.parseInt(a[8]);
-    int timeout = Integer.parseInt(a[9]);
-    long longNanos = Long.parseLong(a[10]) * 1_000_000L;
+    DatabaseType type = DatabaseType.valueOf(a[3]);
+    double scale = Double.parseDouble(a[4]);
+    int reps = Integer.parseInt(a[5]);
+    int vendorLevel = Integer.parseInt(a[6]);
+    int driverLevel = Integer.parseInt(a[7]);
+    int timeout = Integer.parseInt(a[8]);
+    long longNanos = Long.parseLong(a[9]) * 1_000_000L;
+    String password = System.getenv("TPCH_CHECK_PASSWORD");
     WorkloadConfiguration w = new WorkloadConfiguration();
     w.setDatabaseType(type);
     w.setBenchmarkName("tpch");
     StatementDialects dialects = new StatementDialects(w);
     StringBuilder out = new StringBuilder();
     boolean allSame = true;
-    try (Connection v = DriverManager.getConnection(a[0], a[2], a[3]);
-        Connection d = DriverManager.getConnection(a[1], a[2], a[3])) {
+    try (Connection v = DriverManager.getConnection(a[0], a[2], password);
+        Connection d = DriverManager.getConnection(a[1], a[2], password)) {
       for (boolean tx : List.of(true, false)) {
         out.append("\n")
             .append(tx ? "In a transaction each" : "In autocommit")
             .append(", median of ")
             .append(reps)
             .append(" after a warm-up, or the warm-up alone (runs 1) past ")
-            .append(a[10])
+            .append(a[9])
             .append(" ms:\n\n")
             .append("| query | rows | runs | vendor ms | driver ms | driver/vendor | same rows |\n")
             .append("|---|--:|--:|--:|--:|--:|---|\n");

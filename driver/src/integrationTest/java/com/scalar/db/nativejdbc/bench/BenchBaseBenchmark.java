@@ -15,6 +15,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -473,7 +474,8 @@ class BenchBaseBenchmark {
 
   /**
    * The TPC-H queries through the vendor URL and the driver's on the tables run (c) left, in a JVM
-   * of BenchBase's classpath (bench/TpchCheck.java): its table in {@code {dir}/check.md}.
+   * of BenchBase's classpath (bench/TpchCheck.java): its table in {@code {dir}/check.md}, or the
+   * check's failure there, so that the run's report is kept.
    */
   private static void tpchCheck(Engines e, String workload, Path dir) throws Exception {
     Path source =
@@ -490,7 +492,6 @@ class BenchBaseBenchmark {
             url,
             "jdbc:scalardb-native:" + url.substring("jdbc:".length()),
             benchUser(e),
-            e.password(),
             e.engine() == Engine.ORACLE ? "ORACLE" : "POSTGRES",
             scale(workload).isEmpty() ? "1" : scale(workload),
             String.valueOf(TPCH_CHECK),
@@ -499,19 +500,34 @@ class BenchBaseBenchmark {
             String.valueOf(TPCH_CHECK_TIMEOUT),
             String.valueOf(TPCH_CHECK_LONG_MS));
     Path log = dir.resolve("check.log");
-    Process p =
+    Path table = dir.resolve("check.md");
+    ProcessBuilder b =
         new ProcessBuilder(command)
             .directory(HOME.toFile())
             .redirectError(log.toFile())
-            .redirectOutput(dir.resolve("check.md").toFile())
-            .start();
+            .redirectOutput(table.toFile());
+    b.environment().put("TPCH_CHECK_PASSWORD", e.password()); // not on the command line
+    Process p = b.start();
+    String failed = null;
     if (!p.waitFor(6, TimeUnit.HOURS)) {
       p.destroyForcibly();
-      throw new IllegalStateException("the TPC-H check did not finish: " + log);
+      failed = "did not finish in 6 hours";
+    } else if (p.exitValue() != 0) {
+      failed = "exited with " + p.exitValue();
     }
-    if (p.exitValue() != 0) {
-      throw new IllegalStateException(
-          "the TPC-H check failed (" + p.exitValue() + "): " + log + "\n" + tail(log));
+    if (failed != null) {
+      Files.writeString(
+          table,
+          "\nThe check "
+              + failed
+              + " ("
+              + log.toAbsolutePath()
+              + "):\n\n```\n"
+              + tail(log)
+              + "\n```\n",
+          StandardCharsets.UTF_8,
+          StandardOpenOption.CREATE,
+          StandardOpenOption.APPEND);
     }
   }
 
