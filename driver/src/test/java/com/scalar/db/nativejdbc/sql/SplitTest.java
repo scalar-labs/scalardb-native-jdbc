@@ -385,6 +385,17 @@ class SplitTest {
     // 110: a whole-row reference reads every column; a doubled quote is one
     assertThat(read("select t from t where id = 1", 0)).isNull();
     assertThat(read("select \"a\"\"b\" from t", 0)).containsExactly("a\"b");
+    // 368: only where the name can reach the table, in its query or one inside it; TPC-H Q9's
+    // outer nation names the derived table's column
+    String q9 =
+        "select nation, sum(amount) from (select n_name as nation, s_acctbal as amount"
+            + " from supplier, nation where s_nationkey = n_nationkey) as profit group by nation";
+    assertThat(read(q9, 1))
+        .containsExactly("amount", "n_name", "n_nationkey", "nation", "s_acctbal", "s_nationkey");
+    // a correlated subquery sees the enclosing query's table: still its whole row
+    assertThat(read("select 1 from t where exists (select 1 from u where u.r = t)", 0)).isNull();
+    // nor an enclosing query, the derived table's own t
+    assertThat(read("select t from (select x as t from t) s", 0)).containsExactly("t", "x");
   }
 
   @Test

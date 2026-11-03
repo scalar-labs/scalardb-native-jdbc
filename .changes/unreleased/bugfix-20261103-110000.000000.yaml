@@ -1,0 +1,3 @@
+kind: bugfix
+body: 'A read of an inline table whose enclosing query names a column like the table, such as TPC-H Q9''s `nation` over `FROM (SELECT n_name AS nation ... FROM nation ...)`, now runs as written once the transaction found its tables clear. The driver had taken the column for the table''s whole row and read every table of the statement through its committed-rows view, on PostgreSQL 1,035 seconds against 59 ms for Q9.'
+time: 2026-11-03T11:00:00.000000+09:00
