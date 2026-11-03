@@ -80,6 +80,46 @@ and in autocommit.
       received), returning the vendor's rows
 - [ ] Full check passes on all engines
 
+## Review record (2026-11-03, b8c2b5e on `whole-row-rule-scope`, built by session 28 on d7df0e7)
+
+Verdict: mergeable once one line is changed, `Walker.enclosing(Column)` returning null for a column
+with no recorded query (today it returns an empty set). Read from `git show`.
+
+- `SqlAst`: the walker records `columnBlocks` (column to `open.peek()` at `visit(Column)`) and
+  `parents` (query to `open.peek()` at the push in `visit(PlainSelect)`), the same stack the
+  tables' scopes use, so the two agree; `enclosing(c)` walks the parents into an identity set;
+  `ColumnRef` carries the set, null for a `t.*` and for a column the walk skipped (the clause's
+  values, `SqlAst.java` ~614); `sees(r)` is `enclosing == null || r.scope == null ||
+  enclosing.contains(r.scope)`; the whole-row condition gains `&& c.sees(r)`. The ancestry computed
+  per column at parse time, the parent map staying in the walker, in place of the design's field
+  on the AST: fine, smaller.
+- Checked against the parser (JSQLParser 5.4's `TablesNamesFinder`, fetched from its tag):
+  `visit(PlainSelect)` visits the WITH items, select items, FROM, joins, WHERE, GROUP BY, HAVING,
+  window definitions, ORDER BY, LIMIT, OFFSET and FETCH inside the method, so every column of a
+  top-level PlainSelect is recorded under its push; columns visited outside any push belong to a
+  `SetOperationList` or `ParenthesedSelect` ORDER BY, statements for which `columnsReadFrom`
+  returns null before the rule. So the empty-set case is unreachable today, which is why the
+  change asked is one line and not a block: an empty set says "sees no query" and would turn the
+  whole-row reading off, todo 110's wrong rows, for any column a later parser or walker change
+  visits outside a push, where null keeps the conservative reading the design asks for a column
+  the walk did not record.
+- Observation, no change: a CTE body is visited under the main query's push, so its parent is the
+  main query and a CTE body's unqualified column named like a main-query table still reads that
+  table whole, though a CTE body cannot see the main query's FROM. Over-reading, harmless, as it
+  was before the change.
+- `SplitTest`: Q9's shape reads nation's named columns (`amount, n_name, n_nationkey, nation,
+  s_acctbal, s_nationkey`; `nation` among them is the outer column's name, naming too many); the
+  correlated `exists (select 1 from u where u.r = t)` stays null; the derived table's own `t`
+  (`select t from (select x as t from t) s`) reads `t, x`; the todo 110 cases hold. Right.
+- `SnapshotIntegrationTest.enclosingColumnNamedLikeTheTable` (PostgreSQL, both layouts): Q9's
+  shape over `t` runs as written in a transaction, the text from its own `current_query()`
+  containing the data table and neither `rc_` nor `UNION`, and returns the rows in autocommit
+  (rows only, the autocommit path being todo 367's). Without the change the inline run's text is
+  `"sni"."rc_t"`. Right.
+- Suites as reported: unit 417, PostgreSQL and Oracle integration green; the same two Oracle
+  tests failed once with ORA-12516 and passed rerun alone.
+- Changelog `bugfix-20261103-110000`: accurate, not engine-specific, as the rule is not.
+
 ## Work Log
 
 - 2026-11-03: filed from session 28's TPC-H inline run on PostgreSQL; the cause confirmed from

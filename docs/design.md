@@ -1471,7 +1471,11 @@ union as a derived table.
   name to the rule (todo 368, 2026-11-03: on an inline table the whole-row reading has no plain
   statement, so Q9 ran through `rc_T` in a transaction whose checks had passed, 1,035 s against the
   vendor's 59 ms on PostgreSQL 16 at scale factor 0.1, and 64 ms as written with the alias renamed;
-  the walker records each column's block as it does each table's, and each block's parent); on a
+  the walker records each column's block as it does each table's, and each block's parent; built by
+  session 28 as b8c2b5e on `whole-row-rule-scope`, reviewed 2026-11-03: `ColumnRef` carries its
+  query and every query enclosing it, computed at parse time, and `sees(r)` asks whether the table's
+  query is among them, true for a column the walk did not record, which keeps the reading of every
+  column); on a
   50-column table this shortens the statement up to 5x, which
   MySQL and MariaDB parse on every execution. A row is in exactly one copy of its table, so the copies are
   disjoint and need no dedup, and each copy is the user's own statement over base tables, so every
