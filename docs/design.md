@@ -1409,7 +1409,10 @@ union as a derived table.
   2026-11-03: the switch reads `marks || own`, the whole fetch is set on the statement that runs,
   the plain one after the switch, and restored on it, and
   `SnapshotIntegrationTest.autocommitPastTheSplit` reads the text run from its own
-  `current_query()`.
+  `current_query()`; on Oracle, where a forward-only read takes the gated form first,
+  `OracleOltpIntegrationTest.autocommitScrollableReadPastTheSplitRunsAsWritten` (dd3bd7d) reads a
+  scrollable one's text from `v$sql`, the gated form declining a scrollable result, so the own
+  transaction is reached without a race, on both layouts.
 
   **On Oracle both hold, at its SERIALIZABLE, the driver's SNAPSHOT, in a transaction** (todo 334).
   The argument above needs two things of the engine: one snapshot for every statement of the

@@ -111,6 +111,27 @@ and fall to `rc_T` only when closed; the range gate's reason for declining a ran
 (the split read being cheaper than a second round trip) does not hold past the split. A
 refinement for the second step, the user's call.
 
+Resolved (2026-11-03, later): the probe's level was the fixture's, `Engines.openDriver` setting
+READ COMMITTED on every driver connection; 28 confirmed it. Rerun at REPEATABLE READ
+(`getTransactionIsolation()` 4 each time), five-way joins on `k` and on `x`, both layouts,
+f8f589c's build: forward-only, in autocommit and in a transaction, the gated form (gate columns
+over the in-flight index); scrollable in autocommit, which the gated form declines, the statement
+exactly as written over the data tables, this item's switch on Oracle. So the item does apply on
+Oracle at the default level and is testable there without a race, through a scrollable result.
+
+Review (2026-11-03) of dd3bd7d on `autocommit-read-as-written`, on f8f589c:
+`OracleOltpIntegrationTest.autocommitScrollableReadPastTheSplitRunsAsWritten`. Tables `acsi` and
+`acsd` (k, x; 10 rows seeded; the class's `@BeforeAll` drops the namespace's tables), set up by
+`Setup.run`, a driver connection at `catalog_ttl_millis` 59369 (the class's one-TTL-a-test
+convention, 59360-59368 taken) set to REPEATABLE READ in autocommit; per layout a scrollable
+five-way join on `tN.x = t1.x WHERE t1.k <= 3 ORDER BY t1.k`, tagged; asserted the rows 1/10, 2/20,
+3/30 and exactly one text for the tag in `v$sql`, naming the data table as `t1` and `t5` and none
+of `RC_`, `CASE` or `scalardb_native`. The scrollable result is what makes the gated form decline
+and the own transaction run, so the test is deterministic; the coarse checks carry no tag, so the
+single text is the plain statement. Without `(marks || own)` the text is `"OO"."RC_ACSI"` x5 per
+28. Class green, 35 tests, 2 skipped. Mergeable. The branch at dd3bd7d (9eb01b8 + f8f589c +
+dd3bd7d) is mergeable as a whole; landing on the user's word.
+
 ## Acceptance Criteria
 
 - [ ] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
