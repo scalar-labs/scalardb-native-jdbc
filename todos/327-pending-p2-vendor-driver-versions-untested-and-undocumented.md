@@ -206,3 +206,45 @@ the supported versions are documented only once CI verifies them.
   design session (89) has no objection.
 - `oracle-19c` merged into main (642cdb1); the 19c job moved into `ci.yml`, `oracle-19c.yml`
   removed, README lists 19c as supported from 3.20.1 (e4a4352).
+
+### 2026-11-03 - PR #11 reviewed and merged; two follow-ups found after the merge
+
+**By:** Claude Code (the design session, 89)
+- The review record, written down after the fact (the verdicts went to the 19c session by message
+  on 2026-11-02): 30dede3 (`CatalogSessionsExtension` and the package-private
+  `NativeJdbcDriver.releaseCatalogSessions()`; `Engines.importTable`'s retry) mergeable; f75db6e
+  with 1c294ad (`Engines.catalog()`/`track()`/`releaseCatalogSessions()`, the tests' own catalogs
+  released after each class too; the 19c session's measure: the suite's low point 3-7 sessions,
+  the peak 29) mergeable, run 41444738024 green on all eight jobs. 7d0acbc ("hold the tracked
+  catalogs weakly", after Copilot's comment on the PR) went in after the review and was not
+  reviewed before the merge. The user squash-merged PR #11 as 146d0bf (2026-11-02 14:43 UTC; the
+  squash's tree equals 7d0acbc's; the branch is deleted on origin).
+- CI on 146d0bf: the push's run 41464633802 failed in the 19c job alone,
+  `WriteIntegrationTest.reviewFindings` at its first import (`rsd.t`): ScalarDB's
+  `getImportTableMetadata`, ojdbc's `getColumns` PL/SQL, `ORA-00604: error occurred at recursive
+  SQL level 1` with `ORA-08177` as the second line. 19c reports the 08177 inside ORA-00604, so the
+  SQLException's error code is 604 and `causedBy08177` (error code 8177 alone) never matches: the
+  retry cannot fire on the one server that raises the error. Fix: match the message as well
+  (`ORA-08177` in `getMessage()`, or code 604 carrying it). The other seven jobs passed. The
+  scheduled Isolation run 41496933170 the same evening failed SQL Server's
+  `MaelstromIntegrationTest.history_failsAtSerializableWithoutScalarDbsSettings LIST_APPEND` (an
+  anomaly expected within ANOMALY_SECONDS, none came); the 2026-10-30 scheduled run failed the
+  PostgreSQL `history_failsWithoutTheDriver` the same way; not this merge's.
+- 7d0acbc reviewed now: the weak set drops a catalog once the collector reaches it, and nothing
+  then closes its session. Probe on the container (scratchpad `ora/gcsess2.jsh`, ojdbc 23.26, JDK
+  25): five connections opened, their references dropped, four `System.gc()` over 15 s: all five
+  SYSTEM sessions stayed in `v$session`; a held sixth left on `close()`. ojdbc 23's socket is an
+  NIO `SocketChannel`, which has no cleaner (`javap`: `NioSocketImpl` registers one,
+  `SocketChannelImpl` none). So a test-local catalog collected before its class's afterAll holds
+  its session to the JVM's end, as before f75db6e; the 3-7 low point was measured with the strong
+  list and not again after. Recommendation: the strong list back (f75db6e's form) with a Javadoc
+  sentence saying why (Copilot's point is ~50 catalogs' metadata, nothing beside their sessions).
+  Both follow-ups are one-liners for the 19c session on the user's word; 89 reviews.
+- The 19c job's setup prints `ORA-02065: illegal option for ALTER SYSTEM` for
+  `_disable_last_successful_login_time` (ci.yml since e4a4352): 19c does not take the parameter;
+  the step goes on; cosmetic.
+- Local main (88b3a49) is 8 commits past the fork point 10ebd49 and lacks the squash;
+  `git merge-tree` finds no conflict (both sides touch `Engines.java` and
+  `InlineIntegrationTest.java`, 77ece28's inline isolation against the squash's catalog tracking,
+  in different hunks). A merge of origin/main keeps the eight quoted hashes, and main already
+  carries merges (642cdb1). On the user's word, with a build after.
