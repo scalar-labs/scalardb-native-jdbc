@@ -524,7 +524,7 @@ second key index. All three carry the function-based in-flight index.
   key's and the driver's hint as spelled today is right; tables imported before it keep the by-name
   key and need the conversion.
 
-## Design of items 2 and 3 (2026-11-02, for c7)
+## Design of items 2 and 3 (2026-11-02, for the builder: session 28, corrected 2026-11-04; first written c7)
 
 The user's pick, typed in 6e's session and relayed 2026-11-02: "For 1, it should be fixed in
 ScalarDB. I will ask the team, so can you give me the summary of the issue? For 2 and 3, they look
@@ -532,7 +532,7 @@ good if they only improve performance." Item 1 is not built here; 6e writes the 
 the facts logged above (the import by `KEY_SEQ`; the measured insert cost of the by-name key; the
 hint's column order). Items 2 and 3 are designed below under the user's condition: the same rows,
 outcomes, waits, aborts and errors as today, performance alone; anything that would change one stops
-and goes back to the user through 6e before it lands. Each is one branch of c7's, reviewed here from
+and goes back to the user through 6e before it lands. Each is one branch of 28's, reviewed here from
 `git show`, landing on the user's own word in 28's session (corrected 2026-11-04; first written c7); 6e takes the AWS READ COMMITTED and
 SNAPSHOT decoupled TPC-C cells when the second is on main. Item 2 first: the larger gain.
 
@@ -634,9 +634,9 @@ was measured and not taken; the design above stays as the record of the form and
 goes on as designed at b40dc64 (`decoupled-rc-case-copy`); 6e takes the AWS READ COMMITTED and
 SNAPSHOT decoupled cells when it is on main.
 
-### 2026-11-02: c7's finding on item 2: a positional ORDER BY past the select list through the CASE copy
+### 2026-11-02: 28's finding on item 2: a positional ORDER BY past the select list through the CASE copy
 
-Building the decoupled copy, c7 found (`WriteIntegrationTest.anchorReviewFindings`, todo 144's
+Building the decoupled copy, 28 found (`WriteIntegrationTest.anchorReviewFindings`, todo 144's
 probe) that the CASE copy appends the hidden anchor columns to the user's select list, so `SELECT x
 FROM T ORDER BY 2` at READ COMMITTED in a transaction sorts by a hidden column and succeeds, where
 the two-arm form's lift leaves such a statement whole for the database to refuse (todo 144). The
@@ -645,17 +645,17 @@ full-table read with a bad position shows it. Fix on `decoupled-rc-case-copy`: `
 declines the copy for the statement when `SqlAst.ordersPastSelectList()` (a position below 1, past
 the select items, or beside a `*`), both layouts; unit test and both todo 364 tests assert the error
 and no copy; `ReviewFindings` 127's marker accepts either form of the decoupled key read. Design 4.2
-amended (f95e7a5). Asked of c7: `SqlAst.gated`, the anchor-less read behind gate columns (D2,
+amended (f95e7a5). Asked of 28: `SqlAst.gated`, the anchor-less read behind gate columns (D2,
 2026-10-28), appends its columns the same way without the lift and shows no positional handling in
 its builder; if it has the same hole, the same guard on the same branch with two tests (SNAPSHOT
 autocommit whole-table, READ COMMITTED with a key conjunct). Reported to the user through 6e: a
 restoration under item 2's condition, landing with item 2 unless the user wants it split out. Also
-from c7's first full Oracle run: the decoupled item read at 6.00 gets a call against the vendor's
+from 28's first full Oracle run: the decoupled item read at 6.00 gets a call against the vendor's
 3.00, better than the design's 8; unit tests 416.
 
 ### 2026-11-02: item 2 reviewed mergeable: 708aba0 + 67de0b1 on `decoupled-rc-case-copy` (the design's note)
 
-Reviewed from `git show` (on b40dc64; c7 rebases onto main at landing). `SplitRead.caseCopy` reads
+Reviewed from `git show` (on b40dc64; 28 rebases onto main at landing). `SplitRead.caseCopy` reads
 the metadata through alias `m` for a decoupled table, `FROM <data> t LEFT JOIN <meta> m ON <key>`,
 each non-key column and both anchors `CASE WHEN COALESCE(m.tx_state, 3) IN (1, 2) THEN m.before_c
 ELSE t.c END`, the state `m.tx_state`, the WHERE on `m`, no hint; the inline form unchanged, as
@@ -667,7 +667,7 @@ checked by the test's executed texts (`scalardb_native_g0` present, no copy). Th
 `t.*` included since `AllTableColumns` extends `AllColumns`; a plain select only, which is enough,
 the split's text builder refusing anything else at `emitSplit`) guards both `Router.caseCopies` and
 `Router.gated`, so the two-arm form's lift leaves the statement whole and Oracle raises ORA-01785 as
-before; the gated hole confirmed by c7 on main (an autocommit SNAPSHOT read of an inline table sorted
+before; the gated hole confirmed by 28 on main (an autocommit SNAPSHOT read of an inline table sorted
 by the gate column). Tests: `todo364_keyOnlyDecoupledReadsAtReadCommittedTakeTheCaseCopy` (the copy's
 text for a lookup and a prefix range; before images in flight with the insert left out; the SUM and
 an autocommit key read gated as written; a non-key predicate keeping the arms; an inner join with
@@ -678,7 +678,7 @@ a write after the in-flight transaction rolled back; ORDER BY 2 refused; the ite
 and READ COMMITTED keyed: ORA-01785, no gate column executed), the inline copy test's ORDER BY 2
 assertion, `SqlAstTest.ordersPastSelectList_...`, ReviewFindings 127's either-form marker;
 changelogs: an improvement for the copy and a bugfix for the ORDER BY position (the gated form may be
-released). c7's run: unit 417, the Oracle suite 189 tests, 0 failures. Design 4.2 amended here: the
+released). 28's run: unit 417, the Oracle suite 189 tests, 0 failures. Design 4.2 amended here: the
 gated guard, the set-operation remark, the 6-gets figure and the build's record. Lands on the user's
 word in 28's session (corrected 2026-11-04; first written c7) (the user asleep; 6e puts the ORDER BY defect and the landing to them in the
 morning); then 6e's AWS READ COMMITTED and SNAPSHOT decoupled cells. Expected there: the RC decoupled

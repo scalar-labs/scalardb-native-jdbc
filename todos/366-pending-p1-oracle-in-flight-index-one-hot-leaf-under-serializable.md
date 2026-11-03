@@ -141,7 +141,7 @@ per six, in-flight rows instead of one block.
   and the fixture's Oracle level at `READ_COMMITTED` for inline) and option 2 (the user takes
   `RdbEngineOracle`'s minimum to the ScalarDB team). Option 1 sent to 89 to design and route to c7.
 
-## Design of option 1 (2026-11-01, for c7)
+## Design of option 1 (2026-11-01, for the builder: session 28, corrected 2026-11-04; first written c7)
 
 The user's word via 6e: "For 1 (366), I will do both". Option 2 is the user's with the ScalarDB team
 (the feedback page). Option 1 is ours, docs and fixture, and stands whatever ScalarDB does: the docs
@@ -220,9 +220,9 @@ Checks: the docs build (links resolve: the new anchor `#scalardbs-connections-on
 `InlineIntegrationTest` on Oracle locally; spotless. Lands on the user's word in 28's session (corrected 2026-11-04; first written c7), rebased
 onto main's head.
 
-## Review record (2026-11-01, written down 2026-11-02 at c7's ask)
+## Review record (2026-11-01, written down 2026-11-02 at 28's ask; the builder was 28, corrected 2026-11-04 from c7)
 
-Option 1 as built by c7 on `oracle-366-docs-fixture`: 3ff8b73 (the docs by layout and the inline
+Option 1 as built by session 28 on `oracle-366-docs-fixture`: 3ff8b73 (the docs by layout and the inline
 suite at `READ_COMMITTED`, on 4d499bc) was reviewed from `git show` on 2026-11-01 and found
 mergeable, read against the design above: the transactions.md table rows and line 34's
 decoupled-only requirement, the new subsection and its anchor `#scalardbs-connections-on-oracle`,
@@ -230,9 +230,9 @@ the three one-clause pointers, design section 3's sentence, `Engines` (`isolatio
 comment, `inlineIsolation()`, `scalarDbInline()` through `scalarDb(Properties)`, whose `putIfAbsent`
 leaves the level), and `InlineIntegrationTest`'s five call sites with the class comment; the
 subsection's figures match the measurements above. One nit, design.md line 976 at 144 characters,
-fixed by c7 as 89b49c2 (lines 976–977 rewrapped at 100, nothing else; the fence count 38 as on
-main). Verdict for the pair 3ff8b73 + 89b49c2: mergeable. The verdict went to c7 by message and was
-not written here until 2026-11-02, when c7 found no record of it before landing; it lands on the
+fixed by 28 as 89b49c2 (lines 976–977 rewrapped at 100, nothing else; the fence count 38 as on
+main). Verdict for the pair 3ff8b73 + 89b49c2: mergeable. The verdict went to 28 by message and was
+not written here until 2026-11-02, when 28 found no record of it before landing; it lands on the
 user's word in 28's session (corrected 2026-11-04; first written c7), rebased onto main's head.
 
 ### 2026-11-02: option 1 on main (77ece28 + d67342c)

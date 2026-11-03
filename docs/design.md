@@ -1303,11 +1303,11 @@ union as a derived table.
   (`Router.caseCopies` declines the copy for the statement, `SqlAst.ordersPastSelectList`): the copy
   appends the hidden anchor columns to the select list, so `SELECT x FROM T ORDER BY 2` would sort
   by a hidden column where the arms' lift leaves the statement whole for the database to refuse
-  (todo 144); found by c7 building the decoupled copy, 2026-11-02, the inline copy on main having
-  had it since 5e1da62, fixed with the decoupled copy. The gated statement as written (above)
-  appends its gate columns the same way and declines likewise (`Router.gated`), c7 having shown an
-  autocommit SNAPSHOT read sorted by the gate column; Oracle's ORA-01785 on both layouts, in and out
-  of a transaction, is the tested outcome
+  (todo 144); found by session 28 building the decoupled copy, 2026-11-02, the inline copy on main
+  having had it since 5e1da62, fixed with the decoupled copy. The gated statement as written (above)
+  appends its gate columns the same way and declines likewise (`Router.gated`), session 28 having
+  shown an autocommit SNAPSHOT read sorted by the gate column; Oracle's ORA-01785 on both layouts,
+  in and out of a transaction, is the tested outcome
   (`OracleOltpIntegrationTest.anchorlessReadsWithAPositionPastTheListAreRefused`), and a set
   operation never takes a copy or a gate, the split's text builder reading one plain select only.
 
@@ -1351,9 +1351,9 @@ union as a derived table.
   row read with NULL anchors, a delete in flight read as the row before it; to add: the copy's text
   for a decoupled key lookup and for a key-prefix range, the anchor-less key read still the gated
   statement as written, and the item read of `OracleOltpIntegrationTest`'s decoupled cell, 6.00 gets
-  a call as built with 50 items in flight (c7, 2026-11-02; the test bounds it at 8.2; the 8
+  a call as built with 50 items in flight (session 28, 2026-11-02; the test bounds it at 8.2; the 8
   estimated above is the stock-shaped pair's, whose deeper indexes cost a get more a probe). Built
-  by c7 as 708aba0 and 67de0b1 on `decoupled-rc-case-copy`, reviewed mergeable 2026-11-02:
+  by session 28 as 708aba0 and 67de0b1 on `decoupled-rc-case-copy`, reviewed mergeable 2026-11-02:
   `SplitRead.caseCopy` takes the metadata alias for a decoupled table and joins it,
   `Router.caseCopies` admits a decoupled reference only in `own`, and both the copy and the gated
   statement decline under `SqlAst.ordersPastSelectList`. **A table found clear** (todo 329). The
