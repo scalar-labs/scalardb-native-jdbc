@@ -203,6 +203,14 @@ exercise the long rule: 42 rows, every execution the vendor's rows; the failure 
 exercised with a real failure (eight lines, read). The branch at 979faaa (b3ed1ea + 979faaa) is
 mergeable as a whole; landing on the user's word.
 
+### 2026-11-03: the TPC-H check on main (a978e35 + 6f381b3)
+
+Landed by 28 on the user's "land it" (c7's session), rebased onto 67ef575; my range-diff of
+75dea69..979faaa against 67ef575..6f381b3 shows both commits identical. Nothing pushed. The SF 10
+PostgreSQL TPC-H cloud run (6e's plan `bench-env/plans/postgresql-tpch-sf10.json`, `tpchCheck`
+3) is the user's to start; when it lands, read the check's warm figures for Q19, Q22 and Q2 and
+the autocommit table against the SF 0.1 ones above.
+
 ## Acceptance Criteria
 
 - [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
