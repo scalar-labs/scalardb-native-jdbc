@@ -95,6 +95,41 @@ returns the committed rows through `rc_T`; a prepared one executed across both s
 - [ ] Full check passes on all engines
 - [ ] 28's TPC-H autocommit run repeated from the build: Q5-Q9 at the in-transaction figures
 
+## Review record (2026-11-03, 9eb01b8 on `autocommit-read-as-written`, built by session 28 on afc68f6)
+
+Verdict: mergeable, with one Javadoc line to fix before landing. Read from `git show`.
+
+- `Proxies`: the plain switch reads `(marks || own)` as designed. The own transaction's whole fetch
+  moved from before the checks to just before the forward, on `vendor()` as it then is, the plain
+  statement after the switch, and `endOwn` takes that statement and restores its fetch size on it;
+  the checks run on statements of their own, so the earlier placement served nothing they needed,
+  and a failure before the fetch size is set leaves `fetched` null, nothing to restore. Right.
+- The switch back for a prepared read is the existing `switchTo(false, one)` branch; a failure of
+  the checks leaves the target as it was (the plain statement after a first pass), which the next
+  execute's checks decide again. Right.
+- Test `SnapshotIntegrationTest.autocommitPastTheSplit` (PostgreSQL, both layouts, at REPEATABLE
+  READ): a five-way self join of `t` in autocommit with `current_query()` in its select list, the
+  text run containing the data table and no `rc_`, plain and prepared; with row 7 in flight,
+  outside the read's `t1.id <= 3`, both abort with `SQLTransactionRollbackException`; the prepared
+  read runs as written again after the rollback. Without the change the text is five `rc_t`.
+- The design's expectation "the same read with a row in flight returns them through `rc_T`" was
+  wrong for this shape: past the split the table's check aborts before any text is chosen (the
+  predicate pairs check is off by default), as it did before the change. Design and this todo
+  corrected in the same commit as this record. The test's Javadoc still carries the wrong sentence
+  ("with a row in flight in one it runs through rc_T") against what the test asserts: fix it to
+  say the read aborts, the table's check coming first.
+- No Oracle test: the Oracle autocommit path takes the gated form first, unchanged, and the own
+  transaction there follows a closed gate, whose row in flight the check meets too. Accepted.
+- Suites as reported: unit 417, PostgreSQL and Oracle integration green; two Oracle tests failed
+  once with ORA-12516 (the container out of processes, PR #11's subject) and passed rerun alone.
+- Changelog `improvement-20261103-100000`: accurate.
+
+Observation, not this item's: an autocommit read past the split aborts when any of its tables has
+a row in flight anywhere, the table's coarse check, where the user docs' SNAPSHOT sentence
+("checks whether the statement reaches a row in flight") describes the split shapes. The committed
+view would answer such a read exactly, one statement in one snapshot. A BI query over a busy
+table meets this; a follow-up if the user wants it.
+
 ## Work Log
 
 - 2026-11-03: filed from session 28's TPC-H smoke run on PostgreSQL; the cause read from `Proxies`

@@ -1403,7 +1403,13 @@ union as a derived table.
   `SnapshotIntegrationTest.scrollableInAutocommit` and the found-clear tests of todo 329; to add: an
   autocommit read past the split on PostgreSQL and Oracle that runs as written, by the text the
   vendor received, and returns the committed rows, and the same read with a row in flight, which
-  returns them through `rc_T`.
+  aborts as before, the table's check coming before any text past the split (the predicate pairs
+  check is off by default), the design's first expectation, a return through `rc_T`, corrected by
+  the build. Built by session 28 as 9eb01b8 on `autocommit-read-as-written`, reviewed mergeable
+  2026-11-03: the switch reads `marks || own`, the whole fetch is set on the statement that runs,
+  the plain one after the switch, and restored on it, and
+  `SnapshotIntegrationTest.autocommitPastTheSplit` reads the text run from its own
+  `current_query()`.
 
   **On Oracle both hold, at its SERIALIZABLE, the driver's SNAPSHOT, in a transaction** (todo 334).
   The argument above needs two things of the engine: one snapshot for every statement of the
