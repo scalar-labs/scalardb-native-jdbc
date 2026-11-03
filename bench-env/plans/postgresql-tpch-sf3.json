@@ -1,0 +1,32 @@
+{
+  "description": "TPC-H scale factor 3 on PostgreSQL (10 did not load within the harness's 3 hours, run 20261104-0013-pg): BenchBase's serial run of the 21 queries (Q15 off), one terminal, the default SNAPSHOT level, both layouts, the fast network; runs (a) and (c) once each, four loads; the server's per-statement account of every run (matrix.sh's serverStats); after (c), session 28's row check, 3 timed executions a query after a warm-up, a query over 1 s timed by its warm-ups alone",
+  "workloads": {
+    "tpch": {
+      "benchmark": "tpch",
+      "scale": 3
+    }
+  },
+  "matrix": {
+    "workloads": [
+      "tpch"
+    ],
+    "levels": [
+      "SNAPSHOT"
+    ],
+    "layouts": [
+      "decoupled",
+      "inline"
+    ],
+    "delays_us": [
+      0
+    ]
+  },
+  "runs": "a,c",
+  "reps": 1,
+  "time_s": 60,
+  "terminals": 1,
+  "loader_threads": 8,
+  "harness": {
+    "tpchCheck": 3
+  }
+}

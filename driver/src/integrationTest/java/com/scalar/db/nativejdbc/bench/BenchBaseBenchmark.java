@@ -1475,7 +1475,7 @@ class BenchBaseBenchmark {
       String... args)
       throws Exception {
     Path config = dir.resolve(phase + ".xml");
-    writeConfig(e, workload, run, config);
+    writeConfig(e, workload, run, phase, config);
     List<String> command = new ArrayList<>();
     command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
     // -Dnativejdbc.benchbase.jvmArgs=-XX:StartFlightRecording=...: for the execute phase only;
@@ -1562,7 +1562,7 @@ class BenchBaseBenchmark {
   }
 
   /** BenchBase's sample configuration for the workload, with this run's connection and load. */
-  private static void writeConfig(Engines e, String workload, String run, Path to)
+  private static void writeConfig(Engines e, String workload, String run, String phase, Path to)
       throws Exception {
     Path sample = HOME.resolve("config").resolve(configDir(e.engine()));
     DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
@@ -1572,6 +1572,11 @@ class BenchBaseBenchmark {
             .parse(sample.resolve("sample_" + benchmark(workload) + "_config.xml").toFile());
     boolean vendor = run.equals("a") || run.equals("d");
     String url = benchUrl(e);
+    if (phase.equals("load") && e.engine() == Engine.POSTGRESQL) {
+      // a batch as one multi-row INSERT: BenchBase loads TPC-H's lineitem on one thread, which at
+      // scale factor 10 took over the load's 3 hours row by row (run 20261104-0013-pg)
+      url += "&reWriteBatchedInserts=true";
+    }
     set(
         d,
         "driver",
