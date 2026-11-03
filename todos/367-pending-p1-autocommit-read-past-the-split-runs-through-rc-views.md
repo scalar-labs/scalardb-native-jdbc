@@ -132,10 +132,20 @@ single text is the plain statement. Without `(marks || own)` the text is `"OO"."
 28. Class green, 35 tests, 2 skipped. Mergeable. The branch at dd3bd7d (9eb01b8 + f8f589c +
 dd3bd7d) is mergeable as a whole; landing on the user's word.
 
+### 2026-11-03: on main (4d05481 + 89ca6b2 + 385fbb4)
+
+Landed by 28 on the user's "land it" (c7's session), rebased onto c026b72; my range-diff of
+d7df0e7..dd3bd7d against c026b72..385fbb4 shows all three commits identical. Before the
+fast-forward 28 ran spotlessCheck, the unit suite (417) and the PostgreSQL integration suite
+(190) on the combined head with todo 368, all green; Oracle not rerun for the combination (368
+touches nothing Oracle-specific; this item's Oracle test ran green on the branch). Left open: the
+TPC-H autocommit rerun from main (the third acceptance item) and the READ COMMITTED second step
+with its Oracle refinement, the user's call.
+
 ## Acceptance Criteria
 
-- [ ] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
-      PostgreSQL and Oracle, with the tests above
+- [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
+      PostgreSQL and Oracle, with the tests above (on main 2026-11-03)
 - [ ] Full check passes on all engines
 - [ ] 28's TPC-H autocommit run repeated from the build: Q5-Q9 at the in-transaction figures
 

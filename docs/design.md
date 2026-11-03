@@ -1412,7 +1412,8 @@ union as a derived table.
   `current_query()`; on Oracle, where a forward-only read takes the gated form first,
   `OracleOltpIntegrationTest.autocommitScrollableReadPastTheSplitRunsAsWritten` (dd3bd7d) reads a
   scrollable one's text from `v$sql`, the gated form declining a scrollable result, so the own
-  transaction is reached without a race, on both layouts.
+  transaction is reached without a race, on both layouts. On main as 4d05481, 89ca6b2 and 385fbb4
+  (2026-11-03, the user's word; range-diff identical).
 
   **On Oracle both hold, at its SERIALIZABLE, the driver's SNAPSHOT, in a transaction** (todo 334).
   The argument above needs two things of the engine: one snapshot for every statement of the
@@ -1478,7 +1479,7 @@ union as a derived table.
   session 28 as b8c2b5e on `whole-row-rule-scope`, reviewed 2026-11-03: `ColumnRef` carries its
   query and every query enclosing it, computed at parse time, and `sees(r)` asks whether the table's
   query is among them, true for a column the walk did not record, which keeps the reading of every
-  column); on a
+  column; on main as efc2fd5 and 11c8ce3, 2026-11-03, the user's word); on a
   50-column table this shortens the statement up to 5x, which
   MySQL and MariaDB parse on every execution. A row is in exactly one copy of its table, so the copies are
   disjoint and need no dedup, and each copy is the user's own statement over base tables, so every

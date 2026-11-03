@@ -73,9 +73,22 @@ a derived table's columns, keeps reading every column, the harmless side (the ta
 In the integration tests: Q9's shape on an inline table returns the vendor's rows in a transaction
 and in autocommit.
 
+### 2026-11-03: on main (efc2fd5 + 11c8ce3)
+
+Landed by 28 on the user's "land it" (c7's session), rebased onto 385fbb4 (todo 367's landing).
+`SnapshotIntegrationTest` conflicted, both items adding a call and a method at the same spot; 28
+took main's file and re-applied this item's call (beside `autocommitPastTheSplit`, inside the same
+`if (pg)`) and its method unchanged. My range-diff of d7df0e7..4e551da against 385fbb4..11c8ce3:
+efc2fd5 differs from b8c2b5e only in that context, 11c8ce3 identical to 4e551da. Suites on the
+combined head before the fast-forward: spotlessCheck, unit 417, PostgreSQL integration 190, green;
+Oracle not rerun for the combination (nothing Oracle-specific here; the branch's Oracle run was
+green apart from the ORA-12516 pair that pass rerun alone). Left open: Q9 through BenchBase from
+main, the second acceptance item's measurement.
+
 ## Acceptance Criteria
 
-- [ ] `columnsReadFrom` scopes the whole-row rule as designed, with the unit tests above
+- [x] `columnsReadFrom` scopes the whole-row rule as designed, with the unit tests above (on main
+      2026-11-03)
 - [ ] Q9's shape on an inline table runs as written once the checks passed (the text the vendor
       received), returning the vendor's rows
 - [ ] Full check passes on all engines
