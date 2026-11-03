@@ -1114,9 +1114,11 @@ public final class Proxies {
         return gatedRows;
       }
       // in autocommit the checks and the read share one snapshot in a transaction of their own,
-      // its rows fetched whole, since its end closes a cursor
+      // its rows fetched whole, since its end closes a cursor: on the statement that runs, the
+      // plain one when the checks passed
       boolean own = checked != null && owner.vendor.getAutoCommit();
-      int fetchSize = own ? vendor().getFetchSize() : 0;
+      Statement fetched = null;
+      int fetchSize = 0;
       if (own) {
         owner.vendor.setAutoCommit(false);
         if (owner.router.engine() == Engine.ORACLE) {
@@ -1128,9 +1130,6 @@ public final class Proxies {
       }
       Object result;
       try {
-        if (own) {
-          vendor().setFetchSize(0);
-        }
         if (checked != null) {
           try {
             owner.router.check(
@@ -1156,7 +1155,7 @@ public final class Proxies {
             one != null
                 && one.plainSql != null
                 && one.write == null
-                && marks
+                && (marks || own)
                 && !unwrapped
                 && (takesSql || !streamBound())
                 && owner.router.allPassed(one.clearedBy);
@@ -1182,6 +1181,11 @@ public final class Proxies {
         // trip at every switch
         owner.router.beforeRun(
             owner.vendor, plain && !Objects.requireNonNull(one).parallel ? List.of() : ran);
+        if (own) {
+          fetched = vendor();
+          fetchSize = fetched.getFetchSize();
+          fetched.setFetchSize(0);
+        }
         try {
           result = forward(vendor(), method, routed);
         } finally {
@@ -1192,7 +1196,7 @@ public final class Proxies {
       } catch (Throwable e) {
         if (own) {
           try {
-            endOwn(false, fetchSize);
+            endOwn(false, fetched, fetchSize);
           } catch (SQLException f) {
             e.addSuppressed(f); // the read's own failure is the one to report
           }
@@ -1213,7 +1217,7 @@ public final class Proxies {
         throw e instanceof SQLException ? Writes.asRetryable((SQLException) e) : e;
       }
       if (own) {
-        endOwn(true, fetchSize);
+        endOwn(true, fetched, fetchSize);
       }
       if (!(result instanceof ResultSet)) {
         return result;
@@ -1260,7 +1264,8 @@ public final class Proxies {
     }
 
     /** Ends the transaction a checked read ran in, in autocommit, and restores autocommit. */
-    private void endOwn(boolean commit, int fetchSize) throws SQLException {
+    private void endOwn(boolean commit, @Nullable Statement fetched, int fetchSize)
+        throws SQLException {
       try {
         if (commit) {
           owner.vendor.commit();
@@ -1275,7 +1280,9 @@ public final class Proxies {
           owner.vendor.setTransactionIsolation(
               owner.router.sessionLevel(owner.router.isolation(), true));
         }
-        vendor().setFetchSize(fetchSize);
+        if (fetched != null) {
+          fetched.setFetchSize(fetchSize);
+        }
       }
     }
 
