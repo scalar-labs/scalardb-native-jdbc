@@ -1,0 +1,29 @@
+{
+  "description": "TPC-H scale factor 10 on PostgreSQL: BenchBase's serial run of the 21 queries (Q15 off), one terminal, the default SNAPSHOT level, both layouts, the fast network; runs (a) and (c) once each, four loads; the server's per-statement account of every run (matrix.sh's serverStats)",
+  "workloads": {
+    "tpch": {
+      "benchmark": "tpch",
+      "scale": 10
+    }
+  },
+  "matrix": {
+    "workloads": [
+      "tpch"
+    ],
+    "levels": [
+      "SNAPSHOT"
+    ],
+    "layouts": [
+      "decoupled",
+      "inline"
+    ],
+    "delays_us": [
+      0
+    ]
+  },
+  "runs": "a,c",
+  "reps": 1,
+  "time_s": 60,
+  "terminals": 1,
+  "loader_threads": 8
+}
