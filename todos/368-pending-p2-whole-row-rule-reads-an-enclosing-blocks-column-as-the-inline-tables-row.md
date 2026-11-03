@@ -120,6 +120,13 @@ with no recorded query (today it returns an empty set). Read from `git show`.
   tests failed once with ORA-12516 and passed rerun alone.
 - Changelog `bugfix-20261103-110000`: accurate, not engine-specific, as the rule is not.
 
+Follow-up (2026-11-03): the line in as asked, 4e551da on the branch: `Walker.enclosing(Column)` is
+`@Nullable` and returns null where `columnBlocks` has no entry for the column, the set as before
+otherwise, its Javadoc saying null keeps the whole-row reading. Unit suite and spotbugs clean,
+`SnapshotIntegrationTest` and `ReviewFindingsIntegrationTest` green on PostgreSQL per 28; no unit
+case, none reaching it. The branch at 4e551da (b8c2b5e + 4e551da) is mergeable as a whole;
+landing on the user's word, the landed head to be range-diffed against it.
+
 ## Work Log
 
 - 2026-11-03: filed from session 28's TPC-H inline run on PostgreSQL; the cause confirmed from
