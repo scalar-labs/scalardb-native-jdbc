@@ -134,7 +134,7 @@ dd3bd7d) is mergeable as a whole; landing on the user's word.
 
 ### 2026-11-03: on main (4d05481 + 89ca6b2 + 385fbb4)
 
-Landed by 28 on the user's "land it" (c7's session), rebased onto c026b72; my range-diff of
+Landed by 28 on the user's "land it" (typed in 28's session), rebased onto c026b72; my range-diff of
 d7df0e7..dd3bd7d against c026b72..385fbb4 shows all three commits identical. Before the
 fast-forward 28 ran spotlessCheck, the unit suite (417) and the PostgreSQL integration suite
 (190) on the combined head with todo 368, all green; Oracle not rerun for the combination (368
@@ -205,7 +205,7 @@ mergeable as a whole; landing on the user's word.
 
 ### 2026-11-03: the TPC-H check on main (a978e35 + 6f381b3)
 
-Landed by 28 on the user's "land it" (c7's session), rebased onto 67ef575; my range-diff of
+Landed by 28 on the user's "land it" (typed in 28's session), rebased onto 67ef575; my range-diff of
 75dea69..979faaa against 67ef575..6f381b3 shows both commits identical. Nothing pushed. The SF 10
 PostgreSQL TPC-H cloud run (6e's plan `bench-env/plans/postgresql-tpch-sf10.json`, `tpchCheck`
 3) is the user's to start; when it lands, read the check's warm figures for Q19, Q22 and Q2 and

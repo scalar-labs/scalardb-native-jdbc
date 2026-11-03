@@ -75,7 +75,7 @@ and in autocommit.
 
 ### 2026-11-03: on main (efc2fd5 + 11c8ce3)
 
-Landed by 28 on the user's "land it" (c7's session), rebased onto 385fbb4 (todo 367's landing).
+Landed by 28 on the user's "land it" (typed in 28's session), rebased onto 385fbb4 (todo 367's landing).
 `SnapshotIntegrationTest` conflicted, both items adding a call and a method at the same spot; 28
 took main's file and re-applied this item's call (beside `autocommitPastTheSplit`, inside the same
 `if (pg)`) and its method unchanged. My range-diff of d7df0e7..4e551da against 385fbb4..11c8ce3:

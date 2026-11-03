@@ -217,7 +217,7 @@ and `MaelstromIntegrationTest` set the level themselves and do not run on Oracle
    ScalarDB client is idle during a run; `READ_COMMITTED` for inline cells is 6e's call), the driver.
 
 Checks: the docs build (links resolve: the new anchor `#scalardbs-connections-on-oracle`); unit tests;
-`InlineIntegrationTest` on Oracle locally; spotless. Lands on the user's word in c7's session, rebased
+`InlineIntegrationTest` on Oracle locally; spotless. Lands on the user's word in 28's session (corrected 2026-11-04; first written c7), rebased
 onto main's head.
 
 ## Review record (2026-11-01, written down 2026-11-02 at c7's ask)
@@ -233,12 +233,12 @@ subsection's figures match the measurements above. One nit, design.md line 976 a
 fixed by c7 as 89b49c2 (lines 976–977 rewrapped at 100, nothing else; the fence count 38 as on
 main). Verdict for the pair 3ff8b73 + 89b49c2: mergeable. The verdict went to c7 by message and was
 not written here until 2026-11-02, when c7 found no record of it before landing; it lands on the
-user's word in c7's session, rebased onto main's head.
+user's word in 28's session (corrected 2026-11-04; first written c7), rebased onto main's head.
 
 ### 2026-11-02: option 1 on main (77ece28 + d67342c)
 
-c7 rebased `oracle-366-docs-fixture` onto 0561b6a and fast-forwarded main on the user's "land it" in
-its session; the range-diff against the reviewed 3ff8b73 + 89b49c2 shows both commits identical, and
+Session 28 rebased `oracle-366-docs-fixture` onto 0561b6a and fast-forwarded main on the user's
+"land it" typed in its session (corrected 2026-11-04: first recorded as c7, 28's own correction); the range-diff against the reviewed 3ff8b73 + 89b49c2 shows both commits identical, and
 design.md keeps its 38 fences. Nothing pushed. With this, the inline layout's recommended Oracle
 configuration (ScalarDB's connections at `READ_COMMITTED`) is in the user docs and runs through CI
 in `InlineIntegrationTest`. The todo stays open for the decoupled layout: option 2, ScalarDB

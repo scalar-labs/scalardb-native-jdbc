@@ -533,7 +533,7 @@ the facts logged above (the import by `KEY_SEQ`; the measured insert cost of the
 hint's column order). Items 2 and 3 are designed below under the user's condition: the same rows,
 outcomes, waits, aborts and errors as today, performance alone; anything that would change one stops
 and goes back to the user through 6e before it lands. Each is one branch of c7's, reviewed here from
-`git show`, landing on the user's own word in c7's session; 6e takes the AWS READ COMMITTED and
+`git show`, landing on the user's own word in 28's session (corrected 2026-11-04; first written c7); 6e takes the AWS READ COMMITTED and
 SNAPSHOT decoupled TPC-C cells when the second is on main. Item 2 first: the larger gain.
 
 ### Item 2: the CASE copy for decoupled keyed reads at READ COMMITTED (branch `decoupled-rc-case-copy`)
@@ -680,14 +680,15 @@ assertion, `SqlAstTest.ordersPastSelectList_...`, ReviewFindings 127's either-fo
 changelogs: an improvement for the copy and a bugfix for the ORDER BY position (the gated form may be
 released). c7's run: unit 417, the Oracle suite 189 tests, 0 failures. Design 4.2 amended here: the
 gated guard, the set-operation remark, the 6-gets figure and the build's record. Lands on the user's
-word in c7's session (the user asleep; 6e puts the ORDER BY defect and the landing to them in the
+word in 28's session (corrected 2026-11-04; first written c7) (the user asleep; 6e puts the ORDER BY defect and the landing to them in the
 morning); then 6e's AWS READ COMMITTED and SNAPSHOT decoupled cells. Expected there: the RC decoupled
 TPC-C cell from 0.61 toward 0.64–0.66; the SNAPSHOT cell unchanged (the copy is READ COMMITTED only).
 
 ### 2026-11-02: item 2 on main (37e278f + 10ebd49)
 
-c7 rebased `decoupled-rc-case-copy` onto bfc7fde (6e's reading of the 19c run) and fast-forwarded
-main on the user's "land it" in its session; the range-diff against the reviewed 708aba0 + 67de0b1
+Session 28 rebased `decoupled-rc-case-copy` onto bfc7fde (6e's reading of the 19c run) and
+fast-forwarded main on the user's "land it" typed in its session (corrected 2026-11-04: first
+recorded as c7, 28's own correction); the range-diff against the reviewed 708aba0 + 67de0b1
 shows both commits identical. Nothing pushed. 6e now takes the AWS READ COMMITTED and SNAPSHOT
 decoupled TPC-C cells to the user (expected above: the RC decoupled cell from 0.61 toward
 0.64–0.66, the SNAPSHOT cell unchanged as the control).
