@@ -865,3 +865,41 @@ NewOrder, not the cell's gap.
 A version comparison needs both versions on one host type: RDS offers 26ai only as
 `oracle-ee-cdb` with a bring-your-own licence, and the EC2 stack would need the 19.3 container
 image. The user's call.
+
+## Oracle 19c on RDS, overnight (20261102-2146-ora19)
+
+The second 19c run (2026-11-02 night), on the same RDS type as 20261102-0045-ora19, from 88b3a49
+with item 2 (the decoupled RC CASE copy, 37e278f + 10ebd49) on main (plan
+`plans/oracle19-long.json`: TPC-C scale 32 and YCSB A, C, E and F at 1M rows, 4 terminals, both
+levels, both layouts, the fast network and 250 µs added, two repetitions of 60 s). The harness ran
+BenchBase alone (c96607e); all 8 cells finished in 8.5 hours and the stack tore itself down.
+The added delay measured 202 µs to 458 µs on a TCP connect.
+
+Throughput, (c)/(a):
+
+| cell | TPC-C | YCSB A | YCSB C | YCSB E | YCSB F |
+|---|---|---|---|---|---|
+| RC decoupled, fast | 0.80 | 0.97 | 0.94 | 0.72 | 0.93 |
+| RC inline, fast | 0.83 | 0.95 | 0.95 | 0.83 | 0.92 |
+| SNAPSHOT decoupled, fast | 0.86 | 0.91 | 0.94 | 0.97 | 0.96 |
+| SNAPSHOT inline, fast | 0.80 | 0.96 | 0.94 | 0.93 | 0.98 |
+| RC decoupled, +250 µs | 0.85 | 0.94 | 0.98 | 0.82 | 0.94 |
+| RC inline, +250 µs | 0.89 | 0.98 | 0.97 | 0.90 | 0.97 |
+| SNAPSHOT decoupled, +250 µs | 0.86 | 0.95 | 0.98 | 0.97 | 0.96 |
+| SNAPSHOT inline, +250 µs | 0.94 | 0.98 | 0.99 | 0.95 | 1.01 |
+
+The fast TPC-C cells moved against the first 19c run by −0.02 (RC decoupled), +0.07 (RC inline),
++0.02 (SNAPSHOT decoupled) and −0.09 (SNAPSHOT inline, untouched by item 2), and the vendor's
+fast TPC-C ran 635–716 a second across cells: one 60-second pair on RDS carries about ±0.07, so
+item 2's effect is not visible on 19c, where the commit dominates (it remains to be shown on a
+host with fast commits). With the delay every TPC-C cell is 0.85–0.94 and every YCSB cell but RC
+E is 0.94 or above. The low cell is YCSB E at RC (0.72 decoupled, 0.83 inline): the decoupled
+(c) spends 44 ms of server time a transaction against the vendor's 22, the RC scan's cost (the
+scan plus insert workload); SNAPSHOT E is 0.93–0.97.
+
+RC inline's slower log syncs (TPC-C, ms a `log file sync` wait, fast network): decoupled RC
+1.24–1.53 (a) and 1.53–1.70 (c); RC inline 1.73–2.46 (a) and 2.41–2.49 (c); SNAPSHOT decoupled
+1.87–1.90 (a) and 1.58–1.66 (c); SNAPSHOT inline 1.46–1.65 (a) and 2.30–2.67 (c). The slow syncs
+now show in both inline layouts' (c) and in one of the vendor's runs, so they follow the RDS log
+writes during those runs rather than one statement of the driver's; not pursued further on a
+shared-storage service.
