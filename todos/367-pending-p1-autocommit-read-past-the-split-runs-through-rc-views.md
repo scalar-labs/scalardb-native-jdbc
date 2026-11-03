@@ -88,6 +88,29 @@ returns the committed rows through `rc_T`; a prepared one executed across both s
 - Replacing only the tables found clear, the rest through `rc_T`, where a table is in flight: the
   unmeasured territory of todo 095's "first tables split and the rest through `rc_T`".
 
+## Oracle note (2026-11-03, session 28's container probe on f8f589c's build)
+
+A five-way self join of a 10-row table on its key, `WHERE t1.k <= 3`, named select list, texts
+from `v$sql`: inline in autocommit five CASE derived tables without anchors, inline in a
+transaction the same with v0/v1 and x0..x14, decoupled in autocommit `RC_ACSD` x5 with no gate,
+decoupled in a transaction five metadata-join CASE copies with x0..x14. Every one is the READ
+COMMITTED route's form (todo 364's CASE copies, anchored in a transaction; the anchor-less
+decoupled read past the split with no range for the joined tables), none the SNAPSHOT route's
+(one state column a table, the whole-table gate, the own transaction's plain text). Nothing in
+`Router` routes Oracle autocommit as READ COMMITTED (`snapshot()` is the driver's `isolation`,
+default REPEATABLE READ; the session re-read runs only for a passthrough statement that sets the
+level and returns on Oracle before touching it), so the probe's connection was at READ COMMITTED;
+28 asked to confirm from `getTransactionIsolation()`, which on Oracle answers the driver's level.
+If it answers REPEATABLE READ with these texts, that is a bug to chase with the probe's source.
+
+At READ COMMITTED this item does not apply by design (no checks, no own transaction), the second
+step above. The probe adds an Oracle angle to it: a statement past the split whose joined tables
+carry no key range of their own (`t2.k = t1.k`) takes `rc_T` at READ COMMITTED on Oracle, where a
+whole-table gate on those tables, one statement and one round trip, would answer it as written
+and fall to `rc_T` only when closed; the range gate's reason for declining a range-less table
+(the split read being cheaper than a second round trip) does not hold past the split. A
+refinement for the second step, the user's call.
+
 ## Acceptance Criteria
 
 - [ ] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
