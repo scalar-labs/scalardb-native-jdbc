@@ -308,6 +308,7 @@ class SnapshotIntegrationTest {
         scrollableInAutocommit(d, tpc, at);
         if (pg) {
           autocommitPastTheSplit(d, tpc, at);
+          enclosingColumnNamedLikeTheTable(d, at);
         }
       }
 
@@ -1317,6 +1318,44 @@ class SnapshotIntegrationTest {
     }
     assertThat(rows).as(what).containsExactly("1/a", "2/a", "3/a");
     assertThat(text).as(what + ": the text run").contains("\"t").doesNotContain("rc_");
+  }
+
+  /**
+   * TPC-H Q9's shape: an outer column named like the unaliased table of a derived table is the
+   * derived table's column, not the table's whole row, so a transaction that found the table clear
+   * runs the read as written in either layout (todo 368); in autocommit it returns the same rows.
+   * The text the server ran is the read's own {@code current_query()}.
+   */
+  private static void enclosingColumnNamedLikeTheTable(Connection d, String at) throws Exception {
+    String sql =
+        "SELECT t, current_query() FROM (SELECT x AS t FROM "
+            + SN
+            + ".t WHERE id <= 3) s ORDER BY t";
+    String what = at + ": an enclosing column named like the table";
+    List<String> texts = new ArrayList<>();
+    try (Statement st = d.createStatement();
+        ResultSet rs = st.executeQuery(sql)) {
+      List<String> rows = new ArrayList<>();
+      while (rs.next()) {
+        rows.add(rs.getString(1));
+        texts.add(rs.getString(2));
+      }
+      assertThat(rows).as(what).containsExactly("a", "a", "a");
+    }
+    d.commit();
+    assertThat(texts.get(0))
+        .as(what + ": the text run")
+        .contains("FROM \"" + SN + "\".\"t")
+        .doesNotContain("rc_")
+        .doesNotContain("UNION");
+    d.setAutoCommit(true);
+    try {
+      assertThat(rows(d, "SELECT t FROM (SELECT x AS t FROM " + SN + ".t WHERE id <= 3) s"))
+          .as(what + ", in autocommit")
+          .containsExactly("a", "a", "a");
+    } finally {
+      d.setAutoCommit(false);
+    }
   }
 
   /** Waits until a transaction waits on a lock, so that the next one forms the deadlock. */

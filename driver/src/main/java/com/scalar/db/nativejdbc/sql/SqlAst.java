@@ -480,10 +480,10 @@ public final class SqlAst {
     }
     List<ColumnRef> columns = new ArrayList<>();
     for (Column c : walker.columns) {
-      columns.add(new ColumnRef(c, null));
+      columns.add(new ColumnRef(c, null, walker.enclosing(c)));
     }
     for (AllTableColumns a : walker.allTableColumns) {
-      columns.add(new ColumnRef(null, a));
+      columns.add(new ColumnRef(null, a, null));
     }
     Node root = rootOf(stmt, walker.tables, walker.columns, sql, engine == Engine.SQLSERVER);
     if (root == null) {
@@ -611,7 +611,7 @@ public final class SqlAst {
         parameters.add(v);
       }
       if (v instanceof Column && walked.add((Column) v)) {
-        columns.add(new ColumnRef((Column) v, null)); // a column the walk skipped
+        columns.add(new ColumnRef((Column) v, null, null)); // a column the walk skipped
       }
     }
     for (Column c : walked) {
@@ -3375,8 +3375,10 @@ public final class SqlAst {
         return null;
       }
       String name = lowerUnquoted(c.name());
-      if (q == null && name.equals(self)) {
-        return null; // PostgreSQL reads an unqualified table name as its whole row (todo 110)
+      if (q == null && name.equals(self) && c.sees(r)) {
+        // PostgreSQL reads an unqualified table name as its whole row (todo 110), where the name
+        // can reach the table: in its query or one inside it, not an enclosing one (todo 368)
+        return null;
       }
       out.add(name);
     }
@@ -5616,10 +5618,25 @@ public final class SqlAst {
   public static final class ColumnRef {
     private final @Nullable Column column;
     private final @Nullable AllTableColumns allTableColumns;
+    // the query it is written in and every query enclosing that one, whose tables it can name;
+    // null where the walk did not record it
+    private final @Nullable Set<PlainSelect> enclosing;
 
-    private ColumnRef(@Nullable Column column, @Nullable AllTableColumns allTableColumns) {
+    private ColumnRef(
+        @Nullable Column column,
+        @Nullable AllTableColumns allTableColumns,
+        @Nullable Set<PlainSelect> enclosing) {
       this.column = column;
       this.allTableColumns = allTableColumns;
+      this.enclosing = enclosing;
+    }
+
+    /**
+     * Whether the reference can name a table of {@code r}'s query: written in that query or in a
+     * query inside it, as a correlated subquery is; true where the walk did not record it.
+     */
+    boolean sees(TableRef r) {
+      return enclosing == null || r.scope == null || enclosing.contains(r.scope);
     }
 
     /**
@@ -5704,6 +5721,21 @@ public final class SqlAst {
     /** For each table node, the query whose FROM holds it; none for the statement's own. */
     final Map<Table, PlainSelect> scopes = new IdentityHashMap<>();
 
+    /** For each column node, the query it is written in; none outside every query. */
+    final Map<Column, PlainSelect> columnBlocks = new IdentityHashMap<>();
+
+    /** For each query, the query it is written in; none for an outermost one. */
+    final Map<PlainSelect, PlainSelect> parents = new IdentityHashMap<>();
+
+    /** The query a column is written in and every query enclosing it, by identity. */
+    Set<PlainSelect> enclosing(Column c) {
+      Set<PlainSelect> out = Collections.newSetFromMap(new IdentityHashMap<>());
+      for (PlainSelect q = columnBlocks.get(c); q != null; q = parents.get(q)) {
+        out.add(q);
+      }
+      return out;
+    }
+
     private final Deque<String> withBodies = new ArrayDeque<>();
     private final Deque<PlainSelect> open = new ArrayDeque<>();
 
@@ -5716,6 +5748,10 @@ public final class SqlAst {
         if (e instanceof JdbcParameter || e instanceof JdbcNamedParameter) {
           parameters.add(e); // TOP ? is neither a tree node nor visited
         }
+      }
+      PlainSelect parent = open.peek();
+      if (parent != null) {
+        parents.put(plainSelect, parent);
       }
       open.push(plainSelect);
       try {
@@ -5796,6 +5832,10 @@ public final class SqlAst {
     @Override
     public <S> Void visit(Column column, S context) {
       columns.add(column);
+      PlainSelect block = open.peek();
+      if (block != null) {
+        columnBlocks.put(column, block);
+      }
       return super.visit(column, context);
     }
 
