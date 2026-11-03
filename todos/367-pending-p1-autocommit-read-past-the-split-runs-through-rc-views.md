@@ -142,12 +142,37 @@ touches nothing Oracle-specific; this item's Oracle test ran green on the branch
 TPC-H autocommit rerun from main (the third acceptance item) and the READ COMMITTED second step
 with its Oracle refinement, the user's call.
 
+### 2026-11-03: the TPC-H rerun from main (c12d7a2), session 28
+
+bb-pgss, PostgreSQL 16, scale factor 0.1, both layouts, the first run's settings; results in 28's
+scratchpad `tpch2/`. BenchBase (c)/(a) per query, p50 of 2: decoupled 0.70-1.36x, inline
+0.58-1.30x. Row check in autocommit, both layouts: no timeouts, no shared-memory errors; Q5 1.2x,
+Q7 1.3-1.4x, Q8 1.0-1.1x, Q9 1.0-1.15x (all four had passed a 30 s timeout), Q2 1.9x (was
+178-188x), Q11 1.2/2.3x (was 196-276x), Q20 1.4-1.5x (was 67-99x), Q22 2.6/3.7x (was 311-327x),
+Q18 1.1-1.3x (was 25-30x). Row check in a transaction: all 21 queries the vendor's rows in both
+layouts; single cold runs mostly 0.9-1.4x, Q19 3.6-3.8x, Q22 2.4-2.8x, Q1 and Q2 1.8-2.1x. One
+DIFFERENT flag, decoupled autocommit Q9, is floating-point noise in a parallel `sum()` whose last
+digits move run to run on the vendor too, the comparator's 9-digit rounding on a boundary; not
+the driver.
+
+Left, at single-run noise level: the small queries at 2-4x in a transaction (Q19 about 10 ms on
+the vendor against 26 ms, Q22 14 against 36-52 ms), not looked into. A reading to check, not a
+finding: these are cold runs, and a shape within the split limit (Q19's lineitem-part join, 4
+copies) pays the split text's planning on its first execution, which todo 096 measured at 14 ms
+for a narrow 4-table split, where a shape past the limit pays one check round trip and runs as
+written; repetitions at a larger scale would tell, and if the ratio holds warm, a route that takes
+the checks and the plain statement for a read whose generic plan is costly (the driver already
+asks `EXPLAIN (GENERIC_PLAN)` once per text for the parallel question) is the lever. The user's
+call.
+
 ## Acceptance Criteria
 
 - [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
       PostgreSQL and Oracle, with the tests above (on main 2026-11-03)
-- [ ] Full check passes on all engines
-- [ ] 28's TPC-H autocommit run repeated from the build: Q5-Q9 at the in-transaction figures
+- [ ] Full check passes on all engines (unit, PostgreSQL and Oracle green locally; the other
+      engines at the push's CI)
+- [x] 28's TPC-H autocommit run repeated from the build: Q5-Q9 at the in-transaction figures
+      (2026-11-03, from main c12d7a2: Q5 1.2x, Q7 1.3-1.4x, Q8 1.0-1.1x, Q9 1.0-1.15x)
 
 ## Review record (2026-11-03, 9eb01b8 on `autocommit-read-as-written`, built by session 28 on afc68f6)
 

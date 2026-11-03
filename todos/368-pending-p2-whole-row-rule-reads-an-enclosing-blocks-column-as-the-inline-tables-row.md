@@ -85,13 +85,20 @@ Oracle not rerun for the combination (nothing Oracle-specific here; the branch's
 green apart from the ORA-12516 pair that pass rerun alone). Left open: Q9 through BenchBase from
 main, the second acceptance item's measurement.
 
+### 2026-11-03: the TPC-H rerun from main (c12d7a2), session 28
+
+Inline Q9 through BenchBase 1.11x the vendor (was 17,544x); the row check in a transaction 1.20x
+with the vendor's rows (it had timed out at 30 s). The other 20 inline queries 0.58-1.30x through
+BenchBase, the full figures in todo 367's log.
+
 ## Acceptance Criteria
 
 - [x] `columnsReadFrom` scopes the whole-row rule as designed, with the unit tests above (on main
       2026-11-03)
-- [ ] Q9's shape on an inline table runs as written once the checks passed (the text the vendor
-      received), returning the vendor's rows
-- [ ] Full check passes on all engines
+- [x] Q9's shape on an inline table runs as written once the checks passed (the text the vendor
+      received), returning the vendor's rows (the test; TPC-H Q9 1.11x from main, 2026-11-03)
+- [ ] Full check passes on all engines (unit, PostgreSQL and Oracle green locally; the other
+      engines at the push's CI)
 
 ## Review record (2026-11-03, b8c2b5e on `whole-row-rule-scope`, built by session 28 on d7df0e7)
 
