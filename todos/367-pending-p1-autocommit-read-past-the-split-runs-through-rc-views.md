@@ -190,6 +190,19 @@ false `no` (sort both sides if one appears); with `reps` above 1 the check runs 
 repetition, and the report shows the last; and confirm `check.md` stays free of BenchBase's log
 lines (log4j's console appender writes to stdout where the table goes).
 
+Follow-up (2026-11-03): 979faaa on the branch, read in full. The change in: a child that outruns
+six hours (destroyed) or exits non-zero no longer throws; `tpchCheck` appends "The check did not
+finish in 6 hours | exited with N (log path):" and the log's tail in a fence to `check.md` and
+returns, so `Result.read` and the report go on. The password nit taken: the child's environment
+(`TPCH_CHECK_PASSWORD`), the program's arguments shifted by one consistently (a[3]..a[9], the long
+threshold printed from a[9]). Nits declined with reasons accepted: the engine mapping (the check
+runs only inside `benchBase()`, which assumes PostgreSQL or Oracle), row order (no false `no` so
+far; sort if one appears), reps above 1 (the plan runs one). `check.md` confirmed clean, BenchBase's
+log lines going to stderr (`check.log`). Rerun at SF 0.1 inline with `tpchCheckLongMs` 50 to
+exercise the long rule: 42 rows, every execution the vendor's rows; the failure branch not
+exercised with a real failure (eight lines, read). The branch at 979faaa (b3ed1ea + 979faaa) is
+mergeable as a whole; landing on the user's word.
+
 ## Acceptance Criteria
 
 - [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
