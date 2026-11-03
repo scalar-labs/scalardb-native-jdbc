@@ -130,6 +130,10 @@ a row in flight anywhere, the table's coarse check, where the user docs' SNAPSHO
 view would answer such a read exactly, one statement in one snapshot. A BI query over a busy
 table meets this; a follow-up if the user wants it.
 
+Follow-up (2026-11-03): the Javadoc fixed as asked in f8f589c on the branch, a comment-only change
+(three lines), spotless clean per 28. The branch at f8f589c (9eb01b8 + f8f589c) is mergeable as a
+whole; landing on the user's word, the landed head to be range-diffed against it.
+
 ## Work Log
 
 - 2026-11-03: filed from session 28's TPC-H smoke run on PostgreSQL; the cause read from `Proxies`
