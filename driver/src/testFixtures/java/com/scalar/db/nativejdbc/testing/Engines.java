@@ -13,15 +13,12 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
-import java.util.Set;
-import java.util.WeakHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.testcontainers.containers.JdbcDatabaseContainer;
@@ -154,11 +151,11 @@ public enum Engines {
   private static final Map<Engines, Started> STARTED = new EnumMap<>(Engines.class);
 
   /**
-   * The catalogs the tests made through {@link #catalog} or {@link #track}, held weakly: a catalog
-   * no test still refers to drops out with its metadata, one a class keeps in a field stays and is
-   * released again after each later class. Guarded by itself.
+   * The catalogs the tests made through {@link #catalog} or {@link #track}; guarded by itself. Held
+   * strongly: a catalog the collector took would keep its session to the JVM's end, since ojdbc's
+   * NIO socket registers no cleaner, so only {@link #releaseCatalogSessions} closes it.
    */
-  private static final Set<Catalog> CATALOGS = Collections.newSetFromMap(new WeakHashMap<>());
+  private static final List<Catalog> CATALOGS = new ArrayList<>();
 
   private static final class Started {
     final String url;
@@ -331,7 +328,9 @@ public enum Engines {
 
   private static boolean causedBy08177(Throwable t) {
     for (Throwable c = t; c != null; c = c.getCause()) {
-      if (c instanceof SQLException s && s.getErrorCode() == 8177) {
+      // 19c raises it inside ORA-00604 from ojdbc's getColumns PL/SQL, so the code reads 604
+      if (c instanceof SQLException s
+          && (s.getErrorCode() == 8177 || String.valueOf(s.getMessage()).contains("ORA-08177"))) {
         return true;
       }
     }

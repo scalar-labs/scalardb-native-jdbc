@@ -145,8 +145,6 @@ jobs:
             docker rm -f oracle19
           done
           "$started"
-          echo 'ALTER SYSTEM SET "_disable_last_successful_login_time" = TRUE SCOPE = MEMORY;' \
-            | docker exec -i oracle19 bash -c 'sqlplus -s / as sysdba'
           echo 'SELECT banner_full FROM v$version;' \
             | docker exec -i oracle19 bash -c 'sqlplus -s / as sysdba'
 
