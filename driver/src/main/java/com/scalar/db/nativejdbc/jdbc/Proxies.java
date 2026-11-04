@@ -1905,14 +1905,16 @@ public final class Proxies {
 
     /**
      * An anchor-less read on Oracle as written behind its gates (design 4.2 "Anchor-less reads as
-     * written behind a gate column", todo 334), on a vendor statement of its own, closed with its
-     * rows: the rows, their first already read, when each gate of the first row is 0, a whole
-     * table's then marked clear in a transaction at SNAPSHOT; when there is no row, in such a
-     * transaction, whose one snapshot the coarse checks read too, the empty rows where each finds
-     * nothing. Null, nothing returned, for the split read to run instead: a gate of 1, or NULL (an
-     * aggregate over no row), or no row elsewhere; and where the gated form does not apply, an
-     * {@code execute} other than {@code executeQuery}, a scrollable or unwrapped result, a bound
-     * stream, or a transaction that found the tables clear, which runs the plain statement.
+     * written behind a gate column", todo 334), and on PostgreSQL a READ COMMITTED read past the
+     * split on the lateral form of todo 369, whose marker column, hidden with the gates, is NULL on
+     * the one row of an empty result; on a vendor statement of its own, closed with its rows: the
+     * rows, their first already read, when each gate of the first row is 0, a whole table's then
+     * marked clear in a transaction at SNAPSHOT; when there is no row, in such a transaction, whose
+     * one snapshot the coarse checks read too, the empty rows where each finds nothing. Null,
+     * nothing returned, for the split read to run instead: a gate of 1, or NULL (an aggregate over
+     * no row), or no row elsewhere; and where the gated form does not apply, an {@code execute}
+     * other than {@code executeQuery}, a scrollable or unwrapped result, a bound stream, or a
+     * transaction that found the tables clear, which runs the plain statement.
      */
     @SuppressFBWarnings(
         value = "SQL_INJECTION_JDBC",
@@ -1972,6 +1974,10 @@ public final class Proxies {
               return null;
             }
           }
+          // PostgreSQL's lateral form: the one row of an empty result, its gates read (todo 369)
+          if (g.marker && rs.getObject(columns - g.gates) == null) {
+            row = false;
+          }
         } else {
           if (!snapshot) {
             rs.close();
@@ -1999,14 +2005,21 @@ public final class Proxies {
         }
         owner.ran(one);
         return proxy(
-            ResultSet.class, new GatedRows(rs, connection, (Statement) proxy, g.gates, st, row));
+            ResultSet.class,
+            new GatedRows(
+                rs, connection, (Statement) proxy, g.gates + (g.marker ? 1 : 0), st, row));
       } catch (SQLException e) {
         if (rs != null) {
           rs.close();
         }
         closeGated(st);
         SQLException retryable = Writes.asRetryable(e);
-        if (!(retryable instanceof java.sql.SQLTransactionRollbackException)
+        // on PostgreSQL the error aborted the application's transaction, where no fallback can
+        // run: the statement's own error, as the vendor's statement would report it (todo 369)
+        boolean aborted =
+            owner.router.engine() == Engine.POSTGRESQL && !owner.vendor.getAutoCommit();
+        if (!aborted
+            && !(retryable instanceof java.sql.SQLTransactionRollbackException)
             && !Writes.endsTransaction(owner.vendor, e)
             && e.getErrorCode() != 1013) {
           // what the statement as written cannot run, a CLOB compared, say: the split read,

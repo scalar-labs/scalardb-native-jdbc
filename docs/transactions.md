@@ -95,9 +95,10 @@ committed, so it cannot hand the driver the old values; the driver has to find t
   flight instead of failing, so it reads committed rows from the table and in-flight rows' old
   values from the metadata. It rewrites the statement into copies joined by `UNION ALL`, one for
   each combination of committed and in-flight tables: two copies for one table, four for a join of
-  two. Where a quick check shows nothing in flight in the statement's key range, it runs the
-  statement as written instead. When nothing is in flight, the extra copies find no rows, but the
-  database still parses, plans and starts them.
+  two. Where a quick check shows nothing in flight in the statement's key range, or in the whole
+  table for a statement too large to rewrite into copies, it runs the statement as written
+  instead. When nothing is in flight, the extra copies find no rows, but the database still parses,
+  plans and starts them.
 - **Writes.** A SNAPSHOT transaction's view never changes, so once the driver finds a table with no
   row in flight, it remembers this until the transaction ends: every later read and write of that
   table runs as your statement as written, with the transaction metadata the write needs. A READ
