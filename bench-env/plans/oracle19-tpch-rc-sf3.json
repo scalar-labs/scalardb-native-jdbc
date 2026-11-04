@@ -1,0 +1,35 @@
+{
+  "description": "TPC-H scale factor 3 on Oracle 19c (RDS SE2, licence included) at READ COMMITTED, both layouts, from 87c0b2b (todos 370-373); the fast network; runs (a) and (c) once each, four loads; after (c), session 28's row check, 3 timed executions a query after a warm-up, a query over 1 s timed by its warm-ups alone",
+  "workloads": {
+    "tpch": {
+      "benchmark": "tpch",
+      "scale": 3
+    }
+  },
+  "matrix": {
+    "workloads": [
+      "tpch"
+    ],
+    "levels": [
+      "READ_COMMITTED"
+    ],
+    "layouts": [
+      "decoupled",
+      "inline"
+    ],
+    "delays_us": [
+      0
+    ]
+  },
+  "runs": "a,c",
+  "reps": 1,
+  "time_s": 60,
+  "terminals": 1,
+  "loader_threads": 8,
+  "harness": {
+    "tpchCheck": 3
+  },
+  "jvm_args": [
+    "-Doracle.jdbc.implicitStatementCacheSize=128"
+  ]
+}
