@@ -67,6 +67,41 @@ split's text and the committed rows; the read recording no anchor, as the anchor
 What must keep holding: the split tests of the four subquery kinds, todo 095's and 109's cases,
 `ReadCommittedPastTheSplitIntegrationTest`.
 
+## Review record (2026-11-04, 33b927a on `rc-split-views-gated`, built by session 28 on 76c3f4a)
+
+Verdict: mergeable once the user-facing wording names the shape precisely (below). Read from
+`git show`: `Router`, both tests, the docs and the changelog.
+
+- `Router`: `viaViews = !snapshot && (PostgreSQL || Oracle) && some ScalarDB reference is in no
+  split place` (by identity); then `anchored = List.of()`, so `own` is empty, no `Anchored` is
+  attached and the split text carries no anchor columns either, and the existing anchor-less gate
+  call becomes `gated(r, ast, scalarDb, viaViews)`, `pastSplit` true: on PostgreSQL the lateral
+  wrapper over the renamed statement, the subquery's table included in the gates and the
+  renaming; on Oracle the unranged gates. The split text stays the route's `sql`, the fallback. A
+  statement whose only ScalarDB reference is the subquery's (no split place at all) takes the
+  form too. Oracle inline: `caseCopies` still covers key-only inline references and the gate goes
+  on since copies < references. Right; the 13 lines the design asked for.
+- `ReadCommittedPastTheSplitIntegrationTest.splitReadsThroughTheViewsRunAsWrittenBehindGates`
+  (layouts d and i, both modes): Q18's shape, `t1 JOIN t2 ON id WHERE t1.id IN (SELECT t3.id ...
+  GROUP BY t3.id HAVING SUM(t3.v) > ?)`, gives "gated [18/a, 19/a, 20/a]", the form read from the
+  result set's handler class (`GatedRows` or not; a `current_query()` in the select list would
+  send the statement past the split, 28 found, so the text could not serve); in a transaction
+  `anchors(d).recorded(table)` is false; with a prepared update in flight on id 19, "split [18/a,
+  19/a, 20/a]". `OracleOltpIntegrationTest.readCommittedSplitReadsThroughTheViewsRunBehindGates`
+  (`acq{i,d}`, TTL 59371, both modes): one text per tag with g0..g2 and no `RC_` or `UNION ALL`.
+  Both fail without the change per 28. Right.
+- Suites as reported: unit, PostgreSQL 194, Oracle 194 green, no ORA-12516 this time.
+- Measured by 28 (local TPC-H at READ COMMITTED, SF 0.1, `tpchCheck` 3, both layouts and modes):
+  Q18 1.00-1.03x (was 33-36x), Q20 0.98-1.10x (was 92-118x), Q5 0.89-1.07x; every query the
+  vendor's rows; Q1 3.6-5.6x, todo 372's. TPC-C and YCSB at READ COMMITTED: 0 `LATERAL`, 0 `rc_`.
+- The wording to fix: `transactions.md` ("neither are any rows of a statement with a subquery on
+  a ScalarDB table"; the reads sentence "or with a subquery on a ScalarDB table") and the
+  changelog ("a read with a subquery on a ScalarDB table") say more than the change does: a
+  subquery the split rewrites (a semi-joined `IN` or `EXISTS` on a plain predicate) keeps the
+  outer tables' anchors as before; only a subquery the driver reads through the committed view
+  (one with an aggregate or a row limit, a scalar subquery, a CTE, a set operation) loses them.
+  Name that shape in both, and rewrap `transactions.md` line 147 (119 characters) at 100.
+
 ## Acceptance Criteria
 
 - [ ] A READ COMMITTED split read with a reference through `rc_T` runs as written behind
