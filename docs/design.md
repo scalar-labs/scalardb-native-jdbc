@@ -1458,7 +1458,16 @@ union as a derived table.
   the next read within a second the split without a gate, after a second the gate again;
   StockLevel's shape on PostgreSQL with range gates; on Oracle one range-less table gated by the
   whole table. Expected: Q1 and the decoupled-only queries at about the vendor's cost on quiet
-  tables, StockLevel and Delivery better or unchanged, YCSB unchanged.
+  tables, StockLevel and Delivery better or unchanged, YCSB unchanged. Built by session 28 as
+  58ac088 and 661f148 on `rc-anchorless-gated`, reviewed mergeable 2026-11-04: the busy marks in the
+  catalog keyed by the table's in-flight check text, `SqlAst.gated` taking the set of ranged
+  references, PostgreSQL's gate `CASE WHEN EXISTS (SELECT 1 FROM T_meta m WHERE m.tx_state IN (1, 2)
+  [AND <range>]) THEN 1 ELSE 0 END` and, range-less, the ordered coarse check under EXISTS,
+  PostgreSQL's form the lateral row whatever the shape; measured at scale factor 0.1: decoupled Q1
+  from 5.5x to 1.00x, Q6 from 6.4-7.0x to 1.01x, Q12 from 11.8-13.7x to about 1x, Q16 from
+  16.8-19.1x to about 1x, inline Q1 from 3.6x to 1.0x; TPC-C at READ COMMITTED locally, p95 against
+  the vendor's: StockLevel decoupled 1.96 to 1.43 and inline 1.67 to 1.11, Delivery decoupled 1.90
+  to 1.23 and inline 1.41 to 1.41.
 
   *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
   A read of an inline table whose predicate names only the table's key columns, every column of the

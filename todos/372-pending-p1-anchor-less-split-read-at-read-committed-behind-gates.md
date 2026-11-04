@@ -73,10 +73,68 @@ a second the gate again; StockLevel's shape on PostgreSQL with the range gates (
 the range conjuncts); on Oracle a read with one range-less table gated by the whole table in place
 of the split. What must keep holding: D2's Oracle tests, the split tests, todo 369's and 370's.
 
+## Review record (2026-11-04, `rc-anchorless-gated` at 661f148 on a9d81a8, built by session 28)
+
+Verdict: mergeable; landing on the user's word, the cloud TPC-C READ COMMITTED cells the
+confirmation after it (below). Read from `git diff a9d81a8 rc-anchorless-gated`: 58ac088 the
+build, 661f148 form 7's assertion.
+
+- `Catalog`: `busy`, a `ConcurrentHashMap` from the table's in-flight check text to `nanoTime`,
+  `markBusy(key)`, `busy(key)` under one second (`BUSY_NANOS`); shared by the catalog's connections
+  as designed; one entry a table at most, never pruned, bounded by the table count. Right.
+- `SqlAst`: `gated(naming, gates, ranged, form)` takes the set of references whose gates repeat
+  their key conjuncts, the others' gates the whole table's; `hasKeyConjuncts(ref, KeyRange)`; the
+  lateral form says `FROM dual) g` on Oracle and `) g` on PostgreSQL. Right.
+- `Router.gated`: `pg = PostgreSQL && !pastSplit && !snapshot` admits the split's anchor-less reads
+  at READ COMMITTED on PostgreSQL; a PostgreSQL gate is `CASE WHEN EXISTS (SELECT 1 FROM T_meta m
+  WHERE m."tx_state" IN (1, 2) [AND <conjuncts>]) THEN 1 ELSE 0 END`, and where
+  `hasKeyConjuncts` is false `CASE WHEN EXISTS (<Writes.firstInFlight>) THEN 1 ELSE 0 END`, the
+  ordered coarse check that takes the in-flight index whatever the statistics say (todo 329);
+  Oracle's `KeyRange` as before, its whole-table gate the SNAPSHOT one; `ranged` the references
+  with conjuncts and `skippable` the other gates' positions, both only when `!snapshot &&
+  !pastSplit`, so SNAPSHOT's gates and 369's and 370's are never skippable and range gates never
+  are; the form LATERAL on PostgreSQL whatever the shape (its plans the statement's), Oracle's by
+  shape (todo 371); `Gated.skippable`, the retry's too. Right; D2's "a range-less table keeps the
+  split" gives way to the whole-table gate on Oracle as designed.
+- `Proxies.gated`: before the gated statement, any skippable gate whose check is busy returns null
+  (the split); a gate of 1 at a skippable position marks its table busy (`at = i - (columns -
+  gates + 1)`). Right.
+- `ReadCommittedPastTheSplitIntegrationTest.anchorlessSplitReadsRunBehindGatesAndSkipABusyTable`
+  (PostgreSQL, d and i, in a transaction and in autocommit): Q1's shape (`SELECT x, SUM(v),
+  COUNT(*) ... WHERE v > ? GROUP BY x`) and Q12's (a grouped key join) gated, by the handler
+  class; with a prepared update in flight on id 19, Q1 "split [a/57]" with the committed rows and
+  StockLevel's shape (`COUNT(DISTINCT x) ... WHERE id BETWEEN 1 AND 5 AND v < ?`) still gated,
+  its range gate open with the row outside the range; after the rollback, within the second
+  "split" (busy), after 1.1 s "gated". `OracleOltpIntegrationTest.
+  readCommittedRangeLessTableGatedByTheWholeTable` (`acmd`, TTL 59373): a `COUNT(*)` join on x
+  with `t1.k BETWEEN 1 AND 3` gives one text with g0 (BETWEEN) and g1, no `UNION ALL`; form 7's
+  "no gate without a key conjunct" becomes "the whole table's gate". Each fails without its part
+  per 28. Right.
+- `transactions.md`: the reads sentence (the whole table where the statement gives no key range,
+  is too large to rewrite, or has a view-read subquery) and the busy sentence; the changelog
+  `improvement-20261104-200000`: accurate.
+- Suites as reported: unit 417, PostgreSQL 197, Oracle 197 green (the form 7 assertion fixed in
+  661f148); `OracleOltpIntegrationTest` 39.
+- Measured by 28 (local PostgreSQL TPC-H at READ COMMITTED, SF 0.1, `tpchCheck` 3, after 370 then
+  after 372, transaction/autocommit): decoupled Q1 5.48/5.56x to 1.00/1.00x, Q3 4.6/4.9 to
+  1.06/1.02, Q4 3.4/3.5 to 0.94/1.07, Q6 6.4/7.0 to 1.01/1.01, Q12 11.8/13.7 to 1.06/0.99, Q16
+  16.8/19.1 to 1.04/1.02, Q10 1.7 to 1.03/1.05; inline Q1 3.6 to 0.99/1.02, Q10 4.3/4.6 to
+  1.02/1.11, Q19 1.7 to 1.02; every query the vendor's rows; outliers on the busy laptop (inline
+  Q20 autocommit 2.22x, Q11 autocommit 1.38-1.40x), not chased. TPC-C and YCSB at READ COMMITTED
+  (local, scale 1, 30 s): TPC-C one lateral statement a layout, YCSB none; p95 against (a), the
+  370 run then the 372 run: StockLevel decoupled 1.96 to 1.43, inline 1.67 to 1.11; Delivery
+  decoupled 1.90 to 1.23, inline 1.41 to 1.41; overall (c)/(a) decoupled 0.69 to 0.81. Better or
+  unchanged, on different machine states.
+- The acceptance's TPC-C READ COMMITTED cells: the local ones are in and point the right way; the
+  cloud cells (6e, PostgreSQL TPC-C at READ COMMITTED, both layouts) confirm from the landed
+  main. Landing need not wait for them unless the user wants it to: the local run shows no
+  regression and the change is the one 4.2 measured on Oracle (D2).
+
 ## Acceptance Criteria
 
-- [ ] The anchor-less split read at READ COMMITTED takes the gated form with range or whole-table
-      gates and the busy mark, on PostgreSQL and Oracle, with the tests above
+- [x] The anchor-less split read at READ COMMITTED takes the gated form with range or whole-table
+      gates and the busy mark, on PostgreSQL and Oracle, with the tests above (661f148, reviewed
+      2026-11-04)
 - [ ] Full check passes on all engines
 - [ ] TPC-C READ COMMITTED cells on PostgreSQL (local, then 6e's) with StockLevel and Delivery
       better or unchanged; Q1 and the decoupled-only TPC-H queries at about the vendor's cost
