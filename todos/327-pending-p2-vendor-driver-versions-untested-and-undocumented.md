@@ -253,3 +253,19 @@ the supported versions are documented only once CI verifies them.
   `causedBy08177` and the strong list back with a Javadoc sentence; the ORA-02065 guard optional.
   89 reviews from `git show`; the merge of origin/main into the local main still waits on the
   user's word.
+- 2026-11-04, review record for eee99c1 (`ci-oracle-flakies-followups`, one commit on 146d0bf, the
+  19c session; not pushed yet): mergeable once one comment is added. The three hunks are as asked:
+  `causedBy08177` takes error code 8177 or `ORA-08177` in the message (19c's ORA-00604 wrapping,
+  the report's message carries the second line, `String.valueOf` guards a null); `CATALOGS` is
+  f75db6e's `ArrayList` again, the diff against f75db6e being the Javadoc and the matcher only;
+  the 19c job's refused ALTER SYSTEM goes. The change wanted: a comment where the ALTER SYSTEM was,
+  in the 19c job's start step, because the parameter was not cosmetic. The fixture sets
+  `_disable_last_successful_login_time` only for the container it starts (`ORACLE.url`), and its
+  Javadoc requires a DBA to have set it on an external database; 19c refuses it (ORA-02065), so the
+  19c job runs without todo 105's mitigation: each logon writes SYS.USER$, and a hard parse inside a
+  SERIALIZABLE transaction reads USER$ at the snapshot and fails with ORA-08177, which is the import
+  failure's shape (ORA-00604 at recursive SQL level 1, ojdbc's getColumns PL/SQL). The retry covers
+  the import on 19c; ScalarDB's record commit, which ignores the failure and leaves rows prepared
+  (todo 105), stays exposed there, named by `ReadIntegrationTest`'s check after each commit. No
+  19c-side switch is known to 89. The comment should say that much in two lines and point at todo
+  105. The proof is the PR's CI, the 19c job above all.
