@@ -286,3 +286,10 @@ the supported versions are documented only once CI verifies them.
   carried the label); tests and CI are what the label is for, and adding it re-runs the check. Told
   the 19c session to put the label to the user. The seven integration jobs run; the 19c job is the
   proof.
+- 2026-11-04, later: PR #12's eight build checks pass at 803615f (run 41785792579; Oracle 23 18m12s,
+  19c 19m10s); only the Changelog entry check waits on the `no-changelog` label. The 19c session's
+  point, agreed: a pass does not show the retry fired, since it logs nothing and the ORA-08177 is
+  intermittent. Proposed to the user: one `System.err` line in `Engines.importTable`'s catch per
+  retried attempt and one on the third failure, kept by gradle in the report's system-err, so each
+  run's report says whether 19c's flaky struck and whether three tries sufficed; a commit on #12 or
+  a later PR, the user's call.
