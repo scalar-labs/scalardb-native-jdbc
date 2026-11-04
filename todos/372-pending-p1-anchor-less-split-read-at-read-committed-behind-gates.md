@@ -156,6 +156,18 @@ reports are fetched with it (`a/results/bb-rc-d0-benchbase-postgresql.md` on the
 over lineitem's 18M rows; an EXPLAIN ANALYZE of the plain and the wrapped text at that scale is
 the next look if it holds in the inline cell.
 
+### 2026-11-05: the proof run complete, both cells fetched and read (`bench-env/results/20261104-2248-pg/a/`)
+
+From the reports: decoupled BenchBase (c)/(a) 0.97, inline 0.93 (0.10 and 0.09 from the build
+with todo 369 alone); the check in a transaction, decoupled Q1 1.16x, Q5 1.01x, Q9 1.00x, Q20
+1.00x, in autocommit Q1 1.10x, Q5 1.01x; inline Q1 1.05x and 0.99x, Q5 1.01x, Q9 1.00x, Q20 1.02x;
+every row "yes" on both. BenchBase's own single runs: decoupled Q1 1.13, Q9 1.29 (one cold run,
+the check's three at 1.00x), inline Q1 1.04, Q9 1.01. Q1's 1.10-1.16x is decoupled only and does
+not show inline, so it is the decoupled data table's or its gate's at that scale, not the form's;
+small, left as the one residual to read with an EXPLAIN ANALYZE if it matters later. The stack is
+torn down; the Oracle rerun from 87c0b2b (READ COMMITTED both layouts and SNAPSHOT decoupled, for
+Q16) is planned at bdcd5f3 and waits on the user's apply.
+
 ## Acceptance Criteria
 
 - [x] The anchor-less split read at READ COMMITTED takes the gated form with range or whole-table
