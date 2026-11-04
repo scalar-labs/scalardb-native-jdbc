@@ -269,3 +269,10 @@ the supported versions are documented only once CI verifies them.
   (todo 105), stays exposed there, named by `ReadIntegrationTest`'s check after each commit. No
   19c-side switch is known to 89. The comment should say that much in two lines and point at todo
   105. The proof is the PR's CI, the 19c job above all.
+- 2026-11-04, later: 803615f (eee99c1 + the three-line comment in the 19c job's start step: not
+  mitigated, 19c refuses the parameter, each logon writes SYS.USER$, a SERIALIZABLE hard parse can
+  fail with ORA-08177, the import retried, ScalarDB's commit exposed, todo 105 named) reviewed:
+  mergeable as the branch stands, `ci-oracle-flakies-followups` at 803615f, two commits on 146d0bf,
+  5 lines of ci.yml and 15 of Engines.java in all. The push and the PR are on the user's word in the
+  19c session; the PR's CI, the 19c job above all, is the proof. The records keep naming the design
+  session 89 (c4 is only its message address).
