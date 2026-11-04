@@ -1,0 +1,3 @@
+kind: improvement
+body: 'At READ COMMITTED, a read of ScalarDB tables too large to rewrite into copies, such as a join of five or more tables, now runs as written over the data tables when none of its tables has a row in flight, on PostgreSQL and Oracle, in a transaction and in autocommit; the check travels in the statement itself. It had read every table through its committed-rows view: on PostgreSQL, TPC-H joins of six to eight tables passed a 120-second timeout against 20-130 ms.'
+time: 2026-11-04T12:00:00.000000+09:00

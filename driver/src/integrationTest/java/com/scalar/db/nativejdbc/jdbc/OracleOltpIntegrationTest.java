@@ -3848,6 +3848,80 @@ class OracleOltpIntegrationTest {
     }
   }
 
+  /**
+   * A read past the split at READ COMMITTED on Oracle (todo 369): five tables joined on a column
+   * besides the key, in a transaction and in autocommit, run as written behind the whole table's
+   * gate per reference, by v$sql's text, not through {@code rc_T}; on both layouts.
+   */
+  @Test
+  void readCommittedReadsPastTheSplitRunBehindWholeTableGates() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      for (String layout : List.of("i", "d")) {
+        admin.createTable(
+            N(NS),
+            N("acr" + layout),
+            TableMetadata.newBuilder()
+                .addColumn(N("k"), intType())
+                .addColumn(N("x"), intType())
+                .addPartitionKey(N("k"))
+                .build(),
+            layout.equals("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of());
+      }
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      for (String layout : List.of("i", "d")) {
+        seed(v, "acr" + layout, "k, x", "LEVEL, LEVEL * 10", "k", "LEVEL", 10);
+      }
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)acr[id]"),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
+          .hasSize(2)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59370");
+    try (Connection d = ORA.openDriver(ttl);
+        Connection v = ORA.open()) {
+      assertThat(d.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
+      for (String layout : List.of("i", "d")) {
+        String table = NS + ".acr" + layout;
+        for (boolean tx : List.of(true, false)) {
+          d.setAutoCommit(!tx);
+          String name = layout + (tx ? " in a transaction" : " in autocommit");
+          String tag = "/* acr" + System.nanoTime() + " */";
+          StringBuilder sql =
+              new StringBuilder("SELECT " + tag + " t1.k, t1.x FROM " + table + " t1");
+          for (int i = 2; i <= 5; i++) {
+            sql.append(" JOIN ").append(table).append(" t").append(i);
+            sql.append(" ON t").append(i).append(".x = t1.x");
+          }
+          sql.append(" WHERE t1.k <= 3 ORDER BY t1.k");
+          assertThat(rows(d, sql.toString())).as(name).containsExactly("1/10", "2/20", "3/30");
+          if (tx) {
+            d.commit();
+          }
+          List<String> texts = executedTexts(v, tag);
+          log("RC past the split, " + name + ": " + texts);
+          assertThat(texts)
+              .as(name + ": the text run")
+              .singleElement()
+              .satisfies(
+                  t ->
+                      assertThat(t)
+                          .contains("scalardb_native_g0", "scalardb_native_g4")
+                          .doesNotContain("RC_"));
+        }
+      }
+      d.setAutoCommit(true);
+    }
+  }
+
   /** Seeds a ScalarDB table of either layout with committed rows, their stamps full-sized. */
   private static void seed(
       Connection v,

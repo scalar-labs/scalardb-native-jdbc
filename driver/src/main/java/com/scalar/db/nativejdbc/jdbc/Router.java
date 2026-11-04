@@ -418,13 +418,22 @@ final class Router {
     // whether a gate of 0 marks its table clear for the transaction: the whole table's, at
     // SNAPSHOT
     final boolean marks;
+    // whether the column before the gates marks a row of the statement, NULL on the one row an
+    // empty result returns: PostgreSQL's lateral form (todo 369)
+    final boolean marker;
 
-    Gated(String sql, List<Integer> parameterSources, List<String> checks, boolean marks) {
+    Gated(
+        String sql,
+        List<Integer> parameterSources,
+        List<String> checks,
+        boolean marks,
+        boolean marker) {
       this.sql = sql;
       this.parameterSources = List.copyOf(parameterSources);
       this.gates = checks.size();
       this.checks = List.copyOf(checks);
       this.marks = marks;
+      this.marker = marker;
     }
   }
 
@@ -2002,7 +2011,7 @@ final class Router {
       }
       // the CASE copy of every table is exact in one statement: no gate in front of it
       if (anchored.isEmpty() && caseCopies.size() < scalarDb.size()) {
-        r = gated(r, ast, scalarDb);
+        r = gated(r, ast, scalarDb, false);
       }
       r =
           engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
@@ -2027,7 +2036,7 @@ final class Router {
             0,
             List.of(),
             true);
-    r = gated(r, ast, scalarDb);
+    r = gated(r, ast, scalarDb, true);
     return snapshot
         ? withPlain(r.checked(checks(scalarDb), fallback(ast, scalarDb)), ast, scalarDb)
         : r;
@@ -2088,19 +2097,30 @@ final class Router {
    * column per ScalarDB table (design 4.2 "Anchor-less reads as written behind a gate column", todo
    * 334): at READ COMMITTED each gate over the predicate's conjuncts on its table's key columns,
    * those B1 repeats on PostgreSQL, a table without one keeping the split read alone; at SNAPSHOT
-   * over the whole table, its 0 marking the table clear. Unchanged elsewhere, for a locking read,
-   * and for a {@code *} over an inline table, whose data table holds the metadata.
+   * over the whole table, its 0 marking the table clear. A read past the split ({@code pastSplit},
+   * the {@code rc_T} route) at READ COMMITTED takes the whole table's gates, on Oracle and on
+   * PostgreSQL, where they ride a row of their own (design 4.2 "The read past the split at READ
+   * COMMITTED behind whole-table gates", todo 369). Unchanged elsewhere, for a locking read, and
+   * for a {@code *} over an inline table, whose data table holds the metadata.
    */
-  private Route gated(Route r, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+  private Route gated(
+      Route r,
+      SqlAst ast,
+      IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb,
+      boolean pastSplit) {
+    boolean snapshot = snapshot();
+    boolean lateral = engine == Engine.POSTGRESQL && pastSplit && !snapshot;
     // a position past the select list left for the database to refuse, as the split read leaves
     // it, not answered by an appended gate column (todo 144)
-    if (engine != Engine.ORACLE
+    if ((engine != Engine.ORACLE && !lateral)
         || ast.hasLockingOrIntoClause()
         || scalarDb.isEmpty()
         || ast.ordersPastSelectList()) {
       return r;
     }
-    boolean snapshot = snapshot();
+    if (lateral) {
+      return lateralGated(r, ast, scalarDb);
+    }
     // an unqualified column of a join is a table's where no other table of the statement has one
     // of its name, which only every table's columns known can tell
     boolean known = ast.tableRefs().stream().allMatch(scalarDb::containsKey);
@@ -2151,10 +2171,63 @@ final class Router {
                   : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
             },
             gates,
-            !snapshot);
+            !snapshot && !pastSplit);
     return text == null
         ? r
-        : r.gated(new Gated(text.sql(), text.parameterSources(), checks, snapshot));
+        : r.gated(new Gated(text.sql(), text.parameterSources(), checks, snapshot, false));
+  }
+
+  /**
+   * On PostgreSQL at READ COMMITTED, a read past the split as written over the data tables, on the
+   * nullable side of a lateral join from one row of whole-table gates, each the table's coarse
+   * check as an initplan, and a marker column NULL where the statement returned no row, so that an
+   * empty result still carries its gates (design 4.2, todo 369): the statement's columns, the
+   * marker, the gates.
+   */
+  private Route lateralGated(
+      Route r, SqlAst ast, IdentityHashMap<SqlAst.TableRef, TableInfo> scalarDb) {
+    List<String> checks = new ArrayList<>();
+    List<String> gates = new ArrayList<>();
+    for (Map.Entry<SqlAst.TableRef, TableInfo> e : scalarDb.entrySet()) {
+      TableInfo t = e.getValue();
+      if (t.layout() == Layout.INLINE && ast.columnsReadFrom(e.getKey()) == null) {
+        return r;
+      }
+      String check = inFlightCheck(t);
+      gates.add(
+          "CASE WHEN EXISTS ("
+              + check
+              + ") THEN 1 ELSE 0 END AS "
+              + engine.quote("scalardb_native_g" + gates.size()));
+      checks.add(check);
+    }
+    String inner =
+        ast.joinTokens(
+            ref -> {
+              TableInfo t = scalarDb.get(ref);
+              return t == null
+                  ? null
+                  : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
+            });
+    List<Integer> all = ast.placeholdersIn(0, ast.source().length());
+    if (inner == null || all == null) {
+      return r;
+    }
+    // a terminating semicolon, legal after a statement, is not inside a derived table
+    inner = inner.strip();
+    while (inner.endsWith(";")) {
+      inner = inner.substring(0, inner.length() - 1).strip();
+    }
+    // the statement on lines of its own, so that a line comment at its end closes nothing
+    String sql =
+        "SELECT s.*, g.* FROM (SELECT "
+            + String.join(", ", gates)
+            + ") g LEFT JOIN LATERAL (SELECT i.*, 1 AS "
+            + engine.quote("scalardb_native_present")
+            + " FROM (\n"
+            + inner
+            + "\n) i) s ON true";
+    return r.gated(new Gated(sql, all, checks, false, true));
   }
 
   /**
