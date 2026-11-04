@@ -211,6 +211,20 @@ PostgreSQL TPC-H cloud run (6e's plan `bench-env/plans/postgresql-tpch-sf10.json
 3) is the user's to start; when it lands, read the check's warm figures for Q19, Q22 and Q2 and
 the autocommit table against the SF 0.1 ones above.
 
+### 2026-11-04: TPC-H SF 3 on AWS, the decoupled cell (6e's run 20261104-0948-pg, relayed by 28)
+
+PostgreSQL 16, main at e52a9e2 on the stack, `tpchCheck` 3. BenchBase serial (c)/(a) 0.97. The
+check in a transaction: every query 0.99-1.05x; Q1 1.05x (timed by the warm-ups alone, past the
+long threshold); Q19 93.9 against 95.0 ms (1.01x); Q22 154.4 against 155.6 (1.01x); Q2 633.6
+against 643.5 (1.02x); Q11 1.02x. In autocommit 0.99-1.04x, Q7 and Q11 the highest at 1.04x.
+Every execution returned the vendor's rows. 6e's reading, which I share: SF 0.1's small-query
+2-4x does not show warm at SF 3; whatever fixed part the driver adds is a few ms at most (Q2 about
+10 ms, Q11 4-7 ms, the rest within 1-2 ms). So the cold-planning reading above stands and the
+plan-cost-gated route is not needed. The report is on the client at
+`a/results/bb-d0-benchbase-postgresql.md` (lines 66-120); 6e fetches the whole run, the inline cell
+included, to `bench-env/results/20261104-0948-pg/`. The inline cell was running when relayed;
+its Q9 goes to todo 368.
+
 ## Acceptance Criteria
 
 - [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
