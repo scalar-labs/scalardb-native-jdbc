@@ -1,0 +1,3 @@
+kind: bugfix
+body: 'On PostgreSQL, a read the driver runs as written behind a whole-table in-flight check, or the statement as written of a read too large to rewrite into copies, now runs with the session''s parallel workers. A short rewritten read earlier on the connection had left them off, so that at TPC-H scale factor 3 such reads ran 1.3 to 6.5 times the vendor''s time.'
+time: 2026-11-04T21:00:00.000000+09:00
