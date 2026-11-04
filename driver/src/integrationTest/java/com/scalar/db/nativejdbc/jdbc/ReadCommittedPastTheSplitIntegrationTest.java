@@ -181,6 +181,86 @@ class ReadCommittedPastTheSplitIntegrationTest {
     }
   }
 
+  /**
+   * Todo 370: TPC-H Q18's shape, a join whose subquery's table the split reads through {@code rc_T}
+   * in every copy, runs as written behind whole-table gates, recording no anchor; with a row in
+   * flight, the split and the committed rows. The form that ran is the result set's handler: the
+   * gated form's rows, or the split's (a function in the select list would take the statement past
+   * the split, so no {@code current_query()} here).
+   */
+  @Test
+  void splitReadsThroughTheViewsRunAsWrittenBehindGates() throws Exception {
+    TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager();
+    Catalog catalog = new Catalog(Engine.POSTGRESQL, Catalog.DEFAULT_METADATA_SCHEMA, PG::open);
+    try (Connection d = PG.openDriver()) {
+      for (String table : List.of("d", "i")) {
+        String anchorTable =
+            new Writes.Names(Engine.POSTGRESQL, catalog.lookup(List.of(), NS, table)).table;
+        String t = NS + "." + table;
+        String sql =
+            "SELECT t1.id, t1.x FROM "
+                + t
+                + " t1 JOIN "
+                + t
+                + " t2 ON t2.id = t1.id WHERE t1.id IN (SELECT t3.id FROM "
+                + t
+                + " t3 GROUP BY t3.id HAVING SUM(t3.v) > ?) ORDER BY t1.id";
+        for (boolean tx : List.of(true, false)) {
+          d.setAutoCommit(!tx);
+          String at = table + (tx ? ", in a transaction" : ", in autocommit");
+          assertThat(form(d, sql)).as(at).isEqualTo("gated [18/a, 19/a, 20/a]");
+          if (tx) {
+            assertThat(DecoupledReadCommittedIntegrationTest.anchors(d).recorded(anchorTable))
+                .as(at + ": no anchor recorded")
+                .isFalse();
+          }
+          TwoPhaseCommitTransaction held = tpc.begin();
+          held.update(
+              Update.newBuilder()
+                  .namespace(NS)
+                  .table(table)
+                  .partitionKey(id(19))
+                  .textValue("x", "b")
+                  .build());
+          held.prepare();
+          try {
+            assertThat(form(d, sql))
+                .as(at + ", a row in flight: the split, the committed rows")
+                .isEqualTo("split [18/a, 19/a, 20/a]");
+          } finally {
+            held.rollback();
+          }
+          if (tx) {
+            d.commit();
+          }
+        }
+      }
+      d.setAutoCommit(true);
+    }
+  }
+
+  /** The form a read of {@code sql} bound to 17 ran in, gated or split, and its rows. */
+  private static String form(Connection d, String sql) throws SQLException {
+    List<String> rows = new ArrayList<>();
+    String form;
+    try (PreparedStatement ps = d.prepareStatement(sql)) {
+      ps.setInt(1, 17);
+      try (ResultSet rs = ps.executeQuery()) {
+        form =
+            java.lang.reflect.Proxy.getInvocationHandler(rs)
+                    .getClass()
+                    .getSimpleName()
+                    .equals("GatedRows")
+                ? "gated"
+                : "split";
+        while (rs.next()) {
+          rows.add(rs.getString(1) + "/" + rs.getString(2));
+        }
+      }
+    }
+    return form + " " + rows;
+  }
+
   /** A read's rows, its first two columns joined by '/', and the text the server ran. */
   private record Read(List<String> rows, String text) {}
 

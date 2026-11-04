@@ -96,8 +96,8 @@ committed, so it cannot hand the driver the old values; the driver has to find t
   values from the metadata. It rewrites the statement into copies joined by `UNION ALL`, one for
   each combination of committed and in-flight tables: two copies for one table, four for a join of
   two. Where a quick check shows nothing in flight in the statement's key range, or in the whole
-  table for a statement too large to rewrite into copies, it runs the statement as written
-  instead. When nothing is in flight, the extra copies find no rows, but the database still parses,
+  table for a statement too large to rewrite into copies or with a subquery on a ScalarDB table, it
+  runs the statement as written instead. When nothing is in flight, the extra copies find no rows, but the database still parses,
   plans and starts them.
 - **Writes.** A SNAPSHOT transaction's view never changes, so once the driver finds a table with no
   row in flight, it remembers this until the transaction ends: every later read and write of that
@@ -143,7 +143,8 @@ rollback-only. On the engines' own errors:
 When a transaction writes a row, it checks that the row is unchanged since the transaction read it.
 Rows read only through a subquery, a grouped or `DISTINCT` read, a RIGHT or FULL JOIN, a derived
 table, a CTE or a UNION are read committed, but are not checked this way: at READ COMMITTED, a write
-based on such a read can overwrite a change made after it. Read the rows you will write with a
+based on such a read can overwrite a change made after it. On PostgreSQL and Oracle at READ
+COMMITTED, neither are any rows of a statement with a subquery on a ScalarDB table. Read the rows you will write with a
 SELECT of their own table, or lock them first with `SELECT ... FOR UPDATE`.
 
 ## Read-only transactions
