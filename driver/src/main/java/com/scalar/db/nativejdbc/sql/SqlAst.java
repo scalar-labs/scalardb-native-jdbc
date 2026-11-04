@@ -4471,21 +4471,25 @@ public final class SqlAst {
   /** The label of a gate column {@code i} (todo 334). */
   private static final String GATE = "scalardb_native_g";
 
+  /** The label of the column that marks a row of the statement under the gates (todo 371). */
+  private static final String PRESENT = "scalardb_native_present";
+
   /**
-   * Returns the statement as written, the references {@code naming} names replaced, with a gate
-   * column for each of {@code gates} appended to its select list (design 4.2 "Anchor-less reads as
-   * written behind a gate column", todo 334): the gate's text before its conjuncts, then, with
+   * Returns the statement as written, the references {@code naming} names replaced, on the nullable
+   * side of a lateral join from one row of gates, one for each of {@code gates} (design 4.2
+   * "Oracle's gated form on a row of its own", todos 334 and 371): {@code SELECT s.*, g.* FROM
+   * (SELECT <gates> FROM dual) g LEFT JOIN LATERAL (SELECT i.*, 1 AS present FROM (<statement>) i)
+   * s ON 1 = 1}, so that the statement's columns come first, then its marker, NULL on the one row
+   * of an empty result, then the gates. Each gate is its text before its conjuncts, then, with
    * {@code ranged}, each conjunct of the statement's WHERE clause on the reference's key columns,
-   * read as the gate's alias's, its placeholders bound again where they stand, then the text after;
-   * wrapped in {@code MAX()} where the statement groups or aggregates. Without such a conjunct for
-   * a reference, a ranged gate is not made.
+   * read as the gate's alias's, its placeholders bound there before the statement's own, then the
+   * text after. Without such a conjunct for a reference, a ranged gate is not made.
    *
    * @param naming what to replace
-   * @param gates each gate's reference and texts, in the select list's order
+   * @param gates each gate's reference and texts, in the gates' order
    * @param ranged whether each gate repeats its reference's key conjuncts
    * @return the statement and the sources of its placeholders, or {@code null} where it is not one
-   *     plain select, its select list has a bare {@code *}, a ranged gate has no conjunct, or the
-   *     text cannot be rewritten
+   *     plain select, a ranged gate has no conjunct, or the text cannot be rewritten
    */
   public @Nullable SplitText gated(
       @Nullable Naming naming, Map<TableRef, KeyRange> gates, boolean ranged) {
@@ -4517,35 +4521,18 @@ public final class SqlAst {
         return null;
       }
     }
-    PlainSelect s = (PlainSelect) statement;
-    for (SelectItem<?> item : s.getSelectItems()) {
-      if (item.getExpression() instanceof AllColumns
-          && !(item.getExpression() instanceof AllTableColumns)) {
-        // Oracle takes no bare * beside another item, and a table renamed without an alias of
-        // its name leaves no name to spell it out by
-        return null;
-      }
-    }
     keepLabels(from, to, Map.of());
-    List<SelectItem<?>> items = s.getSelectItems();
-    Node lastItemNode = items.get(items.size() - 1).getASTNode();
-    Token lastItem = lastItemNode == null ? null : lastItemNode.jjtGetLastToken();
-    if (lastItem == null) {
-      return null;
-    }
-    boolean grouped = isGrouped(s);
     List<Integer> sources = new ArrayList<>();
     Emitter e = new Emitter(from, to, placeholders, sources);
-    e.tokens(start, lastItem);
+    e.text("SELECT s.*, g.* FROM (SELECT");
     int i = 0;
     for (Map.Entry<TableRef, KeyRange> g : gates.entrySet()) {
       List<Run> runs = ranged ? keyConjuncts(g.getKey(), g.getValue()) : List.of();
       if (ranged && runs.isEmpty()) {
         return null;
       }
-      e.text(",");
-      if (grouped) {
-        e.text("MAX(");
+      if (i > 0) {
+        e.text(",");
       }
       e.text(g.getValue().before);
       for (Run r : runs) {
@@ -4553,13 +4540,15 @@ public final class SqlAst {
         e.run(r);
       }
       e.text(g.getValue().after);
-      if (grouped) {
-        e.text(")");
-      }
       e.text("AS");
       e.text(engine.quote(GATE + i++));
     }
-    e.tokens(lastItem.next, null);
+    e.text("FROM dual) g LEFT JOIN LATERAL (SELECT i.*, 1 AS");
+    e.text(engine.quote(PRESENT));
+    e.text("FROM (");
+    e.tokens(start, null);
+    // after a line comment the emitter opens a new line
+    e.text(") i) s ON 1 = 1");
     String text = e.text();
     assert parses(text) : text;
     return checked(text, sources);

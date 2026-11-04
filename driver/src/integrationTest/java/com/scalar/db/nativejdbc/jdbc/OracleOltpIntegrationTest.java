@@ -3165,7 +3165,10 @@ class OracleOltpIntegrationTest {
           "SELECT /* vendor */ " + measured + " SUM(ol_amt) FROM " + olData + " WHERE ol_o = ?"
         };
         String[] patterns = {
-          "SELECT " + measured + (layout.equals("i") ? "%CASE WHEN%" : "%scalardb_native_g0%"),
+          // the gated form on its row from dual, its tag inside the lateral view (todo 371)
+          layout.equals("i")
+              ? "SELECT " + measured + "%CASE WHEN%"
+              : "SELECT s.*, g.* FROM (SELECT%scalardb_native_g0%" + measured + "%",
           "SELECT /* split */ " + measured + "%",
           "SELECT /* vendor */ " + measured + "%"
         };
@@ -3999,6 +4002,117 @@ class OracleOltpIntegrationTest {
     }
   }
 
+  /**
+   * Oracle's gated form on a row of its own from dual (todo 371): an empty result in autocommit at
+   * SNAPSHOT is one statement, on both layouts; at READ COMMITTED a ranged read with ORDER BY and
+   * FETCH FIRST keeps its order and its bound values, a grouped read takes no MAX(), and a bare *
+   * over a decoupled table takes the form.
+   */
+  @Test
+  void gatedReadsRideARowOfTheirOwn() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      for (String layout : List.of("i", "d")) {
+        admin.createTable(
+            N(NS),
+            N("acl" + layout),
+            TableMetadata.newBuilder()
+                .addColumn(N("k"), intType())
+                .addColumn(N("x"), intType())
+                .addPartitionKey(N("k"))
+                .build(),
+            layout.equals("d") ? Map.of("transaction-metadata-decoupling", "true") : Map.of());
+      }
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      for (String layout : List.of("i", "d")) {
+        seed(v, "acl" + layout, "k, x", "LEVEL, LEVEL * 10", "k", "LEVEL", 10);
+      }
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)acl[id]"),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
+          .hasSize(2)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59372");
+    try (Connection d = ORA.openDriver(ttl);
+        Connection v = ORA.open()) {
+      assertThat(d.getAutoCommit()).isTrue();
+      // an empty grouped result at SNAPSHOT in autocommit: the gated statement alone, no second one
+      d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      for (String layout : List.of("i", "d")) {
+        String tag = "/* acl" + System.nanoTime() + " */";
+        assertThat(
+                rows(
+                    d,
+                    "SELECT "
+                        + tag
+                        + " x, COUNT(*) FROM "
+                        + NS
+                        + ".acl"
+                        + layout
+                        + " WHERE x > 1000 GROUP BY x"))
+            .as(layout + ": no row")
+            .isEmpty();
+        assertThat(executedTexts(v, tag))
+            .as(layout + ": one statement")
+            .singleElement()
+            .satisfies(
+                t -> assertThat(t).contains("scalardb_native_present", "scalardb_native_g0"));
+      }
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      String table = NS + ".acld";
+      // a ranged read, ordered and limited, its values bound: the vendor's order
+      String tag = "/* acr" + System.nanoTime() + " */";
+      try (PreparedStatement ps =
+          d.prepareStatement(
+              "SELECT "
+                  + tag
+                  + " k, x FROM "
+                  + table
+                  + " WHERE k BETWEEN ? AND ? ORDER BY x DESC FETCH FIRST 3 ROWS ONLY")) {
+        ps.setInt(1, 2);
+        ps.setInt(2, 8);
+        assertThat(rowsOf(ps)).as("ranged, ordered").containsExactly("8/80", "7/70", "6/60");
+      }
+      assertThat(executedTexts(v, tag))
+          .as("ranged, ordered: the text run")
+          .singleElement()
+          .satisfies(t -> assertThat(t).contains("scalardb_native_present", "BETWEEN"));
+      // a grouped read: no MAX() over the gates
+      tag = "/* acg" + System.nanoTime() + " */";
+      assertThat(
+              rows(
+                  d,
+                  "SELECT "
+                      + tag
+                      + " MOD(k, 2), COUNT(*) FROM "
+                      + table
+                      + " WHERE k BETWEEN 1 AND 5 GROUP BY MOD(k, 2) ORDER BY 1"))
+          .as("grouped")
+          .containsExactly("0/2", "1/3");
+      assertThat(executedTexts(v, tag))
+          .as("grouped: the text run")
+          .singleElement()
+          .satisfies(t -> assertThat(t).contains("scalardb_native_g0").doesNotContain("MAX("));
+      // a bare * over a decoupled table
+      tag = "/* acs" + System.nanoTime() + " */";
+      assertThat(rows(d, "SELECT " + tag + " * FROM " + table + " WHERE k = 3"))
+          .as("a bare *")
+          .containsExactly("3/30");
+      assertThat(executedTexts(v, tag))
+          .as("a bare *: the text run")
+          .singleElement()
+          .satisfies(t -> assertThat(t).contains("scalardb_native_g0"));
+    }
+  }
+
   /** Seeds a ScalarDB table of either layout with committed rows, their stamps full-sized. */
   private static void seed(
       Connection v,
@@ -4085,9 +4199,11 @@ class OracleOltpIntegrationTest {
     List<String> out = new ArrayList<>();
     try (PreparedStatement ps =
         v.prepareStatement(
-            "SELECT sql_fulltext FROM v$sql WHERE sql_text LIKE ? AND executions > 0 AND sql_text"
-                + " NOT LIKE '%v$sql%'")) {
-      ps.setString(1, "%" + tag + "%");
+            // the full text: a gated statement's tag follows its gates, past sql_text's 1,000
+            // characters (todo 371)
+            "SELECT sql_fulltext FROM v$sql WHERE DBMS_LOB.INSTR(sql_fulltext, ?) > 0 AND"
+                + " executions > 0 AND sql_text NOT LIKE '%v$sql%'")) {
+      ps.setString(1, tag);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           out.add(rs.getString(1));
