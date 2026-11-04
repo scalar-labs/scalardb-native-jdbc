@@ -2104,10 +2104,11 @@ final class Router {
   /**
    * On Oracle, an anchor-less read with its form as written over the data tables behind a gate
    * column per ScalarDB table (design 4.2 "Anchor-less reads as written behind a gate column", todo
-   * 334): at READ COMMITTED each gate over the predicate's conjuncts on its table's key columns,
-   * those B1 repeats on PostgreSQL, a table without one keeping the split read alone; at SNAPSHOT
-   * over the whole table, its 0 marking the table clear. A read past the split ({@code pastSplit},
-   * the {@code rc_T} route) at READ COMMITTED takes the whole table's gates, on Oracle and on
+   * 334), on a row of its own from dual, a marker column NULL on an empty result's (todo 371): at
+   * READ COMMITTED each gate over the predicate's conjuncts on its table's key columns, those B1
+   * repeats on PostgreSQL, a table without one keeping the split read alone; at SNAPSHOT over the
+   * whole table, its 0 marking the table clear. A read past the split ({@code pastSplit}, the
+   * {@code rc_T} route) at READ COMMITTED takes the whole table's gates, on Oracle and on
    * PostgreSQL, where they ride a row of their own (design 4.2 "The read past the split at READ
    * COMMITTED behind whole-table gates", todo 369). Unchanged elsewhere, for a locking read, and
    * for a {@code *} over an inline table, whose data table holds the metadata.
@@ -2120,11 +2121,11 @@ final class Router {
     boolean snapshot = snapshot();
     boolean lateral = engine == Engine.POSTGRESQL && pastSplit && !snapshot;
     // a position past the select list left for the database to refuse, as the split read leaves
-    // it, not answered by an appended gate column (todo 144)
+    // it (todo 144): inside Oracle's wrapper the statement's positions are its own (todo 371)
     if ((engine != Engine.ORACLE && !lateral)
         || ast.hasLockingOrIntoClause()
         || scalarDb.isEmpty()
-        || ast.ordersPastSelectList()) {
+        || (engine != Engine.ORACLE && ast.ordersPastSelectList())) {
       return r;
     }
     if (lateral) {
@@ -2183,7 +2184,7 @@ final class Router {
             !snapshot && !pastSplit);
     return text == null
         ? r
-        : r.gated(new Gated(text.sql(), text.parameterSources(), checks, snapshot, false));
+        : r.gated(new Gated(text.sql(), text.parameterSources(), checks, snapshot, true));
   }
 
   /**
