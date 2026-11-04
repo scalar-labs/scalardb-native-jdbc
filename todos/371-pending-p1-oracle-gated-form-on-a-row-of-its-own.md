@@ -227,6 +227,11 @@ the changelog), read as the combined diff from `git diff 4e916f6 f2238ab` and pe
   lateral commit and the changelog kept; the squashed head's diff against f2238ab must be empty.
   The user's call with the landing.
 
+Squashed (2026-11-04): the branch is 0682c91, d8db452 (d4e6f0c + d37229f + 766a762 under 766a762's
+message) and 55e79b9 (the changelog); my `git diff f2238ab 55e79b9` is empty, the tree the
+reviewed one. Mergeable as a whole; landing on the user's word after a rebase onto main's head,
+the landed head to be range-diffed against 4e916f6..55e79b9.
+
 ## Acceptance Criteria
 
 - [x] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
