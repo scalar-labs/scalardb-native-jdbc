@@ -1333,6 +1333,94 @@ union as a derived table.
   today for the OLTP case where the gate is closed more often than open; both measured items for the
   user. On main as 9b63126 (2026-11-04, the user's word; range-diff identical).
 
+  *The split read with a reference through `rc_T` at READ COMMITTED (todo 370, 2026-11-04).* A
+  statement the split serves with some reference through `rc_T`, a scalar subquery's table, a
+  subquery holding an aggregate or a row limit, a CTE's, a set operation's branch, a nullable side
+  that is itself a join (the list below), repeats that reference in every copy, through a view no
+  engine joins by key (todo 095): on PostgreSQL 16 at TPC-H scale factor 0.1, READ COMMITTED, both
+  layouts and modes, after todo 369 (session 28, 2026-11-04), Q18 33-36x and Q20 92-118x, their
+  aggregate subqueries' lineitem through `rc_T` inside each of 8 and more copies. Such a statement
+  takes todo 369's gated form in place of the split: whole-table gates for every ScalarDB table of
+  it, the subqueries' included, one statement, one snapshot; open, the statement as written; closed,
+  the split as today; 369's exclusions hold, and the gate is always tried, since the fallback, the
+  split with its views, is never cheap. It records no anchor: its split anchored the outer
+  references (Q20's supplier and nation) while the subquery's table was unguarded anyway; now the
+  statement joins the reads that protect nothing (section 5: subqueries, grouped and DISTINCT reads,
+  the `rc_T` shapes), a write after it to a row it returned not checked against the version read,
+  which the user-facing sentence names. Not taken: the anchors inside the wrapper (an inline table's
+  own version columns, a decoupled table's metadata by a per-row subquery), select-list surgery for
+  a shape that is a report's. Nothing changes at SNAPSHOT, where such a statement runs as written
+  once its tables are found clear, or in TPC-C and YCSB, which have no such statement. Build: at
+  READ COMMITTED a route whose split leaves a reference to the views is built anchor-less and gated
+  as the `rc_T` route is, the split text its fallback; Oracle the same. Tests: Q18's shape on both
+  layouts and engines, in a transaction and in autocommit, as written with gates and the vendor's
+  rows; with a row in flight the split's text and the committed rows; no anchor recorded. Expected:
+  Q18 and Q20 at about the vendor's cost.
+
+  *Oracle's gated form on a row of its own (todo 371, 2026-11-04).* The Oracle gated form above
+  appends its gate columns to the select list, so a result of no rows carries none and falls to the
+  fallback: at SNAPSHOT in autocommit the own transaction's checks and, since todo 367, the plain
+  statement again, TPC-H Q18 at scale factor 0.1, which returns no row there, 2.01x decoupled and
+  2.10x inline against 1.03-1.09x in a transaction (session 28, 2026-11-04), and every empty key
+  lookup in autocommit two or three round trips for one; at READ COMMITTED the split, or `rc_T` past
+  it. It moves to the one-row wrapper of todo 369 in Oracle's spelling, for every use of it,
+  SNAPSHOT's whole-table gates, READ COMMITTED's range gates within the split and the whole-table
+  gates of 369 and 370: `SELECT s.*, g.* FROM (SELECT <gates> FROM dual) g LEFT JOIN LATERAL (SELECT
+  i.*, 1 AS scalardb_native_present FROM (<statement>) i) s ON 1 = 1` (12c and later; `OUTER APPLY`
+  plans the same), each gate the existing `(SELECT COUNT(*) FROM dual WHERE EXISTS (...))`, the
+  range conjuncts and their placeholders as extracted today, now before the statement's, the sources
+  recorded. Measured on the container (Oracle 23, `OLI_V` 1.2M rows, 2026-11-04): the plan is NESTED
+  LOOPS OUTER from FAST DUAL to the lateral view, whose SORT ORDER BY (STOPKEY under FETCH FIRST)
+  sits inside it, so the inner's order is the output's; 30,605 rows, and 50 with FETCH FIRST, in the
+  plain statement's order under both spellings, an empty result one row of NULLs, the gate a scalar
+  subquery evaluated once, and the cost the plain statement's, 8.62 against 8.70 ms a call. The
+  wrapper removes the `MAX()` over a grouped select list, the bare-`*` restriction (inside the
+  inline view `*` stands alone), the position-past-the-select-list guard for the gated form (the
+  inner's positions are its own, which Oracle refuses itself) and the no-row fallback, a NULL marker
+  being the empty result as on PostgreSQL; a `*` over an inline table still keeps the split, the
+  gates' meaning, the marking of a clear table at SNAPSHOT and the fallback on a gate of 1 stay, and
+  `Proxies.gated` is unchanged. Expected: Q18 in autocommit at SNAPSHOT from 2.0x to about 1x, an
+  empty key lookup in autocommit one round trip, an empty gated read at READ COMMITTED one
+  statement. Tests: an empty result in autocommit at SNAPSHOT as one text in `v$sql`, rows empty,
+  both layouts; a ranged read with ORDER BY and FETCH FIRST in the vendor's order; a grouped read; a
+  bare `SELECT *` over a decoupled table on the form; the gated tests of todos 334 and 369 on the
+  wrapper's text; 19c in CI.
+
+  *The anchor-less split read at READ COMMITTED behind gates on every table (todo 372, 2026-11-04).*
+  A read that records no anchor takes the gated form on Oracle only where every table of it has a
+  key range (above), and on PostgreSQL never: it runs as the split, whose copies for a decoupled
+  table each join or anti-join the metadata table over the scan. On PostgreSQL 16 at TPC-H scale
+  factor 0.1, READ COMMITTED, after todo 369 (session 28, 2026-11-04): Q1 5.2x decoupled and 3.6x
+  inline, a two-piece scan of lineitem; decoupled only, Q3 4.4-4.9x, Q4 3.3-3.7x, Q6 6.6-7.7x, Q12
+  12.8-13.9x, Q16 16.9x in a transaction and 3.5x in autocommit, the same queries inline 1.1-1.6x.
+  Such a read takes the gated form on both engines, each table gated by its key range where the
+  predicate gives one (the conjuncts above; B1's extraction on PostgreSQL) and by the whole table
+  where it does not; open, the statement as written; closed, the split as today; PostgreSQL's gates
+  on 369's wrapper, Oracle's on 371's. The whole-table gate under load: on a table with rows in
+  flight most of the time (TPC-C's order_line) it is closed more often than open, and every closed
+  gate costs the plain statement's time before the split's, the reason the range gate declines a
+  range-less table above. The rule that bounds it: a whole-table gate found closed marks its table
+  busy in the catalog for one second, shared by the catalog's connections; a read whose gated
+  statement would need a whole-table gate of a busy table takes the split at once; a range gate is
+  never skipped, a closed range saying nothing of the next, nor are 369's and 370's gates, whose
+  fallback is `rc_T`'s cost. So a busy table costs one wasted plain statement a second across the
+  catalog's connections and a quiet one nothing; StockLevel's and Delivery's aggregates keep the
+  range gates where they have them (order_line's range, stock's warehouse) and the split otherwise,
+  no worse than today, and on PostgreSQL gain the range-gated form Oracle's eighth and ninth runs
+  measured (StockLevel from +53-62% toward +25%, Delivery +91/64%), to be confirmed by PostgreSQL's
+  TPC-C READ COMMITTED cells before this lands. Not taken: a cost-based choice by the generic plan
+  (the split's planning cost is the cold run's only, todo 367), a longer or adaptive mark (one
+  second a constant, to revisit with figures), gating a read that records anchors. Build: the
+  anchor-less split route at READ COMMITTED gated with a per-table choice, `Gated` carrying which
+  gates are the whole table's; the busy marks in the catalog, read by `Proxies.gated` before the
+  gated statement and set on a closed whole-table gate; the user-facing sentence gains the whole
+  table where the statement gives no range. Tests: Q1's and Q12's shapes over a decoupled table, as
+  written with gates and the vendor's rows, with a row in flight the split and the committed rows,
+  the next read within a second the split without a gate, after a second the gate again;
+  StockLevel's shape on PostgreSQL with range gates; on Oracle one range-less table gated by the
+  whole table. Expected: Q1 and the decoupled-only queries at about the vendor's cost on quiet
+  tables, StockLevel and Delivery better or unchanged, YCSB unchanged.
+
   *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
   A read of an inline table whose predicate names only the table's key columns, every column of the
   reference in the statement's WHERE and ON clauses a key column, the select list free, takes one
