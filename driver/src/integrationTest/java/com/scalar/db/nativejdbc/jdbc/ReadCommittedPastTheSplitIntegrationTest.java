@@ -239,6 +239,69 @@ class ReadCommittedPastTheSplitIntegrationTest {
     }
   }
 
+  /**
+   * Todo 372: an anchor-less read within the split at READ COMMITTED, TPC-H Q1's shape (one table's
+   * aggregate) and Q12's (a grouped join), runs as written behind a gate per table, the whole
+   * table's where the predicate gives no key range; with a row in flight, the split and the
+   * committed rows, and the table busy: within the second the split without the gate, though the
+   * row is gone, after it the gate again.
+   */
+  @Test
+  void anchorlessSplitReadsRunBehindGatesAndSkipABusyTable() throws Exception {
+    TwoPhaseCommitTransactionManager tpc = factory.getTwoPhaseCommitTransactionManager();
+    try (Connection d = PG.openDriver()) {
+      for (String table : List.of("d", "i")) {
+        String t = NS + "." + table;
+        String q1 = "SELECT x, SUM(v), COUNT(*) FROM " + t + " WHERE v > ? GROUP BY x ORDER BY x";
+        String q12 =
+            "SELECT t1.x, COUNT(*) FROM "
+                + t
+                + " t1 JOIN "
+                + t
+                + " t2 ON t2.id = t1.id WHERE t2.v > ? GROUP BY t1.x ORDER BY t1.x";
+        for (boolean tx : List.of(true, false)) {
+          d.setAutoCommit(!tx);
+          String at = table + (tx ? ", in a transaction" : ", in autocommit");
+          assertThat(form(d, q1)).as(at + ", Q1's shape").isEqualTo("gated [a/57]");
+          assertThat(form(d, q12)).as(at + ", Q12's shape").isEqualTo("gated [a/3]");
+          TwoPhaseCommitTransaction held = tpc.begin();
+          held.update(
+              Update.newBuilder()
+                  .namespace(NS)
+                  .table(table)
+                  .partitionKey(id(19))
+                  .textValue("x", "b")
+                  .build());
+          held.prepare();
+          try {
+            assertThat(form(d, q1))
+                .as(at + ", a row in flight: the split, the committed rows")
+                .isEqualTo("split [a/57]");
+            // StockLevel's shape, a key range's gate: open, the row in flight outside its range
+            assertThat(
+                    form(
+                        d,
+                        "SELECT COUNT(DISTINCT x), COUNT(*) FROM "
+                            + t
+                            + " WHERE id BETWEEN 1 AND 5 AND v < ?"))
+                .as(at + ", a key range's gate")
+                .isEqualTo("gated [1/5]");
+          } finally {
+            held.rollback();
+          }
+          // the row gone, the table busy for the second: the split without its gate
+          assertThat(form(d, q1)).as(at + ", within the second").isEqualTo("split [a/57]");
+          Thread.sleep(1100);
+          assertThat(form(d, q1)).as(at + ", after the second").isEqualTo("gated [a/57]");
+          if (tx) {
+            d.commit();
+          }
+        }
+      }
+      d.setAutoCommit(true);
+    }
+  }
+
   /** The form a read of {@code sql} bound to 17 ran in, gated or split, and its rows. */
   private static String form(Connection d, String sql) throws SQLException {
     List<String> rows = new ArrayList<>();
