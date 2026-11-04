@@ -1269,8 +1269,8 @@ union as a derived table.
   table, the split read being cheaper than a second round trip, does not hold where there is no
   split read, only `rc_T`. And on PostgreSQL the gates ride a row of their own rather than the
   select list: the statement as written, its tables renamed, becomes a derived table on the nullable
-  side of a lateral join from a one-row relation that carries the gates, `SELECT g.*, s.* FROM
-  (SELECT <gates>) g LEFT JOIN LATERAL (SELECT 1 AS scalardb_native_present, i.* FROM (<statement>)
+  side of a lateral join from a one-row relation that carries the gates, `SELECT s.*, g.* FROM
+  (SELECT <gates>) g LEFT JOIN LATERAL (SELECT i.*, 1 AS scalardb_native_present FROM (<statement>)
   i) s ON true`, so that a result of no rows still returns one row, the gates set and the marker
   NULL, where the select-list form has no row to read its gates from and falls to a second statement
   (on Oracle the own transaction's plain statement at SNAPSHOT, which is TPC-H Q18's 2.0x in
@@ -1311,7 +1311,27 @@ union as a derived table.
   committed rows, no abort; no row; a `*` over an inline table and a set operation keeping `rc_T`;
   on Oracle, the five-way key join of todo 367's probe at READ COMMITTED taking the gated statement
   in place of `RC_ACSD` x5. The user-facing sentence of `transactions.md` on the quick check in the
-  statement's key range gains the whole table for a statement too large to rewrite.
+  statement's key range gains the whole table for a statement too large to rewrite. Built by session
+  28 as 1a6db05 on `rc-gated-past-split`, reviewed mergeable 2026-11-04, three choices of the build
+  adopted here: the gates follow the statement's columns and the marker sits before them, so the
+  gated result's trailing hidden columns serve, one more; a trailing `;` of the statement is dropped
+  inside the derived table, where it is a syntax error (BenchBase's Q5 ends with one); and on
+  PostgreSQL in a transaction an error of the gated statement is reported as the statement's own,
+  the transaction being aborted so that no fallback can run there, where in autocommit and on Oracle
+  the fallback runs as before. Each gate is the table's coarse check under EXISTS. `Router.gated`
+  takes a past-the-split flag: the split route passes none, so reads within the split keep their
+  forms on both engines (TPC-C and YCSB at READ COMMITTED send no gated statement, 0 of 64 and 54
+  texts); the `rc_T` route passes it, the Oracle gate unranged and PostgreSQL's lateral form.
+  Measured by session 28 at scale factor 0.1: Q2, Q7, Q8, Q9, Q11, Q13, Q21 and Q22 from timeouts or
+  35-1,000x to 0.6-1.7x in both layouts and modes, Q21's segment failure gone, every completed query
+  the vendor's rows. What remains at READ COMMITTED is within the split: Q18 at 33-36x and Q20 at
+  92-118x, whose split copies carry a subquery's table through `rc_T` (the aggregate subquery's,
+  4.2's rule), repeated in every copy (todo 095), and Q1 at 3.6-5.3x, a whole-table aggregate of
+  lineitem whose two pieces scan it twice; the first a candidate for the same gated form, a
+  statement whose split would read any reference through `rc_T` taking the whole-table gates
+  instead, the second for a whole-table gate on a scan-shaped anchor-less read, which 4.2 declines
+  today for the OLTP case where the gate is closed more often than open; both measured items for the
+  user.
 
   *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
   A read of an inline table whose predicate names only the table's key columns, every column of the

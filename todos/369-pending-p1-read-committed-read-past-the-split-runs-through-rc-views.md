@@ -134,13 +134,73 @@ one: the parallel workers switched off for a split whose generic plan the driver
 (`Router.plainPlanIsParallel` answers no when `EXPLAIN (GENERIC_PLAN)` fails, as on a parameter
 whose type it cannot infer), or the committed copy's anti-join against the metadata table.
 
+## Review record (2026-11-04, 1a6db05 on `rc-gated-past-split`, built by session 28 on 0835b18)
+
+Verdict: mergeable. Read from `git show`: `Router`, `Proxies`, both tests, the docs sentence and
+the changelog.
+
+- `Router.gated` takes `pastSplit`: the split route passes false (on PostgreSQL the route returns
+  as before; Oracle keeps its ranged gates there), the `rc_T` route true: on Oracle `ast.gated`
+  with `ranged = !snapshot && !pastSplit`, whole-table at READ COMMITTED; on PostgreSQL
+  `lateralGated` where `!snapshot`. A `*` over an inline table keeps `rc_T` on both engines;
+  `ordersPastSelectList`, a locking clause and an empty table set decline as the gate does.
+- `lateralGated`: each gate `CASE WHEN EXISTS (<inFlightCheck(t)>) THEN 1 ELSE 0 END AS
+  "scalardb_native_gN"`, the coarse check's ordered LIMIT 1 probe under EXISTS, the metadata
+  table or, inline, the table itself; the inner text `joinTokens` with the data tables, as
+  `withPlain` renames, on lines of its own so a line comment closes nothing, a trailing `;`
+  dropped (BenchBase's Q5 ends with one: a syntax error inside the derived table, which in
+  autocommit had sent the fallback through `rc_T` to its timeout); the placeholders in source
+  order (`placeholdersIn` over the whole text). Column order `SELECT s.*, g.*` with the marker as
+  `s`'s last column, so `GatedRows` hides the trailing `gates + 1` columns unchanged. Right; the
+  design's `g.*` first was only a spelling, amended to the build.
+- `Proxies.gated`: the first row's gates are read first (any 1 returns null for the fallback), then
+  the marker (`rs.getObject(columns - gates)` NULL means the empty result), so a gate of 1 on an
+  empty result still takes the fallback, which can return before images; right. In the catch, on
+  PostgreSQL in a transaction (`aborted`) the error is rethrown as itself, since the transaction is
+  aborted and a fallback would surface as 25P02; in autocommit and on Oracle the fallback as before.
+- `ReadCommittedPastTheSplitIntegrationTest` (PostgreSQL, layouts d and i, in a transaction and in
+  autocommit, the fixture's READ COMMITTED asserted): a six-way key join as written by its own
+  `current_query()` (`LEFT JOIN LATERAL`, g0 and g5, no `rc_`), three application columns only;
+  `t1.id > 100` empty (one row of NULLs without the marker check); a prepared update in flight on
+  id 2 gives the `rc_` text and the committed rows, no abort; `1 / (t1.v - t1.v)` gives 22012 in
+  both modes; `t1.*` over the inline table gives `rc_`. `OracleOltpIntegrationTest.
+  readCommittedReadsPastTheSplitRunBehindWholeTableGates` (`acr{i,d}`, TTL 59370, a five-way join
+  on x, both modes): one text per tag with g0..g4 and no `RC_`. Each fails without its part per 28.
+- Suites as reported: unit 417, PostgreSQL 192 green; Oracle green except the ORA-12516 pair that
+  pass rerun alone; `OracleOltpIntegrationTest` 36 green.
+- `transactions.md`: "or in the whole table for a statement too large to rewrite into copies",
+  as asked. Changelog `improvement-20261104-120000`: accurate.
+
+Measured by 28 (local TPC-H at READ COMMITTED, SF 0.1, `tpchCheck` 3): Q2, Q7, Q8, Q9, Q11, Q13,
+Q21 and Q22 at 0.6-1.7x from timeouts or 35-1,000x, both layouts and modes; Q21's shared-memory
+failure gone; Q5 after the semicolon fix 20-45 ms against the vendor's 21-84 (a direct run);
+every completed query the vendor's rows. OLTP regression check at READ COMMITTED, TPC-C scale 1
+and YCSB, both layouts: no statement takes the form (0 `LEFT JOIN LATERAL`, 0 `rc_` among the
+64/78 and 54/55 server statements). Q6 and Q12 decoupled showed 6.5x and 12.8x this time against
+0.9x and 1.6x before; Q6's text is the split read, untouched by this change, read as the
+laptop's load; to see in a quiet run.
+
+## Open after this item (READ COMMITTED, within the split; the user's call)
+
+- Q18 at 33-36x and Q20 at 92-118x: their split copies carry a subquery's table through `rc_T`
+  (an aggregate subquery's, 4.2's rule) and the reference is repeated in every copy (todo 095).
+  Candidate: a statement whose split would read any reference through `rc_T` takes the gated
+  form of this item instead, its whole-table gates over every table; the gate open, the vendor's
+  cost; closed, today's split.
+- Q1 at 3.6-5.3x: a whole-table aggregate of lineitem, two pieces that scan it twice. Candidate: a
+  whole-table gate for a scan-shaped anchor-less read (no key conjunct on its table), which 4.2
+  declines today for the OLTP case where the gate is closed more often than open; an adaptive
+  skip (a table whose gate closed within the last second keeps the split for that second) would
+  bound the loss there. Measured items both.
+
 ## Acceptance Criteria
 
-- [ ] A READ COMMITTED read past the split runs as written behind whole-table gates on PostgreSQL
-      and Oracle, in a transaction and in autocommit, with the tests above
+- [x] A READ COMMITTED read past the split runs as written behind whole-table gates on PostgreSQL
+      and Oracle, in a transaction and in autocommit, with the tests above (1a6db05, reviewed
+      2026-11-04)
 - [ ] Full check passes on all engines
-- [ ] 28's READ COMMITTED TPC-H step repeated from the build: Q5, Q7, Q8, Q9 and Q21 complete at
-      about the vendor's cost
+- [x] 28's READ COMMITTED TPC-H step repeated from the build: Q5, Q7, Q8, Q9 and Q21 complete at
+      about the vendor's cost (0.6-1.7x, 2026-11-04)
 
 ## Work Log
 
