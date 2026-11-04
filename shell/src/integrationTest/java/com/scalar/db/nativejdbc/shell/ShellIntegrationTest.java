@@ -341,7 +341,7 @@ class ShellIntegrationTest {
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
       admin.createNamespace(sh, true);
-      admin.importTable(sh, e.storedTable("item"), DECOUPLED, Map.of());
+      Engines.importTable(admin, sh, e.storedTable("item"), DECOUPLED, Map.of());
     }
     try (Connection c = admin(e)) {
       List<Setup.Result> results =

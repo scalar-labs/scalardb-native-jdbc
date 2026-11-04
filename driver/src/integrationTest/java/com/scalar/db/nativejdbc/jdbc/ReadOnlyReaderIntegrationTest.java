@@ -17,7 +17,6 @@ import com.scalar.db.exception.transaction.TransactionException;
 import com.scalar.db.io.DataType;
 import com.scalar.db.io.Key;
 import com.scalar.db.nativejdbc.NativeJdbcDriver;
-import com.scalar.db.nativejdbc.catalog.Catalog;
 import com.scalar.db.nativejdbc.engine.Engine;
 import com.scalar.db.nativejdbc.setup.Setup;
 import com.scalar.db.nativejdbc.testing.Engines;
@@ -302,11 +301,7 @@ class ReadOnlyReaderIntegrationTest {
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
-                  new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open),
-                  c,
-                  t -> t.namespace().equals(RO),
-                  Duration.ofMinutes(1),
-                  List.of()))
+                  e.catalog(), c, t -> t.namespace().equals(RO), Duration.ofMinutes(1), List.of()))
           .allMatch(Setup.Result::succeeded, "succeeded");
     }
   }

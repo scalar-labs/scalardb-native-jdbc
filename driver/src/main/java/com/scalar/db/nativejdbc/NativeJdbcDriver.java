@@ -234,6 +234,18 @@ public final class NativeJdbcDriver implements Driver {
     }
   }
 
+  /**
+   * Releases every catalog's database session, keeping the catalogs; for tests, whose JVM gathers a
+   * catalog for nearly every test's identity, each holding a session until pushed out.
+   */
+  static void releaseCatalogSessions() {
+    synchronized (CATALOGS) {
+      for (Catalog c : CATALOGS.values()) {
+        c.releaseConnection();
+      }
+    }
+  }
+
   /** Parses the URL; the error never repeats the URL, which may carry credentials. */
   private static NativeJdbcUrl parse(String url) throws SQLException {
     try {

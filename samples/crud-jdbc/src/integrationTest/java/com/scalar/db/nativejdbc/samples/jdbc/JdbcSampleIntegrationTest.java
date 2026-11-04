@@ -76,13 +76,14 @@ class JdbcSampleIntegrationTest {
     }
     try (DistributedTransactionAdmin admin = e.admin()) {
       admin.createCoordinatorTables(true);
-      admin.importTable(
+      Engines.importTable(
+          admin,
           ns,
           table,
           inline ? Map.of() : Map.of("transaction-metadata-decoupling", "true"),
           Map.of());
     }
-    Catalog catalog = new Catalog(e.engine(), Catalog.DEFAULT_METADATA_SCHEMA, e::open);
+    Catalog catalog = e.catalog();
     try (Connection c = e.open()) {
       assertThat(
               Setup.run(
