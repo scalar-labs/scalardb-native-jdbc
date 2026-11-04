@@ -1605,6 +1605,14 @@ class BenchBaseBenchmark {
     if (!weights(workload).isEmpty()) {
       setIn(work, "weights", weights(workload));
     }
+    if (e.engine() == Engine.ORACLE) {
+      // BenchBase's Oracle TPC-H config gathers the statistics of a schema it names BENCHBASE
+      // (ORA-20000 for ours); the run gathers its own schema's after the load
+      NodeList after = d.getDocumentElement().getElementsByTagName("afterload");
+      while (after.getLength() > 0) {
+        after.item(0).getParentNode().removeChild(after.item(0));
+      }
+    }
     if (benchmark(workload).equals("tpch")) {
       // Q15 creates and drops a view, which the driver refuses over ScalarDB tables
       List<String> w = new ArrayList<>(Arrays.asList(text(work, "weights").split(",", -1)));
@@ -1630,10 +1638,16 @@ class BenchBaseBenchmark {
   private static final Pattern ORACLE_NUMBER =
       Pattern.compile("\\b(NUMBER\\b(?!\\s*\\()|INT(EGER)?\\b)", Pattern.CASE_INSENSITIVE);
 
+  // Oracle compares a blank-padded CHAR(n) column with a VARCHAR2 bind without padding, so
+  // TPC-H's r_name = ? and the like, bound as strings, match no row on either driver
+  private static final Pattern ORACLE_CHAR =
+      Pattern.compile("\\bchar\\s*\\((\\d+)\\)", Pattern.CASE_INSENSITIVE);
+
   /**
    * BenchBase's DDL for the workload with the types ScalarDB 3.19 cannot import replaced: its
    * decimals as doubles, and on Oracle FLOAT as BINARY_DOUBLE and INT or a bare NUMBER as
-   * NUMBER(10); every run creates its tables from it, so that (a) and (b) read the same types.
+   * NUMBER(10), and for TPC-H CHAR(n) as VARCHAR2(n); every run creates its tables from it, so that
+   * (a) and (b) read the same types.
    *
    * @return whether the DDL differs from BenchBase's, and was written
    */
@@ -1652,6 +1666,9 @@ class BenchBaseBenchmark {
                 .matcher(ORACLE_FLOAT.matcher(ddl).replaceAll("BINARY_DOUBLE"))
                 .replaceAll("NUMBER(10)")
             : DECIMAL.matcher(ddl).replaceAll("double precision");
+    if (engine == Engine.ORACLE && workload.equals("tpch")) {
+      changed = ORACLE_CHAR.matcher(changed).replaceAll("VARCHAR2($1)");
+    }
     if (changed.equals(ddl)) {
       return false;
     }
