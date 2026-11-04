@@ -91,6 +91,15 @@ Inline Q9 through BenchBase 1.11x the vendor (was 17,544x); the row check in a t
 with the vendor's rows (it had timed out at 30 s). The other 20 inline queries 0.58-1.30x through
 BenchBase, the full figures in todo 367's log.
 
+### 2026-11-04: TPC-H SF 3 on AWS, inline Q9 (6e's run 20261104-0948-pg, read from the report)
+
+BenchBase (c)/(a) for Q9 1.43 (2,161 against 1,515 ms at p50), which is the inline table shape:
+the check on (c)'s own inline tables has the vendor at 1,776 ms and the driver at 1,722 in a
+transaction (0.97x) and 1,733 against 1,801 in autocommit (1.04x), timed by the warm-up alone past
+the long threshold; the vendor's rows every time. So Q9 runs as written at the vendor's cost on
+the same tables, the 17,544x and the 30 s timeout gone; the rest of the ratio is the wider inline
+rows that the vendor driver pays alike (todo 367's log has the Q18/Q21 figures).
+
 ## Acceptance Criteria
 
 - [x] `columnsReadFrom` scopes the whole-row rule as designed, with the unit tests above (on main
@@ -98,7 +107,7 @@ BenchBase, the full figures in todo 367's log.
 - [x] Q9's shape on an inline table runs as written once the checks passed (the text the vendor
       received), returning the vendor's rows (the test; TPC-H Q9 1.11x from main, 2026-11-03)
 - [ ] Full check passes on all engines (unit, PostgreSQL and Oracle green locally; the other
-      engines at the push's CI)
+      engines at the push's CI); the SF 3 measurement done 2026-11-04 (above)
 
 ## Review record (2026-11-03, b8c2b5e on `whole-row-rule-scope`, built by session 28 on d7df0e7)
 

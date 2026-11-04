@@ -225,6 +225,31 @@ plan-cost-gated route is not needed. The report is on the client at
 included, to `bench-env/results/20261104-0948-pg/`. The inline cell was running when relayed;
 its Q9 goes to todo 368.
 
+### 2026-11-04: TPC-H SF 3 on AWS, both cells fetched (`bench-env/results/20261104-0948-pg/a/`), read
+
+Reports `bb-d0-benchbase-postgresql.md` (decoupled) and `bb-inline-d0-benchbase-postgresql.md`
+(inline); the check tables under "TPC-H queries on the tables of (c)", `check.md` and `check.log` in
+the `bb-*-benchbase-runs.tgz` under `benchbase-postgresql/tpch-c-1/`. Read from the reports:
+
+- Decoupled: BenchBase (c)/(a) 0.97; the check as relayed above (Q2 1.02x, Q19 1.01x, Q22 1.01x
+  in a transaction; 1.00x, 0.99x, 1.01x in autocommit).
+- Inline: BenchBase (c)/(a) 0.86; the check on (c)'s own tables 0.97-1.05x in a transaction and
+  0.98-1.07x in autocommit (Q7 1.07x and Q17 1.05x, both timed by the warm-up alone); Q19 103.2
+  against 102.7 ms, Q22 166.9 against 166.1, Q2 692.3 against 684.2. Both cells 42 "yes" rows, no
+  "no"; "Every execution returned the vendor's rows" on both.
+- Inline's 0.86 is the table shape, not the driver (6e's reading, which the figures bear out):
+  BenchBase's (a) runs on plain tables and its (c) on the inline ones, whose rows carry the
+  metadata and before-image columns, and the vendor driver itself is slower on the inline tables
+  than on the plain ones: Q18 11,290 ms on (c)'s tables in the check against 8,922 in (a), Q9
+  1,776 against 1,515, Q21 2,585 against 1,716 (BenchBase p50s for (a), the check's vendor
+  medians for (c)'s tables). On the same inline tables the driver is within 0.97-1.05x. The
+  harness's run (d), the vendor URL on (c)'s tables, would separate the two in BenchBase's own
+  numbers if the user wants that on record; the decoupled layout keeps the data table as the
+  vendor's and shows 0.97.
+
+The autocommit cliff of this item is closed at SF 3: no timeout, no shared-memory error, every
+query at the vendor's cost on the same tables. The last acceptance item is the push's CI.
+
 ## Acceptance Criteria
 
 - [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
