@@ -302,6 +302,75 @@ class ReadCommittedPastTheSplitIntegrationTest {
     }
   }
 
+  /**
+   * Todo 373: a split read turns PostgreSQL's parallel workers off for the connection; a gated
+   * statement with a whole-table gate, and at SNAPSHOT the statement as written of a read past the
+   * split, turn them back on, as the vendor's statement runs; a gated statement with range gates
+   * alone leaves the setting as it is.
+   */
+  @Test
+  void wholeTableReadsRunWithTheSessionsWorkers() throws Exception {
+    try (Connection d = PG.openDriver()) {
+      String session = workers(d);
+      assertThat(session).as("the session's own value").isNotEqualTo("0");
+      d.setAutoCommit(false);
+      String keyed = "SELECT x, v FROM " + NS + ".d WHERE id = ?";
+      assertThat(form(d, keyed)).isEqualTo("split [a/17]");
+      assertThat(workers(d)).as("after a keyed split read").isEqualTo("0");
+      // 369's six-way join, its gates the whole table's
+      read(d, sixWay("d", "t1.id, t1.x, current_query()", "t1.id <= ?"), 3);
+      assertThat(workers(d)).as("after a gated read past the split").isEqualTo(session);
+      form(d, keyed);
+      // StockLevel's shape, a key range's gate alone: the setting kept
+      assertThat(
+              form(
+                  d,
+                  "SELECT COUNT(DISTINCT x), COUNT(*) FROM "
+                      + NS
+                      + ".d WHERE id BETWEEN 1 AND 5 AND v < ?"))
+          .isEqualTo("gated [1/5]");
+      assertThat(workers(d)).as("after a gated read with range gates alone").isEqualTo("0");
+      // 372's Q1 shape, the whole table's gate
+      assertThat(form(d, "SELECT x, SUM(v) FROM " + NS + ".d WHERE v > ? GROUP BY x"))
+          .isEqualTo("gated [a/57]");
+      assertThat(workers(d)).as("after a whole-table gated read").isEqualTo(session);
+      d.commit();
+      // at SNAPSHOT, the statement as written of a read past the split once its tables are clear
+      d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+      form(d, keyed);
+      assertThat(workers(d)).as("at SNAPSHOT, after a keyed split read").isEqualTo("0");
+      read(d, sixWay("d", "t1.id, t1.x, current_query()", "t1.id <= ?"), 3);
+      assertThat(workers(d))
+          .as("at SNAPSHOT, after a plain read past the split")
+          .isEqualTo(session);
+      d.commit();
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      d.setAutoCommit(true);
+    }
+  }
+
+  /**
+   * The connection's max_parallel_workers_per_gather, read on the vendor's connection itself: a
+   * statement through the driver on no ScalarDB table would run with the session's value.
+   */
+  private static String workers(Connection d) throws SQLException {
+    Connection vendor;
+    try {
+      Object h = java.lang.reflect.Proxy.getInvocationHandler(d);
+      java.lang.reflect.Field f = h.getClass().getDeclaredField("vendor");
+      f.setAccessible(true);
+      vendor = (Connection) f.get(h);
+    } catch (ReflectiveOperationException e) {
+      throw new AssertionError(e);
+    }
+    try (java.sql.Statement st = vendor.createStatement();
+        ResultSet rs =
+            st.executeQuery("SELECT current_setting('max_parallel_workers_per_gather')")) {
+      rs.next();
+      return rs.getString(1);
+    }
+  }
+
   /** The form a read of {@code sql} bound to 17 ran in, gated or split, and its rows. */
   private static String form(Connection d, String sql) throws SQLException {
     List<String> rows = new ArrayList<>();

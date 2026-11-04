@@ -1179,8 +1179,15 @@ public final class Proxies {
         // the workers stay as they are for the plain statement, unless its own plan is parallel,
         // where the rewritten one would have kept them too: a SET each way would cost a round
         // trip at every switch
-        owner.router.beforeRun(
-            owner.vendor, plain && !Objects.requireNonNull(one).parallel ? List.of() : ran);
+        // the statement as written of a read past the split or with a whole-table gate runs with
+        // the session's workers, as the vendor's does (todo 373)
+        if (plain
+            && (one.parameterSources == null || (one.gated != null && one.gated.wholeTable))) {
+          owner.router.beforeGated(owner.vendor, true);
+        } else {
+          owner.router.beforeRun(
+              owner.vendor, plain && !Objects.requireNonNull(one).parallel ? List.of() : ran);
+        }
         if (own) {
           fetched = vendor();
           fetchSize = fetched.getFetchSize();
@@ -1981,7 +1988,7 @@ public final class Proxies {
             }
           }
         }
-        owner.router.beforeRun(owner.vendor, List.of());
+        owner.router.beforeGated(owner.vendor, g.wholeTable);
         rs = takesSql ? st.executeQuery(g.sql) : ((PreparedStatement) st).executeQuery();
         boolean row = rs.next();
         boolean snapshot = g.marks && marks;

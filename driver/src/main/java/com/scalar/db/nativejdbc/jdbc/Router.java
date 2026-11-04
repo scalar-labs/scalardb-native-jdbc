@@ -430,6 +430,9 @@ final class Router {
     // the gates, by position, that are the whole table's within the split at READ COMMITTED: a
     // busy table's skips the gated statement for the split (todo 372)
     final List<Integer> skippable;
+    // whether a gate is the whole table's: the statement then runs with the session's workers
+    // on PostgreSQL, as the vendor's would (todo 373)
+    final boolean wholeTable;
 
     Gated(
         String sql,
@@ -439,7 +442,8 @@ final class Router {
         boolean marker,
         int hidden,
         @Nullable Gated retry,
-        List<Integer> skippable) {
+        List<Integer> skippable,
+        boolean wholeTable) {
       this.sql = sql;
       this.parameterSources = List.copyOf(parameterSources);
       this.gates = checks.size();
@@ -449,6 +453,7 @@ final class Router {
       this.hidden = hidden;
       this.retry = retry;
       this.skippable = List.copyOf(skippable);
+      this.wholeTable = wholeTable;
     }
   }
 
@@ -2276,7 +2281,8 @@ final class Router {
                 true,
                 checks.size() + 1,
                 null,
-                skippable);
+                skippable,
+                gates.size() > ranged.size());
     boolean marker = form == SqlAst.GatedForm.LATERAL;
     return r.gated(
         new Gated(
@@ -2287,7 +2293,8 @@ final class Router {
             marker,
             checks.size() + (form == SqlAst.GatedForm.SELECT_LIST ? 0 : 1),
             retry,
-            skippable));
+            skippable,
+            gates.size() > ranged.size()));
   }
 
   /**
@@ -2340,7 +2347,8 @@ final class Router {
             + " FROM (\n"
             + inner
             + "\n) i) s ON true";
-    return r.gated(new Gated(sql, all, checks, false, true, checks.size() + 1, null, List.of()));
+    return r.gated(
+        new Gated(sql, all, checks, false, true, checks.size() + 1, null, List.of(), true));
   }
 
   /**
@@ -3263,6 +3271,34 @@ final class Router {
     long[] fresh = {count, now, cached == null ? 0 : cached[2]};
     inflight.put(meta, fresh);
     return fresh;
+  }
+
+  /**
+   * Before a gated statement, or the statement as written of a read past the split or with a
+   * whole-table gate, on PostgreSQL: with any gate the whole table's ({@code wholeTable}) the
+   * session's own workers, switched back on where a split read turned them off, since such a
+   * statement is the vendor's own over whole tables; with range gates alone the setting as it is,
+   * so that TPC-C's alternation of split and gated reads costs no round trip (design 4.2, todo
+   * 373).
+   *
+   * @param vendor the vendor connection
+   * @param wholeTable whether the statement reads a table whole
+   */
+  void beforeGated(Connection vendor, boolean wholeTable) {
+    lock.lock();
+    try {
+      if (engine != Engine.POSTGRESQL || !wholeTable) {
+        return;
+      }
+      try {
+        switchWorkers(vendor, false);
+      } catch (SQLException e) {
+        // only the speed depends on it; the statement itself reports an aborted transaction
+        workersOff = null;
+      }
+    } finally {
+      lock.unlock();
+    }
   }
 
   /**
