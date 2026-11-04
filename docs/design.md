@@ -1362,59 +1362,60 @@ union as a derived table.
   scale factor 0.1: Q18 1.00-1.03x, Q20 0.98-1.10x, both layouts and modes. On main as b4558c4,
   87e7b34 and 7fa361a (2026-11-04, the user's word; range-diff identical).
 
-  *Oracle's gated form on a row of its own (todo 371, 2026-11-04; amended the same day).* The Oracle
-  gated form above appends its gate columns to the select list, so a result of no rows carries none
-  and falls to the fallback: at SNAPSHOT in autocommit the own transaction's checks and, since todo
-  367, the plain statement again, TPC-H Q18 at scale factor 0.1, which returns no row there, 2.01x
-  decoupled and 2.10x inline against 1.03-1.09x in a transaction (session 28, 2026-11-04), and every
-  empty key lookup in autocommit two or three round trips for one; at READ COMMITTED the split, or
-  `rc_T` past it. It moves to a form that always returns a row, for every use of it, SNAPSHOT's
-  whole-table gates, READ COMMITTED's range gates within the split and the whole-table gates of 369
-  and 370, in one of two spellings by the statement's shape, since neither serves both. A statement
-  without GROUP BY and without a DISTINCT select list, every OLTP shape among them, takes the
-  one-row wrapper of todo 369 in Oracle's spelling, `SELECT s.*, g.* FROM (SELECT <gates> FROM dual)
-  g LEFT JOIN LATERAL (SELECT i.*, 1 AS scalardb_native_present FROM (<statement>) i) s ON 1 = 1`
-  (12c and later; `OUTER APPLY` plans the same): measured on the container (Oracle 23, `OLI_V` 1.2M
-  rows, 2026-11-04), NESTED LOOPS OUTER from FAST DUAL to the lateral view with its SORT ORDER BY
+  *Oracle's gated form on a row of its own (todo 371, 2026-11-04; amended twice the same day).* The
+  Oracle gated form above appends its gate columns to the select list, so a result of no rows
+  carries none and falls to the fallback: at SNAPSHOT in autocommit the own transaction's checks
+  and, since todo 367, the plain statement again, TPC-H Q18 at scale factor 0.1, which returns no
+  row there, 2.01x decoupled and 2.10x inline against 1.03-1.09x in a transaction (session 28,
+  2026-11-04), and every empty key lookup in autocommit two or three round trips for one; at READ
+  COMMITTED the split, or `rc_T` past it. Two spellings replace it, by the statement's shape,
+  because Oracle's optimizer plans a GROUP BY or DISTINCT differently inside a lateral view or a
+  materialized subquery: there it takes SORT GROUP BY and SORT UNIQUE in place of HASH GROUP BY and
+  HASH UNIQUE, the joins unchanged, which cost TPC-H Q18 1.76-1.93x and Q13 1.38-1.45x in session
+  28's builds of a lateral wrapper (9ee0024) and of a materialized `WITH` with a sentinel branch
+  (d2524d1) alike, and on the container a Q13-shaped statement over TPC-H-shaped tables 39.7 ms
+  against 20.2 under either; no hint on the outer query restores the hash aggregation (ALL_ROWS,
+  FIRST_ROWS, OPT_PARAM, NO_DECORRELATE, NO_MERGE, USE_HASH_AGGREGATION at the top), only
+  USE_HASH_AGGREGATION inside the user's own query blocks, which the driver will not write into
+  them; a plain derived table at the top keeps the plan whole (19.8 ms, and the Q18 shape 76.8
+  against 76.5, `VW_NSO_1`'s HASH GROUP BY kept). So: a statement without GROUP BY and without a
+  DISTINCT select list, every OLTP shape among them, takes the one-row wrapper of todo 369 in
+  Oracle's spelling, `SELECT s.*, g.* FROM (SELECT <gates> FROM dual) g LEFT JOIN LATERAL (SELECT
+  i.*, 1 AS scalardb_native_present FROM (<statement>) i) s ON 1 = 1` (12c and later; `OUTER APPLY`
+  plans the same): NESTED LOOPS OUTER from FAST DUAL to the lateral view with its SORT ORDER BY
   inside, so the inner's order is the output's, 30,605 rows and 50 under FETCH FIRST in the plain
   statement's order, an empty result one row of NULLs, the gate a scalar subquery evaluated once,
-  and the cost the plain's (8.62 against 8.70 ms a call; a 10-row key read 0.54 against 0.59). A
-  statement that groups or selects DISTINCT does not take it: under the lateral view Oracle plans
-  every GROUP BY and DISTINCT as SORT GROUP BY and SORT UNIQUE in place of HASH GROUP BY and HASH
-  UNIQUE, the joins unchanged, which cost a Q18-shaped statement 1.42x and a Q13-shaped one 1.26x on
-  the container and, in session 28's build of the wrapper alone (9ee0024), TPC-H Q18 1.76-1.85x and
-  Q13 1.38-1.45x at scale factor 0.1 in both modes; no hint on the outer query restores the hash
-  aggregation (ALL_ROWS, OPT_PARAM, NO_DECORRELATE, NO_MERGE, USE_HASH_AGGREGATION at the top all
-  leave the sorts), only USE_HASH_AGGREGATION inside the user's own query blocks does, which the
-  driver will not write into them. Such a statement takes the materialized form instead: `WITH r AS
-  (SELECT /*+ MATERIALIZE */ i.*, ROWNUM AS scalardb_native_n FROM (<statement>) i) SELECT r.*, 1 AS
-  scalardb_native_present, <gates> FROM r UNION ALL SELECT NULL, ..., NULL, NULL, <gates> FROM dual
-  WHERE NOT EXISTS (SELECT 1 FROM r) ORDER BY <the position of scalardb_native_n>`, the statement
-  evaluated once into a temporary table (TEMP TABLE TRANSFORMATION, LOAD AS SELECT, in memory on
-  23ai, in the temporary tablespace on 19c) with its plan as it is, the hash aggregation kept, the
-  sentinel row from `dual` where the table is empty, and the order structural: ROWNUM is assigned as
-  the ordered inline view produces its rows, the top-N idiom Oracle documents, and the outer ORDER
-  BY restores it whatever order the temporary table is read in, parallel execution included; where
-  the statement has no ORDER BY, neither the column nor the outer ORDER BY. Measured: the Q18 shape
-  199.9 against 198.5 ms, the Q13 shape 58.4 against 57.3, a 30,605-row ordered read 51.9 against
-  41.5 (the load and the sort of the result), a 10-row key read 0.98 against 0.59, the fixed cost of
-  the temporary table, which is why the OLTP shapes keep the lateral wrapper, and an empty result
-  one row. Both spellings read the same way: the gates and the marker hidden, a NULL marker the
-  empty result, a gate of 1 the fallback; the marking of a clear table at SNAPSHOT stays; the range
-  conjuncts and their placeholders as extracted today, the sources recorded for their new places
-  (before the statement's in the lateral form, after it in the materialized one, where the gates
-  follow `r`). What the forms remove: the `MAX()` over a grouped select list, the bare-`*`
-  restriction (inside the inline view `*` stands alone), the position-past-the-select-list guard for
-  the gated form (the inner's positions are its own, which Oracle refuses itself) and the no-row
-  fallback; a `*` over an inline table still keeps the split. Expected: Q18 in autocommit at
-  SNAPSHOT from 2.0x to about 1x and Q13 unchanged, an empty key lookup in autocommit one round
-  trip, an empty gated read at READ COMMITTED one statement, StockLevel's and Delivery's gated reads
-  (no GROUP BY) at the lateral form's cost, the plain's. Tests: an empty result in autocommit at
-  SNAPSHOT as one text in `v$sql`, rows empty, both layouts, for a key read and for a grouped read;
-  a ranged read with ORDER BY and FETCH FIRST in the vendor's order on the lateral form, a grouped
-  read with ORDER BY on the materialized form in the vendor's order; a bare `SELECT *` over a
-  decoupled table; the gated tests of todos 334 and 369 on the forms' texts; the TPC-H check's Q13
-  and Q18 at their pre-371 figures; TPC-C's gated statements on the lateral form; 19c in CI.
+  the cost the plain's (8.62 against 8.70 ms a call; a 10-row key read 0.54 against 0.59). A
+  statement that groups or selects DISTINCT takes the derived wrapper, `SELECT i.*, 1 AS
+  scalardb_native_present, <gates> FROM (<statement>) i`, the gates in the wrapper's own select
+  list, which groups nothing, so no `MAX()`: its plan the plain's, its first row's gates deciding as
+  today, and a result of no rows carrying none, so falling to the fallback: at SNAPSHOT the own
+  transaction's checks and the plain statement as before (an empty grouped result in autocommit
+  twice the statement's cost, which is TPC-H Q18 at scale factor 0.1 and no larger scale); at READ
+  COMMITTED the lateral spelling of the same statement as the second statement, exact in its own
+  snapshot, whose gates decide and whose cost is the lateral form's (up to about twice the plain's
+  for the grouped shapes), in place of `rc_T` past the split and of the split within it. Both
+  wrappers need the statement's output names unique, since Oracle refuses `i.*` over an inline view
+  with two columns of one name (ORA-00918: two items aliased alike, one column name from two tables,
+  an unaliased expression twice): the parser tells, and such a statement keeps the select-list form
+  above as it is, as does a `*` whose tables' columns are not all known. Both wrappers accept a
+  statement with its own WITH clause inside the inline view (12c and later). What the wrappers
+  remove where they apply: the `MAX()` over a grouped select list, the bare-`*` restriction (inside
+  the inline view `*` stands alone), the position-past-the-select-list guard for the gated form (the
+  inner's positions are its own, which Oracle refuses itself); the gates' meaning, the marking of a
+  clear table at SNAPSHOT, the fallback on a gate of 1 and a `*` over an inline table keeping the
+  split stay; the range conjuncts' placeholders sit before the statement's in the lateral form and
+  after it in the derived one, the sources recorded per form. Expected: an empty key lookup in
+  autocommit one round trip; an empty gated read at READ COMMITTED one statement where nothing
+  groups, two where it does, never `rc_T` for an open gate; Q13 and Q18 at their pre-371 figures;
+  StockLevel's and Delivery's gated reads (no GROUP BY) at the lateral form's cost, the plain's.
+  Tests: an empty key read in autocommit at SNAPSHOT as one text in `v$sql`, both layouts; an empty
+  grouped read at READ COMMITTED past the split as the derived text then the lateral text, no `RC_`;
+  a ranged read with ORDER BY and FETCH FIRST in the vendor's order on the lateral form; a grouped
+  read on the derived form in the vendor's order; a statement with two columns of one name on the
+  select-list form; a bare `SELECT *` over a decoupled table; the gated tests of todos 334, 369 and
+  370 on the forms' texts; the TPC-H check's Q13 and Q18 at their pre-371 figures; TPC-C's gated
+  statements on the lateral form; 19c in CI.
 
   *The anchor-less split read at READ COMMITTED behind gates on every table (todo 372, 2026-11-04).*
   A read that records no anchor takes the gated form on Oracle only where every table of it has a

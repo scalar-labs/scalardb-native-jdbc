@@ -127,9 +127,60 @@ vendor's order, an empty grouped read in autocommit at SNAPSHOT as one text; the
 Q13 and Q18 back at their pre-371 figures, the other queries as in 9ee0024's run; TPC-C's gated
 statements (StockLevel, Delivery) on the lateral form, their latency unchanged.
 
+## Second amendment (2026-11-04, after 28's build of the materialized form)
+
+28's d2524d1 (+ e9718f2, a test fix: 370's Oracle test had asserted no UNION ALL, which the
+sentinel branch adds), the materialized form as designed, does not restore Q13 and Q18 either:
+pre-371 / 9ee0024 / d2524d1, Q18 in a transaction decoupled 1.09 / 1.85 / 1.88x, inline 1.03 /
+1.76 / 1.89x, in autocommit 2.01 / 1.83 / 1.84x and 2.10 / 1.78 / 1.93x; Q13 1.10 / 1.43 / 1.43x
+and 1.03 / 1.38 / 1.42x; the other queries within 0.9-1.3x; every execution the vendor's rows;
+suites green. 28's cursor plans (scratchpad `s371b/`): inside the CTE's load the unnested
+subquery's aggregation (`VW_NSO_1`) is SORT GROUP BY where the vendor's is HASH GROUP BY, the
+rest of the plan alike.
+
+Reproduced on the container with TPC-H-shaped tables made from `OLI_V` (`TH_LINEITEM` 1.2M rows,
+`TH_ORDERS`, `TH_CUSTOMER`; scratchpad `ora/q18.jsh`, `q18b.jsh`, `q18c.jsh`, `dup.jsh`),
+BenchBase's Q18 and Q13 texts with binds, actual cursor plans by `DBMS_XPLAN.DISPLAY_CURSOR`:
+
+- Q13: plain 20.2 ms (HASH GROUP BY, SORT GROUP BY NOSORT, MERGE JOIN OUTER, HASH GROUP BY); the
+  lateral wrapper 39.7 (SORT GROUP BY twice); the materialized `WITH` 39.6 (the inner GROUP BY
+  SORT), with or without ROWNUM, with or without the sentinel; a plain derived table with the
+  gates in its own select list, `SELECT i.*, 1 AS P, <gates> FROM (<statement>) i`, 19.8, the
+  plan the plain's.
+- Q18: plain 76.5 (`VW_NSO_1` HASH GROUP BY); the derived wrapper 76.8, the same plan; the lateral
+  81.1 with `VW_NSO_1` SORT GROUP BY (the data here make the sort cheap; 28's real data do not).
+- No hint on the outer query changes it (FIRST_ROWS(100) and FIRST_ROWS(1) tried too; FIRST_ROWS(1)
+  moved Q13 to a hash join but is no lever for BI plans). Oracle Free has no parallel query.
+- Oracle refuses `i.*` over an inline view with two columns of one name, ORA-00918, under both
+  wrappers (`SELECT 1 AS a, 2 AS a`, `c_custkey, c_custkey`, `SUM(x), SUM(x)`); a WITH clause
+  inside the inline view works.
+
+So the materialized form is dropped and the design (4.2's paragraph rewritten again) is:
+
+- No GROUP BY and no DISTINCT select list: the lateral wrapper, as built in 9ee0024.
+- GROUP BY or DISTINCT: the derived wrapper `SELECT i.*, 1 AS scalardb_native_present, <gates>
+  FROM (<statement>) i`, the gates in the wrapper's select list (no `MAX()`), the plan the
+  plain's; no row means no gates, so the fallback: at SNAPSHOT the own transaction's checks and
+  the plain statement as before (an empty grouped result in autocommit at twice the cost, Q18 at
+  SF 0.1 only); at READ COMMITTED the lateral spelling of the same statement as the second
+  statement, exact in its own snapshot, its gates deciding, in place of `rc_T` (past the split) and
+  of the split (within it).
+- Both wrappers only where the statement's output names are unique (the parser: aliases, column
+  names of plain references, the text of unaliased expressions); otherwise today's select-list
+  form stays, as for a `*` whose tables' columns are not all known.
+- `Gated` carries the form (lateral, derived, select-list) and the hidden count; the placeholders'
+  sources per form; `Proxies.gated` reads the marker on the lateral form only and, on the derived
+  form at READ COMMITTED with no row, runs the lateral text before the fallback.
+
+Build, on e9718f2: drop the materialized text; add the derived form and the shape and name
+tests; the READ COMMITTED no-row second statement; the tests listed in the design. Acceptance as
+amended below.
+
 ## Acceptance Criteria
 
-- [ ] Oracle's gated reads run on the wrapper, an empty result one statement, with the tests above
+- [ ] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
+      wrapper (grouped), an empty ungrouped result one statement, an empty grouped result at READ
+      COMMITTED never `rc_T`, with the tests above
 - [ ] Full check passes on all engines, 19c included
 - [ ] Q18 in autocommit at SNAPSHOT at about 1x in 28's Oracle step from the build, Q13 and Q18 in a
       transaction at their pre-371 figures, StockLevel and Delivery unchanged
