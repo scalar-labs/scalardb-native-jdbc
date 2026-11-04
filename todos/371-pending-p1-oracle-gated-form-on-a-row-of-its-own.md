@@ -67,11 +67,72 @@ statement (one text for the tag in `v$sql`, no second), rows empty, on both layo
 read with ORDER BY and FETCH FIRST in the vendor's order; a grouped read without `MAX()`; a bare
 `SELECT *` over a decoupled table taking the gated form. 19c in CI (LATERAL since 12c).
 
+## Amendment (2026-11-04, after 28's build of the wrapper alone)
+
+28's build 9ee0024 on `oracle-gated-lateral` (on 370's pre-rebase commits; suites green, every
+execution the vendor's rows) regressed two TPC-H queries on Oracle at SNAPSHOT (SF 0.1,
+`tpchCheck` 3, against the pre-371 step): Q18 in a transaction 1.09x to 1.85x decoupled and 1.03x
+to 1.76x inline, in autocommit 2.01x to 1.83x and 2.10x to 1.78x (117.8/125.5 ms against the
+vendor's 64.4/70.4); Q13 1.02-1.10x to 1.38-1.45x (55.5 against 76.7 ms); the other 19 unchanged
+or better (Q2 autocommit 1.20x to 1.01x, Q21 1.14-1.17x to 1.00-1.06x). Not mergeable as built.
+
+Cause, from the container (Oracle 23, `OLI_V` 1.2M rows; scratchpad `ora/lat2.jsh` to
+`lat6.jsh`): under the lateral view Oracle plans every GROUP BY and DISTINCT as SORT GROUP BY and
+SORT UNIQUE in place of HASH GROUP BY and HASH UNIQUE, the join shapes unchanged; a Q18-shaped
+statement 284 against 199 ms (1.42x), a Q13-shaped one 72 against 59 (1.26x); every wrapped
+spelling alike (LATERAL, OUTER APPLY, a non-lateral LEFT OUTER JOIN, which Oracle turns into a
+lateral view anyway, with or without LEADING/USE_NL); no hint on the outer query restores the hash
+aggregation (ALL_ROWS, OPT_PARAM('optimizer_mode' 'all_rows'), NO_DECORRELATE, NO_MERGE,
+USE_HASH_AGGREGATION at the top), only USE_HASH_AGGREGATION written inside the user's own query
+blocks does (198 and 57.7 ms, the plain's), which the driver will not do. Parallel query is not
+available on Oracle Free (FORCE PARALLEL QUERY gives no PX step), so nothing parallel was measured.
+
+The amended design (4.2's paragraph rewritten): two spellings by shape.
+
+- A statement without GROUP BY and without a DISTINCT select list, every OLTP shape among them,
+  takes the lateral wrapper as built: the plain's cost (a 10-row key read 0.54 against 0.59 ms; a
+  30,605-row ordered read 43.5 against 41.5), the order structural (nested loop from one row).
+- A statement that groups or selects DISTINCT takes the materialized form:
+
+  ```sql
+  WITH r AS (SELECT /*+ MATERIALIZE */ i.*, ROWNUM AS scalardb_native_n FROM (<statement>) i)
+  SELECT r.*, 1 AS scalardb_native_present, <gates> FROM r
+  UNION ALL
+  SELECT NULL, ..., NULL, NULL, <gates> FROM dual WHERE NOT EXISTS (SELECT 1 FROM r)
+  ORDER BY <the position of scalardb_native_n>
+  ```
+
+  The statement is evaluated once into a temporary table (TEMP TABLE TRANSFORMATION, LOAD AS
+  SELECT; in memory on 23ai, the temporary tablespace on 19c) with its plan as it is, the hash
+  aggregation kept; the sentinel row comes from `dual` where the table is empty; the order is
+  structural: ROWNUM is assigned as the ordered inline view produces its rows (the top-N idiom),
+  and the outer ORDER BY restores it whatever order the temporary table is read in, parallel
+  execution included; without an ORDER BY in the statement, neither the column nor the outer
+  ORDER BY. Measured: the Q18 shape 199.9 against 198.5 ms, the Q13 shape 58.4 against 57.3, the
+  30,605-row ordered read 51.9 against 41.5 (the load and the result's sort), a 10-row key read
+  0.98 against 0.59 (the temporary table's fixed cost, about 0.4 ms, which is why the OLTP shapes
+  keep the lateral wrapper), an empty result one row with the gates. `ORDER BY` names the position
+  (`ORDER BY "scalardb_native_n"` on the compound query is ORA-00904).
+
+Both spellings read alike in `Proxies.gated`: the gates and the marker hidden (the order column
+too on the materialized form), a NULL marker the empty result, a gate of 1 the fallback; the range
+conjuncts' placeholders before the statement's in the lateral form and after it in the
+materialized one, the sources recorded. A statement with its own WITH clause goes inside the
+inline view (a subquery factoring clause in an inline view is accepted since 12c); to be tested.
+
+Build, on 9ee0024: the shape test (GROUP BY anywhere in the statement's own query, or a DISTINCT
+select list, the parser knows) choosing the spelling; the materialized text; the hidden-column
+count per form; tests to add: a grouped read with ORDER BY on the materialized form in the
+vendor's order, an empty grouped read in autocommit at SNAPSHOT as one text; the TPC-H check's
+Q13 and Q18 back at their pre-371 figures, the other queries as in 9ee0024's run; TPC-C's gated
+statements (StockLevel, Delivery) on the lateral form, their latency unchanged.
+
 ## Acceptance Criteria
 
 - [ ] Oracle's gated reads run on the wrapper, an empty result one statement, with the tests above
 - [ ] Full check passes on all engines, 19c included
-- [ ] Q18 in autocommit at SNAPSHOT at about 1x in 28's Oracle step from the build
+- [ ] Q18 in autocommit at SNAPSHOT at about 1x in 28's Oracle step from the build, Q13 and Q18 in a
+      transaction at their pre-371 figures, StockLevel and Delivery unchanged
 
 ## Work Log
 
