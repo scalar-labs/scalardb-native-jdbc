@@ -253,12 +253,31 @@ To read when 6e's fetch lands: the Q16 statement's text and plan in the run's `s
 form ran, and whether the 19c planner treats the `MAX()`-wrapped gates or the split's copies
 worse at scale), and whether this item's derived form changes it; the inline cell's figures.
 
+### 2026-11-04: Q16 read from the fetched run (`bench-env/results/20261104-1539-ora19/b/`)
+
+Both cells (the inline one 0.95 too, Q16 2.54x/2.47x there, Q21 1.17-1.19x, Q9 1.11-1.12x, Q10
+1.09x in autocommit). From the decoupled driver run's `server.txt` (the select-list gated form of
+0099545, the gates under `MAX()`): Q16's statement 4 calls, 4,915 ms elapsed and 4,866 ms CPU,
+19,840 buffer gets a call, against the vendor's 1,780 ms elapsed, 1,748 CPU and 19,831 gets a
+call: the same reads, 2.8x the CPU. Its cursor plan: the three gates as scalar subqueries over the
+in-flight indexes (negligible), then SORT ORDER BY over SORT GROUP BY on 347K rows of a HASH JOIN
+RIGHT ANTI (supplier) over PART and PS_SK_PK. So the `MAX()` of a scalar subquery beside
+`COUNT(DISTINCT ps_suppkey)` in the grouped select list keeps Oracle from its hash aggregation
+(the vendor's plan is not among the captured blocks, but the equal gets and the CPU say it hashes),
+the same loss the lateral view and the materialized form showed on the container for Q13 and Q18.
+This item's derived form leaves the statement's own select list alone and carries the gates
+outside it, so Q16's plan should be the vendor's from main (ab328f5 + 0b269cf + d44d1bf); the
+cloud Oracle rerun from 87c0b2b or later, SNAPSHOT cells included, is the proof, which 6e proposes
+to the user beside the READ COMMITTED cells. Q21 and Q9 at 1.1-1.2x are not explained yet; their
+statements' gets and CPU against the vendor's are the next look if the rerun keeps them.
+
 ## Acceptance Criteria
 
 - [x] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
       wrapper (grouped), an empty ungrouped result one statement, an empty grouped result at READ
       COMMITTED never `rc_T`, with the tests above (f2238ab, reviewed 2026-11-04)
-- [ ] Full check passes on all engines, 19c included
+- [ ] Full check passes on all engines, 19c included; the cloud Oracle SNAPSHOT rerun from main: Q16
+      at about 1x (the select-list form's 2.5x at SF 3)
 - [x] Q13 and Q18 in a transaction at their pre-371 figures (1.02-1.09x, 1.03-1.05x), Q18 in
       autocommit at about 2x as its empty case documents, Delivery's gated SUM on the lateral form
       (2026-11-04)
