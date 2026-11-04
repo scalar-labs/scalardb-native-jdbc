@@ -1,0 +1,32 @@
+{
+  "description": "TPC-H scale factor 3 on PostgreSQL at READ COMMITTED (the SNAPSHOT cells are 20261104-0948-pg): BenchBase's serial run of the 21 queries (Q15 off), one terminal, both layouts, the fast network; runs (a) and (c) once each, four loads; after (c), session 28's row check, 3 timed executions a query after a warm-up, a query over 1 s timed by its warm-ups alone; needs main at or after 9b63126 (todo 369)",
+  "workloads": {
+    "tpch": {
+      "benchmark": "tpch",
+      "scale": 3
+    }
+  },
+  "matrix": {
+    "workloads": [
+      "tpch"
+    ],
+    "levels": [
+      "READ_COMMITTED"
+    ],
+    "layouts": [
+      "decoupled",
+      "inline"
+    ],
+    "delays_us": [
+      0
+    ]
+  },
+  "runs": "a,c",
+  "reps": 1,
+  "time_s": 60,
+  "terminals": 1,
+  "loader_threads": 8,
+  "harness": {
+    "tpchCheck": 3
+  }
+}
