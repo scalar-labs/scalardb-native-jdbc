@@ -1917,7 +1917,16 @@ final class Router {
     // the versions cost lookups per row, read only where they are recorded; on PostgreSQL each
     // copy carries them as columns of its own instead (todo 329)
     boolean versioned = !versionless();
-    List<SqlAst.TableRef> anchored = (anchoring && versioned) || states ? anchorable : List.of();
+    // at READ COMMITTED a split that reads a reference through rc_T, a subquery's table in every
+    // copy, gives way to the statement as written behind whole-table gates, which records no
+    // anchor (design 4.2 "The split read with a reference through rc_T", todo 370)
+    boolean viaViews =
+        !snapshot
+            && (engine == Engine.POSTGRESQL || engine == Engine.ORACLE)
+            && scalarDb.keySet().stream()
+                .anyMatch(r -> split.places().keySet().stream().noneMatch(x -> x == r));
+    List<SqlAst.TableRef> anchored =
+        viaViews ? List.of() : (anchoring && versioned) || states ? anchorable : List.of();
     Set<SqlAst.TableRef> own = Collections.newSetFromMap(new IdentityHashMap<>());
     if ((engine == Engine.POSTGRESQL || engine == Engine.ORACLE) && versioned) {
       own.addAll(anchored); // on Oracle, design 4.2 "The read side on Oracle" (todo 334)
@@ -2011,7 +2020,7 @@ final class Router {
       }
       // the CASE copy of every table is exact in one statement: no gate in front of it
       if (anchored.isEmpty() && caseCopies.size() < scalarDb.size()) {
-        r = gated(r, ast, scalarDb, false);
+        r = gated(r, ast, scalarDb, viaViews);
       }
       r =
           engine == Engine.POSTGRESQL && plainPlanIsParallel(vendor, sql, ast, scalarDb)
