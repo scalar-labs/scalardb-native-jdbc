@@ -1469,6 +1469,30 @@ union as a derived table.
   the vendor's: StockLevel decoupled 1.96 to 1.43 and inline 1.67 to 1.11, Delivery decoupled 1.90
   to 1.23 and inline 1.41 to 1.41.
 
+  *Wide reads run with the session's workers (todo 373, 2026-11-04).* On PostgreSQL a split read
+  runs with `max_parallel_workers_per_gather = 0` (above: its estimates start workers for 1 ms
+  statements), the setting switched only when the next statement needs the other one; a gated
+  statement ran with the setting as the previous statement left it, and a plain statement keeps it
+  unless its own plan was found parallel by the generic EXPLAIN, which answers no for a parameter
+  whose type it cannot infer (todo 106). So after any split read in a session a gated or plain
+  statement, the vendor's own text, ran without workers: 6e's READ COMMITTED run at TPC-H scale
+  factor 3 (20261104-1521-pg, todo 369 in, 370-372 not) had Q5 at 6.5x and Q9 at 2.5x as written
+  behind their lateral gates, Q8, Q21 and Q22 at 1.3-2.2x, with one `SET
+  max_parallel_workers_per_gather = 0` a connection and no SET back, where the SNAPSHOT run of the
+  same day, in which no split read ran, had never switched and sat at 0.97-1.05x; at scale factor
+  0.1 nothing is parallel and nothing showed. The rule: a gated statement any gate of which is the
+  whole table's (369's, 370's, 372's range-less) runs with the session's workers, switched on before
+  it where they are off, one SET; a gated statement with range gates only (StockLevel's, Delivery's)
+  keeps the setting, so TPC-C's alternation of split and gated reads costs no round trip; the plain
+  statement of a route past the split, or of one whose gates are the whole table's, switches them on
+  the same way, and the plain statement of a route within the split keeps the rule above, since at
+  SNAPSHOT it alternates with the state-column split reads in every transaction; the split read's
+  own rule stays. Build: `Gated` carries whether a gate is the whole table's, `Proxies.gated` asks
+  the router to switch before such a statement, the plain path likewise for a past-the-split route.
+  Tests read `current_setting('max_parallel_workers_per_gather')` inside the statements themselves.
+  Expected: Q5, Q9, Q8, Q21 and Q22 at about 1x on the cloud rerun of that cell from a main with
+  370-373.
+
   *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
   A read of an inline table whose predicate names only the table's key columns, every column of the
   reference in the statement's WHERE and ON clauses a key column, the select list free, takes one

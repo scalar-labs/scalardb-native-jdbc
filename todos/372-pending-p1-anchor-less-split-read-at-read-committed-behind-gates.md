@@ -130,6 +130,16 @@ build, 661f148 form 7's assertion.
   main. Landing need not wait for them unless the user wants it to: the local run shows no
   regression and the change is the one 4.2 measured on Oracle (D2).
 
+### 2026-11-04: 6e's READ COMMITTED SF 3 run (20261104-1521-pg) read, before this item lands
+
+The run is from 0099545 (369 in; 370, 371 and this item not): BenchBase 0.10 decoupled, 0.09
+inline; Q20 765x and Q18 3.4x are todo 370's shapes, Q1 6.4x, Q10 7.3x, Q16 5.5x, Q12/Q14 4.2x, Q6
+3.7x, Q3/Q4 3.0x, Q19 10.9x this item's; Q5 6.5x and Q9 2.5x ran gated as written and were slow
+for another reason, the parallel workers left off by an earlier split read on the connection,
+filed as todo 373 (a small follow-up, fit for this branch before its landing, the user's call).
+Nothing in the run bears on this item's design; the cloud rerun of the cell from a main with
+370-373 is the proof for all of them. Full reading in todo 373.
+
 ## Acceptance Criteria
 
 - [x] The anchor-less split read at READ COMMITTED takes the gated form with range or whole-table
