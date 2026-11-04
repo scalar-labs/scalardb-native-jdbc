@@ -238,6 +238,21 @@ Landed by 28 on the user's "land it" typed in 28's session, rebased onto a9bd7b2
 4e916f6..55e79b9 against a9bd7b2..d44d1bf shows all three commits identical. Nothing pushed; 19c
 at CI after the user's push, the last tick.
 
+### 2026-11-04: 6e's Oracle 19c TPC-H SF 3 SNAPSHOT decoupled cell (20261104-1539-ora19, relayed by 28)
+
+From 0099545 (todos 370-372 and this item not in), RDS SE2, the report on the client
+(`b/results/bb-d0-benchbase-oracle.md`, fetched after the inline cell): BenchBase (c)/(a) 0.95;
+every check execution the vendor's rows; a transaction and autocommit alike; most queries
+0.90-1.05x. Q18 in autocommit 1.04x (2,686 against 2,571 ms): at this scale Q18 returns rows, so
+the no-row fallback that cost 2x at SF 0.1 never runs, which bounds this item's residual to the
+tiny scale. Outliers: Q16 2.56x in a transaction and 2.53x in autocommit (1,274 against 497 ms,
+three timed runs), new against 1.08-1.29x at SF 0.1 locally, a GROUP BY with COUNT(DISTINCT) over
+partsupp and part with a NOT IN subquery on supplier, which on 0099545 is the select-list gated
+form with `MAX()` over the grouping or the split; Q21 1.16-1.17x, Q9 1.10-1.12x, Q1 1.07-1.08x.
+To read when 6e's fetch lands: the Q16 statement's text and plan in the run's `server.txt` (which
+form ran, and whether the 19c planner treats the `MAX()`-wrapped gates or the split's copies
+worse at scale), and whether this item's derived form changes it; the inline cell's figures.
+
 ## Acceptance Criteria
 
 - [x] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
