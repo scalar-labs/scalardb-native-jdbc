@@ -1355,7 +1355,12 @@ union as a derived table.
   as the `rc_T` route is, the split text its fallback; Oracle the same. Tests: Q18's shape on both
   layouts and engines, in a transaction and in autocommit, as written with gates and the vendor's
   rows; with a row in flight the split's text and the committed rows; no anchor recorded. Expected:
-  Q18 and Q20 at about the vendor's cost.
+  Q18 and Q20 at about the vendor's cost. Built by session 28 as 33b927a with the docs named
+  precisely in fe356bc and 001f337, reviewed mergeable 2026-11-04 (`viaViews` on the split route: a
+  ScalarDB reference in no split place; the form read from the result set's handler in the
+  PostgreSQL test, a function in the select list keeping a statement on `rc_T` whole); measured at
+  scale factor 0.1: Q18 1.00-1.03x, Q20 0.98-1.10x, both layouts and modes. On main as b4558c4,
+  87e7b34 and 7fa361a (2026-11-04, the user's word; range-diff identical).
 
   *Oracle's gated form on a row of its own (todo 371, 2026-11-04).* The Oracle gated form above
   appends its gate columns to the select list, so a result of no rows carries none and falls to the

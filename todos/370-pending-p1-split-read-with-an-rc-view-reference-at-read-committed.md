@@ -111,10 +111,17 @@ changelog names the same shape and adds "its other tables' included"; the change
 100 (96 and 99). Precise now. The branch at 001f337 (33b927a + fe356bc + 001f337) is mergeable as
 a whole; landing on the user's word.
 
+### 2026-11-04: on main (b4558c4 + 87e7b34 + 7fa361a)
+
+Landed by 28 on the user's "land it" typed in 28's session, rebased onto 8bfc4d4; my range-diff of
+76c3f4a..001f337 against 8bfc4d4..7fa361a shows all three commits identical. Nothing pushed. Left:
+the push's CI; 6e's READ COMMITTED SF 3 run from a build with this item, for the quiet figures.
+
 ## Acceptance Criteria
 
-- [ ] A READ COMMITTED split read with a reference through `rc_T` runs as written behind
-      whole-table gates on PostgreSQL and Oracle, anchor-less, with the tests above
+- [x] A READ COMMITTED split read with a reference through `rc_T` runs as written behind
+      whole-table gates on PostgreSQL and Oracle, anchor-less, with the tests above (on main
+      2026-11-04)
 - [ ] Full check passes on all engines
 - [ ] Q18 and Q20 at about the vendor's cost in 28's local step, and in 6e's READ COMMITTED SF 3
       run from the build
