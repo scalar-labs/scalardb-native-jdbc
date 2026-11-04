@@ -281,3 +281,8 @@ the supported versions are documented only once CI verifies them.
   both sides, 77ece28's inline isolation and the squash's catalog tracking); the test fixtures and
   the integration tests compile (warnings only). The local main is 47 commits past origin/main,
   nothing pushed.
+- 2026-11-04: PR #12 opened by the 19c session on the user's word, head 803615f, the reviewed head.
+  Its Changelog "entry" check failed at once: no changie entry and no `no-changelog` label (PR #11
+  carried the label); tests and CI are what the label is for, and adding it re-runs the check. Told
+  the 19c session to put the label to the user. The seven integration jobs run; the 19c job is the
+  proof.
