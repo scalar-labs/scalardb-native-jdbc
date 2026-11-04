@@ -248,3 +248,8 @@ the supported versions are documented only once CI verifies them.
   `InlineIntegrationTest.java`, 77ece28's inline isolation against the squash's catalog tracking,
   in different hunks). A merge of origin/main keeps the eight quoted hashes, and main already
   carries merges (642cdb1). On the user's word, with a build after.
+- 2026-11-04: on the user's word (typed in 89's session) both one-line fixes were sent to the 19c
+  session as a build request, a PR from origin/main (146d0bf): the message-matching
+  `causedBy08177` and the strong list back with a Javadoc sentence; the ORA-02065 guard optional.
+  89 reviews from `git show`; the merge of origin/main into the local main still waits on the
+  user's word.
