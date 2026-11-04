@@ -75,10 +75,42 @@ read, a plain past-the-split read returns the session's value. The TPC-C check o
 Expected on 6e's READ COMMITTED SF 3 run from a main with 370-373: Q5, Q9, Q8, Q21 and Q22 at
 about 1x with the rest; the cloud rerun of that cell is the proof.
 
+## Review record (2026-11-04, 51a27c9 on `rc-anchorless-gated`, built by session 28 on 372's commits)
+
+Verdict: mergeable; with 372's two commits the branch (58ac088, 661f148, 51a27c9 on a9d81a8) is
+mergeable as a whole, landing on the user's word after a rebase onto main's head. Read from `git
+show 51a27c9`.
+
+- `Router`: `Gated.wholeTable`, true for 369's and 370's lateral gates, `gates.size() >
+  ranged.size()` for 372's, the retry's too; `beforeGated(vendor, wholeTable)`: PostgreSQL only
+  and only with a whole-table gate, `switchWorkers(vendor, false)` under the lock with
+  `beforeRun`'s exception handling (the setting is speed only). Right.
+- `Proxies`: the gated statement calls `beforeGated(vendor, g.wholeTable)` in place of
+  `beforeRun(vendor, List.of())`; the plain path calls `beforeGated(vendor, true)` where `plain &&
+  (one.parameterSources == null || one.gated.wholeTable)`, a route past the split or one with a
+  whole-table gate, and keeps `beforeRun` otherwise, so the plain statement within the split and
+  the split read keep 4.2's rule. Right.
+- `ReadCommittedPastTheSplitIntegrationTest.wholeTableReadsRunWithTheSessionsWorkers`: the
+  setting read on the vendor connection (the handler's `vendor` field by reflection, since a
+  statement through the driver on a plain table runs `beforeRun` and restores the value); at READ
+  COMMITTED in a transaction a keyed split read gives 0, 369's six-way join the session's 2, a
+  keyed read 0 and then StockLevel's range-only shape still 0, 372's Q1 shape 2; at SNAPSHOT a
+  keyed read 0, then the six-way join (checks and the plain statement past the split) 2. With
+  `beforeGated` a no-op the gated read past the split reads 0. Right.
+- Changelog `bugfix-20261104-210000`: accurate.
+- Suites as reported: unit 417, PostgreSQL 198, Oracle 198 green. Local TPC-H at READ COMMITTED
+  (SF 0.1, `tpchCheck` 3): every query at or below 1.25x but decoupled Q11 at 1.32x, every
+  execution the vendor's rows; no parallel plan at this scale, so no regression is all it shows.
+  TPC-C at READ COMMITTED: no line with `max_parallel_workers_per_gather` in either layout, so no
+  SET from this item; p95 against (a) StockLevel 1.03 decoupled and 1.41 inline, Delivery 1.22 and
+  1.26. YCSB's two lines are the existing split reads' `SET 0` and `SHOW` a connection.
+- The cloud READ COMMITTED SF 3 cell from the landed main is the proof (Q5, Q9, Q8, Q21, Q22).
+
 ## Acceptance Criteria
 
-- [ ] A gated statement with a whole-table gate and a plain statement past the split run with the
-      session's workers on PostgreSQL, range-gated ones unchanged, with the tests above
+- [x] A gated statement with a whole-table gate and a plain statement past the split run with the
+      session's workers on PostgreSQL, range-gated ones unchanged, with the tests above (51a27c9,
+      reviewed 2026-11-04)
 - [ ] Full check passes on all engines
 - [ ] 6e's READ COMMITTED SF 3 cell from the landed main: Q5 and Q9 at about 1x
 

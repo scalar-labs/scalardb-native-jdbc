@@ -1491,7 +1491,10 @@ union as a derived table.
   the router to switch before such a statement, the plain path likewise for a past-the-split route.
   Tests read `current_setting('max_parallel_workers_per_gather')` inside the statements themselves.
   Expected: Q5, Q9, Q8, Q21 and Q22 at about 1x on the cloud rerun of that cell from a main with
-  370-373.
+  370-373. Built by session 28 as 51a27c9 on `rc-anchorless-gated` with todo 372, reviewed mergeable
+  2026-11-04: `Gated.wholeTable`, `Router.beforeGated`, the plain path's switch for a route past the
+  split or with a whole-table gate; the test reads the setting on the vendor connection after each
+  kind of read; TPC-C at READ COMMITTED issues no SET.
 
   *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
   A read of an inline table whose predicate names only the table's key columns, every column of the
