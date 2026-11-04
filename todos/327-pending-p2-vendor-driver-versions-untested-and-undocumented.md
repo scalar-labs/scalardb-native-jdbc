@@ -293,3 +293,9 @@ the supported versions are documented only once CI verifies them.
   retried attempt and one on the third failure, kept by gradle in the report's system-err, so each
   run's report says whether 19c's flaky struck and whether three tries sufficed; a commit on #12 or
   a later PR, the user's call.
+- 2026-11-04: PR #12 merged by the user as 3314b0c (08:00 UTC; a squash whose tree equals the
+  reviewed 803615f, nothing added after the review). origin/main merged into the local main as
+  6a4845c on the pattern of the user's word for #11 (no conflict, the fixtures compile). CI on main
+  at 3314b0c was in progress when read. The retry log line stays proposed, the user's call. With
+  #11 and #12 in, the ORA-12516 climb and the 19c import retry are on main; the 19c job's
+  SYS.USER$ exposure of ScalarDB's commit (todo 105) stays, named by `ReadIntegrationTest`.
