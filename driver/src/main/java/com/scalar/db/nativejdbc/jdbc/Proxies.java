@@ -1950,6 +1950,11 @@ public final class Proxies {
           || (one.plainSql != null && marks && owner.router.allPassed(one.clearedBy))) {
         return null;
       }
+      for (int i : g.skippable) {
+        if (owner.router.busy(g.checks.get(i))) {
+          return null; // a whole-table gate found closed within the second: the split (todo 372)
+        }
+      }
       Statement st =
           takesSql ? owner.vendor.createStatement() : owner.vendor.prepareStatement(g.sql);
       gatedOpen = st;
@@ -1985,6 +1990,10 @@ public final class Proxies {
           for (int i = columns - g.gates + 1; i <= columns; i++) {
             Object gate = rs.getObject(i);
             if (gate == null || ((Number) gate).intValue() != 0) {
+              int at = i - (columns - g.gates + 1);
+              if (g.skippable.contains(at)) {
+                owner.router.markBusy(g.checks.get(at));
+              }
               rs.close();
               closeGated(st);
               return null;

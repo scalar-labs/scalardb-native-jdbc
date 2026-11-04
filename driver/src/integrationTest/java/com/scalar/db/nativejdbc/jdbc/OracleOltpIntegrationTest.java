@@ -4177,6 +4177,67 @@ class OracleOltpIntegrationTest {
     }
   }
 
+  /**
+   * An anchor-less read within the split at READ COMMITTED on Oracle with a table whose predicate
+   * gives no key range (todo 372): gated by its key range on the one table and by the whole table
+   * on the other, in place of the split.
+   */
+  @Test
+  void readCommittedRangeLessTableGatedByTheWholeTable() throws Exception {
+    try (DistributedTransactionAdmin admin = ORA.admin()) {
+      admin.createTable(
+          N(NS),
+          N("acmd"),
+          TableMetadata.newBuilder()
+              .addColumn(N("k"), intType())
+              .addColumn(N("x"), intType())
+              .addPartitionKey(N("k"))
+              .build(),
+          Map.of("transaction-metadata-decoupling", "true"));
+    }
+    catalog.invalidate();
+    try (Connection v = ORA.open()) {
+      seed(v, "acmd", "k, x", "LEVEL, LEVEL * 10", "k", "LEVEL", 10);
+      assertThat(
+              Setup.run(
+                  catalog,
+                  v,
+                  t -> t.namespace().equals(N(NS)) && t.table().matches("(?i)acmd"),
+                  Duration.ofMinutes(1),
+                  List.of(),
+                  true))
+          .hasSize(1)
+          .allMatch(Setup.Result::succeeded, "succeeded");
+    }
+    Properties ttl = new Properties();
+    ttl.setProperty("scalar.db.native_jdbc.catalog_ttl_millis", "59373");
+    try (Connection d = ORA.openDriver(ttl);
+        Connection v = ORA.open()) {
+      assertThat(d.getTransactionIsolation()).isEqualTo(Connection.TRANSACTION_READ_COMMITTED);
+      String table = NS + ".acmd";
+      String tag = "/* acm" + System.nanoTime() + " */";
+      assertThat(
+              rows(
+                  d,
+                  "SELECT "
+                      + tag
+                      + " COUNT(*) FROM "
+                      + table
+                      + " t1 JOIN "
+                      + table
+                      + " t2 ON t2.x = t1.x WHERE t1.k BETWEEN 1 AND 3"))
+          .containsExactly("3");
+      assertThat(executedTexts(v, tag))
+          .as("the text run")
+          .singleElement()
+          .satisfies(
+              t ->
+                  assertThat(t)
+                      .contains("scalardb_native_g0", "scalardb_native_g1", "BETWEEN")
+                      .doesNotContain("UNION ALL"));
+    }
+  }
+
   /** Seeds a ScalarDB table of either layout with committed rows, their stamps full-sized. */
   private static void seed(
       Connection v,

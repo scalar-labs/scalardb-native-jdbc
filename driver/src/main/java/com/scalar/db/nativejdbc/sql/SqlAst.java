@@ -4522,6 +4522,18 @@ public final class SqlAst {
     return true;
   }
 
+  /**
+   * Returns whether the statement's WHERE clause has a conjunct on {@code r}'s key columns that a
+   * gate over {@code k} can repeat (todos 334, 372).
+   *
+   * @param r the reference
+   * @param k the gate's texts and key columns
+   * @return whether a range gate can be made for it
+   */
+  public boolean hasKeyConjuncts(TableRef r, KeyRange k) {
+    return !keyConjuncts(r, k).isEmpty();
+  }
+
   /** The spellings of the gated form (todos 334, 369, 371). */
   public enum GatedForm {
     /** The gates appended to the statement's own select list, under MAX() where it groups. */
@@ -4548,14 +4560,18 @@ public final class SqlAst {
    *
    * @param naming what to replace
    * @param gates each gate's reference and texts, in the gates' order
-   * @param ranged whether each gate repeats its reference's key conjuncts
+   * @param ranged the references whose gates repeat their key conjuncts, by identity; the others'
+   *     gates are the whole table's
    * @param form the spelling
    * @return the statement and the sources of its placeholders, or {@code null} where it is not one
    *     plain select, the select-list form meets a bare {@code *}, a ranged gate has no conjunct,
    *     or the text cannot be rewritten
    */
   public @Nullable SplitText gated(
-      @Nullable Naming naming, Map<TableRef, KeyRange> gates, boolean ranged, GatedForm form) {
+      @Nullable Naming naming,
+      Map<TableRef, KeyRange> gates,
+      Set<TableRef> ranged,
+      GatedForm form) {
     Token start = root.jjtGetFirstToken();
     if (start == null
         || gates.isEmpty()
@@ -4622,7 +4638,8 @@ public final class SqlAst {
         if (!gateList(e, gates, ranged, false, false)) {
           return null;
         }
-        e.text("FROM dual) g LEFT JOIN LATERAL (SELECT i.*, 1 AS");
+        e.text(engine == Engine.ORACLE ? "FROM dual) g" : ") g");
+        e.text("LEFT JOIN LATERAL (SELECT i.*, 1 AS");
         e.text(engine.quote(PRESENT));
         e.text("FROM (");
         e.tokens(start, null);
@@ -4649,13 +4666,14 @@ public final class SqlAst {
   private boolean gateList(
       Emitter e,
       Map<TableRef, KeyRange> gates,
-      boolean ranged,
+      Set<TableRef> ranged,
       boolean grouped,
       boolean commaFirst) {
     int i = 0;
     for (Map.Entry<TableRef, KeyRange> g : gates.entrySet()) {
-      List<Run> runs = ranged ? keyConjuncts(g.getKey(), g.getValue()) : List.of();
-      if (ranged && runs.isEmpty()) {
+      boolean range = ranged.contains(g.getKey());
+      List<Run> runs = range ? keyConjuncts(g.getKey(), g.getValue()) : List.of();
+      if (range && runs.isEmpty()) {
         return false;
       }
       if (i > 0 || commaFirst) {

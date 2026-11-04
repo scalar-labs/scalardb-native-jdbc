@@ -427,6 +427,9 @@ final class Router {
     // on Oracle's derived form at READ COMMITTED, the lateral form run where it returns no row
     // (todo 371)
     final @Nullable Gated retry;
+    // the gates, by position, that are the whole table's within the split at READ COMMITTED: a
+    // busy table's skips the gated statement for the split (todo 372)
+    final List<Integer> skippable;
 
     Gated(
         String sql,
@@ -435,7 +438,8 @@ final class Router {
         boolean marks,
         boolean marker,
         int hidden,
-        @Nullable Gated retry) {
+        @Nullable Gated retry,
+        List<Integer> skippable) {
       this.sql = sql;
       this.parameterSources = List.copyOf(parameterSources);
       this.gates = checks.size();
@@ -444,6 +448,7 @@ final class Router {
       this.marker = marker;
       this.hidden = hidden;
       this.retry = retry;
+      this.skippable = List.copyOf(skippable);
     }
   }
 
@@ -2120,8 +2125,12 @@ final class Router {
    * whole table, its 0 marking the table clear. A read past the split ({@code pastSplit}, the
    * {@code rc_T} route) at READ COMMITTED takes the whole table's gates, on Oracle and on
    * PostgreSQL, where they ride a row of their own (design 4.2 "The read past the split at READ
-   * COMMITTED behind whole-table gates", todo 369). Unchanged elsewhere, for a locking read, and
-   * for a {@code *} over an inline table, whose data table holds the metadata.
+   * COMMITTED behind whole-table gates", todo 369). Within the split at READ COMMITTED, on both
+   * engines, each table's gate is its key range's where the predicate gives one and the whole
+   * table's elsewhere, a whole-table gate skipped for a second after it was found closed (design
+   * 4.2 "The anchor-less split read at READ COMMITTED behind gates on every table", todo 372).
+   * Unchanged elsewhere, for a locking read, and for a {@code *} over an inline table, whose data
+   * table holds the metadata.
    */
   private Route gated(
       Route r,
@@ -2130,9 +2139,11 @@ final class Router {
       boolean pastSplit) {
     boolean snapshot = snapshot();
     boolean lateral = engine == Engine.POSTGRESQL && pastSplit && !snapshot;
+    // within the split at READ COMMITTED on PostgreSQL, the gates per table (todo 372)
+    boolean pg = engine == Engine.POSTGRESQL && !pastSplit && !snapshot;
     // a position past the select list left for the database to refuse, as the split read leaves
     // it (todo 144): inside Oracle's wrapper the statement's positions are its own (todo 371)
-    if ((engine != Engine.ORACLE && !lateral)
+    if ((engine != Engine.ORACLE && !lateral && !pg)
         || ast.hasLockingOrIntoClause()
         || scalarDb.isEmpty()
         || (engine != Engine.ORACLE && ast.ordersPastSelectList())) {
@@ -2164,32 +2175,78 @@ final class Router {
         }
       }
       Writes.Names n = new Writes.Names(engine, t);
-      gates.put(
-          e.getKey(),
-          new SqlAst.KeyRange(
-              "(SELECT COUNT(*) FROM dual WHERE EXISTS (SELECT "
-                  + n.inflightHint(m)
-                  + "1 FROM "
-                  + n.meta
-                  + " "
-                  + m
-                  + " WHERE "
-                  + n.inflight(m),
-              "))",
-              m,
-              t.keyColumns(),
-              elsewhere,
-              t.inflightExpressions() ? k -> n.inflightKey(m, k) : null));
+      SqlAst.KeyRange gate =
+          pg
+              ? new SqlAst.KeyRange(
+                  "CASE WHEN EXISTS (SELECT 1 FROM "
+                      + n.meta
+                      + " "
+                      + m
+                      + " WHERE "
+                      + m
+                      + "."
+                      + n.txState
+                      + " IN (1, 2)",
+                  ") THEN 1 ELSE 0 END",
+                  m,
+                  t.keyColumns(),
+                  elsewhere,
+                  null)
+              : new SqlAst.KeyRange(
+                  "(SELECT COUNT(*) FROM dual WHERE EXISTS (SELECT "
+                      + n.inflightHint(m)
+                      + "1 FROM "
+                      + n.meta
+                      + " "
+                      + m
+                      + " WHERE "
+                      + n.inflight(m),
+                  "))",
+                  m,
+                  t.keyColumns(),
+                  elsewhere,
+                  t.inflightExpressions() ? k -> n.inflightKey(m, k) : null);
+      if (pg && !ast.hasKeyConjuncts(e.getKey(), gate)) {
+        // the whole table's, ordered so that the in-flight index is taken whatever the
+        // statistics say (todo 329)
+        gate =
+            new SqlAst.KeyRange(
+                "CASE WHEN EXISTS (" + Writes.firstInFlight(n) + ") THEN 1 ELSE 0 END",
+                "",
+                m,
+                t.keyColumns(),
+                elsewhere,
+                null);
+      }
+      gates.put(e.getKey(), gate);
       checks.add(inFlightCheck(t));
+    }
+    // within the split at READ COMMITTED each table's key range where the predicate gives one,
+    // else the whole table's, which a busy table skips (todo 372)
+    Set<SqlAst.TableRef> ranged = Collections.newSetFromMap(new IdentityHashMap<>());
+    List<Integer> skippable = new ArrayList<>();
+    if (!snapshot && !pastSplit) {
+      int i = 0;
+      for (Map.Entry<SqlAst.TableRef, SqlAst.KeyRange> g : gates.entrySet()) {
+        if (ast.hasKeyConjuncts(g.getKey(), g.getValue())) {
+          ranged.add(g.getKey());
+        } else {
+          skippable.add(i);
+        }
+        i++;
+      }
     }
     // the spelling by shape (todo 371): a statement that groups or selects DISTINCT keeps its
     // plan only as a derived table, any other rides the lateral row; both need the output names
     // distinct, else the select-list form of todo 334, which an ORDER BY position past the list
     // keeps from the gate
+    // on PostgreSQL the lateral row whatever the shape, its plans the statement's (todo 369)
     SqlAst.GatedForm form =
-        !ast.outputNamesUnique()
-            ? SqlAst.GatedForm.SELECT_LIST
-            : ast.groupsOrDistinct() ? SqlAst.GatedForm.DERIVED : SqlAst.GatedForm.LATERAL;
+        pg
+            ? SqlAst.GatedForm.LATERAL
+            : !ast.outputNamesUnique()
+                ? SqlAst.GatedForm.SELECT_LIST
+                : ast.groupsOrDistinct() ? SqlAst.GatedForm.DERIVED : SqlAst.GatedForm.LATERAL;
     if (form == SqlAst.GatedForm.SELECT_LIST && ast.ordersPastSelectList()) {
       return r;
     }
@@ -2198,7 +2255,6 @@ final class Router {
           TableInfo t = scalarDb.get(ref);
           return t == null ? null : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
         };
-    boolean ranged = !snapshot && !pastSplit;
     SqlAst.SplitText text = ast.gated(naming, gates, ranged, form);
     if (text == null) {
       return r;
@@ -2219,7 +2275,8 @@ final class Router {
                 snapshot,
                 true,
                 checks.size() + 1,
-                null);
+                null,
+                skippable);
     boolean marker = form == SqlAst.GatedForm.LATERAL;
     return r.gated(
         new Gated(
@@ -2229,7 +2286,8 @@ final class Router {
             snapshot,
             marker,
             checks.size() + (form == SqlAst.GatedForm.SELECT_LIST ? 0 : 1),
-            retry));
+            retry,
+            skippable));
   }
 
   /**
@@ -2282,7 +2340,7 @@ final class Router {
             + " FROM (\n"
             + inner
             + "\n) i) s ON true";
-    return r.gated(new Gated(sql, all, checks, false, true, checks.size() + 1, null));
+    return r.gated(new Gated(sql, all, checks, false, true, checks.size() + 1, null, List.of()));
   }
 
   /**
@@ -3020,6 +3078,16 @@ final class Router {
                   : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
             });
     return plain == null ? r : r.plain(plain, List.copyOf(cleared));
+  }
+
+  /** Whether the table of the in-flight check {@code check} is busy for whole-table gates. */
+  boolean busy(String check) {
+    return catalog.busy(check);
+  }
+
+  /** Marks the table of the in-flight check {@code check} busy for a second (todo 372). */
+  void markBusy(String check) {
+    catalog.markBusy(check);
   }
 
   /** Whether the open transaction found every table of {@code checks} clear (todo 329). */

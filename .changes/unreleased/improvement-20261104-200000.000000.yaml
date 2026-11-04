@@ -1,0 +1,3 @@
+kind: improvement
+body: 'At READ COMMITTED on PostgreSQL and Oracle, a read that records no rows for later writes, such as an aggregate or a read in autocommit, now runs as written over the data tables when a quick check finds nothing in flight in each table: in its key range where the statement gives one, otherwise in the whole table. A table found with rows in flight by the whole-table check skips that check for a second, across the connections, so that a busy table costs at most one extra statement a second. On PostgreSQL, TPC-H Q1 and grouped reads of decoupled tables had run 3 to 14 times the vendor''s time.'
+time: 2026-11-04T20:00:00.000000+09:00

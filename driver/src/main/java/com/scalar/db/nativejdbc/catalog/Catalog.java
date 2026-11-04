@@ -168,6 +168,38 @@ public final class Catalog implements AutoCloseable {
   private final AtomicLong generation = new AtomicLong();
 
   /**
+   * For each table whose whole-table gate a read found closed, when, in nanoseconds: a read that
+   * would need that gate takes the split instead for a second, across the catalog's connections
+   * (design 4.2 "The anchor-less split read at READ COMMITTED behind gates on every table", todo
+   * 372).
+   */
+  private final java.util.concurrent.ConcurrentHashMap<String, Long> busy =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  private static final long BUSY_NANOS = 1_000_000_000L;
+
+  /**
+   * Marks the table that {@code key} names busy: its whole-table gate was found closed.
+   *
+   * @param key the table's in-flight check, as the gates name it
+   */
+  public void markBusy(String key) {
+    busy.put(key, System.nanoTime());
+  }
+
+  /**
+   * Returns whether the table that {@code key} names had its whole-table gate found closed less
+   * than a second ago.
+   *
+   * @param key the table's in-flight check
+   * @return whether a read should take the split without the gate
+   */
+  public boolean busy(String key) {
+    Long at = busy.get(key);
+    return at != null && System.nanoTime() - at < BUSY_NANOS;
+  }
+
+  /**
    * A resolved name with the instant it was resolved at, and the classification of that name
    * against one snapshot, kept so that a hit costs a map lookup rather than a rebuilt {@link
    * TableInfo}.

@@ -96,10 +96,11 @@ committed, so it cannot hand the driver the old values; the driver has to find t
   values from the metadata. It rewrites the statement into copies joined by `UNION ALL`, one for
   each combination of committed and in-flight tables: two copies for one table, four for a join of
   two. Where a quick check shows nothing in flight in the statement's key range, or in the whole
-  table for a statement too large to rewrite into copies, or with a subquery on a ScalarDB table
-  that aggregates or limits its rows, a scalar subquery, a CTE or a UNION, it runs the statement
-  as written instead. When nothing is in flight, the extra copies find no rows, but the database
-  still parses, plans and starts them.
+  table where the statement gives no key range, is too large to rewrite into copies, or has a
+  subquery on a ScalarDB table that aggregates or limits its rows, a scalar subquery, a CTE or a
+  UNION, it runs the statement as written instead. A table found with rows in flight that way skips
+  the whole-table check for a second. When nothing is in flight, the extra copies find no rows, but
+  the database still parses, plans and starts them.
 - **Writes.** A SNAPSHOT transaction's view never changes, so once the driver finds a table with no
   row in flight, it remembers this until the transaction ends: every later read and write of that
   table runs as your statement as written, with the transaction metadata the write needs. A READ
