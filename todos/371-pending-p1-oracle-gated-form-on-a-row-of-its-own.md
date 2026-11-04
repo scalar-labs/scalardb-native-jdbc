@@ -176,14 +176,66 @@ Build, on e9718f2: drop the materialized text; add the derived form and the shap
 tests; the READ COMMITTED no-row second statement; the tests listed in the design. Acceptance as
 amended below.
 
+## Review record (2026-11-04, `oracle-gated-lateral` at f2238ab on 4e916f6, built by session 28)
+
+Verdict: mergeable. Review range 4e916f6..f2238ab (0682c91 the lateral form, d4e6f0c the
+materialized form, d37229f its test fix, 766a762 the forms by shape superseding d4e6f0c, f2238ab
+the changelog), read as the combined diff from `git diff 4e916f6 f2238ab` and per commit.
+
+- `SqlAst`: `GatedForm` SELECT_LIST (todo 334's code restored: the gates appended under `MAX()`
+  where grouped, a bare `*` null), LATERAL (`SELECT s.*, g.* FROM (SELECT <gates> FROM dual) g
+  LEFT JOIN LATERAL (SELECT i.*, 1 AS "scalardb_native_present" FROM (<statement>) i) s ON 1 =
+  1`), DERIVED (`SELECT i.*, 1 AS "scalardb_native_present", <gates> FROM (<statement>) i`); one
+  `gateList(e, gates, ranged, grouped, commaFirst)`; `groupsOrDistinct()` over every query block
+  (`selects`), so Q18's subquery counts; `outputNamesUnique()` over the top select list: alias,
+  else column name, else the expression's text without whitespace, lower-cased and unquoted, false
+  for any `*` or a non-plain select. In both wrappers the gates stand in the outer select list
+  before the statement's text, so their placeholders come first; the design's sentence that put
+  the derived form's after corrected in this commit.
+- `Router.gated`: `form = !unique ? SELECT_LIST : grouped ? DERIVED : LATERAL`; the position-past-
+  the-select-list guard kept for SELECT_LIST only; `ranged = !snapshot && !pastSplit` as before;
+  `Gated(sql, sources, checks, marks, marker, hidden, retry)`: LATERAL marker true and hidden
+  gates + 1, DERIVED marker false, hidden gates + 1 and, at READ COMMITTED, `retry` the LATERAL
+  text of the same statement (marker true, hidden gates + 1, no retry of its own), SELECT_LIST
+  hidden gates; PostgreSQL's `lateralGated` passes gates + 1 and no retry. Right.
+- `Proxies.gated`: a dispatcher and `gated(proxy, one, g, ...)`; in the no-row branch when not
+  marking: the result closed, then `g.retry` run as a gated read if present, else the fallback.
+  The marker is read on the lateral form only (`g.marker`), the hidden count from `g.hidden`.
+  Right.
+- `OracleOltpIntegrationTest.gatedReadsRideARowOfTheirOwn` (`acl{i,d}`, TTL 59372): at SNAPSHOT in
+  autocommit an empty decoupled key read is one text (it takes the state-column split, never a
+  gate; one text asserted) and an empty five-way join past the split one `LEFT JOIN LATERAL`
+  text; at READ COMMITTED an empty grouped five-way join past the split is two texts, one starting
+  `SELECT i.*, 1 AS` and one `LEFT JOIN LATERAL`, no `RC_`; a ranged `ORDER BY x DESC FETCH FIRST
+  3` with binds returns 8/80, 7/70, 6/60 on the lateral form; a grouped `ORDER BY 2 DESC` and a
+  DISTINCT `ORDER BY 1 DESC` on the derived form in the vendor's order, no `MAX(`, no `LATERAL`;
+  a statement with its own WITH inside the wrapper; `t1.k, t2.k` on the select-list form (g0, no
+  `LATERAL`, no `SELECT i.*`). `executedTexts` and form 7's pattern search `sql_fulltext` by
+  `DBMS_LOB.INSTR`; 370's Oracle test reads the forms' texts (its "no UNION ALL" assertion
+  dropped); 9ee0024's bare-`*` gated case dropped, the design keeping `*` on the select list.
+- Suites as reported: unit 417, PostgreSQL 195, Oracle 195 green. Changelog
+  `improvement-20261104-180000`: accurate (the forms by shape, the empty result one statement
+  where nothing groups, the second statement at READ COMMITTED where it does).
+- Measured by 28 (local Oracle 23 free, SF 0.1, `tpchCheck` 3; pre-371 / 9ee0024 / 766a762): Q13
+  in a transaction decoupled 1.10 / 1.43 / 1.02x, inline 1.02 / 1.43 / 1.09x, in autocommit 1.03 /
+  1.38 / 0.93x and 1.02 / 1.45 / 1.01x; Q18 in a transaction 1.09 / 1.85 / 1.05x and 1.03 / 1.76 /
+  1.03x, in autocommit 2.01 / 1.83 / 2.09x and 2.10 / 1.78 / 1.97x (the documented empty case);
+  the others within 0.9-1.4x; every execution the vendor's rows. TPC-C's gated statements: form
+  7's Delivery SUM on the lateral form, its test green. 19c at CI.
+- History: the materialized step (d4e6f0c) and its test fix (d37229f) never land as a state of
+  their own; recommended to squash them into 766a762 before landing (three commits to one), the
+  lateral commit and the changelog kept; the squashed head's diff against f2238ab must be empty.
+  The user's call with the landing.
+
 ## Acceptance Criteria
 
-- [ ] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
+- [x] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
       wrapper (grouped), an empty ungrouped result one statement, an empty grouped result at READ
-      COMMITTED never `rc_T`, with the tests above
+      COMMITTED never `rc_T`, with the tests above (f2238ab, reviewed 2026-11-04)
 - [ ] Full check passes on all engines, 19c included
-- [ ] Q18 in autocommit at SNAPSHOT at about 1x in 28's Oracle step from the build, Q13 and Q18 in a
-      transaction at their pre-371 figures, StockLevel and Delivery unchanged
+- [x] Q13 and Q18 in a transaction at their pre-371 figures (1.02-1.09x, 1.03-1.05x), Q18 in
+      autocommit at about 2x as its empty case documents, Delivery's gated SUM on the lateral form
+      (2026-11-04)
 
 ## Work Log
 

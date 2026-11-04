@@ -1404,18 +1404,25 @@ union as a derived table.
   the inline view `*` stands alone), the position-past-the-select-list guard for the gated form (the
   inner's positions are its own, which Oracle refuses itself); the gates' meaning, the marking of a
   clear table at SNAPSHOT, the fallback on a gate of 1 and a `*` over an inline table keeping the
-  split stay; the range conjuncts' placeholders sit before the statement's in the lateral form and
-  after it in the derived one, the sources recorded per form. Expected: an empty key lookup in
-  autocommit one round trip; an empty gated read at READ COMMITTED one statement where nothing
-  groups, two where it does, never `rc_T` for an open gate; Q13 and Q18 at their pre-371 figures;
-  StockLevel's and Delivery's gated reads (no GROUP BY) at the lateral form's cost, the plain's.
-  Tests: an empty key read in autocommit at SNAPSHOT as one text in `v$sql`, both layouts; an empty
-  grouped read at READ COMMITTED past the split as the derived text then the lateral text, no `RC_`;
-  a ranged read with ORDER BY and FETCH FIRST in the vendor's order on the lateral form; a grouped
-  read on the derived form in the vendor's order; a statement with two columns of one name on the
-  select-list form; a bare `SELECT *` over a decoupled table; the gated tests of todos 334, 369 and
-  370 on the forms' texts; the TPC-H check's Q13 and Q18 at their pre-371 figures; TPC-C's gated
-  statements on the lateral form; 19c in CI.
+  split stay; the range conjuncts' placeholders sit before the statement's in both wrappers (the
+  gates are in the outer select list of each), the sources recorded. Built by session 28 as 0682c91,
+  d4e6f0c, d37229f, 766a762 and f2238ab on `oracle-gated-lateral` (the materialized step superseded
+  within the branch), reviewed mergeable 2026-11-04: `SqlAst.gated` takes the form (`GatedForm`:
+  SELECT_LIST as todo 334 had it, LATERAL, DERIVED), `groupsOrDistinct` reads every query block,
+  `outputNamesUnique` the top select list; `Router.gated` chooses the form and builds the READ
+  COMMITTED retry as the lateral text; `Proxies.gated` runs the retry on no row; measured: Q13 and
+  Q18 in a transaction 1.02-1.09x and 1.03-1.05x (from 1.43x and 1.85x under the wrapper alone), Q18
+  in autocommit about 2x, its empty case. Expected: an empty key lookup in autocommit one round
+  trip; an empty gated read at READ COMMITTED one statement where nothing groups, two where it does,
+  never `rc_T` for an open gate; Q13 and Q18 at their pre-371 figures; StockLevel's and Delivery's
+  gated reads (no GROUP BY) at the lateral form's cost, the plain's. Tests: an empty key read in
+  autocommit at SNAPSHOT as one text in `v$sql`, both layouts; an empty grouped read at READ
+  COMMITTED past the split as the derived text then the lateral text, no `RC_`; a ranged read with
+  ORDER BY and FETCH FIRST in the vendor's order on the lateral form; a grouped read on the derived
+  form in the vendor's order; a statement with two columns of one name on the select-list form; a
+  bare `SELECT *` over a decoupled table; the gated tests of todos 334, 369 and 370 on the forms'
+  texts; the TPC-H check's Q13 and Q18 at their pre-371 figures; TPC-C's gated statements on the
+  lateral form; 19c in CI.
 
   *The anchor-less split read at READ COMMITTED behind gates on every table (todo 372, 2026-11-04).*
   A read that records no anchor takes the gated form on Oracle only where every table of it has a
