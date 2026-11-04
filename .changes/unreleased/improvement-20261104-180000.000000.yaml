@@ -1,3 +1,3 @@
 kind: improvement
-body: 'On Oracle, a read the driver runs as written behind its in-flight checks now carries them on a row of its own, so that an empty result is one statement: in autocommit at SNAPSHOT such a read had run a second time, twice the work for TPC-H Q18, and at READ COMMITTED it had fallen back to the rewritten form. A bare `*` and a grouped read now take the form too.'
+body: 'On Oracle, a read the driver runs as written behind its in-flight checks now carries them on a row of its own where it neither groups nor selects DISTINCT, so that an empty result is one statement: in autocommit such a read had run a second time, and at READ COMMITTED an empty result had fallen back to the rewritten form. A grouped or DISTINCT read keeps its own plan, its checks on its rows; at READ COMMITTED an empty one is answered by a second statement in the first form, not by the rewritten one.'
 time: 2026-11-04T18:00:00.000000+09:00
