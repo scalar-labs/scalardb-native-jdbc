@@ -1412,17 +1412,18 @@ union as a derived table.
   `outputNamesUnique` the top select list; `Router.gated` chooses the form and builds the READ
   COMMITTED retry as the lateral text; `Proxies.gated` runs the retry on no row; measured: Q13 and
   Q18 in a transaction 1.02-1.09x and 1.03-1.05x (from 1.43x and 1.85x under the wrapper alone), Q18
-  in autocommit about 2x, its empty case. Expected: an empty key lookup in autocommit one round
-  trip; an empty gated read at READ COMMITTED one statement where nothing groups, two where it does,
-  never `rc_T` for an open gate; Q13 and Q18 at their pre-371 figures; StockLevel's and Delivery's
-  gated reads (no GROUP BY) at the lateral form's cost, the plain's. Tests: an empty key read in
-  autocommit at SNAPSHOT as one text in `v$sql`, both layouts; an empty grouped read at READ
-  COMMITTED past the split as the derived text then the lateral text, no `RC_`; a ranged read with
-  ORDER BY and FETCH FIRST in the vendor's order on the lateral form; a grouped read on the derived
-  form in the vendor's order; a statement with two columns of one name on the select-list form; a
-  bare `SELECT *` over a decoupled table; the gated tests of todos 334, 369 and 370 on the forms'
-  texts; the TPC-H check's Q13 and Q18 at their pre-371 figures; TPC-C's gated statements on the
-  lateral form; 19c in CI.
+  in autocommit about 2x, its empty case. On main as ab328f5, 0b269cf and d44d1bf (2026-11-04, the
+  user's word; the materialized step squashed away; range-diff identical). Expected: an empty key
+  lookup in autocommit one round trip; an empty gated read at READ COMMITTED one statement where
+  nothing groups, two where it does, never `rc_T` for an open gate; Q13 and Q18 at their pre-371
+  figures; StockLevel's and Delivery's gated reads (no GROUP BY) at the lateral form's cost, the
+  plain's. Tests: an empty key read in autocommit at SNAPSHOT as one text in `v$sql`, both layouts;
+  an empty grouped read at READ COMMITTED past the split as the derived text then the lateral text,
+  no `RC_`; a ranged read with ORDER BY and FETCH FIRST in the vendor's order on the lateral form; a
+  grouped read on the derived form in the vendor's order; a statement with two columns of one name
+  on the select-list form; a bare `SELECT *` over a decoupled table; the gated tests of todos 334,
+  369 and 370 on the forms' texts; the TPC-H check's Q13 and Q18 at their pre-371 figures; TPC-C's
+  gated statements on the lateral form; 19c in CI.
 
   *The anchor-less split read at READ COMMITTED behind gates on every table (todo 372, 2026-11-04).*
   A read that records no anchor takes the gated form on Oracle only where every table of it has a

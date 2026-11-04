@@ -232,6 +232,12 @@ message) and 55e79b9 (the changelog); my `git diff f2238ab 55e79b9` is empty, th
 reviewed one. Mergeable as a whole; landing on the user's word after a rebase onto main's head,
 the landed head to be range-diffed against 4e916f6..55e79b9.
 
+### 2026-11-04: on main (ab328f5 + 0b269cf + d44d1bf)
+
+Landed by 28 on the user's "land it" typed in 28's session, rebased onto a9bd7b2; my range-diff of
+4e916f6..55e79b9 against a9bd7b2..d44d1bf shows all three commits identical. Nothing pushed; 19c
+at CI after the user's push, the last tick.
+
 ## Acceptance Criteria
 
 - [x] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
