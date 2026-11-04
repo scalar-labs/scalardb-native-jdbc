@@ -102,6 +102,15 @@ Verdict: mergeable once the user-facing wording names the shape precisely (below
   (one with an aggregate or a row limit, a scalar subquery, a CTE, a set operation) loses them.
   Name that shape in both, and rewrap `transactions.md` line 147 (119 characters) at 100.
 
+Follow-up (2026-11-04): the wording fixed in two docs-only commits on the branch, fe356bc and
+001f337, read from `git diff 33b927a 001f337`. `transactions.md`'s paragraph: "neither are the
+other rows of a statement that also has, on a ScalarDB table, a subquery that aggregates or
+limits its rows, a scalar subquery, a CTE or a UNION"; the reads bullet: "or with a subquery on a
+ScalarDB table that aggregates or limits its rows, a scalar subquery, a CTE or a UNION"; the
+changelog names the same shape and adds "its other tables' included"; the changed lines within
+100 (96 and 99). Precise now. The branch at 001f337 (33b927a + fe356bc + 001f337) is mergeable as
+a whole; landing on the user's word.
+
 ## Acceptance Criteria
 
 - [ ] A READ COMMITTED split read with a reference through `rc_T` runs as written behind
