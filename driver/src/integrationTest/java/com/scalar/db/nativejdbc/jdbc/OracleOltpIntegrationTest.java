@@ -3122,14 +3122,16 @@ class OracleOltpIntegrationTest {
         assertThat(executedTexts(v, stockTag))
             .as(name + ": StockLevel's gated text, a gate per table")
             .anyMatch(t -> t.contains("\"scalardb_native_g1\""));
-        // a predicate without key conjuncts: the split read alone
+        // a predicate without key conjuncts: the whole table's gate (todo 372; the split alone
+        // before it)
         String noKeyTag = "/* n" + layout + System.nanoTime() + " */";
         assertThat(rows(d, "SELECT " + noKeyTag + " COUNT(*) FROM " + st + " WHERE s_q < 0"))
             .containsExactly("0");
         assertThat(executedTexts(v, noKeyTag))
-            .as(name + ": no gate without a key conjunct")
-            .isNotEmpty()
-            .noneMatch(t -> t.contains("scalardb_native_g0"));
+            .as(name + ": the whole table's gate without a key conjunct")
+            .singleElement()
+            .satisfies(
+                t -> assertThat(t).contains("scalardb_native_g0").doesNotContain("UNION ALL"));
         d.commit();
         // at SNAPSHOT the whole table's gate: one round trip, the table found clear, the next read
         // the plain statement
