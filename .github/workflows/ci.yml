@@ -145,8 +145,9 @@ jobs:
             docker rm -f oracle19
           done
           "$started"
-          echo 'ALTER SYSTEM SET "_disable_last_successful_login_time" = TRUE SCOPE = MEMORY;' \
-            | docker exec -i oracle19 bash -c 'sqlplus -s / as sysdba'
+          # Not mitigated: 19c refuses _disable_last_successful_login_time (ORA-02065), todo 105's fix,
+          # so each logon writes SYS.USER$ and a hard parse in a SERIALIZABLE transaction can fail with
+          # ORA-08177. Engines.importTable retries the import; ScalarDB's commit stays exposed (todo 105).
           echo 'SELECT banner_full FROM v$version;' \
             | docker exec -i oracle19 bash -c 'sqlplus -s / as sysdba'
 
