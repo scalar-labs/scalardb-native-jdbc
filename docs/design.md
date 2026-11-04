@@ -1467,7 +1467,8 @@ union as a derived table.
   from 5.5x to 1.00x, Q6 from 6.4-7.0x to 1.01x, Q12 from 11.8-13.7x to about 1x, Q16 from
   16.8-19.1x to about 1x, inline Q1 from 3.6x to 1.0x; TPC-C at READ COMMITTED locally, p95 against
   the vendor's: StockLevel decoupled 1.96 to 1.43 and inline 1.67 to 1.11, Delivery decoupled 1.90
-  to 1.23 and inline 1.41 to 1.41.
+  to 1.23 and inline 1.41 to 1.41. On main as 3be5c21 and 7c01374 (2026-11-04, the user's word;
+  range-diff identical).
 
   *Wide reads run with the session's workers (todo 373, 2026-11-04).* On PostgreSQL a split read
   runs with `max_parallel_workers_per_gather = 0` (above: its estimates start workers for 1 ms
@@ -1494,7 +1495,8 @@ union as a derived table.
   370-373. Built by session 28 as 51a27c9 on `rc-anchorless-gated` with todo 372, reviewed mergeable
   2026-11-04: `Gated.wholeTable`, `Router.beforeGated`, the plain path's switch for a route past the
   split or with a whole-table gate; the test reads the setting on the vendor connection after each
-  kind of read; TPC-C at READ COMMITTED issues no SET.
+  kind of read; TPC-C at READ COMMITTED issues no SET. On main as 87c0b2b (2026-11-04, the user's
+  word; range-diff identical).
 
   *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
   A read of an inline table whose predicate names only the table's key columns, every column of the

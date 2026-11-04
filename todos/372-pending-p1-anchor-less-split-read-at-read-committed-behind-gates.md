@@ -140,6 +140,12 @@ filed as todo 373 (a small follow-up, fit for this branch before its landing, th
 Nothing in the run bears on this item's design; the cloud rerun of the cell from a main with
 370-373 is the proof for all of them. Full reading in todo 373.
 
+### 2026-11-04: on main (3be5c21 + 7c01374; the branch as 3be5c21 + 7c01374 + 87c0b2b)
+
+Landed by 28 on the user's "land it" typed in 28's session, rebased onto a22856c; my range-diff of
+a9d81a8..51a27c9 against a22856c..87c0b2b shows all three commits identical. Nothing pushed. Left:
+the push's CI; the cloud READ COMMITTED SF 3 cell from this main, the proof for 370-373 together.
+
 ## Acceptance Criteria
 
 - [x] The anchor-less split read at READ COMMITTED takes the gated form with range or whole-table

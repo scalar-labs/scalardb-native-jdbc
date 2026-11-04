@@ -106,6 +106,12 @@ show 51a27c9`.
   1.26. YCSB's two lines are the existing split reads' `SET 0` and `SHOW` a connection.
 - The cloud READ COMMITTED SF 3 cell from the landed main is the proof (Q5, Q9, Q8, Q21, Q22).
 
+### 2026-11-04: on main (87c0b2b; the branch as 3be5c21 + 7c01374 + 87c0b2b)
+
+Landed by 28 on the user's "land it" typed in 28's session, rebased onto a22856c; my range-diff of
+a9d81a8..51a27c9 against a22856c..87c0b2b shows all three commits identical. Nothing pushed. Left:
+the push's CI; the cloud READ COMMITTED SF 3 cell from this main, the proof for 370-373 together.
+
 ## Acceptance Criteria
 
 - [x] A gated statement with a whole-table gate and a plain statement past the split run with the
