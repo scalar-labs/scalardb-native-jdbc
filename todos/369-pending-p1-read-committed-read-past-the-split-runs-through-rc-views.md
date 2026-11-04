@@ -35,6 +35,16 @@ READ_COMMITTED.
 - Near the vendor: Q3, Q4, Q10, Q14, Q6 (0.6-2x).
 - Reports in 28's scratchpad `step1/pg-rc-{decoupled,inline}.md`.
 
+28's Oracle step at SNAPSHOT (2026-11-04, Oracle 23 free via Testcontainers, SF 0.1, `tpchCheck`
+3, after the harness fixes of 44e2dd7): every execution the vendor's rows, the row counts
+PostgreSQL's; in a transaction decoupled 1.00-1.34x, inline 0.87-1.35x; autocommit 0.96-1.37x but
+Q18 at 2.01x decoupled and 2.10x inline (66-69 against 139 ms), 1.03-1.09x in a transaction. Q18
+returns no row at this scale: the gated statement runs, has no row to read its gates from, and
+the own transaction runs the checks and the plain statement again (todo 367's switch), twice the
+work. The earlier cold autocommit gaps (Q19 5.9 against 187 ms) were empty results from the
+CHAR(n) columns plus noise and are gone. BenchBase's 0.86 in both layouts is not readable on the
+busy laptop. Reports in 28's scratchpad `step1/ora2-snap-{decoupled,inline}.md`.
+
 ## Design (4.2 "The read past the split at READ COMMITTED behind whole-table gates", 2026-11-04)
 
 Such a read records no anchor in either mode, so it takes the gated form of todo 334, on
@@ -47,15 +57,40 @@ table's `t2.k = t1.k` is none), and the range gate's reason for declining a rang
 split read being cheaper than a second round trip, does not hold where there is no split read,
 only `rc_T`.
 
+On PostgreSQL the gates ride a row of their own, not the select list (amended 2026-11-04 after
+28's Oracle step): the statement as written, its tables renamed, becomes a derived table on the
+nullable side of a lateral join from a one-row relation carrying the gates:
+
+```sql
+SELECT g.*, s.*
+FROM (SELECT CASE WHEN EXISTS (SELECT 1 FROM T1_meta WHERE tx_state IN (1, 2)) THEN 1 ELSE 0 END AS g0,
+             ... one per table ...) g
+LEFT JOIN LATERAL (SELECT 1 AS scalardb_native_present, i.* FROM (<statement as written>) i) s ON true
+```
+
+A result of no rows still returns one row, the gates set and the marker NULL, where the
+select-list form has no row to read its gates from and falls to a second statement: on Oracle at
+SNAPSHOT the own transaction's plain statement, which is TPC-H Q18's 2.0x in autocommit at SF 0.1
+(it returns no row there) against 1.03-1.09x in a transaction (28's Oracle step); at READ
+COMMITTED `rc_T`, the cliff for every empty result. Measured on the container (EXPLAIN, PostgreSQL
+16, bb.lineitem at SF 0.1): the wrapped Q1 keeps the plain Q1's plan, Finalize GroupAggregate over
+Gather Merge with two workers, under a Subquery Scan; the gates are InitPlans evaluated once; the
+join is a Nested Loop Left Join whose outer side is a one-row Result, so the inner's ORDER BY and
+LIMIT hold in the output; a RIGHT JOIN form plans the same. A CTE and a set operation wrap as
+derived tables too, so on PostgreSQL they take the form. Oracle keeps the select-list form with
+whole-table gates and its no-row fallback; an `OUTER APPLY` wrapper from `dual` there is a measured
+follow-up, if Oracle keeps the inner's order under it.
+
 Exactness: one statement, one snapshot; a gate of 0 says no row of its table was in flight at the
 snapshot, so the data table's rows are the committed images `rc_T`'s first arm returns, its second
 arm empty (a prepare writes the data row and the metadata row in one database transaction,
-section 1, facts 2 and 3). The first row's gates decide; any 1, or no row at all, runs the `rc_T`
-text as today, exact in its own snapshot, the rows never mixed; the gate columns are hidden; an
+section 1, facts 2 and 3). The first row's gates decide; any 1 runs the `rc_T` text as today, exact in
+its own snapshot, the rows never mixed; on PostgreSQL a NULL marker is the empty result, on
+Oracle no row at all runs the fallback as before; the gate columns and the marker are hidden; an
 aggregate without GROUP BY is decided by its one row.
 
-Keeps `rc_T`: a `*` over an inline table (its metadata columns would show), a set operation at the
-top (no one select list), a locking read, a scrollable or unwrapped result, an `execute` other than
+Keeps `rc_T`: a `*` over an inline table (its metadata columns would show), on Oracle a set
+operation at the top (no one select list), a locking read, a scrollable or unwrapped result, an `execute` other than
 `executeQuery`, a bound stream; the gated form's own rules.
 
 Build:
@@ -63,9 +98,10 @@ Build:
 - `Router.gated`: admit PostgreSQL; on both engines, a read past the split (the `rc_T` fallback
   route) takes whole-table gates (`SqlAst.gated` with `ranged` false); the Oracle rule for reads
   within the split at READ COMMITTED (range gates, a range-less table keeping the split) stays.
-- The gate's PostgreSQL spelling beside Oracle's `SELECT COUNT(*) FROM dual WHERE EXISTS (...)`
-  with its index hint (`SqlAst.KeyRange`'s prefix and suffix carry it).
-- `Proxies.gated` is engine-neutral already (no engine test in it); unchanged.
+- On PostgreSQL the wrapper over the renamed text (no select-list surgery; `withPlain`'s renaming
+  serves), the gates spelled as above; on Oracle `SqlAst.gated` unranged with the existing gate.
+- `Proxies.gated` reads the gates and the marker at the front on PostgreSQL and hides them; the
+  rest as it is (no engine test in it today).
 - `transactions.md`, the READ COMMITTED reads sentence: "Where a quick check shows nothing in
   flight in the statement's key range" gains the whole table for a statement too large to rewrite.
 

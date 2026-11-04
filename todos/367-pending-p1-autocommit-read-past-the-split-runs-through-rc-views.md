@@ -250,6 +250,22 @@ the `bb-*-benchbase-runs.tgz` under `benchbase-postgresql/tpch-c-1/`. Read from 
 The autocommit cliff of this item is closed at SF 3: no timeout, no shared-memory error, every
 query at the vendor's cost on the same tables. The last acceptance item is the push's CI.
 
+### 2026-11-04: review of 44e2dd7 on `tpch-step1` (28's two Oracle TPC-H harness fixes)
+
+Test sources only, `BenchBaseBenchmark`, read in full. (1) `writeConfig` removes every `<afterload>`
+on Oracle: BenchBase's Oracle TPC-H sample config gathers the statistics of a schema named
+BENCHBASE after the load (ORA-20000 for the harness's schema, the load failed), and the harness
+gathers its own schema's after every load already, so both runs keep the same statistics; a live
+NodeList emptied from the front, right. (2) `writeDdl` rewrites `\bchar\s*\((\d+)\)` to
+`VARCHAR2($1)` for TPC-H on Oracle only: BenchBase's Oracle TPC-H DDL declares the text columns
+CHAR(n), which Oracle compares with a VARCHAR2 bind without blank padding, so nine queries
+returned no row through ojdbc and the driver alike and the first Oracle check had passed "same
+rows" on empty results; the word boundary leaves `varchar(n)` and `nchar(n)` alone; both drivers
+read the same DDL, TPC-C's untouched. Verdict: mergeable. Its results (every query the
+PostgreSQL row counts and the vendor's rows; Q18's 2.0x in autocommit, the gated form's no-row
+cost) are in todo 369's findings, and the no-row row of the PostgreSQL gated form is designed
+there. Landing on the user's word; the cloud SF 3 Oracle run waits on it.
+
 ## Acceptance Criteria
 
 - [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
