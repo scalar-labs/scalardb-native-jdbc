@@ -1251,6 +1251,50 @@ union as a derived table.
   µs, StockLevel's count from 1.5 ms toward 0.9 with order_line's range gate and stock's warehouse
   gate (`S_W_ID = ?` is a key conjunct), StockLevel at READ COMMITTED from +53-62% toward +25%.
 
+  *The read past the split at READ COMMITTED behind whole-table gates (todo 369, 2026-11-04).* A
+  read the split does not cover, past its limit of pieces or of a shape it does not take, runs
+  through `rc_T` at READ COMMITTED in a transaction and in autocommit alike, since that level has no
+  checks, no own transaction and nothing to remember, and `rc_T` is a view no engine joins by key
+  (section 3): on PostgreSQL 16 at TPC-H scale factor 0.1 (session 28, 2026-11-04, both layouts, the
+  driver and the vendor at READ COMMITTED), Q5, Q8 and Q9 hit a 120 s statement timeout, Q7 ran
+  412-1,004x, Q22 134-246x, Q2 37-121x, Q11 87-115x, Q20 48-88x, Q18 26-31x, and Q21 failed to
+  resize a 256 MB shared memory segment under a 1 GB `/dev/shm`, a parallel hash join through six
+  views; every query that completed returned the vendor's rows. Such a read records no anchor in
+  either mode, so it takes the gated form above, on PostgreSQL as on Oracle, with one difference:
+  its gates are the whole table's, `CASE WHEN EXISTS (SELECT 1 FROM T_meta WHERE tx_state IN (1, 2))
+  THEN 1 ELSE 0 END` on PostgreSQL (over `T` itself for an inline table), an initplan evaluated once
+  as an index-only probe of the in-flight index, and the Oracle gate above without its range
+  conjuncts there, since a statement past the split rarely carries a key range for every table (a
+  joined table's `t2.k = t1.k` is none) and the range gate's reason for declining a range-less
+  table, the split read being cheaper than a second round trip, does not hold where there is no
+  split read, only `rc_T`. The rules are the gated form's: one statement, one snapshot, so a gate of
+  0 says no row of its table was in flight at the snapshot and the data table's rows are the
+  committed images `rc_T`'s first arm would return, its second arm empty (a prepare writes the data
+  row and the metadata row in one database transaction, section 1); the first row's gates decide,
+  any 1 or no row at all running the `rc_T` text as today, exact in its own snapshot, the rows never
+  mixed; the gate columns hidden; an aggregate without GROUP BY decided by its one row. What keeps
+  `rc_T`: a `*` over an inline table, whose metadata columns would show, a set operation at the top,
+  which has no one select list, a locking read, a scrollable or unwrapped result, an `execute` other
+  than `executeQuery`, a bound stream, as the gated form has them. Expected: the queries above at
+  the vendor's cost plus a probe a table, Q21's segment with them; a gate closed by a write in
+  flight on any of its tables costs the plain statement's time over `rc_T`'s, no worse in order than
+  today. Within the split nothing changes at this level: Q1's 4-6x there (a whole-table aggregate of
+  lineitem, two pieces) is not this item's and has two candidate causes to settle by EXPLAIN ANALYZE
+  of both texts, the parallel workers switched off for a split whose generic plan the driver could
+  not make (above) or the committed copy's anti-join. Not taken: the own transaction at REPEATABLE
+  READ for the autocommit read (three round trips where the gate is one, and no form for a
+  transaction), and the checks before the plain statement inside a READ COMMITTED transaction, two
+  snapshots ("Why one statement, not two" below). To build: `Router.gated` admits PostgreSQL and, on
+  both engines, a read past the split with whole-table gates (`SqlAst.gated` unranged); the gate's
+  PostgreSQL spelling; `Proxies.gated` unchanged. Tests: on PostgreSQL a six-table join over a
+  decoupled and an inline table at READ COMMITTED, in a transaction and in autocommit, the text run
+  as written with its gates (by `current_query()`) and the vendor's rows; the same with a row in
+  flight, the `rc_T` text and the committed rows, no abort; no row; a `*` over an inline table and a
+  set operation keeping `rc_T`; on Oracle, the five-way key join of todo 367's probe at READ
+  COMMITTED taking the gated statement in place of `RC_ACSD` x5. The user-facing sentence of
+  `transactions.md` on the quick check in the statement's key range gains the whole table for a
+  statement too large to rewrite.
+
   *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
   A read of an inline table whose predicate names only the table's key columns, every column of the
   reference in the statement's WHERE and ON clauses a key column, the select list free, takes one
