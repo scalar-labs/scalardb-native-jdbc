@@ -419,21 +419,31 @@ final class Router {
     // SNAPSHOT
     final boolean marks;
     // whether the column before the gates marks a row of the statement, NULL on the one row an
-    // empty result returns: PostgreSQL's lateral form (todo 369)
+    // empty result returns: PostgreSQL's lateral form (todo 369), Oracle's two (todo 371)
     final boolean marker;
+    // the columns after the application's, hidden: the gates, and the marker where the form has
+    // one (todo 371)
+    final int hidden;
+    // on Oracle's derived form at READ COMMITTED, the lateral form run where it returns no row
+    // (todo 371)
+    final @Nullable Gated retry;
 
     Gated(
         String sql,
         List<Integer> parameterSources,
         List<String> checks,
         boolean marks,
-        boolean marker) {
+        boolean marker,
+        int hidden,
+        @Nullable Gated retry) {
       this.sql = sql;
       this.parameterSources = List.copyOf(parameterSources);
       this.gates = checks.size();
       this.checks = List.copyOf(checks);
       this.marks = marks;
       this.marker = marker;
+      this.hidden = hidden;
+      this.retry = retry;
     }
   }
 
@@ -2172,19 +2182,54 @@ final class Router {
               t.inflightExpressions() ? k -> n.inflightKey(m, k) : null));
       checks.add(inFlightCheck(t));
     }
-    SqlAst.SplitText text =
-        ast.gated(
-            ref -> {
-              TableInfo t = scalarDb.get(ref);
-              return t == null
-                  ? null
-                  : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
-            },
-            gates,
-            !snapshot && !pastSplit);
-    return text == null
-        ? r
-        : r.gated(new Gated(text.sql(), text.parameterSources(), checks, snapshot, true));
+    // the spelling by shape (todo 371): a statement that groups or selects DISTINCT keeps its
+    // plan only as a derived table, any other rides the lateral row; both need the output names
+    // distinct, else the select-list form of todo 334, which an ORDER BY position past the list
+    // keeps from the gate
+    SqlAst.GatedForm form =
+        !ast.outputNamesUnique()
+            ? SqlAst.GatedForm.SELECT_LIST
+            : ast.groupsOrDistinct() ? SqlAst.GatedForm.DERIVED : SqlAst.GatedForm.LATERAL;
+    if (form == SqlAst.GatedForm.SELECT_LIST && ast.ordersPastSelectList()) {
+      return r;
+    }
+    SqlAst.Naming naming =
+        ref -> {
+          TableInfo t = scalarDb.get(ref);
+          return t == null ? null : engine.quote(t.namespace()) + "." + engine.quote(t.dataTable());
+        };
+    boolean ranged = !snapshot && !pastSplit;
+    SqlAst.SplitText text = ast.gated(naming, gates, ranged, form);
+    if (text == null) {
+      return r;
+    }
+    // at READ COMMITTED a derived form that returns no row runs the lateral one, whose one row
+    // carries the gates, before the fallback
+    SqlAst.SplitText lateralText =
+        form == SqlAst.GatedForm.DERIVED && !snapshot
+            ? ast.gated(naming, gates, ranged, SqlAst.GatedForm.LATERAL)
+            : null;
+    Gated retry =
+        lateralText == null
+            ? null
+            : new Gated(
+                lateralText.sql(),
+                lateralText.parameterSources(),
+                checks,
+                snapshot,
+                true,
+                checks.size() + 1,
+                null);
+    boolean marker = form == SqlAst.GatedForm.LATERAL;
+    return r.gated(
+        new Gated(
+            text.sql(),
+            text.parameterSources(),
+            checks,
+            snapshot,
+            marker,
+            checks.size() + (form == SqlAst.GatedForm.SELECT_LIST ? 0 : 1),
+            retry));
   }
 
   /**
@@ -2237,7 +2282,7 @@ final class Router {
             + " FROM (\n"
             + inner
             + "\n) i) s ON true";
-    return r.gated(new Gated(sql, all, checks, false, true));
+    return r.gated(new Gated(sql, all, checks, false, true, checks.size() + 1, null));
   }
 
   /**

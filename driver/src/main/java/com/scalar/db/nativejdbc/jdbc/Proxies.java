@@ -1925,8 +1925,24 @@ public final class Proxies {
         Object proxy, Router.Route one, String name, boolean takesSql, boolean marks)
         throws Throwable {
       Router.Gated g = one.gated;
-      if (g == null
-          || one.write != null
+      return g == null ? null : gated(proxy, one, g, name, takesSql, marks);
+    }
+
+    /** The gated read of {@code one} in the form {@code g}, as the method above describes. */
+    @SuppressFBWarnings(
+        value = "SQL_INJECTION_JDBC",
+        justification =
+            "the application's own statement with the driver's gates, and the driver's coarse"
+                + " checks, their names quoted from the catalog")
+    private @Nullable Object gated(
+        Object proxy,
+        Router.Route one,
+        Router.Gated g,
+        String name,
+        boolean takesSql,
+        boolean marks)
+        throws Throwable {
+      if (one.write != null
           || !name.equals("executeQuery")
           || unwrapped
           || vendor().getResultSetType() != ResultSet.TYPE_FORWARD_ONLY
@@ -1982,7 +1998,9 @@ public final class Proxies {
           if (!snapshot) {
             rs.close();
             closeGated(st);
-            return null;
+            // Oracle's derived form returns no row to read its gates from: the lateral form,
+            // whose one row carries them, decides at READ COMMITTED (todo 371)
+            return g.retry == null ? null : gated(proxy, one, g.retry, name, takesSql, marks);
           }
           for (String check : g.checks) {
             if (owner.router.passed(check)) {
@@ -2005,9 +2023,7 @@ public final class Proxies {
         }
         owner.ran(one);
         return proxy(
-            ResultSet.class,
-            new GatedRows(
-                rs, connection, (Statement) proxy, g.gates + (g.marker ? 1 : 0), st, row));
+            ResultSet.class, new GatedRows(rs, connection, (Statement) proxy, g.hidden, st, row));
       } catch (SQLException e) {
         if (rs != null) {
           rs.close();

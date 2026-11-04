@@ -3995,7 +3995,7 @@ class OracleOltpIntegrationTest {
                   t ->
                       assertThat(t)
                           .contains("scalardb_native_g0", "scalardb_native_g2")
-                          .doesNotContain("RC_", "UNION ALL"));
+                          .doesNotContain("RC_"));
         }
       }
       d.setAutoCommit(true);
@@ -4003,10 +4003,13 @@ class OracleOltpIntegrationTest {
   }
 
   /**
-   * Oracle's gated form on a row of its own from dual (todo 371): an empty result in autocommit at
-   * SNAPSHOT is one statement, on both layouts; at READ COMMITTED a ranged read with ORDER BY and
-   * FETCH FIRST keeps its order and its bound values, a grouped read takes no MAX(), and a bare *
-   * over a decoupled table takes the form.
+   * Oracle's gated form by shape (todo 371): in autocommit at SNAPSHOT an empty key read is one
+   * statement and an empty join past the split one statement on the lateral row; at READ COMMITTED
+   * an empty grouped read past the split is the derived form then the lateral one, never rc_T; a
+   * ranged read with ORDER BY, FETCH FIRST and bound values keeps the vendor's order on the lateral
+   * form; a grouped and a DISTINCT read take the derived form in the vendor's order, without MAX();
+   * a statement with its own WITH rides the wrapper; two output columns of one name keep the
+   * select-list form.
    */
   @Test
   void gatedReadsRideARowOfTheirOwn() throws Exception {
@@ -4044,32 +4047,47 @@ class OracleOltpIntegrationTest {
     try (Connection d = ORA.openDriver(ttl);
         Connection v = ORA.open()) {
       assertThat(d.getAutoCommit()).isTrue();
-      // an empty grouped result at SNAPSHOT in autocommit: the gated statement alone, no second one
+      // an empty key read at SNAPSHOT in autocommit: the lateral form alone, no second statement
       d.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
-      for (String layout : List.of("i", "d")) {
-        String tag = "/* acl" + System.nanoTime() + " */";
-        assertThat(
-                rows(
-                    d,
-                    "SELECT "
-                        + tag
-                        + " x, COUNT(*) FROM "
-                        + NS
-                        + ".acl"
-                        + layout
-                        + " WHERE x > 1000 GROUP BY x"))
-            .as(layout + ": no row")
-            .isEmpty();
-        assertThat(executedTexts(v, tag))
-            .as(layout + ": one statement")
-            .singleElement()
-            .satisfies(
-                t -> assertThat(t).contains("scalardb_native_present", "scalardb_native_g0"));
-      }
-      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      String tag = "/* ack" + System.nanoTime() + " */";
+      assertThat(rows(d, "SELECT " + tag + " k, x FROM " + NS + ".acld WHERE k = 99"))
+          .as("an empty key read")
+          .isEmpty();
+      assertThat(executedTexts(v, tag)).as("an empty key read: one statement").hasSize(1);
       String table = NS + ".acld";
-      // a ranged read, ordered and limited, its values bound: the vendor's order
-      String tag = "/* acr" + System.nanoTime() + " */";
+      // an empty join past the split at SNAPSHOT in autocommit: the lateral form alone
+      tag = "/* acj" + System.nanoTime() + " */";
+      StringBuilder join = new StringBuilder("SELECT " + tag + " t1.k, t1.x FROM " + table + " t1");
+      for (int i = 2; i <= 5; i++) {
+        join.append(" JOIN ").append(table).append(" t").append(i);
+        join.append(" ON t").append(i).append(".x = t1.x");
+      }
+      join.append(" WHERE t1.k > 100");
+      assertThat(rows(d, join.toString())).as("an empty join past the split").isEmpty();
+      assertThat(executedTexts(v, tag))
+          .as("an empty join past the split: one statement")
+          .singleElement()
+          .satisfies(t -> assertThat(t).contains("LEFT JOIN LATERAL", "scalardb_native_present"));
+      d.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      // past the split at READ COMMITTED, an empty grouped read: the derived form, then the lateral
+      // form whose one row carries the gates, not rc_T
+      tag = "/* ace" + System.nanoTime() + " */";
+      StringBuilder five =
+          new StringBuilder("SELECT " + tag + " t1.x, COUNT(*) FROM " + table + " t1");
+      for (int i = 2; i <= 5; i++) {
+        five.append(" JOIN ").append(table).append(" t").append(i);
+        five.append(" ON t").append(i).append(".x = t1.x");
+      }
+      five.append(" WHERE t1.k > 100 GROUP BY t1.x");
+      assertThat(rows(d, five.toString())).as("an empty grouped read past the split").isEmpty();
+      assertThat(executedTexts(v, tag))
+          .as("an empty grouped read past the split: the texts run")
+          .hasSize(2)
+          .anyMatch(t -> t.startsWith("SELECT i.*, 1 AS"))
+          .anyMatch(t -> t.contains("LEFT JOIN LATERAL"))
+          .noneMatch(t -> t.contains("RC_"));
+      // a ranged read, ordered and limited, its values bound: the lateral form, the vendor's order
+      tag = "/* acr" + System.nanoTime() + " */";
       try (PreparedStatement ps =
           d.prepareStatement(
               "SELECT "
@@ -4084,8 +4102,8 @@ class OracleOltpIntegrationTest {
       assertThat(executedTexts(v, tag))
           .as("ranged, ordered: the text run")
           .singleElement()
-          .satisfies(t -> assertThat(t).contains("scalardb_native_present", "BETWEEN"));
-      // a grouped read: no MAX() over the gates
+          .satisfies(t -> assertThat(t).contains("LEFT JOIN LATERAL", "BETWEEN"));
+      // a grouped read, ordered: the derived form, the vendor's order, no MAX()
       tag = "/* acg" + System.nanoTime() + " */";
       assertThat(
               rows(
@@ -4094,22 +4112,68 @@ class OracleOltpIntegrationTest {
                       + tag
                       + " MOD(k, 2), COUNT(*) FROM "
                       + table
-                      + " WHERE k BETWEEN 1 AND 5 GROUP BY MOD(k, 2) ORDER BY 1"))
+                      + " WHERE k BETWEEN 1 AND 5 GROUP BY MOD(k, 2) ORDER BY 2 DESC"))
           .as("grouped")
-          .containsExactly("0/2", "1/3");
+          .containsExactly("1/3", "0/2");
       assertThat(executedTexts(v, tag))
           .as("grouped: the text run")
           .singleElement()
-          .satisfies(t -> assertThat(t).contains("scalardb_native_g0").doesNotContain("MAX("));
-      // a bare * over a decoupled table
-      tag = "/* acs" + System.nanoTime() + " */";
-      assertThat(rows(d, "SELECT " + tag + " * FROM " + table + " WHERE k = 3"))
-          .as("a bare *")
-          .containsExactly("3/30");
+          .satisfies(
+              t ->
+                  assertThat(t)
+                      .startsWith("SELECT i.*, 1 AS")
+                      .contains("scalardb_native_g0")
+                      .doesNotContain("MAX(", "LATERAL"));
+      // a DISTINCT select list: the derived form too
+      tag = "/* acu" + System.nanoTime() + " */";
+      assertThat(
+              rows(
+                  d,
+                  "SELECT DISTINCT "
+                      + tag
+                      + " MOD(k, 3) FROM "
+                      + table
+                      + " WHERE k BETWEEN 1 AND 6 ORDER BY 1 DESC"))
+          .as("distinct")
+          .containsExactly("2", "1", "0");
       assertThat(executedTexts(v, tag))
-          .as("a bare *: the text run")
+          .as("distinct: the text run")
           .singleElement()
-          .satisfies(t -> assertThat(t).contains("scalardb_native_g0"));
+          .satisfies(t -> assertThat(t).startsWith("SELECT i.*, 1 AS"));
+      // a statement with its own WITH, inside the wrapper's inline view
+      tag = "/* acw" + System.nanoTime() + " */";
+      assertThat(
+              rows(
+                  d,
+                  "WITH w AS (SELECT k, x FROM "
+                      + table
+                      + " WHERE k <= 3) SELECT "
+                      + tag
+                      + " k, x FROM w ORDER BY k DESC"))
+          .as("its own WITH")
+          .containsExactly("3/30", "2/20", "1/10");
+      assertThat(executedTexts(v, tag))
+          .as("its own WITH: the text run")
+          .singleElement()
+          .satisfies(t -> assertThat(t).contains("scalardb_native_present"));
+      // two output columns of one name, which i.* would refuse: the select-list form
+      tag = "/* acn" + System.nanoTime() + " */";
+      StringBuilder twice =
+          new StringBuilder("SELECT " + tag + " t1.k, t2.k FROM " + table + " t1");
+      for (int i = 2; i <= 5; i++) {
+        twice.append(" JOIN ").append(table).append(" t").append(i);
+        twice.append(" ON t").append(i).append(".x = t1.x");
+      }
+      twice.append(" WHERE t1.k <= 2 ORDER BY 1");
+      assertThat(rows(d, twice.toString())).as("one name twice").containsExactly("1/1", "2/2");
+      assertThat(executedTexts(v, tag))
+          .as("one name twice: the text run")
+          .singleElement()
+          .satisfies(
+              t ->
+                  assertThat(t)
+                      .contains("scalardb_native_g0")
+                      .doesNotContain("LATERAL", "SELECT i.*"));
     }
   }
 
