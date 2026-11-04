@@ -4475,24 +4475,87 @@ public final class SqlAst {
   private static final String PRESENT = "scalardb_native_present";
 
   /**
-   * Returns the statement as written, the references {@code naming} names replaced, on the nullable
-   * side of a lateral join from one row of gates, one for each of {@code gates} (design 4.2
-   * "Oracle's gated form on a row of its own", todos 334 and 371): {@code SELECT s.*, g.* FROM
-   * (SELECT <gates> FROM dual) g LEFT JOIN LATERAL (SELECT i.*, 1 AS present FROM (<statement>) i)
-   * s ON 1 = 1}, so that the statement's columns come first, then its marker, NULL on the one row
-   * of an empty result, then the gates. Each gate is its text before its conjuncts, then, with
-   * {@code ranged}, each conjunct of the statement's WHERE clause on the reference's key columns,
-   * read as the gate's alias's, its placeholders bound there before the statement's own, then the
-   * text after. Without such a conjunct for a reference, a ranged gate is not made.
+   * Returns whether a query block of the statement groups or has a DISTINCT select list, which
+   * Oracle aggregates by sorting under a lateral view or a factored subquery: its gated form is the
+   * derived one instead (design 4.2 "Oracle's gated form on a row of its own", todo 371).
+   *
+   * @return whether the statement groups or selects DISTINCT anywhere
+   */
+  public boolean groupsOrDistinct() {
+    for (Select q : selects) {
+      if (q instanceof PlainSelect
+          && (((PlainSelect) q).getGroupBy() != null || ((PlainSelect) q).getDistinct() != null)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns whether the select list's output names are distinct, as {@code i.*} over the statement
+   * as an inline view needs them on Oracle (ORA-00918): each item's alias, else its column's name,
+   * else its expression's text, compared without case or quotes; false for a {@code *} of either
+   * kind and for anything but one plain select (todo 371).
+   *
+   * @return whether the output names are known and distinct
+   */
+  public boolean outputNamesUnique() {
+    if (!(statement instanceof PlainSelect)) {
+      return false;
+    }
+    Set<String> seen = new HashSet<>();
+    for (SelectItem<?> item : ((PlainSelect) statement).getSelectItems()) {
+      Expression x = item.getExpression();
+      if (x instanceof AllColumns) {
+        return false;
+      }
+      String name =
+          item.getAlias() != null
+              ? lowerUnquoted(item.getAlias().getName())
+              : x instanceof Column
+                  ? lowerUnquoted(((Column) x).getColumnName())
+                  : x.toString().replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+      if (!seen.add(name)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** The spellings of the gated form (todos 334, 369, 371). */
+  public enum GatedForm {
+    /** The gates appended to the statement's own select list, under MAX() where it groups. */
+    SELECT_LIST,
+    /** The statement on the nullable side of a lateral join from one row of gates. */
+    LATERAL,
+    /** The statement as a derived table, its rows carrying the gates. */
+    DERIVED
+  }
+
+  /**
+   * Returns the statement as written, the references {@code naming} names replaced, with a gate for
+   * each of {@code gates} (design 4.2 "Anchor-less reads as written behind a gate column" and
+   * "Oracle's gated form on a row of its own", todos 334 and 371), in {@code form}: {@link
+   * GatedForm#SELECT_LIST}, the gates appended to its select list, wrapped in {@code MAX()} where
+   * it groups or aggregates; {@link GatedForm#LATERAL}, {@code SELECT s.*, g.* FROM (SELECT <gates>
+   * FROM dual) g LEFT JOIN LATERAL (SELECT i.*, 1 AS present FROM (<statement>) i) s ON 1 = 1},
+   * whose marker is NULL on the one row of an empty result; {@link GatedForm#DERIVED}, {@code
+   * SELECT i.*, 1 AS present, <gates> FROM (<statement>) i}, the statement's plan kept, no row
+   * where it returns none. Each gate is its text before its conjuncts, then, with {@code ranged},
+   * each conjunct of the statement's WHERE clause on the reference's key columns, read as the
+   * gate's alias's, its placeholders bound where the gate stands, then the text after. Without such
+   * a conjunct for a reference, a ranged gate is not made.
    *
    * @param naming what to replace
    * @param gates each gate's reference and texts, in the gates' order
    * @param ranged whether each gate repeats its reference's key conjuncts
+   * @param form the spelling
    * @return the statement and the sources of its placeholders, or {@code null} where it is not one
-   *     plain select, a ranged gate has no conjunct, or the text cannot be rewritten
+   *     plain select, the select-list form meets a bare {@code *}, a ranged gate has no conjunct,
+   *     or the text cannot be rewritten
    */
   public @Nullable SplitText gated(
-      @Nullable Naming naming, Map<TableRef, KeyRange> gates, boolean ranged) {
+      @Nullable Naming naming, Map<TableRef, KeyRange> gates, boolean ranged, GatedForm form) {
     Token start = root.jjtGetFirstToken();
     if (start == null
         || gates.isEmpty()
@@ -4521,18 +4584,85 @@ public final class SqlAst {
         return null;
       }
     }
+    PlainSelect s = (PlainSelect) statement;
+    if (form == GatedForm.SELECT_LIST) {
+      for (SelectItem<?> item : s.getSelectItems()) {
+        if (item.getExpression() instanceof AllColumns
+            && !(item.getExpression() instanceof AllTableColumns)) {
+          // Oracle takes no bare * beside another item, and a table renamed without an alias of
+          // its name leaves no name to spell it out by
+          return null;
+        }
+      }
+    }
     keepLabels(from, to, Map.of());
     List<Integer> sources = new ArrayList<>();
     Emitter e = new Emitter(from, to, placeholders, sources);
-    e.text("SELECT s.*, g.* FROM (SELECT");
+    switch (form) {
+      case SELECT_LIST:
+        {
+          List<SelectItem<?>> items = s.getSelectItems();
+          Node lastItemNode = items.get(items.size() - 1).getASTNode();
+          Token lastItem = lastItemNode == null ? null : lastItemNode.jjtGetLastToken();
+          if (lastItem == null) {
+            return null;
+          }
+          boolean grouped = isGrouped(s);
+          e.tokens(start, lastItem);
+          if (!gateList(e, gates, ranged, grouped, true)) {
+            return null;
+          }
+          e.tokens(lastItem.next, null);
+          String text = e.text();
+          assert parses(text) : text;
+          return checked(text, sources);
+        }
+      case LATERAL:
+        e.text("SELECT s.*, g.* FROM (SELECT");
+        if (!gateList(e, gates, ranged, false, false)) {
+          return null;
+        }
+        e.text("FROM dual) g LEFT JOIN LATERAL (SELECT i.*, 1 AS");
+        e.text(engine.quote(PRESENT));
+        e.text("FROM (");
+        e.tokens(start, null);
+        // after a line comment the emitter opens a new line
+        e.text(") i) s ON 1 = 1");
+        return checked(e.text(), sources);
+      default:
+        e.text("SELECT i.*, 1 AS");
+        e.text(engine.quote(PRESENT));
+        if (!gateList(e, gates, ranged, false, true)) {
+          return null;
+        }
+        e.text("FROM (");
+        e.tokens(start, null);
+        e.text(") i");
+        return checked(e.text(), sources);
+    }
+  }
+
+  /**
+   * The gates of a select list, a comma before each but a first one without {@code commaFirst},
+   * under MAX() where {@code grouped}; false where a ranged gate has no conjunct.
+   */
+  private boolean gateList(
+      Emitter e,
+      Map<TableRef, KeyRange> gates,
+      boolean ranged,
+      boolean grouped,
+      boolean commaFirst) {
     int i = 0;
     for (Map.Entry<TableRef, KeyRange> g : gates.entrySet()) {
       List<Run> runs = ranged ? keyConjuncts(g.getKey(), g.getValue()) : List.of();
       if (ranged && runs.isEmpty()) {
-        return null;
+        return false;
       }
-      if (i > 0) {
+      if (i > 0 || commaFirst) {
         e.text(",");
+      }
+      if (grouped) {
+        e.text("MAX(");
       }
       e.text(g.getValue().before);
       for (Run r : runs) {
@@ -4540,18 +4670,13 @@ public final class SqlAst {
         e.run(r);
       }
       e.text(g.getValue().after);
+      if (grouped) {
+        e.text(")");
+      }
       e.text("AS");
       e.text(engine.quote(GATE + i++));
     }
-    e.text("FROM dual) g LEFT JOIN LATERAL (SELECT i.*, 1 AS");
-    e.text(engine.quote(PRESENT));
-    e.text("FROM (");
-    e.tokens(start, null);
-    // after a line comment the emitter opens a new line
-    e.text(") i) s ON 1 = 1");
-    String text = e.text();
-    assert parses(text) : text;
-    return checked(text, sources);
+    return true;
   }
 
   /** The label of a copy's appended select item {@code i}. */
