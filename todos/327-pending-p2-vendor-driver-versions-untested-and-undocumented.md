@@ -276,3 +276,8 @@ the supported versions are documented only once CI verifies them.
   5 lines of ci.yml and 15 of Engines.java in all. The push and the PR are on the user's word in the
   19c session; the PR's CI, the 19c job above all, is the proof. The records keep naming the design
   session 89 (c4 is only its message address).
+- 2026-11-04: origin/main (146d0bf) merged into the local main on the user's word, a9bbf08 (parents
+  806e07f and 146d0bf; 44 files, no conflict; `Engines.java` and `InlineIntegrationTest.java` carry
+  both sides, 77ece28's inline isolation and the squash's catalog tracking); the test fixtures and
+  the integration tests compile (warnings only). The local main is 47 commits past origin/main,
+  nothing pushed.
