@@ -266,6 +266,12 @@ PostgreSQL row counts and the vendor's rows; Q18's 2.0x in autocommit, the gated
 cost) are in todo 369's findings, and the no-row row of the PostgreSQL gated form is designed
 there. Landing on the user's word; the cloud SF 3 Oracle run waits on it.
 
+### 2026-11-04: the Oracle TPC-H harness fixes on main (f83d6d4)
+
+Landed by 28 on the user's "land it" typed in 28's session, rebased onto a6efc06; my range-diff of
+9befeab..44e2dd7 against a6efc06..f83d6d4 shows the commit identical. Nothing pushed. The cloud
+SF 3 Oracle TPC-H run is the user's to start with 6e.
+
 ## Acceptance Criteria
 
 - [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
