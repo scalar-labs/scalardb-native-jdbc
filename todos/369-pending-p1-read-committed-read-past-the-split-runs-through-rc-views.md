@@ -199,6 +199,16 @@ Landed by 28 on the user's "land it" typed in 28's session, rebased onto 05bc303
 0835b18..1a6db05 against 05bc303..9b63126 shows the commit identical. Nothing pushed. Left: the
 push's CI for the other engines; the two candidates above, the user's call.
 
+### 2026-11-04: the proof, 6e's PostgreSQL READ COMMITTED SF 3 rerun from 87c0b2b (20261104-2248-pg, decoupled cell, relayed by 28)
+
+BenchBase (c)/(a) 0.97 (0.10 from the build with todo 369 alone). The check in a transaction:
+every query 0.98-1.03x but Q1 at 1.16x; Q20 1.00x (was 765x), Q19 1.01x, Q5 1.01x, Q10 1.00x. In
+autocommit 0.99-1.05x, Q1 1.10x. Every execution the vendor's rows. The inline cell runs next; the
+reports are fetched with it (`a/results/bb-rc-d0-benchbase-postgresql.md` on the client). Q1's
+1.10-1.16x is the one residual above noise: its gated statement is the whole-table lateral form
+over lineitem's 18M rows; an EXPLAIN ANALYZE of the plain and the wrapped text at that scale is
+the next look if it holds in the inline cell.
+
 ## Acceptance Criteria
 
 - [x] A READ COMMITTED read past the split runs as written behind whole-table gates on PostgreSQL

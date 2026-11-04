@@ -146,6 +146,16 @@ Landed by 28 on the user's "land it" typed in 28's session, rebased onto a22856c
 a9d81a8..51a27c9 against a22856c..87c0b2b shows all three commits identical. Nothing pushed. Left:
 the push's CI; the cloud READ COMMITTED SF 3 cell from this main, the proof for 370-373 together.
 
+### 2026-11-04: the proof, 6e's PostgreSQL READ COMMITTED SF 3 rerun from 87c0b2b (20261104-2248-pg, decoupled cell, relayed by 28)
+
+BenchBase (c)/(a) 0.97 (0.10 from the build with todo 369 alone). The check in a transaction:
+every query 0.98-1.03x but Q1 at 1.16x; Q20 1.00x (was 765x), Q19 1.01x, Q5 1.01x, Q10 1.00x. In
+autocommit 0.99-1.05x, Q1 1.10x. Every execution the vendor's rows. The inline cell runs next; the
+reports are fetched with it (`a/results/bb-rc-d0-benchbase-postgresql.md` on the client). Q1's
+1.10-1.16x is the one residual above noise: its gated statement is the whole-table lateral form
+over lineitem's 18M rows; an EXPLAIN ANALYZE of the plain and the wrapped text at that scale is
+the next look if it holds in the inline cell.
+
 ## Acceptance Criteria
 
 - [x] The anchor-less split read at READ COMMITTED takes the gated form with range or whole-table
@@ -153,7 +163,9 @@ the push's CI; the cloud READ COMMITTED SF 3 cell from this main, the proof for 
       2026-11-04)
 - [ ] Full check passes on all engines
 - [ ] TPC-C READ COMMITTED cells on PostgreSQL (local, then 6e's) with StockLevel and Delivery
-      better or unchanged; Q1 and the decoupled-only TPC-H queries at about the vendor's cost
+      better or unchanged (local done; 6e's pending); Q1 and the decoupled-only TPC-H queries at
+      about the vendor's cost (done 2026-11-04: Q3, Q4, Q6, Q10, Q12, Q16, Q19 within 0.98-1.03x, Q1
+      1.10-1.16x)
 
 ## Work Log
 
