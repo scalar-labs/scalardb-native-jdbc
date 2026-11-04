@@ -193,6 +193,12 @@ laptop's load; to see in a quiet run.
   skip (a table whose gate closed within the last second keeps the split for that second) would
   bound the loss there. Measured items both.
 
+### 2026-11-04: on main (9b63126)
+
+Landed by 28 on the user's "land it" typed in 28's session, rebased onto 05bc303; my range-diff of
+0835b18..1a6db05 against 05bc303..9b63126 shows the commit identical. Nothing pushed. Left: the
+push's CI for the other engines; the two candidates above, the user's call.
+
 ## Acceptance Criteria
 
 - [x] A READ COMMITTED read past the split runs as written behind whole-table gates on PostgreSQL

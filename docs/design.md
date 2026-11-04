@@ -1331,7 +1331,7 @@ union as a derived table.
   statement whose split would read any reference through `rc_T` taking the whole-table gates
   instead, the second for a whole-table gate on a scan-shaped anchor-less read, which 4.2 declines
   today for the OLTP case where the gate is closed more often than open; both measured items for the
-  user.
+  user. On main as 9b63126 (2026-11-04, the user's word; range-diff identical).
 
   *The key-only read on an inline table at READ COMMITTED as the CASE copy (todo 364, 2026-10-31).*
   A read of an inline table whose predicate names only the table's key columns, every column of the
