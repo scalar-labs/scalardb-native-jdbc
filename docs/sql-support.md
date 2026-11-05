@@ -154,7 +154,8 @@ ScalarDB table, the key above all, `INTEGER` or `BIGINT` rather than `SMALLINT`,
 
 - MySQL has no `RETURNING`.
 - An `INSERT` gives each key column a literal or a placeholder of the column's type, or leaves out an
-  `AUTO_INCREMENT` key; not NULL or 0 for it.
+  `AUTO_INCREMENT` key; not NULL or 0 for it. A one-row `INSERT` that gives a column as `DEFAULT`,
+  as Hibernate does an `IDENTITY` key on Oracle, runs as if it left that column out.
 - The session needs a strict `sql_mode`, and the table no `BEFORE INSERT` trigger.
 
 ### Types on MySQL and MariaDB

@@ -66,6 +66,28 @@ class WritesTest {
         true);
   }
 
+  /** A column given as DEFAULT is left out, a key the database generates (Hibernate on Oracle). */
+  @Test
+  void withoutDefaults_leavesOutTheColumnsGivenAsDefault() {
+    assertThat(withoutDefaults("insert into ns.t (name,qty,version,id) values (?,?,?,default)"))
+        .isEqualTo("insert into ns.t (name, qty, version) values (?, ?, ?)");
+    assertThat(withoutDefaults("INSERT INTO ns.t (\"a,b\", id, x) VALUES (?, DEFAULT, 'DEFAULT')"))
+        .isEqualTo("INSERT INTO ns.t (\"a,b\", x) VALUES (?, 'DEFAULT')");
+    // nothing to leave out, nothing left, more than one row, no column list
+    assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (?, ?)")).isNull();
+    assertThat(withoutDefaults("INSERT INTO ns.t (id) VALUES (DEFAULT)")).isNull();
+    assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (DEFAULT, 1), (DEFAULT, 2)"))
+        .isNull();
+    assertThat(withoutDefaults("INSERT INTO ns.t VALUES (DEFAULT, 1)")).isNull();
+  }
+
+  private static @Nullable String withoutDefaults(String sql) {
+    StatementShape plain =
+        Writes.withoutDefaults(
+            StatementShape.of(SqlAst.parse(sql, Engine.ORACLE).orElseThrow()).orElseThrow());
+    return plain == null ? null : plain.ast().source();
+  }
+
   private static List<String> plan(String sql) throws Exception {
     return plan(table(), sql);
   }

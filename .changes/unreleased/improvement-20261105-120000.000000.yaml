@@ -1,0 +1,3 @@
+kind: improvement
+body: 'A one-row INSERT of a ScalarDB table that gives a column as `DEFAULT`, such as `INSERT INTO item (name, id) VALUES (?, DEFAULT)`, now runs as if it left the column out, so Hibernate''s `IDENTITY` keys work on Oracle, whose dialect writes them so. The driver had refused it with `0AN01`. A new sample, `samples/crud-jpa`, runs Spring Data JPA and Hibernate through the driver on every engine.'
+time: 2026-11-05T12:00:00.000000+09:00
