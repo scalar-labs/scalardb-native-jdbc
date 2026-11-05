@@ -66,6 +66,44 @@ class WritesTest {
         true);
   }
 
+  /** A column given as DEFAULT is left out, a key the database generates (Hibernate on Oracle). */
+  @Test
+  void withoutDefaults_leavesOutTheColumnsGivenAsDefault() throws Exception {
+    assertThat(withoutDefaults("insert into ns.t (x,id) values (?,default)"))
+        .isEqualTo("insert into ns.t (x) values (?)");
+    assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (DEFAULT, 'DEFAULT')"))
+        .isEqualTo("INSERT INTO ns.t (x) VALUES ('DEFAULT')");
+    // a quoted name, split as one
+    assertThat(withoutDefaults("INSERT INTO ns.t (\"x\", id) VALUES (?, DEFAULT)"))
+        .isEqualTo("INSERT INTO ns.t (\"x\") VALUES (?)");
+    // nothing to leave out, nothing left, more than one row, no column list
+    assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (?, ?)")).isNull();
+    assertThat(withoutDefaults("INSERT INTO ns.t (id) VALUES (DEFAULT)")).isNull();
+    assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (DEFAULT, 1), (DEFAULT, 2)"))
+        .isNull();
+    assertThat(withoutDefaults("INSERT INTO ns.t VALUES (DEFAULT, 1)")).isNull();
+    // an unknown or a repeated column stays the database's error (Copilot's review of PR #13)
+    assertThat(withoutDefaults("INSERT INTO ns.t (x, nonexistent) VALUES (?, DEFAULT)")).isNull();
+    assertThat(withoutDefaults("INSERT INTO ns.t (x, id, x) VALUES (?, DEFAULT, ?)")).isNull();
+  }
+
+  private static @Nullable String withoutDefaults(String sql) throws Exception {
+    StatementShape plain =
+        Writes.withoutDefaults(
+            StatementShape.of(SqlAst.parse(sql, Engine.POSTGRESQL).orElseThrow()).orElseThrow(),
+            Engine.POSTGRESQL,
+            table());
+    return plain == null ? null : plain.ast().source();
+  }
+
+  /** A metadata column given as DEFAULT is refused still, as any write naming one (89's review). */
+  @Test
+  void anInlineTablesMetadataColumn_givenAsDefault_isRefused() {
+    assertThatThrownBy(() -> plan(inline(), "INSERT INTO t (id, tx_state) VALUES (?, DEFAULT)"))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("metadata column");
+  }
+
   private static List<String> plan(String sql) throws Exception {
     return plan(table(), sql);
   }

@@ -488,6 +488,13 @@ final class Writes {
       }
       inlineRefusals(engine, shape, t, tables);
     }
+    // after the inline refusals, so that a metadata column given as DEFAULT is refused still
+    if (shape.kind() == StatementShape.Kind.INSERT) {
+      StatementShape plain = withoutDefaults(shape, engine, t);
+      if (plain != null) {
+        return plan(engine, plain, t, tables, snapshot, locks, vendor, columns);
+      }
+    }
     if (vendor != null && shape.kind() == StatementShape.Kind.INSERT) {
       String why = otherKeys(vendor, n);
       if (why != null) {
@@ -534,6 +541,104 @@ final class Writes {
     String source = ast.source();
     SqlAst listed = ast.reparse(source.substring(0, at) + list + source.substring(at));
     return listed == null ? null : StatementShape.of(listed).orElse(null);
+  }
+
+  /**
+   * An INSERT of one row that lists its columns, with each column given as the keyword {@code
+   * DEFAULT} left out, which is what {@code DEFAULT} means there: Hibernate's Oracle dialect writes
+   * an identity key so, {@code (name, id) VALUES (?, DEFAULT)}, and a key the database generates is
+   * one the INSERT leaves out. No placeholder moves. {@code null} when there is none to leave out,
+   * every column is one, a column it would leave out is not one of the table's own or a column is
+   * named twice, which stay the database's errors (Copilot's review of PR #13), or the text cannot
+   * be rewritten.
+   */
+  static @Nullable StatementShape withoutDefaults(
+      StatementShape shape, Engine engine, TableInfo t) {
+    SqlAst ast = shape.ast();
+    if (shape.insertColumns().isEmpty()
+        || !(((Insert) ast.statement()).getSelect() instanceof Values)) {
+      return null;
+    }
+    ExpressionList<?> row = ((Values) ((Insert) ast.statement()).getSelect()).getExpressions();
+    if (!(row instanceof ParenthesedExpressionList<?>) || row.isEmpty()) {
+      return null;
+    }
+    String source = ast.source();
+    List<String> values = new ArrayList<>();
+    for (Object v : row) {
+      int[] span = ast.span((Expression) v);
+      if (span == null) {
+        return null;
+      }
+      values.add(source.substring(span[0], span[1]));
+    }
+    if (values.stream().noneMatch(v -> v.equalsIgnoreCase("DEFAULT"))
+        || values.stream().allMatch(v -> v.equalsIgnoreCase("DEFAULT"))) {
+      return null;
+    }
+    List<String> names = shape.insertColumns();
+    if (names.size() != values.size()) {
+      return null;
+    }
+    Set<String> data = new HashSet<>();
+    for (String c : t.dataColumns()) {
+      data.add(engine.columnKey(c));
+    }
+    Set<String> seen = new HashSet<>();
+    for (int i = 0; i < names.size(); i++) {
+      String key = engine.columnKey(names.get(i));
+      if (!seen.add(key) || (values.get(i).equalsIgnoreCase("DEFAULT") && !data.contains(key))) {
+        return null;
+      }
+    }
+    // the column list's text: from the first parenthesis after the table's name to its last one
+    // before VALUES, split at its commas outside quotes
+    int[] name = ast.nameSpan(ast.tableRefs().get(0));
+    int rows = rowsStart(ast);
+    int[] first = ast.span((Expression) row.get(0));
+    int[] last = ast.span((Expression) row.get(row.size() - 1));
+    if (name == null || rows < 0 || first == null || last == null) {
+      return null;
+    }
+    int open = source.indexOf('(', name[1]);
+    int close = source.lastIndexOf(')', rows);
+    if (open < 0 || close < open) {
+      return null;
+    }
+    List<String> listed = new ArrayList<>();
+    char quote = 0;
+    int from = open + 1;
+    for (int i = from; i < close; i++) {
+      char c = source.charAt(i);
+      if (quote != 0) {
+        quote = c == quote ? 0 : quote;
+      } else if (c == '"' || c == '`' || c == '[') {
+        quote = c == '[' ? ']' : c;
+      } else if (c == ',') {
+        listed.add(source.substring(from, i).trim());
+        from = i + 1;
+      }
+    }
+    listed.add(source.substring(from, close).trim());
+    if (listed.size() != values.size()) {
+      return null;
+    }
+    StringJoiner keptColumns = new StringJoiner(", ");
+    StringJoiner keptValues = new StringJoiner(", ");
+    for (int i = 0; i < values.size(); i++) {
+      if (!values.get(i).equalsIgnoreCase("DEFAULT")) {
+        keptColumns.add(listed.get(i));
+        keptValues.add(values.get(i));
+      }
+    }
+    SqlAst plain =
+        ast.reparse(
+            source.substring(0, open + 1)
+                + keptColumns
+                + source.substring(close, first[0])
+                + keptValues
+                + source.substring(last[1]));
+    return plain == null ? null : StatementShape.of(plain).orElse(null);
   }
 
   /**

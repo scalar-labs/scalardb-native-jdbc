@@ -1,0 +1,65 @@
+package com.scalar.db.nativejdbc.samples.jpa;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
+
+/** A transfer between items in one transaction, rolled back when the source has too little. */
+@Service
+public class ItemService {
+
+  private final ItemRepository items;
+
+  public ItemService(ItemRepository items) {
+    this.items = items;
+  }
+
+  /** Adds {@code qty} to an item, read under a write lock and written by Hibernate's flush. */
+  @Transactional
+  public void restock(long id, int qty) {
+    // locked first, so that no other writer, ScalarDB's included, changes it in between
+    Item item = items.findLockedById(id).orElseThrow();
+    item.setQty(item.getQty() + qty);
+  }
+
+  /**
+   * The total quantity, read at SERIALIZABLE: no transaction's writes are half seen. A read-write
+   * transaction, as one that also writes from what it read would be; {@link #totalReadOnly} is the
+   * one to use for a read alone.
+   */
+  @Transactional(isolation = Isolation.SERIALIZABLE)
+  public int total() {
+    int total = 0;
+    for (Item item : items.findAll()) {
+      total += item.getQty();
+    }
+    return total;
+  }
+
+  /**
+   * As {@link #total}, in a read-only transaction: declare a transaction that only reads so, and at
+   * SERIALIZABLE on MySQL, MariaDB and SQL Server it reads without the driver's locks.
+   */
+  @Transactional(isolation = Isolation.SERIALIZABLE, readOnly = true)
+  public int totalReadOnly() {
+    return total();
+  }
+
+  /**
+   * Moves {@code qty} from one item to another.
+   *
+   * @throws IllegalStateException when the source has too little, after which nothing changed
+   */
+  @Transactional
+  public void transfer(long from, long to, int qty) {
+    Item source = items.findById(from).orElseThrow();
+    Item target = items.findById(to).orElseThrow();
+    target.setQty(target.getQty() + qty);
+    source.setQty(source.getQty() - qty);
+    // flushed before the check, so that the rollback has something to undo
+    items.flush();
+    if (source.getQty() < 0) {
+      throw new IllegalStateException("item " + from + " has too little");
+    }
+  }
+}

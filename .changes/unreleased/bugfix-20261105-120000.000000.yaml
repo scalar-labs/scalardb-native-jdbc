@@ -1,0 +1,3 @@
+kind: bugfix
+body: 'Hibernate''s `IDENTITY` keys now work on Oracle, so Spring Data JPA and Hibernate applications can insert into a ScalarDB table there. Hibernate''s Oracle dialect gives the key column as `DEFAULT`, such as `INSERT INTO item (name, id) VALUES (?, DEFAULT)`, which the driver refused with `0AN01`; a one-row INSERT that gives a column as `DEFAULT` now runs as if it left that column out. A new sample, `samples/crud-jpa`, runs Spring Data JPA and Hibernate through the driver on every engine.'
+time: 2026-11-05T12:00:00.000000+09:00

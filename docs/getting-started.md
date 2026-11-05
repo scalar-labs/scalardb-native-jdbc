@@ -613,5 +613,6 @@ full list.
 - [Setting up tables](setting-up-tables.md): the setup and its check in full, and adding a table
   while applications run.
 - [Configuration](configuration.md), [Errors](errors.md) and [snsql](snsql.md).
-- `samples/crud-jdbc` and `samples/crud-spring-data-jdbc`: a connection pool and Spring Data JDBC.
+- `samples/crud-jdbc`, `samples/crud-spring-data-jdbc` and `samples/crud-jpa`: a connection pool,
+  Spring Data JDBC, and Spring Data JPA with Hibernate.
 - [docs/design.md](design.md): how the driver works.
