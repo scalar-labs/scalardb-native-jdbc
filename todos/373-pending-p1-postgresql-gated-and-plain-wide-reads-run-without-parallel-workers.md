@@ -134,6 +134,15 @@ small, left as the one residual to read with an EXPLAIN ANALYZE if it matters la
 torn down; the Oracle rerun from 87c0b2b (READ COMMITTED both layouts and SNAPSHOT decoupled, for
 Q16) is planned at bdcd5f3 and waits on the user's apply.
 
+### 2026-11-05: a spotbugs follow-up, 84eef8f on `spotbugs-gated`
+
+Session a8 found `check` failing on main in `spotbugsMain`: an unneeded
+`@SuppressFBWarnings(SQL_INJECTION_JDBC)` on `Proxies$StatementHandler.gated`'s dispatcher, left
+by 87c0b2b's split of the method (the dispatcher runs no text). 28's 84eef8f (on 1dbb213) drops
+the five lines of that annotation and keeps the one on the method that runs the text; spotbugs
+(main, test, integrationTest), spotless and the unit tests green per 28. Reviewed from `git show`:
+the diff is the five deleted lines, nothing else. Mergeable; landing on the user's word.
+
 ## Acceptance Criteria
 
 - [x] A gated statement with a whole-table gate and a plain statement past the split run with the
