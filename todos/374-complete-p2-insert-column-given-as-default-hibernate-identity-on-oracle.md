@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p2
 issue_id: "374"
 tags: [review, writes, oracle, hibernate, samples]
@@ -117,12 +117,20 @@ optional: the dropped test case with a quoted name holding a comma (`"a,b"`) was
 of the quoted split; a quoted name of the test table, `"x"`, would keep it covered. Landing on
 the user's word with PR #13.
 
+### 2026-11-05: merged (PR #13, the squash e6c0450 on origin/main)
+
+Merged by the user. The squash's tree equals the branch head 52f0a79's (d9dfed1, ef4be21,
+8409988, 94c131d the bugfix changelog entry, 9ced240, and 52f0a79, which took the optional nit: a
+quoted column name in the split's test), verified here by tree hash. a8 merged origin/main into
+the local main as 39b11e0 without conflict (14 files, +687); on it WritesTest 27/27 and the
+sample on PostgreSQL and Oracle pass per a8. Nothing pushed from local main.
+
 ## Acceptance Criteria
 
 - [x] The rewrite placed after the inline refusals (or a dropped metadata column still refused),
       with a unit case (8ab3cad, 2026-11-05)
-- [ ] CI on the PR green on MySQL, MariaDB and SQL Server too
-- [ ] `samples/crud-jpa` on every engine and both layouts (done locally by a8)
+- [x] CI on the PR green on MySQL, MariaDB and SQL Server too (PR #13's checks, merged 2026-11-05)
+- [x] `samples/crud-jpa` on every engine and both layouts (done locally by a8)
 
 ## Work Log
 
