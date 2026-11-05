@@ -92,6 +92,31 @@ nine checks in progress; on that base WritesTest 27/27 and the sample on Postgre
 pass per a8. The local `crud-jpa` (8ab3cad on local main) is unchanged. The merge waits on CI and
 the user's word.
 
+### 2026-11-05: Copilot's comment on PR #13 and a8's 9ced240 (on `crud-jpa-pr`, over 94c131d)
+
+Copilot (discussion_r4476783635), rightly: `withoutDefaults` dropped a DEFAULT column without
+checking it, so `INSERT INTO t (id, nonexistent) VALUES (?, DEFAULT)` became `(id) VALUES (?)` and
+could commit instead of reporting the unknown column, and `(id, id, x) VALUES (?, DEFAULT, ?)`
+lost its duplicate-column error. 94c131d, pushed on the user's word, made the changelog entry a
+bugfix. 9ced240: `withoutDefaults(shape, engine, t)` returns null, the statement left as written
+for the database's error, unless every column it would drop is one of `t.dataColumns()` and no
+listed column repeats, compared by `engine.columnKey` on `shape.insertColumns()` against
+`t.dataColumns()`; a kept column is not checked, an unknown one reaching the vendor as before.
+Tests: the unknown and repeated cases added, the helper parsing as PostgreSQL (the test table's
+columns lower-case, Oracle resolving unquoted names upper); WritesTest 27/27; the sample on
+Oracle, PostgreSQL and MySQL, both layouts.
+
+Review (read from `git show 9ced240`): mergeable. (1) `t.dataColumns()` is the right set on every
+layout: the user's columns, keys included, in ordinal order, metadata columns excluded on inline,
+the same on a created or an imported table; `insertColumns()` holds resolved names
+(`resolveIdentifier`: unquoted names folded as the engine folds them, quoted ones as written), and
+`columnKey` lower-cases where the engine ignores case, the comparison `inlineRefusals` already
+makes between the same two sets. (2) Nothing lost by not checking the kept columns: an unknown
+kept column reaches the vendor's error, and the repeat check covers every listed name. Nit,
+optional: the dropped test case with a quoted name holding a comma (`"a,b"`) was the only cover
+of the quoted split; a quoted name of the test table, `"x"`, would keep it covered. Landing on
+the user's word with PR #13.
+
 ## Acceptance Criteria
 
 - [x] The rewrite placed after the inline refusals (or a dropped metadata column still refused),
