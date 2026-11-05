@@ -13,6 +13,9 @@ hikaricp = "4.0.3"
 picocli = "4.7.7"
 # The Spring Data JDBC sample (docs/plans/proxy-step.md, 9c), on the Spring Framework line it needs
 spring-data-jdbc = "4.1.1"
+# The Spring Data JPA sample, on the same release train, and the Hibernate line it is built with
+spring-data-jpa = "4.1.1"
+hibernate = "7.4.14.Final"
 # The shell's line editor; JLine 4 is compiled for Java 11
 jline = "4.4.7"
 # Vendor JDBC drivers: the application supplies its own; these are the versions the tests run
@@ -51,6 +54,8 @@ logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "lo
 hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikaricp" }
 picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
 spring-data-jdbc = { module = "org.springframework.data:spring-data-jdbc", version.ref = "spring-data-jdbc" }
+spring-data-jpa = { module = "org.springframework.data:spring-data-jpa", version.ref = "spring-data-jpa" }
+hibernate-core = { module = "org.hibernate.orm:hibernate-core", version.ref = "hibernate" }
 jline-reader = { module = "org.jline:jline-reader", version.ref = "jline" }
 jline-terminal = { module = "org.jline:jline-terminal", version.ref = "jline" }
 jline-terminal-jni = { module = "org.jline:jline-terminal-jni", version.ref = "jline" }
