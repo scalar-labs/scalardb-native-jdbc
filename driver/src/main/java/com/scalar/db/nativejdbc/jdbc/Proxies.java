@@ -1923,11 +1923,6 @@ public final class Proxies {
      * other than {@code executeQuery}, a scrollable or unwrapped result, a bound stream, or a
      * transaction that found the tables clear, which runs the plain statement.
      */
-    @SuppressFBWarnings(
-        value = "SQL_INJECTION_JDBC",
-        justification =
-            "the application's own statement with the driver's gates, and the driver's coarse"
-                + " checks, their names quoted from the catalog")
     private @Nullable Object gated(
         Object proxy, Router.Route one, String name, boolean takesSql, boolean marks)
         throws Throwable {
