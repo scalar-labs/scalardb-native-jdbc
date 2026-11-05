@@ -476,12 +476,6 @@ final class Writes {
       throw refused(
           tables, "RETURNING on an UPDATE or DELETE of a ScalarDB table is not supported");
     }
-    if (shape.kind() == StatementShape.Kind.INSERT) {
-      StatementShape plain = withoutDefaults(shape);
-      if (plain != null) {
-        return plan(engine, plain, t, tables, snapshot, locks, vendor, columns);
-      }
-    }
     Names n = new Names(engine, t);
     if (t.layout() == Layout.INLINE) {
       if (vendor != null
@@ -493,6 +487,13 @@ final class Writes {
         }
       }
       inlineRefusals(engine, shape, t, tables);
+    }
+    // after the inline refusals, so that a metadata column given as DEFAULT is refused still
+    if (shape.kind() == StatementShape.Kind.INSERT) {
+      StatementShape plain = withoutDefaults(shape);
+      if (plain != null) {
+        return plan(engine, plain, t, tables, snapshot, locks, vendor, columns);
+      }
     }
     if (vendor != null && shape.kind() == StatementShape.Kind.INSERT) {
       String why = otherKeys(vendor, n);

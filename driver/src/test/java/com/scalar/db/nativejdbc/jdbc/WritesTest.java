@@ -81,6 +81,14 @@ class WritesTest {
     assertThat(withoutDefaults("INSERT INTO ns.t VALUES (DEFAULT, 1)")).isNull();
   }
 
+  /** A metadata column given as DEFAULT is refused still, as any write naming one (89's review). */
+  @Test
+  void anInlineTablesMetadataColumn_givenAsDefault_isRefused() {
+    assertThatThrownBy(() -> plan(inline(), "INSERT INTO t (id, tx_state) VALUES (?, DEFAULT)"))
+        .isInstanceOf(SQLException.class)
+        .hasMessageContaining("metadata column");
+  }
+
   private static @Nullable String withoutDefaults(String sql) {
     StatementShape plain =
         Writes.withoutDefaults(
