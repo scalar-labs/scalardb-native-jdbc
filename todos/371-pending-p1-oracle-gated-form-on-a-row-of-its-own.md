@@ -271,6 +271,18 @@ cloud Oracle rerun from 87c0b2b or later, SNAPSHOT cells included, is the proof,
 to the user beside the READ COMMITTED cells. Q21 and Q9 at 1.1-1.2x are not explained yet; their
 statements' gets and CPU against the vendor's are the next look if the rerun keeps them.
 
+### 2026-11-05: 6e's Oracle 19c READ COMMITTED SF 3 decoupled cell from 87c0b2b (20261105-1825-ora19, relayed by 28)
+
+RDS SE2, the first Oracle cell with todos 370-373 in: BenchBase (c)/(a) 0.99; every check
+execution the vendor's rows; in a transaction every query 0.99-1.04x but Q12 at 1.23x (2,113
+against 1,713 ms), Q16 1.01x; in autocommit 0.99-1.05x, Q12 1.27x, Q21 1.05x. The report is on the
+client (`b/results/bb-rc-d0-benchbase-oracle.md`), fetched later with the inline cell and the
+SNAPSHOT decoupled stack (for Q16, due about 13:30 UTC). Q12 is a two-table grouped join of
+orders and lineitem with ranges on non-key columns, so at READ COMMITTED within the split it takes
+todo 372's form on Oracle: whole-table gates (no key range) on todo 371's derived wrapper; about
+1.0x locally at SF 0.1. To read from the run's `server.txt` when fetched: the statement's plan and
+gets against the vendor's, whether the derived wrapper's plan or the gates cost the quarter.
+
 ## Acceptance Criteria
 
 - [x] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
