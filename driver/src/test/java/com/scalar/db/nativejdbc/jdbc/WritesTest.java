@@ -73,6 +73,9 @@ class WritesTest {
         .isEqualTo("insert into ns.t (x) values (?)");
     assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (DEFAULT, 'DEFAULT')"))
         .isEqualTo("INSERT INTO ns.t (x) VALUES ('DEFAULT')");
+    // a quoted name, split as one
+    assertThat(withoutDefaults("INSERT INTO ns.t (\"x\", id) VALUES (?, DEFAULT)"))
+        .isEqualTo("INSERT INTO ns.t (\"x\") VALUES (?)");
     // nothing to leave out, nothing left, more than one row, no column list
     assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (?, ?)")).isNull();
     assertThat(withoutDefaults("INSERT INTO ns.t (id) VALUES (DEFAULT)")).isNull();
