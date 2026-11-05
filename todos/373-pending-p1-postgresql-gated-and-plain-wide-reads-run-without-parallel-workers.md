@@ -143,6 +143,9 @@ the five lines of that annotation and keeps the one on the method that runs the 
 (main, test, integrationTest), spotless and the unit tests green per 28. Reviewed from `git show`:
 the diff is the five deleted lines, nothing else. Mergeable; landing on the user's word.
 
+The spotbugs fix on main as 6a40dc6 (2026-11-05, the user's "land it" in 28's session; my range-diff
+against 84eef8f identical); `check` passes `spotbugsMain` on main again; a8 told.
+
 ## Acceptance Criteria
 
 - [x] A gated statement with a whole-table gate and a plain statement past the split run with the
