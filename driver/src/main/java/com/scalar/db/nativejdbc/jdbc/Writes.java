@@ -490,7 +490,7 @@ final class Writes {
     }
     // after the inline refusals, so that a metadata column given as DEFAULT is refused still
     if (shape.kind() == StatementShape.Kind.INSERT) {
-      StatementShape plain = withoutDefaults(shape);
+      StatementShape plain = withoutDefaults(shape, engine, t);
       if (plain != null) {
         return plan(engine, plain, t, tables, snapshot, locks, vendor, columns);
       }
@@ -548,9 +548,12 @@ final class Writes {
    * DEFAULT} left out, which is what {@code DEFAULT} means there: Hibernate's Oracle dialect writes
    * an identity key so, {@code (name, id) VALUES (?, DEFAULT)}, and a key the database generates is
    * one the INSERT leaves out. No placeholder moves. {@code null} when there is none to leave out,
-   * every column is one, or the text cannot be rewritten.
+   * every column is one, a column it would leave out is not one of the table's own or a column is
+   * named twice, which stay the database's errors (Copilot's review of PR #13), or the text cannot
+   * be rewritten.
    */
-  static @Nullable StatementShape withoutDefaults(StatementShape shape) {
+  static @Nullable StatementShape withoutDefaults(
+      StatementShape shape, Engine engine, TableInfo t) {
     SqlAst ast = shape.ast();
     if (shape.insertColumns().isEmpty()
         || !(((Insert) ast.statement()).getSelect() instanceof Values)) {
@@ -572,6 +575,21 @@ final class Writes {
     if (values.stream().noneMatch(v -> v.equalsIgnoreCase("DEFAULT"))
         || values.stream().allMatch(v -> v.equalsIgnoreCase("DEFAULT"))) {
       return null;
+    }
+    List<String> names = shape.insertColumns();
+    if (names.size() != values.size()) {
+      return null;
+    }
+    Set<String> data = new HashSet<>();
+    for (String c : t.dataColumns()) {
+      data.add(engine.columnKey(c));
+    }
+    Set<String> seen = new HashSet<>();
+    for (int i = 0; i < names.size(); i++) {
+      String key = engine.columnKey(names.get(i));
+      if (!seen.add(key) || (values.get(i).equalsIgnoreCase("DEFAULT") && !data.contains(key))) {
+        return null;
+      }
     }
     // the column list's text: from the first parenthesis after the table's name to its last one
     // before VALUES, split at its commas outside quotes

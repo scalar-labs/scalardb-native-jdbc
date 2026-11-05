@@ -68,17 +68,29 @@ class WritesTest {
 
   /** A column given as DEFAULT is left out, a key the database generates (Hibernate on Oracle). */
   @Test
-  void withoutDefaults_leavesOutTheColumnsGivenAsDefault() {
-    assertThat(withoutDefaults("insert into ns.t (name,qty,version,id) values (?,?,?,default)"))
-        .isEqualTo("insert into ns.t (name, qty, version) values (?, ?, ?)");
-    assertThat(withoutDefaults("INSERT INTO ns.t (\"a,b\", id, x) VALUES (?, DEFAULT, 'DEFAULT')"))
-        .isEqualTo("INSERT INTO ns.t (\"a,b\", x) VALUES (?, 'DEFAULT')");
+  void withoutDefaults_leavesOutTheColumnsGivenAsDefault() throws Exception {
+    assertThat(withoutDefaults("insert into ns.t (x,id) values (?,default)"))
+        .isEqualTo("insert into ns.t (x) values (?)");
+    assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (DEFAULT, 'DEFAULT')"))
+        .isEqualTo("INSERT INTO ns.t (x) VALUES ('DEFAULT')");
     // nothing to leave out, nothing left, more than one row, no column list
     assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (?, ?)")).isNull();
     assertThat(withoutDefaults("INSERT INTO ns.t (id) VALUES (DEFAULT)")).isNull();
     assertThat(withoutDefaults("INSERT INTO ns.t (id, x) VALUES (DEFAULT, 1), (DEFAULT, 2)"))
         .isNull();
     assertThat(withoutDefaults("INSERT INTO ns.t VALUES (DEFAULT, 1)")).isNull();
+    // an unknown or a repeated column stays the database's error (Copilot's review of PR #13)
+    assertThat(withoutDefaults("INSERT INTO ns.t (x, nonexistent) VALUES (?, DEFAULT)")).isNull();
+    assertThat(withoutDefaults("INSERT INTO ns.t (x, id, x) VALUES (?, DEFAULT, ?)")).isNull();
+  }
+
+  private static @Nullable String withoutDefaults(String sql) throws Exception {
+    StatementShape plain =
+        Writes.withoutDefaults(
+            StatementShape.of(SqlAst.parse(sql, Engine.POSTGRESQL).orElseThrow()).orElseThrow(),
+            Engine.POSTGRESQL,
+            table());
+    return plain == null ? null : plain.ast().source();
   }
 
   /** A metadata column given as DEFAULT is refused still, as any write naming one (89's review). */
@@ -87,13 +99,6 @@ class WritesTest {
     assertThatThrownBy(() -> plan(inline(), "INSERT INTO t (id, tx_state) VALUES (?, DEFAULT)"))
         .isInstanceOf(SQLException.class)
         .hasMessageContaining("metadata column");
-  }
-
-  private static @Nullable String withoutDefaults(String sql) {
-    StatementShape plain =
-        Writes.withoutDefaults(
-            StatementShape.of(SqlAst.parse(sql, Engine.ORACLE).orElseThrow()).orElseThrow());
-    return plain == null ? null : plain.ast().source();
   }
 
   private static List<String> plan(String sql) throws Exception {
