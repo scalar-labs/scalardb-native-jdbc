@@ -71,10 +71,20 @@ started.md` names both); `settings.gradle.kts` and the version catalog gain the 
 Data JPA's versions. Not read line by line, a sample, not driver code; its passing on the six
 configurations and both layouts is its review.
 
+Follow-up (2026-11-05): 8ab3cad on the branch moves the `withoutDefaults` call after the inline
+block (`listingColumns`, `inlineRefusals`) and before `otherKeys`, with a comment saying why, and
+adds `WritesTest.anInlineTablesMetadataColumn_givenAsDefault_isRefused` (`INSERT INTO t (id,
+tx_state) VALUES (?, DEFAULT)` on an inline table refused with the metadata-column message);
+WritesTest 27/27, the sample green again on Oracle and PostgreSQL in both layouts per a8. The
+sample's commit message reworded (it had said the sample fails on Oracle), so the hashes moved
+with the trees unchanged: 9c11f45 to d6d2763, c01142b to 4edc220 (my `git diff` of each pair is
+empty). The branch at 8ab3cad (d6d2763 + 4edc220 + 8ab3cad) is mergeable as a whole; landing on
+the user's word, the landed head to be range-diffed against 02b0121..8ab3cad.
+
 ## Acceptance Criteria
 
-- [ ] The rewrite placed after the inline refusals (or a dropped metadata column still refused),
-      with a unit case
+- [x] The rewrite placed after the inline refusals (or a dropped metadata column still refused),
+      with a unit case (8ab3cad, 2026-11-05)
 - [ ] CI on the PR green on MySQL, MariaDB and SQL Server too
 - [ ] `samples/crud-jpa` on every engine and both layouts (done locally by a8)
 
