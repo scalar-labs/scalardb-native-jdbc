@@ -3168,48 +3168,54 @@ vendor's own statement, then on AWS with the rest.
   case the stamped metadata row is written the same way and **kept** as a tombstone after the `T` row is
   deleted (4.3 step 3); the next INSERT of that key takes it over (4.3, INSERT). These cases arise only on
   imported tables, and only until the backfill of section 1 has completed.
-- **RETURNING and generated keys.** The user's INSERT returns the keys it wrote, `RETURNING k` after
-  its own items if it has any, and the `T_meta` rows are stamped from them, each key copied from its
-  data row, since the metadata table spells some types otherwise (CHAR(n) is varchar there). What the
-  application asked for, its own `RETURNING` items or the generated keys (`RETURN_GENERATED_KEYS` as
-  every column, as PostgreSQL's driver returns them, or the named columns): the statement's own
-  `RETURNING` rows are its result as the database returned them, the appended keys hidden; generated
-  keys are read back from `T` by key after the writes, in their transaction and in the order written,
-  so a batch's keys come in the order of its entries. Key lists are bound as a `VALUES` table, each
-  value cast to its column's type, at most 1,000 keys per statement where order does not matter; on
-  MySQL and MariaDB as a `UNION ALL` of one-row selects, uncast. An INSERT without a column list
-  gives its values in the data table's own column order, which `information_schema` gives when the
-  statement is planned. MariaDB's INSERT has `RETURNING`; on MySQL, which has none, the statement
-  either gives each key column a literal or a placeholder, each row's key then read back by those
-  values and required to match exactly one row, since MySQL may store another value than the one
-  given (a NULL or 0 it generates, `1.6` in an INT) and compares after conversion (`1` equals
-  `'01'`), or leaves out a single key column that `information_schema` shows `AUTO_INCREMENT`, whose
-  values the vendor driver reports; anything else is refused, and so is the statement's own
-  `RETURNING`. The read-back is sound only where MySQL stores the values given, or values that
-  compare equal to them, which a primary key then keeps unique: such an INSERT is refused when the
-  session's `sql_mode` is not strict, which truncates, or the data table has a `BEFORE INSERT`
-  trigger, which may set the key, either of which could make the read-back find an older row; and
-  the read-back of an `AUTO_INCREMENT` key leaves out 0, which MySQL generates a key for, so that a
-  0 reads back no row and is refused rather than find an older row 0 (todo 218). A
-  check before the INSERT would have to see the latest committed rows, a locking read, whose gap
-  lock at REPEATABLE READ deadlocks concurrent INSERTs (todo 214). A FLOAT key is
+- - **RETURNING and generated keys.** The user's INSERT returns the keys it wrote, `RETURNING k`
+  after its own items if it has any, and the `T_meta` rows are stamped from them, each key copied
+  from its data row, since the metadata table spells some types otherwise (CHAR(n) is varchar
+  there). What the application asked for, its own `RETURNING` items or the generated keys
+  (`RETURN_GENERATED_KEYS` as every column, as PostgreSQL's driver returns them, or the named
+  columns): the statement's own `RETURNING` rows are its result as the database returned them, the
+  appended keys hidden; generated keys are read back from `T` by key after the writes, in their
+  transaction and in the order written, so a batch's keys come in the order of its entries. Key
+  lists are bound as a `VALUES` table, each value cast to its column's type, at most 1,000 keys per
+  statement where order does not matter; on MySQL and MariaDB as a `UNION ALL` of one-row selects,
+  uncast. An INSERT without a column list gives its values in the data table's own column order,
+  which `information_schema` gives when the statement is planned. An INSERT of one row that lists
+  its columns and gives a column as the keyword `DEFAULT` runs as if it left that column out, a
+  generated key among them, which Hibernate's Oracle dialect writes so (`insert into item (name, id)
+  values (?, default)`): the column list and the row are rebuilt from the text without it and the
+  statement planned again, no placeholder moving, and the inline layout's refusal of a metadata
+  column so named keeps its say (session a8, todo 374, 2026-11-05). MariaDB's INSERT has
+  `RETURNING`; on MySQL, which has none, the statement either gives each key column a literal or a
+  placeholder, each row's key then read back by those values and required to match exactly one row,
+  since MySQL may store another value than the one given (a NULL or 0 it generates, `1.6` in an INT)
+  and compares after conversion (`1` equals `'01'`), or leaves out a single key column that
+  `information_schema` shows `AUTO_INCREMENT`, whose values the vendor driver reports; anything else
+  is refused, and so is the statement's own `RETURNING`. The read-back is sound only where MySQL
+  stores the values given, or values that compare equal to them, which a primary key then keeps
+  unique: such an INSERT is refused when the session's `sql_mode` is not strict, which truncates, or
+  the data table has a `BEFORE INSERT` trigger, which may set the key, either of which could make
+  the read-back find an older row; and the read-back of an `AUTO_INCREMENT` key leaves out 0, which
+  MySQL generates a key for, so that a 0 reads back no row and is refused rather than find an older
+  row 0 (todo 218). A check before the INSERT would have to see the latest committed rows, a locking
+  read, whose gap lock at REPEATABLE READ deadlocks concurrent INSERTs (todo 214). A FLOAT key is
   bound as its exact double, which MySQL compares an uncast value as, and so is a float the
   application binds alone to a FLOAT key, when the driver matches keys; the column types come from
   `information_schema` with the column order. Both engines send a FLOAT as six digits, which can
-  name another float, so the driver reads a key of ScalarDB's FLOAT type as `k + 0E0`, a double
-  sent with all its digits. The metadata rows a key does not have yet are written there by `INSERT IGNORE`, which
-  only the driver's own rows go through. Neither engine's INSERT takes an alias, nor MariaDB's DELETE
-  of one table, which becomes `DELETE T FROM T_data AS T`; a column qualified by a created table's name
-  in `RETURNING` is refused on MariaDB. A failed statement there leaves the transaction open with the
-  earlier keys of a write already written, so each write runs under a savepoint and is undone to its
-  start on any failure, as the engine undoes a statement of its own. A duplicate of a key the database generated is the application's duplicate:
-  without the key as written there is nothing to look up in flight. Under SNAPSHOT and SERIALIZABLE
-  the snapshot cannot see a key written after it, from which the duplicate may come: a duplicate of a
-  key the snapshot does not show committed is a conflict, `40001`. Only a duplicate of the primary
-  key is looked into: another unique constraint's, or a key the statement itself repeats, is the
-  application's duplicate at every level. `RETURNING` on an UPDATE or
-  DELETE, and generated keys by column index, are refused. ScalarDB's import refuses a `SERIAL`
-  column; an identity column, `GENERATED BY DEFAULT AS IDENTITY`, imports.
+  name another float, so the driver reads a key of ScalarDB's FLOAT type as `k + 0E0`, a double sent
+  with all its digits. The metadata rows a key does not have yet are written there by `INSERT
+  IGNORE`, which only the driver's own rows go through. Neither engine's INSERT takes an alias, nor
+  MariaDB's DELETE of one table, which becomes `DELETE T FROM T_data AS T`; a column qualified by a
+  created table's name in `RETURNING` is refused on MariaDB. A failed statement there leaves the
+  transaction open with the earlier keys of a write already written, so each write runs under a
+  savepoint and is undone to its start on any failure, as the engine undoes a statement of its own.
+  A duplicate of a key the database generated is the application's duplicate: without the key as
+  written there is nothing to look up in flight. Under SNAPSHOT and SERIALIZABLE the snapshot cannot
+  see a key written after it, from which the duplicate may come: a duplicate of a key the snapshot
+  does not show committed is a conflict, `40001`. Only a duplicate of the primary key is looked
+  into: another unique constraint's, or a key the statement itself repeats, is the application's
+  duplicate at every level. `RETURNING` on an UPDATE or DELETE, and generated keys by column index,
+  are refused. ScalarDB's import refuses a `SERIAL` column; an identity column, `GENERATED BY
+  DEFAULT AS IDENTITY`, imports.
 
   On SQL Server, as built (milestone 8c1): the INSERT returns its keys by `OUTPUT INSERTED.k`, put
   before its rows, which also reports an `IDENTITY` key of every row; a table with an enabled trigger
