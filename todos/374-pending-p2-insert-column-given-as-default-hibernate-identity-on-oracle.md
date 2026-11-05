@@ -81,6 +81,17 @@ with the trees unchanged: 9c11f45 to d6d2763, c01142b to 4edc220 (my `git diff` 
 empty). The branch at 8ab3cad (d6d2763 + 4edc220 + 8ab3cad) is mergeable as a whole; landing on
 the user's word, the landed head to be range-diffed against 02b0121..8ab3cad.
 
+### 2026-11-05: pushed as PR #13 on the user's word (a8)
+
+Local main sits about 80 commits ahead of `origin/main` (3314b0c, PR #11's merge and the #12
+follow-ups), so a8 replayed the three commits onto `origin/main` as `crud-jpa-pr` and pushed that
+as `crud-jpa`: d6d2763 to d9dfed1, 4edc220 to ef4be21, 8ab3cad to 8409988. My `git range-diff
+02b0121..crud-jpa origin/main..crud-jpa-pr` shows all three identical, and `origin/crud-jpa` is
+8409988. PR #13 (https://github.com/scalar-labs/scalardb-native-jdbc/pull/13) is open with its
+nine checks in progress; on that base WritesTest 27/27 and the sample on PostgreSQL and Oracle
+pass per a8. The local `crud-jpa` (8ab3cad on local main) is unchanged. The merge waits on CI and
+the user's word.
+
 ## Acceptance Criteria
 
 - [x] The rewrite placed after the inline refusals (or a dropped metadata column still refused),
