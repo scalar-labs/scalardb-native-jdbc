@@ -283,13 +283,23 @@ todo 372's form on Oracle: whole-table gates (no key range) on todo 371's derive
 1.0x locally at SF 0.1. To read from the run's `server.txt` when fetched: the statement's plan and
 gets against the vendor's, whether the derived wrapper's plan or the gates cost the quarter.
 
+### 2026-11-05: the proof, 6e's Oracle 19c SNAPSHOT SF 3 decoupled cell from 87c0b2b (20261105-1845-ora19b), read from the report
+
+`bench-env/results/20261105-1845-ora19b/b/bb-d0-benchbase-oracle.md`: BenchBase (c)/(a) 0.99 (0.95
+from 0099545); every check execution the vendor's rows; in a transaction every query 0.97-1.03x,
+Q16 1.03x (503.2 against 488.4 ms) from 2.56x, Q21 1.00x from 1.16x, Q9 1.00x from 1.10x, Q18
+1.00x; in autocommit 0.99-1.05x, Q16 1.03x, Q18 1.05x. BenchBase's own single runs Q16 1.01, Q18
+1.01, Q21 1.00, Q9 1.00. So the derived form keeps Oracle's plan for Q16 at scale, as the gets
+and CPU of the old form had said it would, and Q21's and Q9's tenths went with it. The stack is
+torn down.
+
 ## Acceptance Criteria
 
 - [x] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
       wrapper (grouped), an empty ungrouped result one statement, an empty grouped result at READ
       COMMITTED never `rc_T`, with the tests above (f2238ab, reviewed 2026-11-04)
-- [ ] Full check passes on all engines, 19c included; the cloud Oracle SNAPSHOT rerun from main: Q16
-      at about 1x (the select-list form's 2.5x at SF 3)
+- [ ] Full check passes on all engines, 19c included (at the push's CI); the cloud Oracle SNAPSHOT
+      rerun from main: Q16 at about 1x, done 2026-11-05 (1.03x from 2.56x)
 - [x] Q13 and Q18 in a transaction at their pre-371 figures (1.02-1.09x, 1.03-1.05x), Q18 in
       autocommit at about 2x as its empty case documents, Delivery's gated SUM on the lateral form
       (2026-11-04)
