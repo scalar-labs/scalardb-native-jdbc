@@ -180,6 +180,17 @@ todo 372's form on Oracle: whole-table gates (no key range) on todo 371's derive
 1.0x locally at SF 0.1. To read from the run's `server.txt` when fetched: the statement's plan and
 gets against the vendor's, whether the derived wrapper's plan or the gates cost the quarter.
 
+### 2026-11-06: Q12 read from the fetched archive; the inline READ COMMITTED cell
+
+The inline cell (20261105-1825-ora19, the last of the round): BenchBase (c)/(a) 1.01, every query
+0.98-1.05x in both modes, Q12 1.00x, every execution the vendor's rows; nothing left on AWS. Q12's
+1.23-1.27x in the decoupled cell: the driver run's `server.txt` holds Q12 as two texts of two
+calls each, the gates in two orders (`LINEITEM, ORDERS` at 303,126 gets a call and 1,672 ms, the
+vendor's 303,227 and 1,663; `ORDERS, LINEITEM` at 347,860 gets and 1,859 ms), BenchBase's p50 at
+1.00x and p95 at 1.26x. So the quarter is Oracle planning two cursors for one statement, each
+peeking its own first binds, one of them 15% more gets; the derived wrapper's own plan is the
+vendor's. The gate order follows `scalarDb`'s identity-hash iteration: todo 375, a small fix.
+
 ## Acceptance Criteria
 
 - [x] The anchor-less split read at READ COMMITTED takes the gated form with range or whole-table
