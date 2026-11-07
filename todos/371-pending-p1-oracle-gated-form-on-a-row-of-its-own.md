@@ -293,6 +293,14 @@ Q16 1.03x (503.2 against 488.4 ms) from 2.56x, Q21 1.00x from 1.16x, Q9 1.00x fr
 and CPU of the old form had said it would, and Q21's and Q9's tenths went with it. The stack is
 torn down.
 
+### 2026-11-07: the Oracle 19c SNAPSHOT SF 3 inline rerun from 87c0b2b (20261107-1527-ora19b), read from the report
+
+`bench-env/results/20261107-1527-ora19b/b/bb-inline-d0-benchbase-oracle.md`: BenchBase (c)/(a)
+1.01 (0.95 from 0099545); in a transaction every query 0.96-1.03x, Q16 1.03x (507 against 492 ms)
+from 2.54x; in autocommit 0.98-1.04x; every execution the vendor's rows. The derived form's fix of
+Q16 holds on the inline layout too. With it every TPC-H cell of the round, PostgreSQL and Oracle,
+both levels and layouts, is read from a main with todos 367-373, and nothing is left on AWS.
+
 ## Acceptance Criteria
 
 - [x] Oracle's gated reads run on the lateral wrapper (no GROUP BY or DISTINCT) or the derived
