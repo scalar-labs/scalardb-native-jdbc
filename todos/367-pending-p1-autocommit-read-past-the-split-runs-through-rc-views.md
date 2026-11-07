@@ -272,6 +272,23 @@ Landed by 28 on the user's "land it" typed in 28's session, rebased onto a6efc06
 9befeab..44e2dd7 against a6efc06..f83d6d4 shows the commit identical. Nothing pushed. The cloud
 SF 3 Oracle TPC-H run is the user's to start with 6e.
 
+### 2026-11-07: 6e's PostgreSQL SNAPSHOT SF 3 rerun from 87c0b2b (20261107-1514-pg), both cells, read from the reports
+
+`bench-env/results/20261107-1514-pg/a/`: BenchBase (c)/(a) decoupled 0.98, inline 0.97 (0.97 and 0.86
+in 20261104-0948-pg); the check 0.98-1.05x in a transaction and 0.99-1.05x in autocommit on both
+layouts; every execution the vendor's rows. 6e's note, which the reports bear out: inline's 0.86
+does not recur, and a single-pass BenchBase run (two executions a query) is noisy at this level.
+The width reading recorded on 2026-11-04 is refined, not dropped: the vendor driver itself still
+takes Q18 at 10.6 s on the inline tables (the check's vendor runs, 10,572 and 10,671 ms) against
+8.8 s on the plain ones (BenchBase's (a), 8,809 ms), so Q18 pays about 20% for the wider rows in
+either driver (BenchBase's inline (c)/(a) for Q18: 1.21; the driver on the same tables 1.00x);
+but Q21's earlier 2,585 against 1,716 ms did not recur (1,728 against 1,725 this run) and Q9's
+(a) was itself a slow single run (1,941 ms, the check's vendor 1,472-1,509 on the inline tables),
+so the earlier 0.86 was Q18's width plus the single-pass run's noise, not the width across the
+board. The docs note on inline row width, if the user wants it, should say the scan-heavy
+aggregates over lineitem and orders, not analytics in general. The Oracle 19c SNAPSHOT inline
+rerun (20261107-1527-ora19b) is due about 10:00 UTC.
+
 ## Acceptance Criteria
 
 - [x] An autocommit read past the split at SNAPSHOT runs as written once its checks passed, on
