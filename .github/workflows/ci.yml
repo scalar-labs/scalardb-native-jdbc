@@ -97,12 +97,12 @@ jobs:
 
   # Oracle 19c, the long-term release before 23ai: the organization's private image, SE2 19.3.0 with
   # its database created, reached as an existing database (testing/Engines.java). A pull request from
-  # a fork or from Dependabot has no CR_PAT to pull it with, so the job runs only for the others.
+  # a fork has no CR_PAT to pull it with, so the job skips those; Dependabot's pull requests get the
+  # organization's Dependabot secret of that name.
   integration-test-oracle-19c:
     if: >-
       github.event_name != 'pull_request'
-      || (github.event.pull_request.head.repo.full_name == github.repository
-      && github.actor != 'dependabot[bot]')
+      || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
