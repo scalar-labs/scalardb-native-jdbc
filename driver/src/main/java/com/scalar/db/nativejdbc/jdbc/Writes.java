@@ -6958,6 +6958,20 @@ final class Writes {
       }
     }
 
+    /**
+     * A driver callable statement, tracked as {@link #prepare(String, boolean, String[])} tracks
+     * one.
+     */
+    CallableStatement prepareCall(String sql) throws SQLException {
+      CallableStatement cs = v.prepareCall(sql);
+      try {
+        return track(cs);
+      } catch (SQLException | RuntimeException e) {
+        cs.close(); // track closed it; closed here too so that the resource's path is plain
+        throw e;
+      }
+    }
+
     /** Gives a driver statement what is left of the timeout, and makes it reachable by cancel. */
     private <S extends Statement> S track(S ps) throws SQLException {
       try {
@@ -6982,7 +6996,7 @@ final class Writes {
      */
     CallableStatement call(Step step) throws SQLException {
       checkCancelled();
-      CallableStatement cs = track(v.prepareCall(step.sql));
+      CallableStatement cs = prepareCall(step.sql);
       try {
         bindStep(cs, step, null);
         int at = step.outAt();
@@ -7033,7 +7047,7 @@ final class Writes {
      */
     CallableStatement callEntries(Entries e, List<Run> runs, Variant variant) throws SQLException {
       checkCancelled();
-      CallableStatement cs = track(v.prepareCall(e.sql(runs.size(), variant)));
+      CallableStatement cs = prepareCall(e.sql(runs.size(), variant));
       try {
         cs.setFetchSize(runs.size() + 1); // one row per entry and their end in one fetch
         int at = 1;
@@ -8039,8 +8053,7 @@ final class Writes {
         }
       } else {
         run.checkCancelled();
-        try (CallableStatement cs =
-            run.track(run.v.prepareCall(anchor == null ? f.plain : f.anchored))) {
+        try (CallableStatement cs = run.prepareCall(anchor == null ? f.plain : f.anchored)) {
           int at = 1;
           if (anchor != null) {
             at = bindAnchor(cs, at, anchor);
