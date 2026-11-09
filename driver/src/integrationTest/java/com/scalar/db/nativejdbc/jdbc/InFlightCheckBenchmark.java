@@ -73,7 +73,6 @@ import org.junit.jupiter.params.provider.MethodSource;
       "SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE",
       "SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING",
       "PREDICTABLE_RANDOM",
-      "DMI_RANDOM_USED_ONLY_ONCE",
       "ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"
     },
     justification =
@@ -214,7 +213,7 @@ class InFlightCheckBenchmark {
       // a pass not reported: the engine settles after the setup's backfill of every row
       for (List<Form> forms : sections.values()) {
         for (Form f : forms) {
-          measure(c, f, new Random(1));
+          measure(c, f, 1);
         }
       }
       for (Map.Entry<String, List<Form>> s : sections.entrySet()) {
@@ -232,7 +231,7 @@ class InFlightCheckBenchmark {
           inFlight(e, c, cu, CUSTOMERS, count, cBefore(e));
           out.append("| ").append(count).append(" |");
           for (Form f : forms) {
-            long[] r = measure(c, f, new Random(42));
+            long[] r = measure(c, f, 42);
             out.append(String.format(Locale.ROOT, " %d / %d%% |", r[0], r[1]));
           }
           out.append('\n');
@@ -496,7 +495,7 @@ class InFlightCheckBenchmark {
         inFlight(e, c, cu, CUSTOMERS, count, cBefore(e));
         for (Form f : joinForms) {
           if (f.name().startsWith("read")) {
-            long[] r = measure(c, f, new Random(42));
+            long[] r = measure(c, f, 42);
             out.append(
                 String.format(Locale.ROOT, "%d in flight, %s: %d µs%n", count, f.name(), r[0]));
           }
@@ -523,7 +522,7 @@ class InFlightCheckBenchmark {
               .append('\n');
         }
         for (Map.Entry<String, String> v : variants.entrySet()) {
-          long[] r = measure(c, new Form("v", v.getValue(), false), new Random(42));
+          long[] r = measure(c, new Form("v", v.getValue(), false), 42);
           out.append(
               String.format(
                   Locale.ROOT,
@@ -536,7 +535,7 @@ class InFlightCheckBenchmark {
         // each arm alone, without a limit: the engine's plan unbent by LIMIT 1
         for (int k = 0; k < arms.size(); k++) {
           for (String sql : List.of(Writes.anyRow(engine, arms.get(k)), arms.get(k))) {
-            long[] r = measure(c, new Form("arm", sql, false), new Random(42));
+            long[] r = measure(c, new Form("arm", sql, false), 42);
             out.append(
                 String.format(
                     Locale.ROOT,
@@ -555,13 +554,13 @@ class InFlightCheckBenchmark {
           oracleHints(c, e, o, cu, arms, count, out);
         }
         // the arms as separate statements, stopping at the first that finds a row
+        Random random = new Random(42);
         long[] times = new long[RUNS];
         int found = 0;
         List<PreparedStatement> ps = new ArrayList<>();
         for (String arm : arms) {
           ps.add(c.prepareStatement(arm));
         }
-        Random random = new Random(42);
         for (int i = -50; i < RUNS; i++) {
           long start = System.nanoTime();
           boolean row = false;
@@ -637,7 +636,7 @@ class InFlightCheckBenchmark {
           measure(
               c,
               new Form("v", Writes.anyRow(engine, String.join(" UNION ALL ", hinted)), false),
-              new Random(42));
+              42);
       out.append(
           String.format(
               Locale.ROOT,
@@ -648,8 +647,7 @@ class InFlightCheckBenchmark {
               all[1]));
       for (String arm : hinted) {
         out.append(' ')
-            .append(
-                measure(c, new Form("arm", Writes.anyRow(engine, arm), false), new Random(42))[0]);
+            .append(measure(c, new Form("arm", Writes.anyRow(engine, arm), false), 42)[0]);
       }
       out.append(" µs\n");
       if (count == 10) {
@@ -815,9 +813,7 @@ class InFlightCheckBenchmark {
           Form f = s.getValue();
           long planned =
               measure(
-                  c,
-                  new Form(f.name(), String.format(Locale.ROOT, f.sql(), ""), f.range()),
-                  new Random(42))[0];
+                  c, new Form(f.name(), String.format(Locale.ROOT, f.sql(), ""), f.range()), 42)[0];
           long seek =
               measure(
                   c,
@@ -825,7 +821,7 @@ class InFlightCheckBenchmark {
                       f.name(),
                       String.format(Locale.ROOT, f.sql(), " WITH (FORCESEEK)"),
                       f.range()),
-                  new Random(42))[0];
+                  42)[0];
           // the committed rows by a left join on the metadata table's key, as the split read's
           // LEFT_JOIN check
           String lj =
@@ -838,7 +834,7 @@ class InFlightCheckBenchmark {
                   .replace(
                       " AND q." + engine.quote("tx_state") + " IN (1, 2))",
                       " WHERE COALESCE(q." + engine.quote("tx_state") + ", 3) = 3");
-          long left = measure(c, new Form(f.name(), lj, f.range()), new Random(42))[0];
+          long left = measure(c, new Form(f.name(), lj, f.range()), 42)[0];
           out.append(
               String.format(
                   Locale.ROOT,
@@ -893,17 +889,17 @@ class InFlightCheckBenchmark {
             "UPDATE STATISTICS " + SplitRead.meta(engine, o),
             "UPDATE STATISTICS " + SplitRead.meta(engine, cu),
             "DBCC FREEPROCCACHE");
-        long[] none = measure(c, f, new Random(42));
+        long[] none = measure(c, f, 42);
         inFlight(e, c, o, ROWS, 100, oBefore(e));
         inFlight(e, c, cu, CUSTOMERS, 100, cBefore(e));
-        long[] stale = measure(c, f, new Random(42));
+        long[] stale = measure(c, f, 42);
         String stalePlan = plan(c, engine, v.getValue());
         e.execute(
             c,
             "UPDATE STATISTICS " + SplitRead.meta(engine, o),
             "UPDATE STATISTICS " + SplitRead.meta(engine, cu),
             "DBCC FREEPROCCACHE");
-        long[] fresh = measure(c, f, new Random(42));
+        long[] fresh = measure(c, f, 42);
         out.append(
             String.format(
                 Locale.ROOT,
@@ -1052,7 +1048,8 @@ class InFlightCheckBenchmark {
   }
 
   /** Median µs and percent of runs that return a row, after a warm-up. */
-  private static long[] measure(Connection c, Form f, Random random) throws SQLException {
+  private static long[] measure(Connection c, Form f, long seed) throws SQLException {
+    Random random = new Random(seed);
     try (PreparedStatement ps = c.prepareStatement(f.sql)) {
       long[] times = new long[RUNS];
       int found = 0;
