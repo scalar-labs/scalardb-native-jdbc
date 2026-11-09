@@ -20,7 +20,7 @@ repositories {
 dependencies {
     implementation("com.scalar-labs:scalardb-native-jdbc:$driverVersion")
     runtimeOnly("org.postgresql:postgresql:42.7.14")
-    runtimeOnly("org.slf4j:slf4j-simple:1.7.36")
+    runtimeOnly("org.slf4j:slf4j-simple:2.0.20")
 }
 
 application {
