@@ -136,6 +136,8 @@ jobs:
             return 1
           }
           docker pull -q ghcr.io/scalar-labs/oracle/db-prebuilt:19
+          # the registry token stays out of reach of the build's (Dependabot-updated) code
+          docker logout ghcr.io
           started=false
           for attempt in 1 2; do
             docker run -d --name oracle19 -p 1521:1521 ghcr.io/scalar-labs/oracle/db-prebuilt:19
