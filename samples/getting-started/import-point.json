@@ -1,0 +1,8 @@
+{
+  "point.point_account": {
+    "transaction": true
+  },
+  "point.point_history": {
+    "transaction": true
+  }
+}

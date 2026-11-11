@@ -1,7 +1,7 @@
-// The warehouse application of docs/getting-started.md. A project of its own, not part of the
+// The EC and point applications of docs/getting-started.md. A project of its own, not part of the
 // driver's build: it takes the driver from Maven Central, as an application would.
 plugins {
-    application
+    java
 }
 
 // The released driver the guide names; -PdriverVersion=<version>-SNAPSHOT takes an unreleased one
@@ -23,8 +23,13 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-simple:2.0.20")
 }
 
-application {
-    // step 5: ./gradlew run
-    // step 6: ./gradlew run -PmainClass=example.ReceiveShipmentWithReceipt
-    mainClass = providers.gradleProperty("mainClass").orElse("example.ReceiveShipment")
+// ./gradlew -q ec --args="topup 1 3000", the EC application
+// ./gradlew -q point --args="earn 1 100 checkin", the point application
+tasks.register<JavaExec>("ec") {
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass = "example.EcApp"
+}
+tasks.register<JavaExec>("point") {
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass = "example.PointApp"
 }

@@ -1,8 +1,97 @@
 # Setting up tables
 
-This guide explains how to set up ScalarDB tables for the driver: what the one-time setup creates,
-the `scalardb-native-tools` commands that run, check and undo it, and how to add a table while
-applications run.
+This guide explains how to make a table ScalarDB's, in either layout, and how to set up ScalarDB
+tables for the driver: what the one-time setup creates, the `scalardb-native-tools` commands that
+run, check and undo it, and how to add a table while applications run.
+
+## Making a table ScalarDB's
+
+ScalarDB keeps its [transaction metadata](concepts.md#transaction-metadata) in one of two
+[layouts](concepts.md#layout), and the driver serves both:
+
+| Layout | Where the metadata is | How you get the table |
+| --- | --- | --- |
+| Inline (ScalarDB's default) | Extra `tx_` and `before_` columns in the table itself | **A.** Create it with the Schema Loader, or **B.** create it with your database's own DDL and import it |
+| Decoupled | A separate table ScalarDB keeps; your table keeps only your columns | **C.** Create it with your database's own DDL and import it with `transaction-metadata-decoupling` |
+
+Through the driver the application sees only its own columns in either layout: `SELECT *` does not
+return the metadata columns. Choose decoupled when other tools or applications read the table
+directly and should not see ScalarDB's columns, or when you don't want columns added to an existing
+table. Otherwise inline is the simpler choice. A is for a table that is new; B and C for a table
+that exists, with or without rows. [Getting started](getting-started.md) follows B.
+
+All three run ScalarDB's Schema Loader with a configuration that names the database, with
+`scalar.db.jdbc.isolation_level` as [Isolation levels](transactions.md#isolation-levels) gives:
+ScalarDB needs `REPEATABLE_READ` there for a decoupled table the driver serves (C), and on Oracle the
+value follows the layout ([ScalarDB's connections on
+Oracle](transactions.md#scalardbs-connections-on-oracle)). The examples use `warehouse.stock`:
+
+```sql
+CREATE SCHEMA warehouse;
+CREATE TABLE warehouse.stock (item_id INT PRIMARY KEY, name VARCHAR(50), quantity INT);
+```
+
+**A. Inline, created with the Schema Loader.** A schema file describes the table:
+
+```json
+{
+  "warehouse.stock": {
+    "transaction": true,
+    "partition-key": ["item_id"],
+    "columns": {
+      "item_id": "INT",
+      "name": "TEXT",
+      "quantity": "INT"
+    }
+  }
+}
+```
+
+```sh
+java -jar scalardb-schema-loader-<version>.jar --config scalardb.properties -f schema.json --coordinator
+```
+
+**B. Inline, created with your database's DDL and imported.** Create the table with the DDL above,
+then import it with an import file:
+
+```json
+{
+  "warehouse.stock": {
+    "transaction": true
+  }
+}
+```
+
+```sh
+java -jar scalardb-schema-loader-<version>.jar --config scalardb.properties -f import.json --import
+java -jar scalardb-schema-loader-<version>.jar --config scalardb.properties --coordinator
+```
+
+The import adds ScalarDB's metadata columns to the table. The Schema Loader refuses `--coordinator`
+together with `--import`, so the Coordinator table takes a run of its own, once per ScalarDB
+deployment, in the database that should hold it.
+
+**C. Decoupled, created with your database's DDL and imported.** As B, with decoupling in the import
+file:
+
+```json
+{
+  "warehouse.stock": {
+    "transaction": true,
+    "transaction-metadata-decoupling": true
+  }
+}
+```
+
+`warehouse.stock` is left as it was. ScalarDB adds a table `warehouse.stock_tx_metadata` for the
+metadata, and a view `warehouse.stock_scalardb`, the name ScalarDB's own API uses for the table.
+Applications through the driver keep using `warehouse.stock`. An imported decoupled table can need
+the [backfill](#backfill).
+
+Once a table is ScalarDB's, read and write it through the driver or ScalarDB only: the vendor's
+driver reads data ScalarDB transactions have not committed, and writes rows without the metadata
+ScalarDB transactions check. The vendor's tools stay right for DDL and for ordinary tables. Then run
+the setup below.
 
 ## What the setup does
 
