@@ -130,7 +130,7 @@ A transaction through the driver fails with `40001`, and is left rollback-only, 
 - a write would lose an update, made by a ScalarDB transaction or by another transaction through the
   driver.
 
-Roll it back and retry it; [Getting started](getting-started.md#5-run-the-warehouse-application)
+Roll it back and retry it; [Getting started](getting-started.md#5-run-the-applications-as-before)
 shows a retry loop. A query timeout or a cancel during a write also leaves the transaction
 rollback-only. On the engines' own errors:
 

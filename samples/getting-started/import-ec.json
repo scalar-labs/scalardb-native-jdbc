@@ -1,0 +1,8 @@
+{
+  "ec.wallet": {
+    "transaction": true
+  },
+  "ec.orders": {
+    "transaction": true
+  }
+}

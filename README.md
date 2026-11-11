@@ -15,8 +15,9 @@ one database per connection, and a transaction never spans databases. A ScalarDB
 also touches other databases needs no special handling: the driver only meets the rows that
 transaction prepares in this database.
 
-**Start with [Getting started](docs/getting-started.md)**, from an empty database to a program
-through the driver.
+**Start with [Getting started](docs/getting-started.md)**: two existing applications on two
+databases, brought under ScalarDB through the driver with no change but their JDBC URLs, then a
+transaction across both databases in SQL.
 
 ## Getting it
 
@@ -64,9 +65,9 @@ reference pages are for looking things up.
 
 | Guides | What it covers |
 | --- | --- |
-| [Getting started](docs/getting-started.md) | from an empty database to a program through the driver, in either of ScalarDB's layouts |
+| [Getting started](docs/getting-started.md) | two applications on two databases: local transactions through the driver, then a global transaction through ScalarDB's PostgreSQL frontend |
 | [Unreleased versions](docs/development-builds.md) | a snapshot of the driver from the Maven Central snapshot repository, or the driver, `snsql` and the tools built from this repository |
-| [Setting up tables](docs/setting-up-tables.md) | `scalardb-native-tools`: setting ScalarDB tables up for the driver, checking them, adding a table while applications run |
+| [Setting up tables](docs/setting-up-tables.md) | making a table ScalarDB's in either layout; `scalardb-native-tools`: setting ScalarDB tables up for the driver, checking them, adding a table while applications run |
 
 | Reference | What it covers |
 | --- | --- |

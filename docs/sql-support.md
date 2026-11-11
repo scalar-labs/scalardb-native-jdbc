@@ -132,7 +132,7 @@ try (PreparedStatement write =
 c.commit();
 ```
 
-[Getting started](getting-started.md#5-run-the-warehouse-application) shows a retry loop around
+[Getting started](getting-started.md#5-run-the-applications-as-before) shows a retry loop around
 such a transaction.
 
 ## Column types
