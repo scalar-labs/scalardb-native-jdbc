@@ -17,7 +17,7 @@ spring-data-jdbc = "4.1.1"
 spring-data-jpa = "4.1.1"
 hibernate = "7.4.14.Final"
 # The shell's line editor; JLine 4 is compiled for Java 11
-jline = "4.4.7"
+jline = "4.5.0"
 # Vendor JDBC drivers: the application supplies its own; these are the versions the tests run
 postgresql = "42.7.14"
 mysql = "26.7.0"
