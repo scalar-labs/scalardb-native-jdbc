@@ -1,6 +1,0 @@
-{
-  "warehouse.stock": {
-    "transaction": true,
-    "transaction-metadata-decoupling": true
-  }
-}
