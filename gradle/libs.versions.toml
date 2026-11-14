@@ -8,7 +8,7 @@ scalardb = "3.19.1"
 jsqlparser = "5.4"
 # Kept at ScalarDB's version, since the driver is loaded next to ScalarDB in the tests
 slf4j = "2.0.20"
-logback = "1.5.38"
+logback = "1.6.6"
 hikaricp = "4.0.3"
 picocli = "4.7.7"
 # The Spring Data JDBC sample (docs/plans/proxy-step.md, 9c), on the Spring Framework line it needs
