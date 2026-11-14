@@ -14,7 +14,7 @@ picocli = "4.7.7"
 # The Spring Data JDBC sample (docs/plans/proxy-step.md, 9c), on the Spring Framework line it needs
 spring-data-jdbc = "4.1.1"
 # The Spring Data JPA sample, on the same release train, and the Hibernate line it is built with
-spring-data-jpa = "4.1.1"
+spring-data-jpa = "4.1.2"
 hibernate = "7.4.14.Final"
 # The shell's line editor; JLine 4 is compiled for Java 11
 jline = "4.4.7"
