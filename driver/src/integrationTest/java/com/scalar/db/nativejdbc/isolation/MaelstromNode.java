@@ -82,7 +82,9 @@ import org.jspecify.annotations.Nullable;
  * coordinator state COMMITTED, for lazy recovery to abort or to roll forward; either is indefinite.
  * On the driver's, the connection is dropped ({@link Connection#abort}) before a statement or the
  * commit, a definite abort, or while the commit runs, indefinite; and after a failed statement it
- * is closed without a rollback.
+ * is closed without a rollback, a definite abort except on Oracle, whose JDBC driver commits an
+ * open transaction at close: the driver rolls back there only a transaction it aborted itself (todo
+ * 325), which the test cannot tell from the error, so the outcome is indefinite.
  */
 @SuppressFBWarnings(
     value = {
@@ -237,6 +239,11 @@ public final class MaelstromNode {
       if (fault()) {
         // as an application's try-with-resources does when the error propagates
         drop(c);
+        if (engine == Engines.ORACLE) {
+          // Oracle's driver commits at close what the failed statement left open
+          return error(
+              CRASH, "closed without a rollback: " + e.getSQLState() + " " + e.getMessage());
+        }
       } else {
         rollback(c);
       }
