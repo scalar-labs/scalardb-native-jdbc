@@ -106,11 +106,11 @@ To tell that a connection goes through the driver: its URL starts with `jdbc:sca
 The driver version mirrors the ScalarDB line it is certified against; certification is per line, and
 the tests run against the line's newest patch.
 
-Tested in 3.20.0 against ScalarDB 3.19.1: PostgreSQL, MySQL, MariaDB and SQL Server at READ
+Tested in 3.20.1 against ScalarDB 3.19.1: PostgreSQL, MySQL, MariaDB and SQL Server at READ
 COMMITTED, SNAPSHOT and SERIALIZABLE, and Oracle at READ COMMITTED and SNAPSHOT. ScalarDB 3.20 writes
 the same transaction metadata columns and states as 3.19.
 
-The application supplies its database's JDBC driver. 3.20.0 is tested with the servers and JDBC
+The application supplies its database's JDBC driver. 3.20.1 is tested with the servers and JDBC
 driver versions below, the newest patch of each line in the range; use a version in the range:
 
 | Database | Server | JDBC driver | Versions |

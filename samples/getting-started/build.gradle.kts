@@ -7,7 +7,7 @@ plugins {
 // The released driver the guide names; -PdriverVersion=<version>-SNAPSHOT takes an unreleased one
 // from the local Maven repository or the Maven Central snapshot repository
 // (docs/development-builds.md). release.yml checks the default against the version it releases.
-val driverVersion = providers.gradleProperty("driverVersion").getOrElse("3.20.0")
+val driverVersion = providers.gradleProperty("driverVersion").getOrElse("3.20.1")
 
 repositories {
     if (driverVersion.endsWith("-SNAPSHOT")) {
