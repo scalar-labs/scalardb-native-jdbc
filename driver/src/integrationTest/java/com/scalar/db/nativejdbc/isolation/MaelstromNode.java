@@ -82,9 +82,10 @@ import org.jspecify.annotations.Nullable;
  * coordinator state COMMITTED, for lazy recovery to abort or to roll forward; either is indefinite.
  * On the driver's, the connection is dropped ({@link Connection#abort}) before a statement or the
  * commit, a definite abort, or while the commit runs, indefinite; and after a failed statement it
- * is closed without a rollback, a definite abort except on Oracle, whose JDBC driver commits an
- * open transaction at close: the driver rolls back there only a transaction it aborted itself (todo
- * 325), which the test cannot tell from the error, so the outcome is indefinite.
+ * is closed without a rollback, a definite abort. On Oracle only after the driver's own abort
+ * (SQLState class 40), which it rolls back at close (todo 325): Oracle's JDBC driver commits any
+ * other open transaction at close, the statements before the failure without the failed one, a
+ * partial commit Elle cannot record, so the node rolls back there as a correct application does.
  */
 @SuppressFBWarnings(
     value = {
@@ -236,14 +237,9 @@ public final class MaelstromNode {
         }
       }
     } catch (SQLException e) {
-      if (fault()) {
+      if (fault() && (engine != Engines.ORACLE || abortedByTheDriver(e))) {
         // as an application's try-with-resources does when the error propagates
         drop(c);
-        if (engine == Engines.ORACLE) {
-          // Oracle's driver commits at close what the failed statement left open
-          return error(
-              CRASH, "closed without a rollback: " + e.getSQLState() + " " + e.getMessage());
-        }
       } else {
         rollback(c);
       }
@@ -374,6 +370,12 @@ public final class MaelstromNode {
   private static boolean conflict(SQLException e) {
     String state = e.getSQLState();
     return state != null && (state.startsWith("40") || state.startsWith("23"));
+  }
+
+  /** The driver's abort, which it rolls back at close on Oracle too (todo 325). */
+  private static boolean abortedByTheDriver(SQLException e) {
+    String state = e.getSQLState();
+    return state != null && state.startsWith("40");
   }
 
   private static void rollback(Connection c) {
