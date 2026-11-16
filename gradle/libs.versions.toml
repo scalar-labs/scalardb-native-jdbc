@@ -15,7 +15,7 @@ picocli = "4.7.7"
 spring-data-jdbc = "4.1.1"
 # The Spring Data JPA sample, on the same release train, and the Hibernate line it is built with
 spring-data-jpa = "4.1.2"
-hibernate = "7.4.14.Final"
+hibernate = "7.4.15.Final"
 # The shell's line editor; JLine 4 is compiled for Java 11
 jline = "4.5.0"
 # Vendor JDBC drivers: the application supplies its own; these are the versions the tests run
