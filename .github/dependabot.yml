@@ -37,3 +37,12 @@ updates:
       actions:
         patterns:
           - "*"
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: "3"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
