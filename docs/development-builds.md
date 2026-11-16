@@ -7,7 +7,7 @@ Maven Central and the [GitHub releases](https://github.com/scalar-labs/scalardb-
 
 Every commit on `main` and on each version branch publishes the driver as a snapshot: `main` the
 next line's, such as `4.0.0-SNAPSHOT`, and a version branch its next patch's, such as
-`3.20.1-SNAPSHOT` on `3.20`. A snapshot version stays the same from commit to commit, and each
+`3.20.2-SNAPSHOT` on `3.20`. A snapshot version stays the same from commit to commit, and each
 commit replaces the build behind it. `snsql` and the tools are not published as snapshots: build
 them ([Build this repository](#build-this-repository)).
 
@@ -25,7 +25,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.scalar-labs:scalardb-native-jdbc:3.20.1-SNAPSHOT")
+    implementation("com.scalar-labs:scalardb-native-jdbc:3.20.2-SNAPSHOT")
 }
 ```
 
@@ -44,7 +44,7 @@ With Maven:
 <dependency>
   <groupId>com.scalar-labs</groupId>
   <artifactId>scalardb-native-jdbc</artifactId>
-  <version>3.20.1-SNAPSHOT</version>
+  <version>3.20.2-SNAPSHOT</version>
 </dependency>
 ```
 
