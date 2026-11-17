@@ -41,6 +41,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Properties;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -290,19 +292,53 @@ class WriteIntegrationTest {
 
   private static void duplicates(Engines e, TwoPhaseCommitTransactionManager tpc, Table t)
       throws Exception {
+    String duplicate = "INSERT INTO " + t.sql + " (id, x) VALUES (3, 'd')";
     try (Connection d = e.openDriver()) {
       d.setAutoCommit(false);
-      // the application's duplicate, as the database raised it; the transaction goes on
-      assertThatThrownBy(
-              () ->
-                  d.createStatement()
-                      .executeUpdate("INSERT INTO " + t.sql + " (id, x) VALUES (3, 'd')"))
+      d.createStatement().executeUpdate("UPDATE " + t.sql + " SET x = 'C' WHERE id = 3");
+      // the application's duplicate, as the database raised it
+      assertThatThrownBy(() -> d.createStatement().executeUpdate(duplicate))
           .isInstanceOf(SQLException.class)
           .satisfies(ex -> assertThat(e.engine().isDuplicateKey((SQLException) ex)).isTrue());
-      d.createStatement().executeUpdate("UPDATE " + t.sql + " SET x = 'C' WHERE id = 3");
+      if (e.engine() == Engine.POSTGRESQL) {
+        // the transaction failed, as PostgreSQL's own does, and commits nothing (todo 376)
+        for (ThrowingCallable refused :
+            List.<ThrowingCallable>of(() -> rows(d, "SELECT 1"), d::setSavepoint, d::commit)) {
+          assertThatThrownBy(refused)
+              .isNotInstanceOf(SQLTransactionRollbackException.class)
+              .extracting("SQLState")
+              .isEqualTo("25P02");
+        }
+        d.rollback();
+        assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 3")).containsExactly("c");
+        // a savepoint set before the duplicate, rolled back to, lets it go on, by either form
+        d.createStatement().executeUpdate("UPDATE " + t.sql + " SET x = 'C' WHERE id = 3");
+        Savepoint sp = d.setSavepoint();
+        assertThatThrownBy(() -> d.createStatement().executeUpdate(duplicate))
+            .isInstanceOf(SQLException.class);
+        d.rollback(sp);
+        d.createStatement().execute("SAVEPOINT s");
+        assertThatThrownBy(() -> d.createStatement().executeUpdate(duplicate))
+            .isInstanceOf(SQLException.class);
+        d.createStatement().execute("ROLLBACK TO SAVEPOINT s");
+      }
+      // elsewhere the transaction goes on, as each engine's own
       d.commit();
       d.setAutoCommit(true);
       assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 3")).containsExactly("C");
+      if (e.engine() == Engine.POSTGRESQL) {
+        // under pgjdbc's autosave the transaction goes on, as PostgreSQL's own does there
+        Properties autosave = new Properties();
+        autosave.setProperty("autosave", "always");
+        try (Connection a = e.openDriver(autosave)) {
+          a.setAutoCommit(false);
+          a.createStatement().executeUpdate("UPDATE " + t.sql + " SET x = 'A' WHERE id = 3");
+          assertThatThrownBy(() -> a.createStatement().executeUpdate(duplicate))
+              .isInstanceOf(SQLException.class);
+          a.commit();
+        }
+        assertThat(rows(d, "SELECT x FROM " + t.sql + " WHERE id = 3")).containsExactly("A");
+      }
       // a key a ScalarDB transaction is inserting: in flight, not the application's duplicate
       TwoPhaseCommitTransaction tx = tpc.begin();
       tx.insert(
