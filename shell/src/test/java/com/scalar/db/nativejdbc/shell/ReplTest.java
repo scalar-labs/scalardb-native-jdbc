@@ -203,6 +203,17 @@ class ReplTest {
   }
 
   @Test
+  void metaCommand_endsAtTrailingSemicolons_asInPsql() {
+    repl.feed("\\x on;");
+    repl.feed("\\x off ;;");
+    repl.feed("\\x;");
+
+    assertThat(output.toString())
+        .isEqualTo("Expanded display is on.\nExpanded display is off.\nExpanded display is on.\n");
+    assertThat(repl.feed("\\q;")).isFalse();
+  }
+
+  @Test
   void timing_followsEachStatement() {
     repl.feed("\\timing");
     repl.feed("delete from t;");

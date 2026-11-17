@@ -290,7 +290,8 @@ final class Repl {
   }
 
   private boolean meta(String line) {
-    String[] parts = line.split("\\s+", 2);
+    // As psql, a meta-command ends at trailing semicolons: \dt ec.*; lists ec's tables
+    String[] parts = line.replaceAll("[\\s;]+$", "").split("\\s+", 2);
     String arg = parts.length > 1 && !parts[1].isBlank() ? parts[1].strip() : null;
     // psql's \dt+ and \dtS: more detail and system objects, which JDBC does not separate
     String command = parts[0].length() > 2 ? parts[0].replaceAll("[+S]+$", "") : parts[0];
