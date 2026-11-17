@@ -1,0 +1,3 @@
+kind: bugfix
+body: In `snsql`, a meta-command such as `\dt ec.*;` now drops its trailing semicolons, as psql does. It had searched for a table named `ec.*;` and found none.
+time: 2026-11-26T13:42:30.273289+09:00
