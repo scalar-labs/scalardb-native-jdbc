@@ -6821,6 +6821,8 @@ final class Writes {
    * @param vendor the vendor connection
    * @param readOnly whether the application set the connection read-only
    * @param rollbackOnly marks the application's transaction rollback-only
+   * @param failed marks the application's transaction as one a statement failed in, where that
+   *     aborts it
    * @param writes whether the work writes rows, which a read-only connection refuses
    * @param work the writes
    * @throws SQLException a database error, a timeout, or {@code 40001} for an abort the driver
@@ -6829,7 +6831,12 @@ final class Writes {
   // ponytail: autocommit is off on the vendor connection while the write runs; another thread
   // sharing the connection then joins its transaction, as with any JDBC transaction
   static void within(
-      Connection vendor, boolean readOnly, Runnable rollbackOnly, boolean writes, Work work)
+      Connection vendor,
+      boolean readOnly,
+      Runnable rollbackOnly,
+      Runnable failed,
+      boolean writes,
+      Work work)
       throws SQLException {
     if (readOnly && !writes && "MySQL".equals(vendor.getMetaData().getDatabaseProductName())) {
       // Connector/J refuses a savepoint, which every plan runs under, on a read-only connection
@@ -6870,6 +6877,12 @@ final class Writes {
         // way ends the transaction on PostgreSQL, and is undone to the write's start elsewhere,
         // but a deadlock there ends it, which the application must see too (todo 199)
         rollbackOnly.run();
+      } else if (e instanceof SQLException
+          && ((SQLException) e).getSQLState() != null
+          && ((SQLException) e).getSQLState().startsWith("23")) {
+        // a duplicate is told after the write's savepoint is rolled back to, which on PostgreSQL
+        // undoes the abort too: the transaction must still fail as PostgreSQL's own (todo 376)
+        failed.run();
       }
       if (e instanceof SQLException) {
         throw asRetryable((SQLException) e);
@@ -9240,7 +9253,8 @@ final class Writes {
           if (!n.engine.isDuplicateKey(e) || inFlight == null) {
             throw e;
           }
-          // the transaction goes on, as on the engines where a failed statement does not end it
+          // the transaction goes on, as on the engines where a failed statement does not end it;
+          // on PostgreSQL, within fails it after the duplicate is told (todo 376)
           try (Statement s = run.v.createStatement()) {
             s.execute("ROLLBACK TO SAVEPOINT " + SAVEPOINT + "; RELEASE SAVEPOINT " + SAVEPOINT);
           }
@@ -9404,7 +9418,8 @@ final class Writes {
         if (!n.engine.isDuplicateKey(e) || inFlight == null) {
           throw e;
         }
-        // the transaction goes on, as on the engines where a failed statement does not end it
+        // the transaction goes on, as on the engines where a failed statement does not end it;
+        // on PostgreSQL, within fails it after the duplicate is told (todo 376)
         run.v.rollback(sp);
         throw duplicate(run, e);
       } finally {
