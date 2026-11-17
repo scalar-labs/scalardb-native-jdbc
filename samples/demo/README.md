@@ -7,31 +7,36 @@ PostgreSQL containers and ScalarDB's PostgreSQL frontend, on one tmux screen.
 
 ## Before the session
 
-You need Docker, tmux, Java 17 or later, and ScalarDB's Schema Loader jar
-(`scalardb-schema-loader-3.20.0.jar`, from the
-[ScalarDB releases](https://github.com/scalar-labs/scalardb/releases)).
+You need Docker, tmux, `psql` and Java 17 or later.
 
 ```sh
 cd samples/demo
-SCHEMA_LOADER=/path/to/scalardb-schema-loader-3.20.0.jar ./demo.sh up
+./demo.sh up
 ./demo.sh tmux
 ```
 
-`up` builds `snsql` and `scalardb-native-tools` from this repository, starts the EC database (port
-5432), the point database (5433) and the frontend (15432), creates the two systems' tables with plain
-DDL, imports the shared ones into ScalarDB, and runs the driver's setup. It uses the files in
-`samples/getting-started`. Customer 1 starts with 10,000 in the wallet and 500 points.
+`up` downloads ScalarDB's Schema Loader once (`scalardb-schema-loader-3.20.1.jar`, here, or set
+`SCHEMA_LOADER` to a copy you have), builds `snsql` and `scalardb-native-tools` from this repository,
+starts the EC database (port 5432) and the point database (5433), and creates the two systems'
+tables with plain DDL and ScalarDB's Coordinator table. Act 1 does the rest: the import of the shared tables into ScalarDB,
+the driver's setup, and the frontend (port 15432), which reads ScalarDB's tables when it starts. It
+uses the files in `samples/getting-started`. Customer 1 starts with 10,000 in the wallet and 500
+points.
 
 `tmux` opens the demo screen, sized to the terminal, so open it in the window you will present:
 
 | | EC (left) | | Point system (right) |
 | --- | --- | --- | --- |
-| Top | **EC · local**: `snsql` → EC database | **EC · global**: `psql` → frontend | **Point · local**: `snsql` → point database |
+| Top | **EC · local**: `psql` → EC database, then a shell | **EC · global**: `psql` → frontend | **Point · local**: `psql` → point database, then a shell |
 | Bottom | **EC database**: wallet and orders, every 2 s | | **Point database**: points and history, every 2 s |
 
-The top panes wait for SQL; the bottom panes refresh through the driver. Click a pane to type in it.
-Between rehearsals, `./demo.sh reset` puts the data back (the screen can stay open). After the
-session, `./demo.sh down` removes the containers and the tmux session.
+The top panes wait for SQL. Click a pane to type in it. The local panes open in `psql`, as the apps
+connect today; quitting `psql` leaves a shell (`ec$`, `point$`) for the import and `snsql`. **EC ·
+global** waits until both databases are imported, then starts the frontend and connects. The bottom
+panes read with `psql` before a database's import and through the driver after it. Between
+rehearsals, `./demo.sh reset` undoes the import, puts the data back and restarts the top panes (the
+screen can stay open). Ctrl-C in a pane that is waiting, or `exit` in a shell, closes the pane;
+`./demo.sh tmux` opens the screen again. After the session, `./demo.sh down` removes the containers and the tmux session.
 
 ## The run sheet
 
@@ -39,23 +44,22 @@ session, `./demo.sh down` removes the containers and the tmux session.
 | --- | --- | --- |
 | 0:00 | The ask | Slides: two systems, two teams, two databases; the business wants "pay with points" |
 | 2:00 | How it works | Slides: the driver for local transactions, the frontend for global ones |
-| 5:00 | Act 1: adopt | The apps' SQL, unchanged, through the driver |
+| 5:00 | Act 1: adopt | Import the tables, change the URL; the apps' SQL, unchanged, through the driver |
 | 8:00 | Act 2: pay with points | One transaction across both databases |
 | 10:00 | Act 3: the two meet | A local and a global transaction on the same row |
-| 12:00 | Code | Slide: the apps' only change is the JDBC URL; local and global are the same JDBC code |
+| 12:00 | Code | Slide: local and global are the same JDBC code |
 | 13:00 | Performance, limits | Slide |
 | 14:00 | Questions | |
 
 ### Act 1: adopt, no change but the URL
 
-The tables were imported into ScalarDB with their rows, and each app now connects through the
-driver. Run what each app runs. In **EC · local**, a top-up (`topup_history` is an ordinary table,
-in the same local transaction):
+Today each app connects to its own database directly. In **EC · local**, still `psql`, a top-up
+(`topup_history` is an ordinary table, in the same local transaction):
 
 ```sql
 BEGIN;
-UPDATE ec.wallet SET balance = balance + 3000 WHERE customer_id = 1;
-INSERT INTO ec.topup_history (customer_id, amount) VALUES (1, 3000);
+UPDATE ec.wallet SET balance = balance + 1000 WHERE customer_id = 1;
+INSERT INTO ec.topup_history (customer_id, amount) VALUES (1, 1000);
 COMMIT;
 ```
 
@@ -63,13 +67,54 @@ In **Point · local**, a check-in earns points:
 
 ```sql
 BEGIN;
-UPDATE point.point_account SET points = points + 100 WHERE customer_id = 1;
-INSERT INTO point.point_history VALUES ('h1', 1, 100, 'checkin');
+UPDATE point.point_account SET points = points + 50 WHERE customer_id = 1;
+INSERT INTO point.point_history VALUES ('h0', 1, 50, 'checkin');
 COMMIT;
 ```
 
-The bottom panes show 13,000 and 600. Point out: `SELECT *` in the bottom panes returns the tables'
-own columns, without ScalarDB's metadata, and nothing about the SQL is ScalarDB-specific.
+The bottom panes show 11,000 and 550. Now each team adopts. Type `\q` in both local panes; each
+leaves a shell. Show `samples/getting-started/import-ec.json` for a moment: the wallet and the
+orders, not the top-up history. In **EC · local**, import the EC database's shared tables into
+ScalarDB and set them up for the driver:
+
+```sh
+./demo.sh import ec
+```
+
+It prints and runs the two commands, the Schema Loader's `--import` and `scalardb-native-tools
+setup`, in about 5 seconds. The import kept the tables and their rows: the bottom pane still shows
+11,000. Then reconnect the app through the driver: press ↑ for the prepared command and Enter.
+
+```sh
+snsql -U postgres jdbc:scalardb-native:postgresql://localhost:5432/postgres
+```
+
+Point out the two URLs on screen, `psql -h localhost -p 5432` before and
+`jdbc:scalardb-native:postgresql://...` now: the URL is the change. In **Point · local**, the point
+team does the same with `./demo.sh import point` and ↑, Enter. Once both are imported, **EC ·
+global** starts the frontend and connects.
+
+Run the apps' SQL again, now through the driver. In **EC · local**:
+
+```sql
+BEGIN;
+UPDATE ec.wallet SET balance = balance + 2000 WHERE customer_id = 1;
+INSERT INTO ec.topup_history (customer_id, amount) VALUES (1, 2000);
+COMMIT;
+```
+
+In **Point · local**:
+
+```sql
+BEGIN;
+UPDATE point.point_account SET points = points + 50 WHERE customer_id = 1;
+INSERT INTO point.point_history VALUES ('h1', 1, 50, 'checkin');
+COMMIT;
+```
+
+The bottom panes show 13,000 and 600. Point out: the import added ScalarDB's metadata columns to the
+tables, but `SELECT *` in the bottom panes returns the tables' own columns, and nothing about the SQL
+is ScalarDB-specific.
 
 ### Act 2: pay with points
 
