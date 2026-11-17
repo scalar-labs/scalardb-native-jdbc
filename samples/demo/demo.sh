@@ -172,7 +172,9 @@ RC
     if ! psql -h localhost -p 15432 -U postgres -d ec -c '' >/dev/null 2>&1; then
       echo 'Starting the PostgreSQL frontend'; start_frontend
     fi
-    while true; do LC_MESSAGES=C psql -h localhost -p 15432 -U postgres -d ec; sleep 1; done ;;
+    LC_MESSAGES=C psql -h localhost -p 15432 -U postgres -d ec
+    # \q leaves a shell; reset starts psql again
+    BASH_SILENCE_DEPRECATION_WARNING=1 PS1='global$ ' exec "$BASH" --norc -i ;;
   _watch-ec)
     watch_loop ec $EC 5432 "SELECT * FROM ec.wallet" \
       "SELECT item, price, paid_money, paid_points FROM ec.orders ORDER BY item" ;;
