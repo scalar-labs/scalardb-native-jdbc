@@ -63,3 +63,22 @@ Oracle the transaction goes on, as each engine's own.
 
 - Not the demo's fault. The rehearsal hit the duplicate because an `h1` row from the earlier run
   sheet (+100, `h1`) was still there; `./demo.sh reset` clears it.
+
+## Review log
+
+- 2026-11-17, f4, of c7's 9512158 (branch pg-duplicate-rollback-only, on 9123024; suites: unit 419,
+  each engine 198, 0 failures): **mergeable once the error code is 25P02.** Checked from `git show`:
+  the flag is set only where a failed statement aborts the transaction (PostgreSQL, autosave NEVER),
+  in a transaction, on a 23-class error; later statements, commit(), setSavepoint and
+  releaseSavepoint refuse, and setAutoCommit(true) refuses, so nothing of the transaction commits;
+  close() needs nothing on PostgreSQL, whose closed session commits nothing. The key-in-flight path
+  was never affected (duplicate() returns Aborted, a SQLTransactionRollbackException, which
+  endsTransaction already marks rollback-only). The other internal savepoints on PostgreSQL leave
+  no gap, as c7 found. Clearing the flag on a rollback to a savepoint, by method or text, is better
+  than this todo's proposal: PostgreSQL goes on after ROLLBACK TO SAVEPOINT.
+- The error code: the proposal's 40001 is wrong for this case. The cause is the application's own
+  duplicate, so a framework retrying on 40001 would rerun the transaction into the same duplicate.
+  The refusal while statementFailed is set should be PostgreSQL's 25P02 ("current transaction is
+  aborted, commands ignored until end of transaction block"), a plain SQLException, not a
+  SQLTransactionRollbackException; the tests' expectations change with it. rollbackOnly's refusals
+  (the driver's own aborts) stay 40001.
