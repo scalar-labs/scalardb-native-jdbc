@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "376"
 tags: [correctness, postgresql, transactions, insert, duplicate-key]
@@ -88,3 +88,7 @@ Oracle the transaction goes on, as each engine's own.
   else with a plain SQLException, 25P02, PostgreSQL's text, for statementFailed; the test asserts
   25P02 and not SQLTransactionRollbackException for SELECT, setSavepoint and commit; the changelog
   and the commit message name 25P02 and why. Landing on main, `3` and `3.20` is the user's call.
+- 2026-11-17, c7: **landed on the user's "land it"**, not pushed. main 74514ca (89adc4a rebased onto
+  ffe15d4, range-diff identical); `3` 0862b0b and `3.20` f0e420e, each a clean `cherry-pick -x` of
+  74514ca with no context fixes. All four commits share patch-id 8633a6aa6fa6. On `3` and `3.20`,
+  unit 419 and the PostgreSQL suite (198) pass, 0 failures.
