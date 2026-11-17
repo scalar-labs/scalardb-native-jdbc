@@ -266,6 +266,10 @@ public final class Proxies {
     final Session session;
     // after an abort the driver decided, until the application rolls back (design 4.4)
     volatile boolean rollbackOnly;
+    // on PostgreSQL, after a write failed that the driver's own savepoint undid: the transaction is
+    // left as PostgreSQL leaves one a statement failed in, until a rollback, to a savepoint too
+    // (todo 376)
+    volatile boolean statementFailed;
     // whether a statement ran in the open transaction, whose level is then fixed (todo 219)
     volatile boolean ranInTransaction;
     // the versions the open transaction read, the anchors of its writes (4.2)
@@ -336,6 +340,9 @@ public final class Proxies {
       if (route.kind == SqlAst.Kind.ROLLBACK) {
         rollbackOnly = false; // as Connection.rollback()
       }
+      if (route.kind == SqlAst.Kind.ROLLBACK || route.kind == SqlAst.Kind.ROLLBACK_TO_SAVEPOINT) {
+        statementFailed = false;
+      }
       if (route.kind == SqlAst.Kind.COMMIT || route.kind == SqlAst.Kind.ROLLBACK) {
         anchors.transactionEnded();
         ranInTransaction = false;
@@ -356,6 +363,14 @@ public final class Proxies {
      * application may change it through {@code unwrap}.
      */
     boolean sendsTogether() {
+      return failureAborts();
+    }
+
+    /**
+     * Whether a failed statement aborts the transaction: on PostgreSQL, but not under pgjdbc's
+     * autosave, whose rollback to its own savepoint lets the transaction go on.
+     */
+    boolean failureAborts() {
       if (router.engine() != Engine.POSTGRESQL) {
         return false;
       }
@@ -376,9 +391,22 @@ public final class Proxies {
       }
     }
 
+    /** Marks the transaction as one a statement failed in, where that aborts it (todo 376). */
+    void writeFailed() {
+      if (failureAborts()) {
+        statementFailed = true;
+      }
+    }
+
     void requireNotRollbackOnly() throws SQLException {
       if (rollbackOnly) {
         throw new Writes.Aborted("the transaction was aborted by an earlier statement");
+      }
+      if (statementFailed) {
+        // the application's own failure, which a retry would meet again: not 40001 (todo 376)
+        throw new SQLException(
+            "current transaction is aborted, commands ignored until end of transaction block",
+            "25P02");
       }
     }
 
@@ -395,6 +423,10 @@ public final class Proxies {
         case "setSavepoint":
         case "releaseSavepoint":
           together = false; // ends the savepoint, or sets one above it (todo 329)
+          if (statementFailed && method.getName().endsWith("Savepoint")) {
+            // a savepoint set now would undo nothing of the failed write (todo 376)
+            requireNotRollbackOnly();
+          }
           break;
         default:
           break;
@@ -551,6 +583,7 @@ public final class Proxies {
           {
             Object r = forward(vendor, method, args);
             router.rolledBack(args != null && args.length > 0);
+            statementFailed = false;
             if (args == null || args.length == 0) {
               rollbackOnly = false;
               session.transactionEnded();
@@ -1332,6 +1365,7 @@ public final class Proxies {
             owner.vendor,
             owner.router.readOnly(),
             () -> owner.rollbackOnly = true,
+            owner::writeFailed,
             plan.writes(),
             () -> {
               count[0] = Writes.apply(owner.vendor, plan, context);
@@ -1562,6 +1596,7 @@ public final class Proxies {
             owner.vendor,
             owner.router.readOnly(),
             () -> owner.rollbackOnly = true,
+            owner::writeFailed,
             true,
             () -> {
               // up to here a merged statement failed: not merged again, but sent as below
