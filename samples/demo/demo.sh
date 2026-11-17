@@ -124,7 +124,7 @@ case "${1:-}" in
     if ! imported $db; then
       tmux select-pane -t "$TMUX_PANE" -T "$name · local: psql → $name DB"
       echo "\$ psql -h localhost -p $port -U postgres"
-      psql -h localhost -p $port -U postgres
+      LC_MESSAGES=C psql -h localhost -p $port -U postgres
     fi
     # The shell: the import is typed; snsql with the driver's URL is in the history (up arrow)
     rc=$(mktemp)
@@ -172,7 +172,7 @@ RC
     if ! psql -h localhost -p 15432 -U postgres -d ec -c '' >/dev/null 2>&1; then
       echo 'Starting the PostgreSQL frontend'; start_frontend
     fi
-    while true; do psql -h localhost -p 15432 -U postgres -d ec; sleep 1; done ;;
+    while true; do LC_MESSAGES=C psql -h localhost -p 15432 -U postgres -d ec; sleep 1; done ;;
   _watch-ec)
     watch_loop ec $EC 5432 "SELECT * FROM ec.wallet" \
       "SELECT item, price, paid_money, paid_points FROM ec.orders ORDER BY item" ;;
