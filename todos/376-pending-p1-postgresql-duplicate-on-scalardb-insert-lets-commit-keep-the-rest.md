@@ -82,3 +82,9 @@ Oracle the transaction goes on, as each engine's own.
   aborted, commands ignored until end of transaction block"), a plain SQLException, not a
   SQLTransactionRollbackException; the tests' expectations change with it. rollbackOnly's refusals
   (the driver's own aborts) stay 40001.
+- 2026-11-17, f4, of c7's 89adc4a (on 89d583d; unit 419 and the PostgreSQL suite, 198, 0
+  failures; the change reaches no other engine): **mergeable.** The range-diff against 9512158 is
+  the requested change only: requireNotRollbackOnly refuses with Aborted (40001) for rollbackOnly,
+  else with a plain SQLException, 25P02, PostgreSQL's text, for statementFailed; the test asserts
+  25P02 and not SQLTransactionRollbackException for SELECT, setSavepoint and commit; the changelog
+  and the commit message name 25P02 and why. Landing on main, `3` and `3.20` is the user's call.
