@@ -1,3 +1,0 @@
-kind: bugfix
-body: 'On PostgreSQL, a duplicate key on an INSERT into a ScalarDB table no longer lets the transaction commit its other writes. PostgreSQL aborts a transaction when a statement in it fails, but after this duplicate the driver let the transaction go on, so a later `COMMIT` kept the writes before it. The transaction now fails as PostgreSQL''s own does: later statements and `commit()` fail with `25P02`, as on PostgreSQL, until the application rolls back, either the whole transaction or to a savepoint set before the duplicate. Under pgjdbc''s `autosave`, the transaction goes on, as it does on PostgreSQL there. The other engines are unchanged.'
-time: 2026-11-17T12:00:00.000000+09:00
