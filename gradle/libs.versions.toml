@@ -4,7 +4,7 @@
 # (docs/design.md, "Version and compatibility"). 3.20.0 is tested on 3.19.1: ScalarDB 3.20.0
 # removed the two-phase commit API the tests hold rows prepared with (RELEASING.md, "Certifying a
 # line").
-scalardb = "3.19.1"
+scalardb = "3.20.1"
 jsqlparser = "5.4"
 # Kept at ScalarDB's version, since the driver is loaded next to ScalarDB in the tests
 slf4j = "2.0.20"
